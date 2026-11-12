@@ -121,6 +121,10 @@ export default function App() {
   const [hidden, setHidden] = useState<Map<string, number>>(new Map());
   const [killAsk, setKillAsk] = useState<Agent | null>(null);
   const agents = useMemo(() => (snap?.agents ?? []).filter((a) => !hidden.has(a.id)), [snap, hidden]);
+  // 隠したセッションがある間だけ、1秒ごとに下の判定を回す。一覧が前回と同じなら snap は変わらず（#4）、判定が動かないため
+  const [sweep, setSweep] = useState(0);
+  const hasHidden = hidden.size > 0;
+  useEffect(() => (hasHidden ? pollWhileVisible(() => setSweep((n) => n + 1), 1000) : undefined), [hasHidden]);
   useEffect(() => {
     if (!snap || hidden.size === 0) return;
     const present = new Set(snap.agents.map((a) => a.id));
@@ -130,7 +134,7 @@ export default function App() {
     if (!stuck.length && !gone.length) return;
     setHidden((h) => { const n = new Map(h); for (const id of [...stuck, ...gone]) n.delete(id); return n; });
     if (stuck.length) toast(`止まらなかった: ${stuck.map((id) => snap.agents.find((a) => a.id === id)?.name ?? id.slice(0, 8)).join("、")}`, true);
-  }, [snap]);
+  }, [snap, sweep]);
   // 別の町のお便り。町の表示はいま選んだノードだけで、お便りは全部の町から集める
   const selfName = peers.find((p) => p.self)?.name ?? "このMac";
   const curTown = peer || selfName;
