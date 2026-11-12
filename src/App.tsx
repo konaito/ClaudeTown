@@ -16,7 +16,7 @@ import {
 } from "./model";
 import { Markdown } from "./Markdown";
 import { chatPerf } from "./chatPerf";
-import { mergeConv, type ConvDelta } from "./conv";
+import { mergeConv, savedLabel, type ConvCache, type ConvDelta } from "./conv";
 import { layoutFamily, type LNode } from "./layout/layout";
 import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
@@ -342,6 +342,7 @@ export default function App() {
           {((err && !snap?.ccn_ok) || (snap && !snap.ccn_ok)) && (
             <div className="banner bad">
               {err ?? snap?.ccn_error}
+              {snap?.cached_at && <span>{savedLabel(snap.cached_at)} に保存した一覧と会話を出している</span>}
               <span className="hint">次: ターミナルで <code>ccn doctor</code> を実行する</span>
             </div>
           )}
@@ -886,6 +887,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
   // 送ったばかりの文。after は送り始めたときに持っていた最後の番号で、これより後に届いた発言とだけ比べる
   const [pending, setPending] = useState<(ConvItem & { after: number })[]>([]);
   const [convErr, setConvErr] = useState<string | null>(null);
+  // 保存してあった会話を出しているときの、保存した時刻。ccn から読めたら null に戻す
+  const [cachedAt, setCachedAt] = useState<number | null>(null);
   // 下書きは宛先ごとに持つ。宛先を切り替えたとき、打ちかけの文が次の宛先に送られないようにする
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const text = agent ? drafts[agent.id] ?? "" : "";
@@ -899,18 +902,29 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
   // 以前は stick を読み込みの effect でしか戻さず、タブの切り替えでは前の値が残り、容れ物も作り直されるのに items が変わらないので下へ送られなかった
   useLayoutEffect(() => { stick.current = true; }, [id, tab, chatReq]);
   useEffect(() => {
-    setItems([]); setPending([]); setConvErr(null); stick.current = true;
+    setItems([]); setPending([]); setConvErr(null); setCachedAt(null); stick.current = true;
     if (!id) return;
     let alive = true;
-    // 画面が持っている数。Rust は、これより後の発言だけを返す（#10）。増えていなければ items を変えず、描き直さない
+    // ccn から一度でも読めたか。読めたあとに保存分が届いても出さない
+    let live = false;
+    // 画面が持っている数。Rust は、これより後の発言だけを返す（#10）。増えていなければ items を変えず、描き直さない。
+    // 保存分を出している間は null のままにし、読めた最初の回は全部（reset）で差し替える（保存分の番号 n と混ぜない）
     let since: number | null = null;
+    // 開いた直後に保存分を出す。ネットが切れていると ccn の時間切れまで数秒かかるので、失敗を待たない
+    invoke<ConvCache | null>("conversation_cache", { sessionId: id, peer: peer || null }).then((c) => {
+      if (!alive || live || !c?.items.length) return;
+      setItems(c.items);
+      setCachedAt(c.savedAt);
+    }).catch(() => {});
     const load = async () => {
       try {
         const d = await invoke<ConvDelta>("conversation", { sessionId: id, peer: peer || null, since });
         if (!alive) return;
+        live = true;
         since = Math.max(since ?? 0, d.total);
         if (d.reset) since = d.total;
         setConvErr(null);
+        setCachedAt(null);
         if (d.reset || d.items.length) setItems((prev) => mergeConv(prev, d));
       } catch (e) {
         if (alive) setConvErr(String(e));
@@ -1016,7 +1030,14 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
       ) : tab === "talk" ? (
         <ScrollEdgeGradient className="talk" wrapClassName="seg-fill" ref={scroller}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
-          {convErr && <div className="banner bad small">{convErr}</div>}
+          {convErr && shown.length > 0 ? (
+            // 読めないが、保存分か前に読めた分を出している。中身の失敗は title に入れる
+            <div className="offline-note" title={convErr}><i />つながらない・{cachedAt ? `${savedLabel(cachedAt)} に保存した履歴` : "最後に読めた履歴"}を表示中</div>
+          ) : convErr ? (
+            <div className="banner bad small">{convErr}</div>
+          ) : cachedAt ? (
+            <div className="offline-note wait"><i />{savedLabel(cachedAt)} に保存した履歴・最新を読み込み中</div>
+          ) : null}
           {shown.length === 0 && !convErr && <p className="hint center">まだチャットが無い</p>}
           {shown.map((x, i) => <Bubble key={x.n ?? `p${x.at ?? i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "approval" && (

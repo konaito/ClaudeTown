@@ -53,6 +53,8 @@ export type Snapshot = {
   /** お手紙の最近の記録（この機械の町だけ。src/letters.ts） */
   letters?: import("./letters").LetterRec[];
   fetched_at: number;
+  /** 一覧を読めず、保存してあった一覧を agents に入れたときの、保存した時刻（ms）。src-tauri/src/offline.rs */
+  cached_at?: number | null;
 };
 
 export type Peer = { name: string; url: string; status: string; self: boolean };

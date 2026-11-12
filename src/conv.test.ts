@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { deltaOf, mergeConv, KEEP_CONV } from "./conv";
+import { deltaOf, mergeConv, KEEP_CONV, savedLabel } from "./conv";
 import type { ConvItem } from "./model";
 
 const item = (n: number): ConvItem => ({ role: "assistant", text: `t${n}`, n });
@@ -43,4 +43,10 @@ describe("deltaOf", () => {
     expect(deltaOf(all, 100).items).toEqual([]);
     expect(deltaOf(all, 98).items.map((x) => x.n)).toEqual([98, 99]);
   });
+});
+
+test("保存した時刻は、今日なら時刻だけ、別の日なら日付も付ける", () => {
+  const at = new Date(2026, 10, 13, 9, 5).getTime();
+  expect(savedLabel(at, new Date(2026, 10, 13, 23, 0).getTime())).toBe("09:05");
+  expect(savedLabel(at, new Date(2026, 10, 14, 0, 1).getTime())).toBe("11/13 09:05");
 });
