@@ -7,7 +7,8 @@ import { collectMail, type Mail } from "./mail";
 import { flightsOf, resolve, type Flight } from "./letters";
 import { withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
-import { pollWhileVisible, shownAt } from "./visible";
+import { isVisible, onVisibleChange, pollWhileVisible, shownAt } from "./visible";
+import { reuseAgents, reuseSnap } from "./snap";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
@@ -66,7 +67,6 @@ export default function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [zoom, setZoom] = useState<number | "fit">("fit");
-  const [, tick] = useState(0);
 
   const toast = useCallback((text: string, bad = false) => {
     const id = Date.now() + Math.random();
@@ -100,7 +100,8 @@ export default function App() {
       try {
         const s = await invoke<Snapshot>("snapshot", { peer: want });
         if (!alive) return;
-        if (s.ccn_ok) { setSnap(s); setErr(null); setFail(null); }
+        // 中身が前回と同じなら前回のオブジェクトのまま（描き直さない）。変わらないセッションも使い回す（#4）
+        if (s.ccn_ok) { setSnap((prev) => reuseSnap(prev, s)); setErr(null); setFail(null); }
         else failed(s.ccn_error ?? "ccn につながらない", s);
       } catch (e) {
         if (alive) failed(String(e));
@@ -109,10 +110,10 @@ export default function App() {
       }
     };
     reload.current = load;
-    // ウィンドウが見えていない間は、取得も時計も止める。見えたらすぐ1回取り直す（#6）
-    const stopLoad = pollWhileVisible(load, POLL_MS);
-    const stopTick = pollWhileVisible(() => tick((x) => x + 1), 1000);
-    return () => { alive = false; stopLoad(); stopTick(); };
+    // ウィンドウが見えていない間は取得を止める。見えたらすぐ1回取り直す（#6）。
+    // 経過時間の表示は Since が自分で時計を回すので、ここで町全体を毎秒描き直さない（#4）
+    const stop = pollWhileVisible(load, POLL_MS);
+    return () => { alive = false; stop(); };
   }, [peer]);
 
   // 閉じたセッション。演出が終わったら隠し、ccn の一覧から消えたら忘れる（10秒たっても消えなければ戻して失敗を出す）
@@ -120,6 +121,10 @@ export default function App() {
   const [hidden, setHidden] = useState<Map<string, number>>(new Map());
   const [killAsk, setKillAsk] = useState<Agent | null>(null);
   const agents = useMemo(() => (snap?.agents ?? []).filter((a) => !hidden.has(a.id)), [snap, hidden]);
+  // 隠したセッションがある間だけ、1秒ごとに下の判定を回す。一覧が前回と同じなら snap は変わらず（#4）、判定が動かないため
+  const [sweep, setSweep] = useState(0);
+  const hasHidden = hidden.size > 0;
+  useEffect(() => (hasHidden ? pollWhileVisible(() => setSweep((n) => n + 1), 1000) : undefined), [hasHidden]);
   useEffect(() => {
     if (!snap || hidden.size === 0) return;
     const present = new Set(snap.agents.map((a) => a.id));
@@ -129,11 +134,13 @@ export default function App() {
     if (!stuck.length && !gone.length) return;
     setHidden((h) => { const n = new Map(h); for (const id of [...stuck, ...gone]) n.delete(id); return n; });
     if (stuck.length) toast(`止まらなかった: ${stuck.map((id) => snap.agents.find((a) => a.id === id)?.name ?? id.slice(0, 8)).join("、")}`, true);
-  }, [snap]);
+  }, [snap, sweep]);
   // 別の町のお便り。町の表示はいま選んだノードだけで、お便りは全部の町から集める
   const selfName = peers.find((p) => p.self)?.name ?? "このMac";
   const curTown = peer || selfName;
-  const [others, setOthers] = useState<Map<string, { agents: Agent[]; at?: number } | { error: string }>>(new Map());
+  const [others, setOthers] = useState<Map<string, { agents: Agent[] } | { error: string }>>(new Map());
+  // 別の町の一覧が最後に取れた時刻。others に入れると取るたびに町が描き直されるので、別に持つ（#4）
+  const okAt = useRef<Map<string, number>>(new Map());
   useEffect(() => {
     let alive = true;
     let running = false;
@@ -146,20 +153,29 @@ export default function App() {
       if (running) return;
       running = true;
       for (const t of towns) {
-        let v: { agents: Agent[]; at?: number } | { error: string };
+        let v: { agents: Agent[] } | { error: string };
         if (!t.healthy) v = { error: "つながらない" };
         else {
           try {
             const s = await invoke<Snapshot>("snapshot", { peer: t.key || null });
-            v = s.ccn_ok ? { agents: s.agents, at: Date.now() } : { error: s.ccn_error ?? "つながらない" };
+            v = s.ccn_ok ? { agents: s.agents } : { error: s.ccn_error ?? "つながらない" };
           } catch (e) { v = { error: String(e) }; }
         }
         if (!alive) break;
+        if ("agents" in v) okAt.current.set(t.name, Date.now());
         // 取れなかった回は、60秒以内に取れた前回の町を残す（1回の時間切れで、お便りとゴーストが消えないように）
+        // 前回と同じなら Map を作り直さない（#4）
+        const got = v;
         setOthers((m) => {
           const prev = m.get(t.name);
-          if ("error" in v && prev && "agents" in prev && Date.now() - (prev.at ?? 0) < OTHER_TOWN_KEEP_MS) return m;
-          return new Map(m).set(t.name, v);
+          if ("error" in got) {
+            if (prev && "agents" in prev && Date.now() - (okAt.current.get(t.name) ?? 0) < OTHER_TOWN_KEEP_MS) return m;
+            if (prev && "error" in prev && prev.error === got.error) return m;
+            return new Map(m).set(t.name, got);
+          }
+          const agents = reuseAgents(prev && "agents" in prev ? prev.agents : undefined, got.agents);
+          if (prev && "agents" in prev && agents === prev.agents) return m;
+          return new Map(m).set(t.name, { agents });
         });
       }
       running = false;
@@ -721,9 +737,12 @@ function layoutOf(all: Agent[]) {
  * 家族の木を、配置計算が決めた座標に置いて描く。
  * 線は、配置の検査に使ったのと同じ「親の中心から子の中心」の線分を SVG で引く。
  */
-function FamilyCanvas({ all, result, selected, onSelect, onFocus }: {
-  all: Agent[]; result: ReturnType<typeof layoutFamily>; selected: string | null; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;
-}) {
+type CanvasProps = { all: Agent[]; result: ReturnType<typeof layoutFamily>; selected: string | null; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void };
+/** 世帯の顔ぶれ（all の中身のオブジェクト）、配置、選択、手が同じなら描き直さない（#4）。all は木を作り直すたびに新しい配列になるので、中身で比べる */
+const sameCanvas = (a: CanvasProps, b: CanvasProps) => a.result === b.result && a.selected === b.selected && a.onSelect === b.onSelect && a.onFocus === b.onFocus
+  && a.all.length === b.all.length && a.all.every((x, i) => x === b.all[i]);
+const FamilyCanvas = memo(function FamilyCanvas({ all, result, selected, onSelect, onFocus }: CanvasProps) {
+  if (import.meta.env.DEV) renders.canvas++;
   const pad = LAYOUT.framePad;
   const minX = Math.min(...result.nodes.map((n) => n.x - n.w / 2));
   const minY = Math.min(...result.nodes.map((n) => n.y - n.h / 2));
@@ -769,9 +788,13 @@ function FamilyCanvas({ all, result, selected, onSelect, onFocus }: {
       })}
     </div>
   );
-}
+}, sameCanvas);
 
-function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void }) {
+/** 描き直しの回数（開発版だけ数える）。待機中に増えないことを確かめる（#4）。ブラウザでは window.__fcRenders で読む */
+const renders = { canvas: 0, card: 0 };
+if (import.meta.env.DEV && typeof window !== "undefined") (window as any).__fcRenders = renders;
+
+const Card = memo(function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void }) {
   const { agent, depth, selected, onSelect, onFocus } = props;
   const { dying } = useContext(KillCtx);
   if (depth <= 1) return <FullCard {...props} />;
@@ -798,7 +821,7 @@ function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect:
       )}
     </>
   );
-}
+});
 
 /**
  * 人狼の「夜に襲われる」風の演出。暗くなる → 赤い爪痕の3本線が順に走る → 倒れて灰色 → 幽霊が昇って消える。
@@ -831,7 +854,7 @@ function KillFx({ w, h }: { w: number; h: number }) {
  * 転出のゴースト（src/ghost.ts）。別の町にいる親か子の影。半透明、点線の枠、旅行かばんの印で、閉じる演出の 👻 と分ける。
  * 押すと本物がいる町に切り替えて、その子を選ぶ。× は出さない（ここからは閉じない）。
  */
-function GhostCard({ agent, depth, onSelect }: { agent: Agent; depth: number; onSelect: (a: Agent) => void }) {
+const GhostCard = memo(function GhostCard({ agent, depth, onSelect }: { agent: Agent; depth: number; onSelect: (a: Agent) => void }) {
   const g = agent.ghost!;
   const mini = depth >= 2;
   const box = mini ? boxOf(depth, agent.name) : { w: LAYOUT.card.w, h: LAYOUT.card.h, scale: 1 };
@@ -846,20 +869,41 @@ function GhostCard({ agent, depth, onSelect }: { agent: Agent; depth: number; on
       </span>
     </button>
   );
-}
+});
 
 function SuitcaseIcon() {
   return (<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" aria-hidden><rect x="3" y="7" width="18" height="13" rx="2.5" /><path d="M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2M8 7v13M16 7v13" /></svg>);
+}
+
+/**
+ * 作業中の経過時間（sinceText）。この部品の中だけで時計を回し、町全体は描き直さない（#4）。
+ * 1分までは1秒ごと、1時間までは30秒ごと、それより後は6分ごとに描き直す。ウィンドウが見えていない間は止め、見えたらすぐ描き直す（#6）
+ */
+function Since({ at }: { at: number }) {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout> | null = null;
+    const plan = () => {
+      const age = Date.now() - at;
+      t = setTimeout(() => { t = null; bump((x) => x + 1); plan(); }, age < 60_000 ? 1000 : age < 3_600_000 ? 30_000 : 360_000);
+    };
+    const stop = () => { if (t !== null) { clearTimeout(t); t = null; } };
+    const off = onVisibleChange((v) => { stop(); if (v) { bump((x) => x + 1); plan(); } });
+    if (isVisible()) plan();
+    return () => { off(); stop(); };
+  }, [at]);
+  return <>{sinceText(at)}</>;
 }
 
 function FullCard({ agent, depth, selected, onSelect, onFocus }: {
   agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;
 }) {
   const { dying } = useContext(KillCtx);
+  if (import.meta.env.DEV) renders.card++;
   const mood = moodOf(agent);
   const task = taskOf(agent, mood);
   const now = nowOf(agent, mood);
-  const since = mood === "working" ? sinceText(agent.report?.turn_started_at) : "";
+  const started = mood === "working" ? agent.report?.turn_started_at : null;
   return (
     <button
       className={`card m-${mood} ${selected ? "sel" : ""}`}
@@ -875,7 +919,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
       <div className="card-main">
         <Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(depth)} size={48} dead={dying.has(agent.id)} />
         <div className="card-info">
-          <span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}{since && <em>{since}</em>}</span>
+          <span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}{started ? <em><Since at={started} /></em> : null}</span>
           <span className="cname">{agent.name}</span>
         </div>
       </div>
@@ -1360,13 +1404,13 @@ function fromLabel(from: string): string {
 
 function StateTab({ agent, mood }: { agent: Agent; mood: Mood }) {
   const r = agent.report;
-  const rows: [string, string | null | undefined][] = [
+  const rows: [string, React.ReactNode][] = [
     ["いま", nowOf(agent, mood)],
     ["頼まれたこと", r?.asked],
     ["最後の報告", r?.said],
     ["次の一手", r?.next],
     ["閉じていい？", agent.closeCheck ? (agent.closeCheck.status === "ok" ? "閉じてOK" : agent.closeCheck.status === "ng" ? `まだ: ${agent.closeCheck.short ?? ""}` : "判定中") : null],
-    ["作業中の時間", mood === "working" ? sinceText(r?.turn_started_at) : null],
+    ["作業中の時間", mood === "working" && r?.turn_started_at ? <Since at={r.turn_started_at} /> : null],
     ["場所", agent.cwd.replace(/^\/Users\/[^/]+/, "~")],
     ["セッション", agent.id],
   ];
