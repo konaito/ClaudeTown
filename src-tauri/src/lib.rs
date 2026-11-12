@@ -663,6 +663,26 @@ fn term_resize(session_id: String, cols: u16, rows: u16, peer: Option<String>) -
     Ok(())
 }
 
+// ---------- 計測（#18） ----------
+
+/// 画面の計測（src/term/perf.ts）の1行を書く。FC_PERF_LOG があればそのファイルに足し、無ければ標準エラーに出す
+#[tauri::command]
+fn perf_log(line: String) {
+    match std::env::var("FC_PERF_LOG") {
+        Ok(p) if !p.is_empty() => {
+            use std::io::Write;
+            if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(p) {
+                let _ = writeln!(f, "{line}");
+            }
+        }
+        _ => eprintln!("[perf] {line}"),
+    }
+}
+
+/// 何もしない命令。async を付けないので、メインスレッドで動く。往復が長ければ、メインスレッドが止まっている
+#[tauri::command]
+fn perf_ping() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 開発用: 画面に渡すのと同じ JSON を出して終わる（ブラウザでの見た目の確認に使う）
@@ -714,7 +734,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             snapshot, peers, conversation, send_message, set_house_name, answer_permission,
-            create_session, stop_session, teleport, teleport_info, session_detail, term_open, term_close, term_input, term_resize
+            create_session, stop_session, teleport, teleport_info, session_detail, term_open, term_close, term_input, term_resize,
+            perf_log, perf_ping
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
