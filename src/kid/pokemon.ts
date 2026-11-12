@@ -1,4 +1,4 @@
-// ポケモンスキン。親・子・孫を、3段進化する1つの系統の1段目・2段目・3段目で描く。
+// ポケモンスキン。3段進化する1つの系統で、親を3段目（最終進化）、子を2段目、孫を1段目で描く。
 // 絵は Pokémon Showdown のアニメ GIF を PokeAPI/sprites が配布しているもの。リポジトリには入れず、
 // 表示中のキャラの分だけ実行時に raw.githubusercontent.com から読む（webview の HTTP キャッシュに残る）。
 // 系統の一覧（pokemon-lines.json）は scripts/pokemon-lines.ts で作った図鑑番号と英名だけ。
@@ -12,7 +12,8 @@ export type Skin = "default" | "pokemon";
 const SPRITES = `https://raw.githubusercontent.com/PokeAPI/sprites/${LINES.sha}/sprites/pokemon/other/showdown`;
 /** [図鑑番号3つ, 英名3つ] の並び */
 const ALL = LINES.lines as unknown as [number[], string[]][];
-const STAGE: Record<Role, number> = { parent: 0, child: 1, grandchild: 2 };
+/** 親ほど進化した姿にする。lines の並びは1段目・2段目・3段目なので、親が添字2、孫が添字0 */
+const STAGE: Record<Role, number> = { parent: 2, child: 1, grandchild: 0 };
 
 export function spriteUrl(id: number): string {
   return `${SPRITES}/${id}.gif`;

@@ -10,7 +10,7 @@ import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
-import { SkinCtx, saveSkin, savedSkin, useSkin, type Skin } from "./kid/pokemon";
+import { SkinCtx, saveSkin, savedSkin, type Skin } from "./kid/pokemon";
 import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
   MOOD_LABEL, NEEDS_YOU, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, targetLabel, taskOf,
@@ -344,13 +344,7 @@ export default function App() {
           </select>
           <span className={`conn ${!snap?.ccn_ok ? "bad" : slow ? "slow" : "ok"}`} title={fail?.msg ?? ""}><i />{snap ? (!snap.ccn_ok ? "つながらない" : slow ? "つながりにくい" : "接続中") : "よみこみ中"}</span>
         </div>
-        <div className="top-right">
-          <select className="node skin" value={skin} title="キャラの見た目。ポケモンでは親・子・孫を3段進化で描く"
-            onChange={(e) => { const v = e.target.value as Skin; setSkin(v); saveSkin(v); }}>
-            <option value="default">キャラ: いつもの</option>
-            <option value="pokemon">キャラ: ポケモン</option>
-          </select>
-        </div>
+        <div className="top-right" />
       </header>
 
       <SplitGroup className="body" orientation="horizontal" defaultLayout={savedSplit()} onLayoutChanged={saveSplit}>
@@ -409,7 +403,7 @@ export default function App() {
               <button className="fs" title="全画面" onClick={() => setFullscreen()}>⛶</button>
             </div>
             <span className="hint">クリックでチャット・右クリックでターミナル</span>
-            <Credits />
+            <Credits skin={skin} onSkin={(v) => { setSkin(v); saveSkin(v); }} />
           </div>
         </div>
 
@@ -1387,14 +1381,20 @@ function StateTab({ agent, mood }: { agent: Agent; mood: Mood }) {
 
 // ---------- 素材のクレジット ----------
 
-function Credits() {
+/** 素材の表示と、キャラの見た目（いつもの / ポケモン）の切り替え。見た目で使う素材が変わるので同じ所に置く */
+function Credits({ skin, onSkin }: { skin: Skin; onSkin: (s: Skin) => void }) {
   const [open, setOpen] = useState(false);
-  const { skin } = useSkin();
   return (
     <span className="credits">
       <button className="credit-btn" onClick={() => setOpen((o) => !o)}>素材</button>
       {open && (
         <span className="credit-pop" onMouseLeave={() => setOpen(false)}>
+          <span className="skin-pick" title="ポケモンでは、親を最終進化、子を2段目、孫を1段目で描く">
+            キャラの見た目
+            {([["default", "いつもの"], ["pokemon", "ポケモン"]] as const).map(([v, label]) => (
+              <button key={v} className={skin === v ? "on" : ""} onClick={() => onSkin(v)}>{label}</button>
+            ))}
+          </span>
           <b>キャラ</b>: Ninja Adventure Asset Pack（Pixel-boy、AAA）、CC0 1.0。
           <br /><b>状態の印、幽霊、お手紙</b>: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0
           （creativecommons.org/licenses/by/4.0）。Source: googlefonts.github.io/noto-emoji-animation

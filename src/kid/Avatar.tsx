@@ -78,7 +78,7 @@ function NinjaAvatar({ seed, mood, role, size, pick, dead }: { seed: string; moo
 }
 
 /**
- * ポケモンスキンの1体（src/kid/pokemon.ts）。世帯の根で系統が決まり、親・子・孫が1段目・2段目・3段目になる。
+ * ポケモンスキンの1体（src/kid/pokemon.ts）。世帯の根で系統が決まり、親・子・孫が3段目・2段目・1段目になる。
  * 作業中は GIF をそのまま動かし、少し跳ねさせる。それ以外は1フレームを止めて見せる。印と待機の薄さは元のスキンと同じ。
  */
 function PokemonAvatar({ seed, mood, role, size, dead, root, onBroken }: { seed: string; mood: Mood; role: Role; size: number; dead?: boolean; root: string; onBroken: () => void }) {
