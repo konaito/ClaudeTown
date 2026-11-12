@@ -83,7 +83,26 @@ struct Snapshot {
     ccn_ok: bool,
     ccn_error: Option<String>,
     agents: Vec<Value>,
+    /// お手紙（セッションどうしのやり取り）の最近の記録。hook が ~/.family-computing/letters.jsonl に書く。この機械の町だけ
+    letters: Vec<Value>,
     fetched_at: u128,
+}
+
+/// お手紙の記録のうち、直近 LETTERS_WINDOW_MS のものを古い順に返す（多くても LETTERS_MAX 件）
+const LETTERS_WINDOW_MS: u128 = 10 * 60 * 1000;
+const LETTERS_MAX: usize = 300;
+fn recent_letters() -> Vec<Value> {
+    let Ok(text) = fs::read_to_string(home().join(".family-computing/letters.jsonl")) else { return vec![] };
+    let since = now_ms().saturating_sub(LETTERS_WINDOW_MS);
+    let mut out: Vec<Value> = text
+        .lines()
+        .rev()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .take_while(|v| v["at"].as_u64().map(|a| a as u128 >= since).unwrap_or(false))
+        .take(LETTERS_MAX)
+        .collect();
+    out.reverse();
+    out
 }
 
 #[tauri::command]
@@ -174,7 +193,8 @@ fn snapshot(peer: Option<String>) -> Snapshot {
             a["avatar"] = json!({ "char": v.char, "hue": v.hue });
         }
     }
-    Snapshot { ccn: ccn_base(), peer, ccn_ok: ccn_error.is_none(), ccn_error, agents, fetched_at: now_ms() }
+    let letters = if peer.is_none() { recent_letters() } else { vec![] };
+    Snapshot { ccn: ccn_base(), peer, ccn_ok: ccn_error.is_none(), ccn_error, agents, letters, fetched_at: now_ms() }
 }
 
 // ---------- 家の名前 ----------
@@ -262,6 +282,20 @@ fn simplify(m: &Value) -> Vec<Value> {
                 _ => String::new(),
             };
             let text = text.trim();
+            // 別のセッションからのお手紙（<cross-session-message from=… from-name=…>本文</cross-session-message>）は、包みを外して本文だけ出す
+            if let Some(rest) = text.strip_prefix("<cross-session-message") {
+                let (attrs, body) = rest.split_once('>').unwrap_or(("", ""));
+                let attr = |k: &str| {
+                    let key = format!("{k}=\"");
+                    attrs.find(&key).and_then(|i| attrs[i + key.len()..].split('"').next()).map(String::from)
+                };
+                let body = body.trim().trim_end_matches("</cross-session-message>").trim();
+                if !body.is_empty() {
+                    out.push(json!({ "role": "user", "text": body, "from": null, "at": at,
+                        "letter": { "fromName": attr("from-name"), "fromRaw": attr("from") } }));
+                }
+                return out;
+            }
             // 道具の結果だけの user、hook やシステムの差し込み（<...> で始まる）は出さない
             if text.is_empty() || text.starts_with('<') || text.starts_with("Caveat:") {
                 return out;
@@ -271,7 +305,12 @@ fn simplify(m: &Value) -> Vec<Value> {
                 Some((first, rest)) if first.starts_with("from ") && first.contains(" via ") => (Some(first.to_string()), rest.trim().to_string()),
                 _ => (None, text.to_string()),
             };
-            out.push(json!({ "role": "user", "text": body, "from": from, "at": at }));
+            // from agent:<ノード>/<sid8>/<役割> の文は、セッションからのお手紙
+            let letter = from.as_deref().and_then(|f| f.strip_prefix("from agent:")).map(|r| {
+                let who = r.split_whitespace().next().unwrap_or("");
+                json!({ "fromName": null, "fromRaw": who })
+            });
+            out.push(json!({ "role": "user", "text": body, "from": from, "at": at, "letter": letter }));
         }
         "assistant" => {
             if let Value::Array(a) = content {

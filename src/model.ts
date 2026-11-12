@@ -44,12 +44,18 @@ export type Snapshot = {
   ccn_ok: boolean;
   ccn_error: string | null;
   agents: Agent[];
+  /** お手紙の最近の記録（この機械の町だけ。src/letters.ts） */
+  letters?: import("./letters").LetterRec[];
   fetched_at: number;
 };
 
 export type Peer = { name: string; url: string; status: string; self: boolean };
 
-export type ConvItem = { role: "user" | "assistant" | "tool"; text: string; from?: string | null; at?: string | null; pending?: boolean };
+export type ConvItem = {
+  role: "user" | "assistant" | "tool"; text: string; from?: string | null; at?: string | null; pending?: boolean;
+  /** 別のセッションからのお手紙なら、送り手（from-name と、uds のソケットか agent:<ノード>/<sid8>/<役割>） */
+  letter?: { fromName?: string | null; fromRaw?: string | null } | null;
+};
 
 /**
  * キャラの様子。

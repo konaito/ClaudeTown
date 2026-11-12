@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { call as invoke, setFullscreen } from "./bridge";
 import { TerminalView } from "./term/TerminalView";
 import { collectMail, type Mail } from "./mail";
+import { flightsOf, resolve, type Flight } from "./letters";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import "./App.css";
@@ -39,6 +40,10 @@ const KILL_MS = 1150;
 const KILL_STAGGER = 140;
 
 /** 閉じる操作と演出の状態。カードの × と、倒れる演出が読む */
+/** いま見ている町のセッション（お手紙の送り手の名前を引くため） */
+const TownCtx = createContext<Agent[]>([]);
+/** 封筒の印（💌）を頭に出しているセッション */
+const LetterCtx = createContext<Set<string>>(new Set());
 const KillCtx = createContext<{ dying: Map<string, number>; ask: (a: Agent, instant: boolean) => void }>({ dying: new Map(), ask: () => {} });
 const CONV_POLL_MS = 2500;
 
@@ -125,6 +130,9 @@ export default function App() {
     else toast(`${a.name}${order.length > 1 ? ` と子孫 ${order.length - 1} 人` : ""}を閉じた`);
     if (skipped.length) toast(`ccn から止められないので残した: ${skipped.map((x) => x.name).join("、")}`, true);
   }, [tree, selected, peer, toast]);
+  // お手紙。この機械の町を見ているときだけ（記録はこの機械の hook が書く）
+  const flights = useMemo(() => (peer ? [] : flightsOf(snap?.letters ?? [], agents)), [snap, agents, peer]);
+  const letterMarks = useLetterMarks(flights);
   const askKill = useCallback((a: Agent, instant: boolean) => { if (instant) kill(a); else setKillAsk(a); }, [kill]);
   const killCtx = useMemo(() => ({ dying, ask: askKill }), [dying, askKill]);
   const counts = useMemo(() => {
@@ -248,6 +256,8 @@ export default function App() {
 
   return (
     <KillCtx.Provider value={killCtx}>
+    <LetterCtx.Provider value={letterMarks.marks}>
+    <TownCtx.Provider value={agents}>
     <div className="app" onContextMenu={(e) => e.preventDefault()}>
       <header className="top">
         <div className="brand">
@@ -344,13 +354,87 @@ export default function App() {
       <div className="toasts">
         {toasts.map((t) => <div key={t.id} className={`toast ${t.bad ? "bad" : ""}`}>{t.text}</div>)}
       </div>
+      <div className="letters-layer" ref={letterMarks.layer} aria-hidden />
     </div>
+    </TownCtx.Provider>
+    </LetterCtx.Provider>
     </KillCtx.Provider>
   );
 }
 
 function descOf(childrenOf: Map<string, Agent[]>, id: string): Agent[] {
   return (childrenOf.get(id) ?? []).flatMap((k) => [k, ...descOf(childrenOf, k.id)]);
+}
+
+// ---------- お手紙 ----------
+
+const LETTER_IMG = "/sprites/noto/1f48c/512.webp";
+/** 封筒の印を残す長さ。読まれたら短く、読まれないままなら長くても MARK_MAX_MS で消す */
+const MARK_READ_MS = 2500;
+const MARK_MAX_MS = 30000;
+
+/**
+ * 新しいお手紙が来たら、送り手のカードから受け手のカードへ封筒を飛ばし、受け手の頭に印を残す。
+ * 封筒はカードの中心どうしを結ぶ直線を飛ぶ（親子ならつなぎ線と重なる。世帯をまたぐときは町の上を直線で飛ぶ）。
+ * 動きを減らす設定（prefers-reduced-motion）なら、飛ばさずに印だけ出す。
+ * 起動したときにすでにある記録は飛ばさない（古いお手紙を再生しない）。
+ */
+function useLetterMarks(flights: Flight[]) {
+  const layer = useRef<HTMLDivElement>(null);
+  const seen = useRef<Set<string> | null>(null);
+  const [marks, setMarks] = useState<Map<string, { flight: string; until: number }>>(new Map());
+  useEffect(() => {
+    if (seen.current === null) {
+      seen.current = new Set(flights.map((f) => f.id));
+      return;
+    }
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const fresh = flights.filter((f) => !seen.current!.has(f.id));
+    fresh.forEach((f, i) => {
+      seen.current!.add(f.id);
+      const land = () => setMarks((m) => new Map(m).set(f.to, { flight: f.id, until: Date.now() + (f.readAt ? MARK_READ_MS : MARK_MAX_MS) }));
+      const a = document.querySelector(`[data-aid="${f.from}"]`)?.getBoundingClientRect();
+      const b = document.querySelector(`[data-aid="${f.to}"]`)?.getBoundingClientRect();
+      if (reduce || !a || !b || !layer.current) { land(); return; }
+      const img = document.createElement("img");
+      img.src = LETTER_IMG;
+      img.className = "letter-fly";
+      layer.current.appendChild(img);
+      const ax = a.left + a.width / 2, ay = a.top + a.height / 2, bx = b.left + b.width / 2, by = b.top + b.height / 2;
+      const dist = Math.hypot(bx - ax, by - ay);
+      const ms = Math.min(1400, Math.max(650, dist * 1.6));
+      const anim = img.animate([
+        { transform: `translate(${ax}px, ${ay}px) translate(-50%, -50%) scale(0.6)`, opacity: 0 },
+        { transform: `translate(${ax}px, ${ay}px) translate(-50%, -50%) scale(1)`, opacity: 1, offset: 0.12 },
+        { transform: `translate(${bx}px, ${by}px) translate(-50%, -50%) scale(1)`, opacity: 1, offset: 0.9 },
+        { transform: `translate(${bx}px, ${by}px) translate(-50%, -50%) scale(0.7)`, opacity: 0 },
+      ], { duration: ms, delay: i * 180, easing: "cubic-bezier(.4,.1,.3,1)", fill: "both" });
+      anim.onfinish = () => { img.remove(); land(); };
+    });
+  }, [flights]);
+  // 読まれたら印を短くする。時間が来たら消す
+  useEffect(() => {
+    const read = new Map(flights.filter((f) => f.readAt).map((f) => [f.id, f.readAt!]));
+    setMarks((m) => {
+      let changed = false;
+      const n = new Map(m);
+      for (const [to, v] of m) {
+        if (read.has(v.flight) && v.until > Date.now() + MARK_READ_MS) { n.set(to, { ...v, until: Date.now() + MARK_READ_MS }); changed = true; }
+        if (v.until <= Date.now()) { n.delete(to); changed = true; }
+      }
+      return changed ? n : m;
+    });
+  }, [flights]);
+  useEffect(() => {
+    if (marks.size === 0) return;
+    const t = setInterval(() => setMarks((m) => {
+      const n = new Map([...m].filter(([, v]) => v.until > Date.now()));
+      return n.size === m.size ? m : n;
+    }), 500);
+    return () => clearInterval(t);
+  }, [marks.size]);
+  const ids = useMemo(() => new Set(marks.keys()), [marks]);
+  return { layer, marks: ids };
 }
 
 function countDesc(childrenOf: Map<string, Agent[]>, id: string): number {
@@ -569,6 +653,7 @@ function FamilyCanvas({ all, result, selected, onSelect, onFocus }: {
   const byId = new Map(all.map((a) => [a.id, a]));
   const pos = new Map(result.nodes.map((n) => [n.id, n]));
   const kill = useContext(KillCtx);
+  const letters = useContext(LetterCtx);
   return (
     <div className="canvas" style={{ width: W, height: H }} data-valid={result.valid} data-arc={result.arcIndex}
       data-metrics={JSON.stringify({ o: result.metrics.overlaps, c: result.metrics.crossings, t: result.metrics.edgeThroughNode, i: result.metrics.interleave, s: Number(result.metrics.s.toFixed(3)) })}>
@@ -587,9 +672,10 @@ function FamilyCanvas({ all, result, selected, onSelect, onFocus }: {
           <div key={n.id} className={`fnode ${selected === n.id ? "open" : ""} ${delay !== undefined ? "dying" : ""} ${n.depth >= 2 ? "is-mini" : ""}`}
             style={{ left: n.x - n.w / 2 + ox, top: n.y - n.h / 2 + oy, width: n.w, height: n.h, transition: `left ${LAYOUT.moveMs}ms ease, top ${LAYOUT.moveMs}ms ease`, ["--kd" as string]: `${delay ?? 0}ms` }}>
             {/* × はカード（札）の角を基準に置くので、カードと同じ大きさの包みに入れる（カードは overflow: hidden） */}
-            <div className={`fnode-body ${n.depth >= 2 ? "k-mini" : "k-card"}`}
+            <div className={`fnode-body ${n.depth >= 2 ? "k-mini" : "k-card"}`} data-aid={n.id}
               style={n.depth >= 2 ? { ["--kx-k" as string]: boxOf(n.depth, a.name).scale } : undefined}>
               <Card agent={a} depth={n.depth} selected={selected === n.id} onSelect={onSelect} onFocus={onFocus} />
+              {letters.has(n.id) && <img className="letter-mark" src={LETTER_IMG} alt="お手紙が届いた" title="お手紙が届いた" />}
               {a.capabilities?.stop && delay === undefined && (
                 <button className="kill-x" title="閉じる（⌘ を押しながらで確認なし）" aria-label={`${a.name} を閉じる`}
                   onClick={(e) => { e.stopPropagation(); kill.ask(a, e.metaKey); }}
@@ -1039,6 +1125,7 @@ function Bubble({ item, agent, lineageDepth }: { item: ConvItem & { more?: numbe
   if (item.role === "tool") {
     return <div className="tool-line">🔧 {item.text}{item.more ? ` ほか${item.more}件` : ""}</div>;
   }
+  if (item.role === "user" && item.letter) return <LetterBubble item={item} />;
   if (item.role === "user") {
     const who = item.from ? fromLabel(item.from) : null;
     return (
@@ -1055,6 +1142,21 @@ function Bubble({ item, agent, lineageDepth }: { item: ConvItem & { more?: numbe
         <div className="meta"><b>{agent.name}</b>{timeOf(item.at)}</div>
         <div className="b"><Markdown text={item.text} /></div>
       </div>
+    </div>
+  );
+}
+
+/** 別のセッションからのお手紙。便箋の見た目にして、包みのタグは出さず本文だけ見せる */
+function LetterBubble({ item }: { item: ConvItem }) {
+  const town = useContext(TownCtx);
+  const raw = item.letter?.fromRaw ?? null;
+  const sid8 = raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? null;
+  const id = resolve(raw, town) ?? resolve(sid8, town) ?? resolve(item.letter?.fromName, town);
+  const name = (id && town.find((a) => a.id === id)?.name) ?? item.letter?.fromName ?? sid8 ?? "別のセッション";
+  return (
+    <div className="msg letter">
+      <div className="meta"><img className="letter-ico" src={LETTER_IMG} alt="" /><b>{name}</b> からのお手紙{timeOf(item.at) ? ` ・ ${timeOf(item.at)}` : ""}</div>
+      <div className="b"><Markdown text={item.text} /></div>
     </div>
   );
 }
@@ -1098,7 +1200,7 @@ function Credits() {
       {open && (
         <span className="credit-pop" onMouseLeave={() => setOpen(false)}>
           <b>キャラ</b>: Ninja Adventure Asset Pack（Pixel-boy、AAA）、CC0 1.0。
-          <br /><b>状態の印</b>: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0
+          <br /><b>状態の印、幽霊、お手紙</b>: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0
           （creativecommons.org/licenses/by/4.0）。Source: googlefonts.github.io/noto-emoji-animation
           <br />どちらも配布元のファイルを改変せずに使い、表示のときに縮めている。
         </span>

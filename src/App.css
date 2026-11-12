@@ -359,3 +359,21 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .lg { white-space: nowrap; }
 .tp-plan { display: flex; flex-direction: column; gap: 2px; }
 .tp-plan ul { margin: 2px 0 0; padding-left: 18px; }
+
+/* お手紙（セッションどうしのやり取り）。お便り（人の番の知らせ）とは見た目を分ける */
+.letters-layer { position: fixed; inset: 0; pointer-events: none; z-index: 60; }
+.letter-fly { position: absolute; left: 0; top: 0; width: 30px; height: 30px; will-change: transform, opacity; filter: drop-shadow(0 3px 6px rgba(47, 45, 54, 0.18)); }
+/* 受け手の頭（カードの左上の角）に残る印 */
+.letter-mark { position: absolute; left: -9px; top: -11px; width: 24px; height: 24px; z-index: 9; pointer-events: auto; filter: drop-shadow(0 2px 3px rgba(47, 45, 54, 0.15)); animation: letter-pop 0.35s ease-out; }
+@keyframes letter-pop { from { transform: scale(0.4); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .letter-mark { animation: none; } }
+/* 会話の中のお手紙（便箋）。人が打った文（右寄せの吹き出し）と分ける */
+.msg.letter { display: flex; flex-direction: column; gap: 3px; margin: 2px 6px; }
+.msg.letter .meta { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: #7a6f95; }
+.msg.letter .meta b { color: #4f466b; }
+.letter-ico { width: 16px; height: 16px; }
+.msg.letter .b {
+  background: #fffdf7; border: 1px solid #ece4d0; border-radius: 4px 12px 12px 12px; padding: 10px 14px;
+  background-image: repeating-linear-gradient(to bottom, transparent 0, transparent 21.5px, #f1ead9 21.5px, #f1ead9 22.5px);
+  background-position: 0 9px; line-height: 22.5px; font-size: 13.5px; box-shadow: 0 1px 2px rgba(47, 45, 54, 0.04);
+}

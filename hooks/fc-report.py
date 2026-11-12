@@ -26,6 +26,8 @@ import time
 from pathlib import Path
 
 STATE_DIR = Path(os.environ.get("FC_STATE_DIR", Path.home() / ".family-computing" / "state"))
+LETTERS = Path(os.environ.get("FC_LETTERS", Path.home() / ".family-computing" / "letters.jsonl"))
+LETTERS_MAX = 1024 * 1024
 HOUSES = Path(os.environ.get("FC_HOUSES", Path.home() / ".family-computing" / "houses.json"))
 # 子を作る道具。ccn の MCP の create_session（親は from 行で ccn に残る）
 MAKE_CHILD = "mcp__ccn__create_session"
@@ -222,6 +224,65 @@ def cur_field(sid, key):
         return None
 
 
+# お手紙（セッションどうしのやり取り）。送った道具の名前 → 記録の種類
+LETTER_TOOLS = {"SendMessage": "send", "mcp__ccn__send_message": "ccn_send", MAKE_CHILD: "ccn_create"}
+UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def append_letter(rec):
+    """letters.jsonl に1行足す。1行は1回の write で書く。1MB を超えたら .1 に移して新しく始める"""
+    rec["at"] = int(time.time() * 1000)
+    rec["id"] = hashlib.sha1(json.dumps(rec, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:12]
+    LETTERS.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if LETTERS.stat().st_size > LETTERS_MAX:
+            os.replace(LETTERS, LETTERS.with_suffix(".1.jsonl"))
+    except FileNotFoundError:
+        pass
+    line = (json.dumps(rec, ensure_ascii=False) + "\n").encode()
+    fd = os.open(LETTERS, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, line)
+    finally:
+        os.close(fd)
+
+
+def letter_sent(sid, name, inp, resp):
+    """送った記録。宛先は生のまま残し、セッション ID への結び付けはアプリがする"""
+    kind = LETTER_TOOLS[name]
+    inp = inp if isinstance(inp, dict) else {}
+    text = json.dumps(resp, ensure_ascii=False) if not isinstance(resp, str) else resp
+    if kind == "send":
+        if isinstance(resp, dict) and resp.get("success") is False:
+            return
+        to, body = str(inp.get("to") or ""), inp.get("summary") or first_line(inp.get("message") if isinstance(inp.get("message"), str) else "")
+        to_id = None
+    elif kind == "ccn_send":
+        to, body = str(inp.get("session") or ""), first_line(inp.get("text"))
+        m = UUID.search(text)
+        to_id = m.group(0) if m else None
+    else:
+        # create_session の返り値の id が、新しい子のセッション ID
+        m = UUID.search(text)
+        to, body, to_id = "", first_line(inp.get("prompt")) or "（最初の文なし）", (m.group(0) if m else None)
+    if not to and not to_id:
+        return
+    append_letter({"ev": "sent", "kind": kind, "from": sid, "to": to, "to_id": to_id, "peer": inp.get("peer") or None, "summary": clip(body, 60)})
+
+
+def letter_received(sid, prompt):
+    """受けた記録。<cross-session-message from=... from-name=...> か、1行目が from agent:<ノード>/<sid8>/<役割> via <ノード> の文"""
+    m = re.search(r"<cross-session-message\s+([^>]*)>", prompt)
+    if m:
+        attrs = dict(re.findall(r'([a-z-]+)="([^"]*)"', m.group(1)))
+        body = re.sub(r"</?cross-session-message[^>]*>", "", prompt).strip()
+        append_letter({"ev": "received", "to": sid, "from_raw": attrs.get("from"), "from_name": attrs.get("from-name"), "summary": clip(first_line(body), 60)})
+        return
+    m = re.match(r"\s*from agent:([^/\s]+)/([0-9a-fA-F]{8})[^\s]* via (\S+)\s*\n?(.*)", prompt, re.S)
+    if m:
+        append_letter({"ev": "received", "to": sid, "from_node": m.group(1), "from_sid8": m.group(2).lower(), "summary": clip(first_line(m.group(4)), 60)})
+
+
 def emit_context(event, text):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=False))
 
@@ -250,6 +311,10 @@ def main():
         prompt = data.get("prompt") or ""
         patch = {"phase": "working", "doing": "考え中", "needs": None, "tools": 0,
                  "turn_started_at": int(time.time() * 1000), "perm_queue": [], "pending": None, "pending_count": 0}
+        try:
+            letter_received(sid, prompt)
+        except Exception:
+            pass
         asked, by = asked_of(prompt)
         # 頼まれたことを上書きするのは、人が打った文か、まだ人の依頼が入っていないときの別セッションからの文だけ。
         # 親に届く子の報告で、人の依頼が消えないようにする
@@ -281,6 +346,11 @@ def main():
         q = [x for x in read_queue(sid) if x["id"] != done_id]
         write_queue(sid, q, data, phase="working", needs=None)
         # 初めて子を作った直後にも促す（その会話の中で名前を付けられるように）
+        if ev == "PostToolUse" and data.get("tool_name") in LETTER_TOOLS:
+            try:
+                letter_sent(sid, data.get("tool_name"), data.get("tool_input"), data.get("tool_response"))
+            except Exception:
+                pass
         if ev == "PostToolUse" and data.get("tool_name") == MAKE_CHILD:
             write(sid, {"made_child": True}, data)
             nudge = house_nudge(sid)

@@ -34,6 +34,8 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
       };
       return {
         ccn: MOCK, peer: null, ccn_ok: true, ccn_error: null, fetched_at: Date.now(),
+        // お手紙の試し: public/dev-letters.json（無ければ空）
+        letters: await fetch("/dev-letters.json", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
         agents: live.map((s) => ({ id: s.id, name: s.title, kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities })),
       } as T;
     }
