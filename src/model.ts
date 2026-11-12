@@ -164,23 +164,10 @@ export function choicesOf(text: string): string[] {
 }
 
 /**
- * 世帯の名前。本人が付けた名前 > 親が付けた名前 > 仮の名前。
- * 仮の名前は、子や孫の作業場所で一番多いディレクトリ名（親の場所は meta などで共通なので除く）。無ければ最初の依頼の先頭。
+ * 世帯の名前。本人が画面で付けた名前（by=human）を優先し、無ければ根のセッションの作業ディレクトリの最後の名前。
+ * 子の場所、最初の依頼、エージェントが hook で付けた名前（by=agent）は使わない。
  */
-export function houseNameOf(root: Agent, all: Agent[]): { name: string; by: "human" | "agent" | "guess" } {
-  if (root.house?.name) return { name: root.house.name, by: root.house.by };
-  const rootDir = projectOf(root);
-  const count = new Map<string, number>();
-  for (const a of all) {
-    if (a.id === root.id) continue;
-    const d = projectOf(a);
-    if (d === rootDir) continue;
-    count.set(d, (count.get(d) ?? 0) + 1);
-  }
-  const top = [...count.entries()].sort((x, y) => y[1] - x[1])[0]?.[0];
-  if (top) return { name: top, by: "guess" };
-  const asked = root.report?.asked?.trim();
-  if (asked) return { name: clip(asked, 12), by: "guess" };
-  // 新しい世帯は meta で始まるので、まだ何も分からないときは「新しい世帯」と出す
-  return { name: rootDir === "meta" ? "新しい世帯" : rootDir, by: "guess" };
+export function houseNameOf(root: Agent, _all?: Agent[]): { name: string; by: "human" | "dir" } {
+  if (root.house?.by === "human" && root.house.name) return { name: root.house.name, by: "human" };
+  return { name: projectOf(root), by: "dir" };
 }

@@ -609,7 +609,7 @@ function Group({ root, all, count, size, hasNeeds, onRename, children }: {
     <section className={`group ${hasNeeds ? "has-needs" : ""}`}
       style={{ width: size.w, height: size.h, background: GROUP_TINTS[tint], borderColor: hasNeeds ? undefined : GROUP_LINES[tint] }}>
       <div className="g-head" onDoubleClick={() => setEditing(true)}
-        title={`ダブルクリックで名前を変える（${house.by === "human" ? "あなたが付けた名前" : house.by === "agent" ? `${root.name}が付けた名前` : "仮の名前"}）`}>
+        title={`ダブルクリックで名前を変える（${house.by === "human" ? "あなたが付けた名前" : "作業ディレクトリの名前"}）`}>
         {editing ? (
           <input className="g-input" autoFocus defaultValue={house.by === "human" ? house.name : ""} placeholder={house.name}
             maxLength={24}
@@ -619,7 +619,7 @@ function Group({ root, all, count, size, hasNeeds, onRename, children }: {
             }}
             onBlur={() => setEditing(false)} />
         ) : (
-          <span className={`g-name ${house.by === "guess" ? "guess" : ""}`}>{house.name}</span>
+          <span className={`g-name `}>{house.name}</span>
         )}
         <span className="g-sub">{count}人</span>
         {hasNeeds && <span className="g-needs">あなたの番</span>}
@@ -750,7 +750,7 @@ function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect:
         onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
         title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで広げてチャット・右クリックでターミナル`}
       >
-        <Avatar pick={agent.avatar} seed={agent.name} mood={mood} role={roleOf(depth)} size={32} dead={dying.has(agent.id)} />
+        <Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(depth)} size={32} dead={dying.has(agent.id)} />
         <span className="mini-name"><i className={`dot st-${mood}`} />{agent.name}</span>
       </button>
       {selected && (
@@ -803,7 +803,7 @@ function GhostCard({ agent, depth, onSelect }: { agent: Agent; depth: number; on
       onClick={() => onSelect(agent)} title={`${agent.name}（${label}）\nクリックで ${g.town} の町に切り替える`}>
       <span className="ghost-tag"><SuitcaseIcon />{label}</span>
       <span className="ghost-body">
-        <span className="ghost-av"><Avatar pick={agent.avatar} seed={agent.name} mood="idle" role={roleOf(depth)} size={mini ? 26 : 40} /></span>
+        <span className="ghost-av"><Avatar pick={agent.avatar} seed={agent.id} mood="idle" role={roleOf(depth)} size={mini ? 26 : 40} /></span>
         <span className="ghost-name">{agent.name}</span>
       </span>
     </button>
@@ -835,7 +835,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
         <span className="task">{task}</span>
       </div>
       <div className="card-main">
-        <Avatar pick={agent.avatar} seed={agent.name} mood={mood} role={roleOf(depth)} size={48} dead={dying.has(agent.id)} />
+        <Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(depth)} size={48} dead={dying.has(agent.id)} />
         <div className="card-info">
           <span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}{since && <em>{since}</em>}</span>
           <span className="cname">{agent.name}</span>
@@ -944,7 +944,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
   return (
     <aside className={`panel pm-${mood}`}>
       <div className="p-head">
-        <div className="p-avatar"><Avatar pick={agent.avatar} seed={agent.name} mood={mood} role={roleOf(lineage.length - 1)} size={64} /></div>
+        <div className="p-avatar"><Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(lineage.length - 1)} size={64} /></div>
         <div className="p-id">
           <div className="p-name"><span className="pn">{agent.name}</span><span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}</span></div>
           <div className="p-line">{lineage.map((a, i) => (
@@ -1220,7 +1220,7 @@ function Bubble({ item, agent, lineageDepth }: { item: ConvItem & { more?: numbe
   }
   return (
     <div className="msg kid">
-      <div className="mini-av"><Avatar pick={agent.avatar} seed={agent.name} mood="idle" role={roleOf(lineageDepth)} size={32} /></div>
+      <div className="mini-av"><Avatar pick={agent.avatar} seed={agent.id} mood="idle" role={roleOf(lineageDepth)} size={32} /></div>
       <div>
         <div className="meta"><b>{agent.name}</b>{timeOf(item.at)}</div>
         <div className="b"><Markdown text={item.text} /></div>
@@ -1247,7 +1247,7 @@ function LetterBubble({ item }: { item: ConvItem }) {
   const name = who?.name ?? item.letter?.fromName ?? raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? "別のセッション";
   return (
     <div className="msg kid letter">
-      <div className="mini-av"><Avatar pick={who?.avatar} seed={name} mood="idle" role={who?.parent ? "child" : "parent"} size={32} /></div>
+      <div className="mini-av"><Avatar pick={who?.avatar} seed={who?.id ?? name} mood="idle" role={who?.parent ? "child" : "parent"} size={32} /></div>
       <div>
         <div className="meta"><b>{name}</b>{timeOf(item.at)}</div>
         <div className="b"><Markdown text={item.text} /></div>
@@ -1263,7 +1263,7 @@ function SentLetter({ item, agent, lineageDepth }: { item: ConvItem; agent: Agen
   const to = s.create ? "新しい子" : who?.name ?? (s.to ? String(s.to).replace(/^uds:.*\/(\d+)\.sock$/, "pid $1") : "相手");
   return (
     <div className="msg kid letter">
-      <div className="mini-av"><Avatar pick={agent.avatar} seed={agent.name} mood="idle" role={roleOf(lineageDepth)} size={32} /></div>
+      <div className="mini-av"><Avatar pick={agent.avatar} seed={agent.id} mood="idle" role={roleOf(lineageDepth)} size={32} /></div>
       <div>
         <div className="meta"><b>{agent.name}</b><span className="to">→ {to}{s.peer ? `（${s.peer}）` : ""}</span>{timeOf(item.at)}</div>
         <div className="b"><Markdown text={s.text || s.summary || ""} /></div>
