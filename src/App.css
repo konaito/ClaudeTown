@@ -93,27 +93,19 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .g-sub { font-size: 12px; color: var(--sub); }
 .g-needs { font-size: 11px; color: #9a6a00; background: #fff3d6; border-radius: 99px; padding: 1px 8px; }
 .g-input { font: inherit; font-size: 15px; font-weight: 700; border: none; border-bottom: 1.5px dashed #b9b2a7; background: transparent; outline: none; width: 12em; }
-.group > .branch { margin: 0 auto; }
 
-/* 木（組織図の線）。どの深さでも同じ規則で、子の段は App.tsx の SHRINK 倍の zoom で縮む */
-.branch { display: flex; flex-direction: column; align-items: center; position: relative; }
-.kids { display: flex; position: relative; padding-top: 14px; }
-.kids::before { content: ""; position: absolute; top: 0; left: 50%; height: 14px; border-left: 2px solid var(--tree); }
-.kids > .branch { padding: 14px 7px 0; flex: none; }
-.kids > .branch::before, .kids > .branch::after { content: ""; position: absolute; top: 0; width: 50%; height: 14px; border-top: 2px solid var(--tree); }
-.kids > .branch::before { right: 50%; }
-.kids > .branch::after { left: 50%; border-left: 2px solid var(--tree); }
-.kids > .branch:first-child::before, .kids > .branch:last-child::after { border-top: none; }
-.kids > .branch:last-child::before { border-right: 2px solid var(--tree); border-top-right-radius: 8px; }
-.kids > .branch:first-child::after { border-top-left-radius: 8px; }
-.kids > .branch:only-child::before { display: none; }
-.kids > .branch:only-child::after { border-top: none; border-radius: 0; }
+/* 家族の木。座標は src/layout が決め、ここでは置くだけ */
+.canvas { position: relative; margin: 0 auto; }
+.edges { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+.edges line { stroke: var(--tree); stroke-width: 2; stroke-linecap: round; }
+.fnode { position: absolute; display: flex; align-items: center; justify-content: center; }
+.fnode.open { z-index: 30; }
 
 /* カード */
 .card {
   flex: none; display: flex; flex-direction: column; gap: 2px; padding: 7px 9px 6px; border-radius: 14px; background: #fff;
   border: 1.5px solid #ebe8e3; box-shadow: 0 1px 2px rgba(47, 45, 54, 0.05), 0 4px 12px rgba(47, 45, 54, 0.04);
-  text-align: left; position: relative; transition: border-color 0.12s, box-shadow 0.12s; min-width: 128px;
+  text-align: left; position: relative; transition: border-color 0.12s, box-shadow 0.12s; box-sizing: border-box; overflow: hidden;
 }
 .card:hover { border-color: #d8d3cb; box-shadow: 0 2px 4px rgba(47, 45, 54, 0.06), 0 8px 18px rgba(47, 45, 54, 0.06); }
 .card.sel { border-color: var(--sel); background: #f3f8ff; box-shadow: 0 0 0 3px rgba(75, 139, 245, 0.16); }
@@ -131,17 +123,15 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .cname { font-size: 14px; font-weight: 700; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 孫より下の小さい札。選ぶと同じ大きさのカード（.pop）を上に重ねる */
-.mini-wrap { position: relative; }
-.mini-wrap.open { z-index: 30; }
 .mini {
-  flex: none; display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 4px 6px 3px; border-radius: 10px;
-  background: #fff; border: 1.5px solid #ebe8e3; min-width: 64px;
+  flex: none; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 1px; padding: 4px 6px 5px; border-radius: 10px; box-sizing: border-box; overflow: hidden;
+  background: #fff; border: 1.5px solid #ebe8e3;
 }
 .mini:hover { border-color: #d8d3cb; }
 .mini.m-approval { border-color: #f6dc9f; }
 .mini.m-reply { border-color: #cfe0ff; }
 .mini.sel { border-color: var(--sel); }
-.mini-name { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 700; max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mini-name { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 700; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mini-name .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; display: inline-block; }
 .dot.st-working { background: var(--working); } .dot.st-reply { background: var(--reply); } .dot.st-approval { background: var(--approval); }
 .dot.st-done { background: var(--done); } .dot.st-idle { background: var(--idle); }

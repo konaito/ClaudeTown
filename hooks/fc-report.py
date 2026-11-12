@@ -203,8 +203,9 @@ def main():
 
     if ev == "UserPromptSubmit":
         prompt = data.get("prompt") or ""
-        # 別セッションからの文は1行目が from 行なので、本文の1行目を取る
-        body = re.sub(r"^from \S+ via \S+\s*\n", "", prompt)
+        # 別セッションからの文は <cross-session-message ...> で包まれていたり、1行目が from 行だったりするので、本文の1行目を取る
+        body = re.sub(r"</?cross-session-message[^>]*>", "", prompt).strip()
+        body = re.sub(r"^from \S+ via \S+\s*\n", "", body)
         write(sid, {"phase": "working", "asked": clip(first_line(body)), "doing": "考え中", "needs": None, "tools": 0,
                     "turn_started_at": int(time.time() * 1000)}, data)
         nudge = house_nudge(sid)

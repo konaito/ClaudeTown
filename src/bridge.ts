@@ -18,7 +18,8 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
     return (await r.json()) as T;
   }
   if (cmd === "peers") return devJson<T>("dev-peers.json", [] as T);
-  if (cmd === "conversation") return devJson<T>("dev-conversation.json", [] as T);
+  // ブラウザ表示では本物の会話を読めない。別のセッションの会話を見せて取り違えに見えないよう、仮の1件だけ返す
+  if (cmd === "conversation") return [{ role: "assistant", text: `（ブラウザ表示の仮の会話）${String(args?.sessionId ?? "").slice(0, 8)} の会話は、Tauri の中で ccn から読む。` }] as T;
   console.info("[ブラウザ表示なので実行しない]", cmd, args);
   return "ブラウザ表示" as T;
 }

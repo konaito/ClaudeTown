@@ -7,6 +7,8 @@ import {
   MOOD_LABEL, NEEDS_YOU, buildTree, choicesOf, clip, houseNameOf, moodOf, nowOf, sinceText, taskOf,
 } from "./model";
 import { Markdown } from "./Markdown";
+import { layoutFamily, type LNode } from "./layout/layout";
+import { LAYOUT, boxOf } from "./layout/params";
 
 const POLL_MS = 2000;
 const CONV_POLL_MS = 2500;
@@ -130,8 +132,7 @@ export default function App() {
                   catch (e) { toast(`グループの名前を変えられなかった: ${e}`, true); }
                 }}
                 hasNeeds={f.all.some((a) => NEEDS_YOU.includes(moodOf(a)))}>
-                <Tree agent={f.root} depth={0} childrenOf={tree.childrenOf}
-                  selected={selected} onSelect={(a) => setSelected(a.id)} onFocus={focus} />
+                <FamilyCanvas all={f.all} selected={selected} onSelect={(a) => setSelected(a.id)} onFocus={focus} />
               </Group>
             ))}
           </Stage>
@@ -293,43 +294,80 @@ function roleOf(depth: number): Role {
   return depth === 0 ? "parent" : depth === 1 ? "child" : "grandchild";
 }
 const ROLE_LABEL = ["親", "子", "孫", "ひ孫", "玄孫"];
-const SHRINK = 0.86;
-const MIN_SCALE = 0.6;
-/** この深さから下は小さい札で描く（0=親、1=子、2=孫） */
-const COMPACT_FROM = 2;
 
-function Tree({ agent, depth, childrenOf, selected, onSelect, onFocus }: {
-  agent: Agent; depth: number; childrenOf: Map<string, Agent[]>; selected: string | null;
-  onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;
+/** 家族ごとに前回選んだ配置の候補（更新のたびに形が変わらないよう引き継ぐ） */
+const prevArc = new Map<string, number>();
+
+/**
+ * 家族の木を、配置計算（src/layout）が決めた座標に置いて描く。
+ * 配置を計算し直すのは、家族の顔ぶれ（id、親、名前）が変わったときだけ。状態や会話の更新では動かさない。
+ * 線は、配置の検査に使ったのと同じ「親の中心から子の中心」の線分を SVG で引く。
+ */
+function FamilyCanvas({ all, selected, onSelect, onFocus }: {
+  all: Agent[]; selected: string | null; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;
 }) {
-  const kids = childrenOf.get(agent.id) ?? [];
-  // どの深さでも同じ規則（カードの下に子を横に並べ、上から線でつなぐ）で描く。
-  // 子の段は kidsZoomAt の倍率で縮め、入れ子で掛け合わさって自己相似になる。孫より下は小さい札にする
-  const kidsZoom = kidsZoomAt(depth);
+  const rootId = all[0].id;
+  const sig = all.map((a) => `${a.id}|${a.parent ?? ""}|${a.name}|${a.startedAt ?? 0}`).join(",");
+  const result = useMemo(() => {
+    const inFam = new Set(all.map((a) => a.id));
+    const depthOf = new Map<string, number>();
+    const d = (a: Agent): number => {
+      if (depthOf.has(a.id)) return depthOf.get(a.id)!;
+      const p = a.parent && inFam.has(a.parent) ? all.find((x) => x.id === a.parent) : undefined;
+      const v = p ? d(p) + 1 : 0;
+      depthOf.set(a.id, v);
+      return v;
+    };
+    const nodes: LNode[] = all.map((a) => {
+      const b = boxOf(d(a), a.name);
+      return { id: a.id, parent: a.parent && inFam.has(a.parent) ? a.parent : null, order: a.startedAt ?? 0, w: b.w, h: b.h };
+    });
+    const r = layoutFamily(nodes, { prevArcIndex: prevArc.get(rootId) });
+    prevArc.set(rootId, r.arcIndex);
+    return r;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sig]);
+  const pad = LAYOUT.framePad;
+  const minX = Math.min(...result.nodes.map((n) => n.x - n.w / 2));
+  const minY = Math.min(...result.nodes.map((n) => n.y - n.h / 2));
+  const W = result.metrics.width + pad * 2, H = result.metrics.height + pad * 2;
+  const ox = pad - minX, oy = pad - minY;
+  const byId = new Map(all.map((a) => [a.id, a]));
+  const pos = new Map(result.nodes.map((n) => [n.id, n]));
   return (
-    <div className="branch">
-      <Card agent={agent} depth={depth} selected={selected === agent.id} onSelect={onSelect} onFocus={onFocus} />
-      {kids.length > 0 && (
-        <div className="kids" style={{ zoom: kidsZoom }}>
-          {kids.map((k) => (
-            <Tree key={k.id} agent={k} depth={depth + 1} childrenOf={childrenOf} selected={selected} onSelect={onSelect} onFocus={onFocus} />
-          ))}
-        </div>
-      )}
+    <div className="canvas" style={{ width: W, height: H }} data-overlaps={result.metrics.overlaps} data-crossings={result.metrics.crossings}>
+      <svg className="edges" width={W} height={H}>
+        {result.nodes.filter((n) => n.parent).map((n) => {
+          const p = pos.get(n.parent!)!;
+          return <line key={n.id} x1={p.x + ox} y1={p.y + oy} x2={n.x + ox} y2={n.y + oy} />;
+        })}
+      </svg>
+      {result.nodes.map((n) => {
+        const a = byId.get(n.id);
+        if (!a) return null;
+        return (
+          <div key={n.id} className={`fnode ${selected === n.id ? "open" : ""}`}
+            style={{ left: n.x - n.w / 2 + ox, top: n.y - n.h / 2 + oy, width: n.w, height: n.h, transition: `left ${LAYOUT.moveMs}ms ease, top ${LAYOUT.moveMs}ms ease` }}>
+            <Card agent={a} depth={n.depth} selected={selected === n.id} onSelect={onSelect} onFocus={onFocus} />
+          </div>
+        );
+      })}
     </div>
   );
 }
 
 function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void }) {
   const { agent, depth, selected, onSelect, onFocus } = props;
-  if (depth < COMPACT_FROM) return <FullCard {...props} />;
-  // 孫より下は小さい札。選んだときだけ、親や子と同じ見た目の大きさのカードを上に重ねる（周りは動かさない）
+  if (depth <= 1) return <FullCard {...props} />;
+  // 孫より下は小さい札。選んだときだけ、親や子と同じ大きさのカードを上に重ねる（周りは動かさない）
   const mood = moodOf(agent);
   const now = nowOf(agent, mood);
+  const box = boxOf(depth, agent.name);
   return (
-    <div className={`mini-wrap ${selected ? "open" : ""}`}>
+    <>
       <button
         className={`mini m-${mood} ${selected ? "sel" : ""}`}
+        style={{ zoom: box.scale, width: box.w / box.scale, height: box.h / box.scale }}
         onClick={() => onSelect(agent)}
         onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
         title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで広げて会話・右クリックでペインへ`}
@@ -338,26 +376,12 @@ function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect:
         <span className="mini-name"><i className={`dot st-${mood}`} />{agent.name}</span>
       </button>
       {selected && (
-        <div className="pop" style={{ zoom: 1 / scaleAt(depth) }}>
+        <div className="pop">
           <FullCard {...props} />
         </div>
       )}
-    </div>
+    </>
   );
-}
-
-/** その深さのカードに、入れ子の zoom が掛け合わさった倍率 */
-function scaleAt(depth: number): number {
-  let s = 1;
-  for (let d = 1; d <= depth; d++) s *= kidsZoomAt(d - 1);
-  return s;
-}
-/** 深さ depth のノードの子の段にかける zoom。孫の段（札になる段）で大きく縮め、その下は SHRINK ずつ、MIN_SCALE で止める */
-function kidsZoomAt(depth: number): number {
-  const z = depth + 1 === COMPACT_FROM ? 1 : SHRINK;
-  let here = 1;
-  for (let d = 0; d < depth; d++) here *= d + 1 === COMPACT_FROM ? 1 : SHRINK;
-  return here * z >= MIN_SCALE ? z : 1;
 }
 
 function FullCard({ agent, depth, selected, onSelect, onFocus }: {
@@ -370,6 +394,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
   return (
     <button
       className={`card m-${mood} ${selected ? "sel" : ""}`}
+      style={{ width: LAYOUT.card.w, height: LAYOUT.card.h }}
       onClick={() => onSelect(agent)}
       onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
       title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで会話・右クリックでペインへ`}
