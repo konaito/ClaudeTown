@@ -1035,12 +1035,13 @@ mod cmd {
 // 画面が決まった間隔で snapshot を呼ぶのをやめ、Rust のスレッドが一覧を取り、前回と変わったときだけ Channel で画面へ送る。
 // 変化が無ければ画面（JS）は一度も起きない。ccn に変化を流す口（SSE）が町の全部を覆うまでのつなぎ。
 // ccn の GET /api/events は、コードを読んだ範囲では hook の状態ファイル（state/、close-check）とお手紙の変化を含まないので、まだ使わない。
-// 間隔は、変化が無い回が続くと 2秒→4秒→8秒→16秒→30秒と延ばし、変わったら2秒に戻す。つながらない回は毎回送り、2秒で取り直す。
+// 間隔は、変化が無い回が続くと 2秒→4秒→8秒と延ばし、8秒で止める。変わったら2秒に戻す。つながらない回は毎回送り、2秒で取り直す。
+// 上限を8秒にしたのは、静かな町で承認待ちや返事待ちが出たとき、画面に出るまでの遅れを8秒までに抑えるため（「あなたの番」を早く見せる）
 // 画面が見えていない間は、画面が town_unwatch で止める（#6）。
 
 /// 変化が無い回が続いたときの間隔の下限と上限
 const WATCH_MIN: Duration = Duration::from_secs(2);
-const WATCH_MAX: Duration = Duration::from_secs(30);
+const WATCH_MAX: Duration = Duration::from_secs(8);
 
 enum WatchCmd { Kick, Stop }
 /// いま動いている見張り（窓は1つなので1本だけ）。世代と、止めるための口
@@ -1289,7 +1290,7 @@ mod tests {
 
     /// 見張りを、モックの町（FC_CCN_URL）につないで決まった秒数だけ回し、画面へ送った回数を数える（#5）。
     /// ccn への要求の回数は、モックの /__bench/stats で数える。
-    /// FC_CCN_URL=http://127.0.0.1:<ポート> FC_AVATARS=/tmp/x/avatars.json FC_WATCH_SECS=60 cargo test --release --lib watch_against_mock -- --ignored --nocapture
+    /// HOME=<空のディレクトリ> FC_CCN_URL=http://127.0.0.1:<ポート> FC_WATCH_SECS=60 <cargo test --no-run で作った試験のバイナリ> watch_against_mock --ignored --nocapture
     #[test]
     #[ignore]
     fn watch_against_mock() {
@@ -1309,7 +1310,7 @@ mod tests {
         let mut w = WATCH_MIN;
         let mut seen = vec![];
         for _ in 0..6 { w = next_wait(w, false); seen.push(w.as_secs()); }
-        assert_eq!(seen, vec![4, 8, 16, 30, 30, 30]);
+        assert_eq!(seen, vec![4, 8, 8, 8, 8, 8]);
         assert_eq!(next_wait(WATCH_MAX, true), WATCH_MIN);
     }
 
