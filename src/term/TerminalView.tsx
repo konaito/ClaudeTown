@@ -22,6 +22,8 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
 
   useEffect(() => {
     if (!box.current) return;
+    // 後始末のときには ref が外れているので、容れ物を今のうちに持っておく
+    const host = box.current;
     perfMark("mount", sessionId);
     const term = new Terminal({
       fontFamily: '"SF Mono", Menlo, "Hiragino Sans", monospace', fontSize: 12.5, lineHeight: 1.15,
@@ -170,7 +172,15 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
       for (const ev of ["keydown", "paste", "compositionend"]) ta?.removeEventListener(ev, reclaim);
       disposeInput.dispose();
       close();
+      // WebGL の文脈は、xterm.js の dispose では手放されない（canvas を外すだけ）。GC まで GPU のメモリが WebContent に残り、
+      // 開き直すたびに積もる（#15、100回で footprint が約 420MB 増えた）。外す前に canvas を拾い、dispose の後で文脈を手放す
+      const canvases = [...host.querySelectorAll("canvas")];
       term.dispose();
+      for (const c of canvases) {
+        const ctx = c.getContext("webgl2");
+        ctx?.getExtension("WEBGL_lose_context")?.loseContext();
+        c.width = 0; c.height = 0;
+      }
     };
   }, [sessionId, peer]);
 
