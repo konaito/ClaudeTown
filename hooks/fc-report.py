@@ -204,13 +204,24 @@ def write_queue(sid, q, data, phase, needs):
 NOT_HUMAN = re.compile(r"^\s*<(task-notification|system-reminder|local-command-[a-z-]+|bash-[a-z-]+)\b")
 
 
+PRELUDE = re.compile(r"^\s*Another Claude session sent a message:\s*\n")
+
+
+def unwrap(prompt):
+    """ターミナルに届いたお手紙の前置きの1行を外し、<cross-session-message> があれば包みの内側だけを返す"""
+    p = PRELUDE.sub("", prompt)
+    m = re.search(r"<cross-session-message[^>]*>(.*?)(</cross-session-message>|$)", p, re.S)
+    return m.group(1).strip() if m else p.strip()
+
+
 def asked_of(prompt):
     """UserPromptSubmit の文から（頼まれたことの1行目, 出どころ）を返す。出どころは human か session。頼まれたことにしない文は ("", None)"""
     if NOT_HUMAN.match(prompt):
         return "", None
     # 別セッションからの文は <cross-session-message ...> で包まれていたり、1行目が from 行だったりするので、本文の1行目を取る
-    by = "session" if re.search(r"<cross-session-message[^>]*>|^from agent:\S+ via \S+", prompt.strip()) else "human"
-    body = re.sub(r"</?cross-session-message[^>]*>", "", prompt).strip()
+    unwrapped = PRELUDE.sub("", prompt).strip()
+    by = "session" if re.search(r"<cross-session-message[^>]*>|^from agent:\S+ via \S+", unwrapped) else "human"
+    body = unwrap(prompt)
     body = re.sub(r"^from \S+ via \S+\s*\n", "", body)
     if NOT_HUMAN.match(body):
         return "", None
@@ -275,10 +286,10 @@ def letter_received(sid, prompt):
     m = re.search(r"<cross-session-message\s+([^>]*)>", prompt)
     if m:
         attrs = dict(re.findall(r'([a-z-]+)="([^"]*)"', m.group(1)))
-        body = re.sub(r"</?cross-session-message[^>]*>", "", prompt).strip()
+        body = unwrap(prompt)
         append_letter({"ev": "received", "to": sid, "from_raw": attrs.get("from"), "from_name": attrs.get("from-name"), "summary": clip(first_line(body), 60)})
         return
-    m = re.match(r"\s*from agent:([^/\s]+)/([0-9a-fA-F]{8})[^\s]* via (\S+)\s*\n?(.*)", prompt, re.S)
+    m = re.match(r"\s*from agent:([^/\s]+)/([0-9a-fA-F]{8})[^\s]* via (\S+)\s*\n?(.*)", PRELUDE.sub("", prompt), re.S)
     if m:
         append_letter({"ev": "received", "to": sid, "from_node": m.group(1), "from_sid8": m.group(2).lower(), "summary": clip(first_line(m.group(4)), 60)})
 

@@ -282,14 +282,17 @@ fn simplify(m: &Value) -> Vec<Value> {
                 _ => String::new(),
             };
             let text = text.trim();
-            // 別のセッションからのお手紙（<cross-session-message from=… from-name=…>本文</cross-session-message>）は、包みを外して本文だけ出す
+            // ターミナルのセッションには、お手紙の前に「Another Claude session sent a message:」の1行が付く
+            let text = text.strip_prefix("Another Claude session sent a message:").map(str::trim_start).unwrap_or(text);
+            // 別のセッションからのお手紙（<cross-session-message from=… from-name=…>本文</cross-session-message>、後ろに注記が付くことがある）は、包みの内側の本文だけ出す
             if let Some(rest) = text.strip_prefix("<cross-session-message") {
                 let (attrs, body) = rest.split_once('>').unwrap_or(("", ""));
+                let body = body.split("</cross-session-message>").next().unwrap_or("");
                 let attr = |k: &str| {
                     let key = format!("{k}=\"");
                     attrs.find(&key).and_then(|i| attrs[i + key.len()..].split('"').next()).map(String::from)
                 };
-                let body = body.trim().trim_end_matches("</cross-session-message>").trim();
+                let body = body.trim();
                 if !body.is_empty() {
                     out.push(json!({ "role": "user", "text": body, "from": null, "at": at,
                         "letter": { "fromName": attr("from-name"), "fromRaw": attr("from") } }));
@@ -323,7 +326,17 @@ fn simplify(m: &Value) -> Vec<Value> {
                             }
                         }
                         Some("tool_use") => {
-                            out.push(json!({ "role": "tool", "text": tool_line(c["name"].as_str().unwrap_or(""), &c["input"]), "at": at }));
+                            let name = c["name"].as_str().unwrap_or("");
+                            let inp = &c["input"];
+                            // 送ったお手紙（SendMessage、ccn の send_message と create_session）は、宛先と1行目を付ける
+                            let first = |v: &Value| v.as_str().unwrap_or("").lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
+                            let sent = match name {
+                                "SendMessage" if inp["message"].is_string() => Some(json!({ "to": inp["to"], "summary": inp["summary"].as_str().map(String::from).unwrap_or_else(|| first(&inp["message"])) })),
+                                "mcp__ccn__send_message" => Some(json!({ "to": inp["session"], "peer": inp["peer"], "summary": first(&inp["text"]) })),
+                                "mcp__ccn__create_session" => Some(json!({ "to": null, "peer": inp["peer"], "summary": first(&inp["prompt"]), "create": true })),
+                                _ => None,
+                            };
+                            out.push(json!({ "role": "tool", "text": tool_line(name, inp), "at": at, "sent": sent }));
                         }
                         _ => {}
                     }

@@ -69,6 +69,10 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   if (cmd === "peers") return devJson<T>("dev-peers.json", [] as T);
   // ブラウザ表示では本物の会話を読めない。別のセッションの会話を見せて取り違えに見えないよう、仮の1件だけ返す
   // 見た目の確認用: ?longconv を付けると、スクロールが要る長さの仮の会話を返す
+  // 見た目の確認用: ?conv を付けると public/dev-conversation.json（`--conversation <id>` の出力の Ok）を返す
+  if (cmd === "conversation" && location.search.includes("conv") && !location.search.includes("longconv")) {
+    return devJson<T>("dev-conversation.json", [] as T);
+  }
   if (cmd === "conversation" && location.search.includes("longconv")) {
     return Array.from({ length: 24 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", text: `（仮の会話 ${i + 1}）スクロールの端のグラデーションを確かめるための文。` })) as T;
   }

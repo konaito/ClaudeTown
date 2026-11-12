@@ -55,6 +55,8 @@ export type ConvItem = {
   role: "user" | "assistant" | "tool"; text: string; from?: string | null; at?: string | null; pending?: boolean;
   /** 別のセッションからのお手紙なら、送り手（from-name と、uds のソケットか agent:<ノード>/<sid8>/<役割>） */
   letter?: { fromName?: string | null; fromRaw?: string | null } | null;
+  /** 送ったお手紙（role が tool のとき）。宛先は生のまま。create は子を作って最初の文を渡したもの */
+  sent?: { to?: string | null; peer?: string | null; summary?: string; create?: boolean } | null;
 };
 
 /**

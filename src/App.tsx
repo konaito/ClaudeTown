@@ -1122,6 +1122,7 @@ function timeOf(at?: string | null): string {
 }
 
 function Bubble({ item, agent, lineageDepth }: { item: ConvItem & { more?: number }; agent: Agent; lineageDepth: number }) {
+  if (item.role === "tool" && item.sent) return <SentLetter item={item} />;
   if (item.role === "tool") {
     return <div className="tool-line">🔧 {item.text}{item.more ? ` ほか${item.more}件` : ""}</div>;
   }
@@ -1146,17 +1147,46 @@ function Bubble({ item, agent, lineageDepth }: { item: ConvItem & { more?: numbe
   );
 }
 
-/** 別のセッションからのお手紙。便箋の見た目にして、包みのタグは出さず本文だけ見せる */
-function LetterBubble({ item }: { item: ConvItem }) {
+/** お手紙の相手（送り手か宛先）を町の一覧から引く。見つからなければ null */
+function useLetterPeer(raw: string | null | undefined, name?: string | null): Agent | null {
   const town = useContext(TownCtx);
-  const raw = item.letter?.fromRaw ?? null;
   const sid8 = raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? null;
-  const id = resolve(raw, town) ?? resolve(sid8, town) ?? resolve(item.letter?.fromName, town);
-  const name = (id && town.find((a) => a.id === id)?.name) ?? item.letter?.fromName ?? sid8 ?? "別のセッション";
+  const id = resolve(raw, town) ?? resolve(sid8, town) ?? resolve(name, town);
+  return (id && town.find((a) => a.id === id)) || null;
+}
+
+/** 相手の顔。町にいればキャラの顔（町と同じ絵）、いなければ封筒の印 */
+function LetterFace({ who, size }: { who: Agent | null; size: number }) {
+  if (!who) return <img className="letter-ico" src={LETTER_IMG} alt="" style={{ width: size * 0.7, height: size * 0.7 }} />;
+  return <Avatar pick={who.avatar} seed={who.name} mood="idle" role={who.parent ? "child" : "parent"} size={size} />;
+}
+
+/** 受け取ったお手紙。肌色の吹き出しに、送り手の顔と名前を添える。包みのタグは出さず本文だけ */
+function LetterBubble({ item }: { item: ConvItem }) {
+  const raw = item.letter?.fromRaw ?? null;
+  const who = useLetterPeer(raw, item.letter?.fromName);
+  const name = who?.name ?? item.letter?.fromName ?? raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? "別のセッション";
   return (
     <div className="msg letter">
-      <div className="meta"><img className="letter-ico" src={LETTER_IMG} alt="" /><b>{name}</b> からのお手紙{timeOf(item.at) ? ` ・ ${timeOf(item.at)}` : ""}</div>
-      <div className="b"><Markdown text={item.text} /></div>
+      <div className="mini-av"><LetterFace who={who} size={32} /></div>
+      <div>
+        <div className="meta"><b>{name}</b> からのお手紙{timeOf(item.at) ? ` ・ ${timeOf(item.at)}` : ""}</div>
+        <div className="b"><Markdown text={item.text} /></div>
+      </div>
+    </div>
+  );
+}
+
+/** 送ったお手紙。道具の1行の代わりに、宛先の小さい顔と1行目を出す */
+function SentLetter({ item }: { item: ConvItem }) {
+  const s = item.sent!;
+  const who = useLetterPeer(s.to ?? null, s.to ?? null);
+  const name = s.create ? "新しい子" : who?.name ?? (s.to ? String(s.to).replace(/^uds:.*\/(\d+)\.sock$/, "pid $1") : "相手");
+  return (
+    <div className="sent-letter">
+      <img className="letter-ico" src={LETTER_IMG} alt="" />
+      <span className="sl-to">{!s.create && <LetterFace who={who} size={20} />}<b>{name}</b>{s.peer ? `（${s.peer}）` : ""} へ{s.create ? "最初のお手紙" : "お手紙"}</span>
+      {s.summary && <span className="sl-sum">{s.summary}</span>}
     </div>
   );
 }
