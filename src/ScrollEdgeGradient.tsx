@@ -3,15 +3,22 @@
 // やり方: 外側（wrap）に地の色と、上端・下端に貼り付けたグラデーションの層（position: absolute、z-index 0）を置き、
 // その上にスクロールの容れ物（背景は透明、z-index 1）を重ねる。層は容れ物の全幅で、上端と下端にぴったり付く。
 // 2026-11-12 までは容れ物の中に sticky の層を置いていたが、容れ物の padding と flex に位置と幅を縛られたのでやめた。
-// 上に続きがあれば上端、下に続きがあれば下端に出し、端に着いたらその側を消す。スクロールが要らなければ両方消す。
-// 判定は実際のスクロールの容れ物から行い、スクロール、大きさの変更（ResizeObserver）、中身の増減（MutationObserver）に追従する。
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState, type CSSProperties, type ReactNode, type UIEvent } from "react";
+// 濃さは端までの残り距離に比例させる: 不透明度 = min(1, 残り距離 / しきい値)。しきい値はグラデーションの高さの FADE_RATIO 倍。
+// 端に近づくと連続して薄くなり、着いたときにちょうど 0 になる。スクロールが要らなければ両方 0。
+// 2026-11-12 までは端に着いた瞬間に表示を切り替えていた（0.18 秒のフェードでも切り替わりが見えたのでやめた）。
+// 実装は CSS のスクロール連動アニメーション。容れ物に scroll-timeline、外側に timeline-scope を付け、兄弟の層が同じ名前の
+// タイムラインを animation-range（px）で読む。中身の増減や窓の大きさの変更もブラウザが同じ式で追従するので JS は要らない。
+// WKWebView（Tauri の macOS）で、残り 38px で 0.4935（= 38 / 77）、着いて 0、スクロールが要らないとき 0 になることを実測した。
+import { forwardRef, useId, type CSSProperties, type ReactNode, type UIEvent } from "react";
 
 /** 場所ごとの濃さ。town は世帯の表示領域（続きの方向をはっきり見せる）、soft は会話や欄（控えめ） */
 export const SEG_STRENGTH = {
   town: { height: 44, alpha: 0.5 },
   soft: { height: 26, alpha: 0.45 },
 } as const;
+
+/** しきい値（グラデーションの高さの何倍の距離で濃さが 0 から 1 になるか） */
+export const FADE_RATIO = 1.75;
 
 type Props = {
   /** スクロールの容れ物（中側）に付けるクラス。overflow: auto はこちらに書く */
@@ -27,43 +34,23 @@ type Props = {
 };
 
 export const ScrollEdgeGradient = forwardRef<HTMLDivElement, Props>(function ScrollEdgeGradient(
-  { className, style, wrapClassName, onScroll, onClick, strength = "soft", children }, outerRef,
+  { className, style, wrapClassName, onScroll, onClick, strength = "soft", children }, ref,
 ) {
-  const ref = useRef<HTMLDivElement>(null);
-  useImperativeHandle(outerRef, () => ref.current!, []);
-  const [edges, setEdges] = useState({ top: false, bottom: false });
-
-  const update = useCallback(() => {
-    const el = ref.current;
-    if (!el) return;
-    const top = el.scrollTop > 1;
-    const bottom = el.scrollTop + el.clientHeight < el.scrollHeight - 1;
-    setEdges((e) => (e.top === top && e.bottom === bottom ? e : { top, bottom }));
-  }, []);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    for (const c of Array.from(el.children)) ro.observe(c);
-    const mo = new MutationObserver(() => {
-      // 子が増えたら、その大きさの変化も見る
-      for (const c of Array.from(el.children)) ro.observe(c);
-      update();
-    });
-    mo.observe(el, { childList: true, subtree: true, characterData: true });
-    return () => { ro.disconnect(); mo.disconnect(); };
-  }, [update]);
-
+  // タイムラインの名前は個体ごとに分ける（入れ子や並びの容れ物と混ざらないように）
+  const tl = `--seg-${useId().replace(/[^a-zA-Z0-9]/g, "")}`;
   return (
     <div className={`seg-wrap ${wrapClassName ?? ""}`}
-      style={{ ["--seg-h" as string]: `${SEG_STRENGTH[strength].height}px`, ["--seg-a" as string]: SEG_STRENGTH[strength].alpha } as CSSProperties}>
-      <div className={`seg seg-top ${edges.top ? "on" : ""}`} aria-hidden />
-      <div className={`seg seg-bottom ${edges.bottom ? "on" : ""}`} aria-hidden />
-      <div ref={ref} className={`seg-scroll ${className ?? ""}`} style={style} onClick={onClick}
-        onScroll={(e) => { update(); onScroll?.(e); }}>
+      style={{
+        ["--seg-h" as string]: `${SEG_STRENGTH[strength].height}px`,
+        ["--seg-a" as string]: SEG_STRENGTH[strength].alpha,
+        ["--seg-r" as string]: FADE_RATIO,
+        ["--seg-tl" as string]: tl,
+        timelineScope: tl,
+      } as CSSProperties}>
+      <div className="seg seg-top" style={{ animationTimeline: tl } as CSSProperties} aria-hidden />
+      <div className="seg seg-bottom" style={{ animationTimeline: tl } as CSSProperties} aria-hidden />
+      <div ref={ref} className={`seg-scroll ${className ?? ""}`} style={{ ...style, scrollTimeline: `${tl} block` } as CSSProperties} onClick={onClick}
+        onScroll={onScroll}>
         {children}
       </div>
     </div>

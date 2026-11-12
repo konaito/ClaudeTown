@@ -280,10 +280,15 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .seg-wrap { position: relative; display: flex; flex-direction: column; min-height: 0; }
 .seg-wrap > .seg-scroll { position: relative; z-index: 1; flex: 1; min-height: 0; background: transparent; }
 .seg-fill { flex: 1; min-height: 0; }
-.seg { position: absolute; left: 0; right: 0; height: var(--seg-h, 26px); pointer-events: none; opacity: 0; transition: opacity 0.18s ease; z-index: 0; }
-.seg-top { top: 0; background: linear-gradient(to bottom, rgb(196 207 226 / var(--seg-a, 0.45)), rgb(196 207 226 / 0)); }
-.seg-bottom { bottom: 0; background: linear-gradient(to top, rgb(196 207 226 / var(--seg-a, 0.45)), rgb(196 207 226 / 0)); }
-.seg.on { opacity: 1; }
+.seg {
+  position: absolute; left: 0; right: 0; height: var(--seg-h, 26px); pointer-events: none; opacity: 0; z-index: 0;
+  /* 濃さは scroll-timeline に連動（ScrollEdgeGradient.tsx の説明）。タイムラインが無効（スクロールが要らない）なら opacity: 0 のまま */
+  animation-duration: auto; animation-timing-function: linear; animation-fill-mode: both;
+}
+.seg-top { top: 0; animation-name: seg-in; animation-range: 0px calc(var(--seg-h) * var(--seg-r)); background: linear-gradient(to bottom, rgb(196 207 226 / var(--seg-a, 0.45)), rgb(196 207 226 / 0)); }
+.seg-bottom { bottom: 0; animation-name: seg-out; animation-range: calc(100% - var(--seg-h) * var(--seg-r)) 100%; background: linear-gradient(to top, rgb(196 207 226 / var(--seg-a, 0.45)), rgb(196 207 226 / 0)); }
+@keyframes seg-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes seg-out { from { opacity: 1; } to { opacity: 0; } }
 /* 町の地（点線）はスクロールの容れ物ではなく外側に描く（グラデーションを地と中身の間に挟むため） */
 .stage-bg { background-image: radial-gradient(#eceae5 1px, transparent 1px); background-size: 18px 18px; }
 .ap-detail { font-family: ui-monospace, Menlo, monospace; }
