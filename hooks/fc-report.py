@@ -216,9 +216,14 @@ def main():
             n = json.loads(p.read_text()).get("tools", 0) + 1
         except Exception:
             n = 1
-        write(sid, {"phase": "working", "doing": describe_tool(data.get("tool_name", ""), data.get("tool_input")), "needs": None, "tools": n}, data)
+        name = data.get("tool_name", "")
+        inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+        # 承認を求められたときに画面で中身を見せるため、これから使う道具を控える（PostToolUse で消す）
+        detail = inp.get("command") or inp.get("file_path") or inp.get("url") or inp.get("pattern") or inp.get("query") or ""
+        pending = {"tool": name, "summary": describe_tool(name, inp), "detail": str(detail)[:400], "id": data.get("tool_use_id")}
+        write(sid, {"phase": "working", "doing": describe_tool(name, inp), "needs": None, "tools": n, "pending": pending}, data)
     elif ev in ("PostToolUse", "PostToolUseFailure"):
-        write(sid, {"phase": "working", "needs": None}, data)
+        write(sid, {"phase": "working", "needs": None, "pending": None}, data)
         # 初めて子を作った直後にも促す（その会話の中で名前を付けられるように）
         if ev == "PostToolUse" and "spawn_child" in (data.get("tool_name") or ""):
             nudge = house_nudge(sid)
@@ -238,6 +243,7 @@ def main():
             "next": nxt or None,
             "needs": "質問に答えてほしい" if asking else None,
             "doing": None,
+            "pending": None,
         }, data)
     elif ev == "SessionStart":
         sweep()

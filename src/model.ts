@@ -10,6 +10,8 @@ export type Report = {
   tools?: number;
   turn_started_at?: number;
   updated_at?: number;
+  /** これから使う道具（承認を求められたら、これが中身） */
+  pending?: { tool: string; summary: string; detail: string; id?: string | null } | null;
 };
 
 export type Agent = {

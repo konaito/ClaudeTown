@@ -151,7 +151,7 @@ export default function App() {
         </div>
 
         <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} onFocus={focus} canFocus={local}
-          onSent={(a) => toast(`${a.name} に届けた`)} onError={(m) => toast(m, true)}
+          onSent={(a) => toast(`${a.name} に届けた`)} onSent2={(m) => toast(m)} onError={(m) => toast(m, true)}
           needs={needs} onSelect={(a) => setSelected(a.id)} />
       </div>
 
@@ -391,9 +391,9 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
 
 // ---------- 右のパネル ----------
 
-function Panel({ agent, peer, lineage, onFocus, canFocus, onSent, onError, needs, onSelect }: {
+function Panel({ agent, peer, lineage, onFocus, canFocus, onSent, onSent2, onError, needs, onSelect }: {
   agent: Agent | null; peer: string; lineage: Agent[]; onFocus: (a: Agent) => void; canFocus: boolean;
-  onSent: (a: Agent) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
+  onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
 }) {
   const [tab, setTab] = useState<"talk" | "state">("talk");
   const [items, setItems] = useState<ConvItem[]>([]);
@@ -465,7 +465,6 @@ function Panel({ agent, peer, lineage, onFocus, canFocus, onSent, onError, needs
   const lastAssistant = [...items].reverse().find((x) => x.role === "assistant");
   const lastIsAssistant = items.filter((x) => x.role !== "tool").slice(-1)[0]?.role === "assistant";
   const choices = lastAssistant && lastIsAssistant && mood !== "working" ? choicesOf(lastAssistant.text) : [];
-  const r = agent.report;
 
   return (
     <aside className={`panel pm-${mood}`}>
@@ -492,7 +491,7 @@ function Panel({ agent, peer, lineage, onFocus, canFocus, onSent, onError, needs
           {shown.length === 0 && !convErr && <p className="hint center">まだ会話が無い</p>}
           {shown.map((x, i) => <Bubble key={i} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "approval" && (
-            <div className="c-warn">承認待ちはここからは答えられない。「ペインへ」で答える。{r?.needs ? `（${r.needs}）` : ""}</div>
+            <Approval agent={agent} canAnswer={!peer} onFocus={onFocus} onDone={(m) => onSent2(m)} onError={onError} />
           )}
           {choices.length > 0 && (
             <div className="choices">
@@ -521,6 +520,49 @@ function Panel({ agent, peer, lineage, onFocus, canFocus, onSent, onError, needs
         <div className="hint">⌘ Enter で送信・ccn で届ける</div>
       </div>
     </aside>
+  );
+}
+
+/**
+ * 承認待ちに画面から答える。中身（道具と対象）は状態 hook が PreToolUse で控えたもの。
+ * 押すと Rust が、今も同じ中身で承認待ちかを確かめてから、Specter のその端末に 1（許可）か Esc（拒否）を送る。
+ */
+function Approval({ agent, canAnswer, onFocus, onDone, onError }: {
+  agent: Agent; canAnswer: boolean; onFocus: (a: Agent) => void; onDone: (m: string) => void; onError: (m: string) => void;
+}) {
+  const [busy, setBusy] = useState<"allow" | "deny" | null>(null);
+  const p = agent.report?.pending;
+  const answer = async (choice: "allow" | "deny") => {
+    setBusy(choice);
+    try {
+      const r = await invoke<string>("answer_permission", {
+        sessionId: agent.id, choice, expectId: p?.id ?? null, terminalId: agent.terminalId ?? null, pid: agent.pid ?? null,
+      });
+      onDone(`${agent.name}: ${choice === "allow" ? "許可した" : "拒否した"}。${r}`);
+    } catch (e) {
+      onError(`${agent.name} に答えられなかった: ${e}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <div className="approval">
+      <div className="ap-title">✋ {agent.name} が承認を待っている</div>
+      {p ? (
+        <>
+          <div className="ap-tool">{p.summary}</div>
+          {p.detail && <pre className="ap-detail">{p.detail}</pre>}
+        </>
+      ) : (
+        <div className="hint">中身が分からない（状態 hook が控える前に始まった承認）。ペインで確かめて答える。</div>
+      )}
+      <div className="ap-btns">
+        <button className="ap-allow" disabled={!canAnswer || !p || !!busy} onClick={() => answer("allow")}>{busy === "allow" ? "送っている…" : "許可する"}</button>
+        <button className="ap-deny" disabled={!canAnswer || !!busy} onClick={() => answer("deny")}>{busy === "deny" ? "送っている…" : "拒否する"}</button>
+        <button className="pane-btn" onClick={() => onFocus(agent)}>ペインへ ↗</button>
+      </div>
+      {!canAnswer && <div className="hint">別の機械のセッションには、ここからは答えられない。</div>}
+    </div>
   );
 }
 

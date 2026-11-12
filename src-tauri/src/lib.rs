@@ -338,6 +338,77 @@ fn send_message(session_id: String, text: String, peer: Option<String>) -> Resul
     }
 }
 
+// ---------- 承認 ----------
+
+/// 承認待ちに答える。choice は "allow" か "deny"。
+/// 送る前に、そのセッションが今も承認待ちで、承認を求めている道具が画面で見せたもの（expect_id）と同じかを確かめ、ずれていたら送らない。
+/// 端末のセッションには Specter の send key（許可は 1、拒否は Esc。2026-11-12 に試験台で確かめた）を送る。
+/// ノードが立てたセッション（claude -p）には ccn の POST /api/sessions/<id>/permissions/<requestId> で答える。
+#[tauri::command]
+fn answer_permission(
+    session_id: String,
+    choice: String,
+    expect_id: Option<String>,
+    terminal_id: Option<String>,
+    pid: Option<u64>,
+) -> Result<String, String> {
+    if choice != "allow" && choice != "deny" {
+        return Err("choice は allow か deny".into());
+    }
+    let base = ccn_base();
+    let detail = get_json(&format!("{base}/api/sessions/{session_id}"))?;
+    if detail["state"].as_str() != Some("waiting_permission") {
+        return Err("もう承認待ちではない（ほかで答えたか、終わった）".into());
+    }
+    if detail["kind"].as_str() == Some("node") {
+        let req = detail["pending"][0]["requestId"].as_str().ok_or("ccn に承認の要求が見当たらない")?;
+        let body = if choice == "allow" { json!({ "behavior": "allow" }) } else { json!({ "behavior": "deny", "message": "family-computing から拒否した" }) };
+        agent()
+            .post(&format!("{base}/api/sessions/{session_id}/permissions/{req}"))
+            .send_json(body)
+            .map_err(|e| format!("ccn に答えを届けられなかった: {e}"))?;
+    } else {
+        let state = read_json(&home().join(format!(".family-computing/state/{session_id}.json")));
+        let now_id = state.as_ref().and_then(|s| s["pending"]["id"].as_str().map(String::from));
+        // 許可は、画面で見せた中身と今の中身が一致したときだけ送る。拒否は安全側なので、中身が分からなくても送ってよい
+        if choice == "allow" && (expect_id.is_none() || now_id != expect_id) {
+            return Err(if now_id.is_none() {
+                "承認を求めている中身がまだ分からない。少し待つか、ペインで確かめて".into()
+            } else if expect_id.is_none() {
+                "画面で中身を見てから答えて（見た中身の id が渡されていない）".into()
+            } else {
+                "承認を求めている中身が変わった。もう一度見てから答えて".into()
+            });
+        }
+        if choice == "deny" && expect_id.is_some() && now_id.is_some() && now_id != expect_id {
+            return Err("承認を求めている中身が変わった。もう一度見てから答えて".into());
+        }
+        let tid = terminal_id.or_else(|| pid.and_then(terminal_by_pid)).ok_or("このセッションのペインが見つからない")?;
+        let key = if choice == "allow" { "digit1" } else { "escape" };
+        osa(&format!(
+            "tell application id \"{SPECTER_BUNDLE_ID}\" to send key \"{key}\" to (first terminal whose id is {})",
+            as_str(&tid)
+        ))
+        .map_err(|e| format!("Specter にキーを送れなかった: {e}"))?;
+    }
+    // 送ったあと、承認待ちから抜けたかを最大4秒見る
+    for _ in 0..8 {
+        std::thread::sleep(Duration::from_millis(500));
+        if let Ok(d) = get_json(&format!("{base}/api/sessions/{session_id}")) {
+            if d["state"].as_str() != Some("waiting_permission") {
+                return Ok(format!("答えた（いまの状態: {}）", d["state"].as_str().unwrap_or("?")));
+            }
+            // 同じセッションが次の承認を求めている場合は、道具の id が変わる
+            let st = read_json(&home().join(format!(".family-computing/state/{session_id}.json")));
+            let id_now = st.as_ref().and_then(|s| s["pending"]["id"].as_str().map(String::from));
+            if expect_id.is_some() && id_now != expect_id {
+                return Ok("答えた（次の承認を待っている）".into());
+            }
+        }
+    }
+    Err("キーは送ったが、4秒たっても承認待ちのまま。ペインで確かめて".into())
+}
+
 // ---------- Specter ----------
 
 fn osa(script: &str) -> Result<String, String> {
@@ -393,6 +464,7 @@ pub fn run() {
     //   family-computing --snapshot             一覧
     //   family-computing --conversation <id>    会話
     //   family-computing --focus <terminalId>   ペインへ移る
+    //   family-computing --answer <sessionId> <allow|deny> [expectId]
     let args: Vec<String> = std::env::args().collect();
     let arg_after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     if args.iter().any(|a| a == "--snapshot") {
@@ -403,13 +475,22 @@ pub fn run() {
         println!("{}", serde_json::to_string_pretty(&conversation(id, None)).unwrap_or_default());
         return;
     }
+    // family-computing --answer <sessionId> <allow|deny> [expectId]   承認待ちに答える（画面のボタンと同じ処理）
+    if let Some(i) = args.iter().position(|a| a == "--answer") {
+        let sid = args.get(i + 1).cloned().unwrap_or_default();
+        let choice = args.get(i + 2).cloned().unwrap_or_default();
+        let expect = args.get(i + 3).cloned();
+        let tid = read_json(&home().join(".specter/agents.json")).and_then(|v| v["agents"][&sid]["terminalId"].as_str().map(String::from));
+        println!("{:?}", answer_permission(sid, choice, expect, tid, None));
+        return;
+    }
     if let Some(t) = arg_after("--focus") {
         println!("{:?}", focus_pane(Some(t), None));
         return;
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![snapshot, peers, conversation, send_message, focus_pane, set_house_name])
+        .invoke_handler(tauri::generate_handler![snapshot, peers, conversation, send_message, focus_pane, set_house_name, answer_permission])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
