@@ -83,7 +83,7 @@ Bun.serve({
     }
     if (!s) return json({ error: "unknown session" }, 404);
     if (!p[3] && req.method === "GET") return json({ ...summary(s), pending: [] });
-    if (!p[3] && req.method === "DELETE") { s.proc.kill(); return new Response(null, { status: 204, headers: CORS }); }
+    if (!p[3] && req.method === "DELETE") { s.proc.kill(9); return new Response(null, { status: 204, headers: CORS }); }
     if (p[3] === "teleport" && req.method === "GET") return json({ id: s.id, kind: "pty", state: "idle", live: true, title: s.name, from: { node: "mock", cwd: s.cwd, lobby: false }, git: null });
     if (p[3] === "teleport" && req.method === "POST") { await Bun.sleep(1500); return json({ id: crypto.randomUUID(), cwd: s.cwd, cloned: false, node: "vm", sourceNode: "mock", sourceId: s.id, fork: false }); }
     if (p[3] === "terminal" && !p[4] && req.method === "GET") {
