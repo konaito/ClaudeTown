@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { call as invoke, setFullscreen } from "./bridge";
 import { TerminalView, lastTermSize } from "./term/TerminalView";
 import { perfMark, perfSetId, perfStart } from "./term/perf";
@@ -15,6 +15,8 @@ import {
   MOOD_LABEL, NEEDS_YOU, buildTree, choicesOf, houseNameOf, moodOf, nowOf, sinceText, taskOf,
 } from "./model";
 import { Markdown } from "./Markdown";
+import { chatPerf } from "./chatPerf";
+import { mergeConv, type ConvDelta } from "./conv";
 import { layoutFamily, type LNode } from "./layout/layout";
 import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
@@ -880,7 +882,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
   useEffect(() => { if (termReq && hasTerm) setTab("term"); }, [termReq]);
   useEffect(() => { if (chatReq) setTab("talk"); }, [chatReq]);
   const [items, setItems] = useState<ConvItem[]>([]);
-  const [pending, setPending] = useState<ConvItem[]>([]);
+  // 送ったばかりの文。after は送り始めたときに持っていた最後の番号で、これより後に届いた発言とだけ比べる
+  const [pending, setPending] = useState<(ConvItem & { after: number })[]>([]);
   const [convErr, setConvErr] = useState<string | null>(null);
   // 下書きは宛先ごとに持つ。宛先を切り替えたとき、打ちかけの文が次の宛先に送られないようにする
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -898,13 +901,16 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
     setItems([]); setPending([]); setConvErr(null); stick.current = true;
     if (!id) return;
     let alive = true;
+    // 画面が持っている数。Rust は、これより後の発言だけを返す（#10）。増えていなければ items を変えず、描き直さない
+    let since: number | null = null;
     const load = async () => {
       try {
-        const r = await invoke<ConvItem[]>("conversation", { sessionId: id, peer: peer || null });
+        const d = await invoke<ConvDelta>("conversation", { sessionId: id, peer: peer || null, since });
         if (!alive) return;
-        setItems(r);
+        since = Math.max(since ?? 0, d.total);
+        if (d.reset) since = d.total;
         setConvErr(null);
-        setPending((p) => p.filter((x) => !r.some((y) => y.role === "user" && y.text.trim() === x.text.trim())));
+        if (d.reset || d.items.length) setItems((prev) => mergeConv(prev, d));
       } catch (e) {
         if (alive) setConvErr(String(e));
       }
@@ -913,6 +919,23 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
     const t = setInterval(load, CONV_POLL_MS);
     return () => { alive = false; clearInterval(t); };
   }, [id, peer]);
+
+  // 送ったばかりの文は、送り始めたあとに会話に出たら仮の項目を消す（前の同じ文、「はい」や選択肢では消さない）
+  useEffect(() => {
+    setPending((p) => {
+      if (!p.length) return p;
+      const q = p.filter((x) => !items.some((y) => (y.n ?? -1) > x.after && y.role === "user" && y.text.trim() === x.text.trim()));
+      return q.length === p.length ? p : q;
+    });
+  }, [items, pending.length]);
+
+  // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
+  const shown = useMemo(() => collapseTools([...items, ...pending]), [items, pending]);
+  const lastChoices = useMemo(() => {
+    const lastAssistant = [...items].reverse().find((x) => x.role === "assistant");
+    const lastIsAssistant = items.filter((x) => x.role !== "tool").slice(-1)[0]?.role === "assistant";
+    return lastAssistant && lastIsAssistant ? choicesOf(lastAssistant.text) : [];
+  }, [items]);
 
   useLayoutEffect(() => {
     const el = scroller.current;
@@ -944,9 +967,10 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
   const send = async (body: string) => {
     if (!body.trim() || busy) return;
     setBusy(true);
+    const after = items[items.length - 1]?.n ?? -1;
     try {
       await invoke("send_message", { sessionId: agent.id, text: body, peer: peer || null });
-      setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString() }]);
+      setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
       setText("");
       stick.current = true;
       onSent(agent);
@@ -957,10 +981,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
     }
   };
 
-  const shown = collapseTools([...items, ...pending]);
-  const lastAssistant = [...items].reverse().find((x) => x.role === "assistant");
-  const lastIsAssistant = items.filter((x) => x.role !== "tool").slice(-1)[0]?.role === "assistant";
-  const choices = lastAssistant && lastIsAssistant && mood !== "working" ? choicesOf(lastAssistant.text) : [];
+  const choices = mood !== "working" ? lastChoices : [];
 
   return (
     <aside className={`panel pm-${mood}`}>
@@ -994,7 +1015,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
           {convErr && <div className="banner bad small">{convErr}</div>}
           {shown.length === 0 && !convErr && <p className="hint center">まだチャットが無い</p>}
-          {shown.map((x, i) => <Bubble key={i} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
+          {shown.map((x, i) => <Bubble key={x.n ?? `p${x.at ?? i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "approval" && (
             <Approval agent={agent} peer={peer} onDone={(m) => onSent2(m)} onError={onError} />
           )}
@@ -1205,26 +1226,42 @@ function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent
   );
 }
 
-/** 道具の行が続いたら1行にまとめる */
+/** 道具の行が続いたら1行にまとめる。まとめた行の n は最初の行の n にする（後ろに道具が増えても key が変わらない） */
 function collapseTools(items: ConvItem[]): (ConvItem & { more?: number })[] {
   const out: (ConvItem & { more?: number })[] = [];
   for (const x of items) {
     const last = out[out.length - 1];
     if (x.role === "tool" && last?.role === "tool") {
-      out[out.length - 1] = { ...x, more: (last.more ?? 0) + 1 };
+      out[out.length - 1] = { ...x, n: last.n, more: (last.more ?? 0) + 1 };
     } else out.push(x);
   }
   return out;
 }
 
+/** 時刻の書式。toLocaleTimeString は呼ぶたびに ICU の書式を作り直すので、1つを使い回す（#10） */
+const HM = new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" });
 /** at は node のセッションなら ISO の文字列、pty のセッションなら ms の数 */
 function timeOf(at?: string | number | null): string {
+  chatPerf.time++;
   if (!at) return "";
   const d = new Date(at);
-  return isNaN(+d) ? "" : d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+  return isNaN(+d) ? "" : HM.format(d);
 }
 
-function Bubble({ item, agent, lineageDepth }: { item: ConvItem & { more?: number }; agent: Agent; lineageDepth: number }) {
+type BubbleProps = { item: ConvItem & { more?: number }; agent: Agent; lineageDepth: number };
+/**
+ * 吹き出しは、中身か見た目に使う値が変わったときだけ描き直す（#10）。
+ * agent は一覧を取るたびに別の物になるので、使う値（id、名前、絵）だけを比べる。
+ * まとめた道具の行は毎回作り直すので、n と件数と文で比べる
+ */
+const Bubble = memo(BubbleView, (a: BubbleProps, b: BubbleProps) =>
+  (a.item === b.item || (a.item.n != null && a.item.n === b.item.n && a.item.more === b.item.more && a.item.text === b.item.text && a.item.pending === b.item.pending))
+  && a.lineageDepth === b.lineageDepth
+  && a.agent.id === b.agent.id && a.agent.name === b.agent.name
+  && a.agent.avatar?.char === b.agent.avatar?.char && a.agent.avatar?.hue === b.agent.avatar?.hue);
+
+function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
+  chatPerf.bubble++;
   if (item.role === "tool" && item.sent) return <SentLetter item={item} agent={agent} lineageDepth={lineageDepth} />;
   if (item.role === "tool") {
     return <div className="tool-line">🔧 {item.text}{item.more ? ` ほか${item.more}件` : ""}</div>;
@@ -1266,15 +1303,7 @@ function LetterBubble({ item }: { item: ConvItem }) {
   const raw = item.letter?.fromRaw ?? null;
   const who = useLetterPeer(raw, item.letter?.fromName);
   const name = who?.name ?? item.letter?.fromName ?? raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? "別のセッション";
-  return (
-    <div className="msg kid letter">
-      <div className="mini-av"><Avatar pick={who?.avatar} seed={who?.id ?? name} mood="idle" role={who?.parent ? "child" : "parent"} size={32} /></div>
-      <div>
-        <div className="meta"><b>{name}</b>{timeOf(item.at)}</div>
-        <div className="b"><Markdown text={item.text} /></div>
-      </div>
-    </div>
-  );
+  return <LetterView pick={who?.avatar} seed={who?.id ?? name} role={who?.parent ? "child" : "parent"} name={name} at={item.at} text={item.text} />;
 }
 
 /** 送ったお手紙。このセッション自身の発言として出し、名前の行に宛先（→ 名前）を添える。吹き出しは肌色 */
@@ -1282,16 +1311,27 @@ function SentLetter({ item, agent, lineageDepth }: { item: ConvItem; agent: Agen
   const s = item.sent!;
   const who = useLetterPeer(s.to ?? null, s.to ?? null);
   const to = s.create ? "新しい子" : who?.name ?? (s.to ? String(s.to).replace(/^uds:.*\/(\d+)\.sock$/, "pid $1") : "相手");
+  return <LetterView pick={agent.avatar} seed={agent.id} role={roleOf(lineageDepth)} name={agent.name} to={`→ ${to}${s.peer ? `（${s.peer}）` : ""}`} at={item.at} text={s.text || s.summary || ""} />;
+}
+
+type LetterViewProps = { pick?: Agent["avatar"]; seed: string; role: Role; name: string; to?: string; at?: string | number | null; text: string };
+/**
+ * お手紙の吹き出しの見た目。お手紙の相手は町の一覧（TownCtx）から引くので、一覧を取るたびに上の2つは描き直される。
+ * 見た目に使う値が変わらなければ、ここで止める（#10）
+ */
+const LetterView = memo(function LetterView({ pick, seed, role, name, to, at, text }: LetterViewProps) {
+  chatPerf.bubble++;
   return (
     <div className="msg kid letter">
-      <div className="mini-av"><Avatar pick={agent.avatar} seed={agent.id} mood="idle" role={roleOf(lineageDepth)} size={32} /></div>
+      <div className="mini-av"><Avatar pick={pick} seed={seed} mood="idle" role={role} size={32} /></div>
       <div>
-        <div className="meta"><b>{agent.name}</b><span className="to">→ {to}{s.peer ? `（${s.peer}）` : ""}</span>{timeOf(item.at)}</div>
-        <div className="b"><Markdown text={s.text || s.summary || ""} /></div>
+        <div className="meta"><b>{name}</b>{to && <span className="to">{to}</span>}{timeOf(at)}</div>
+        <div className="b"><Markdown text={text} /></div>
       </div>
     </div>
   );
-}
+}, (a, b) => a.seed === b.seed && a.role === b.role && a.name === b.name && a.to === b.to && a.at === b.at && a.text === b.text
+  && a.pick?.char === b.pick?.char && a.pick?.hue === b.pick?.hue);
 
 function fromLabel(from: string): string {
   // "from agent:<名前> via <ノード>" / "from local via <ノード>" / "from <メール> via <ノード>"
