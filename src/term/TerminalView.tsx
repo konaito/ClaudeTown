@@ -4,8 +4,10 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { call, openTerminal } from "../bridge";
+import { TERM_URL_RE, openExternal } from "../links";
 import { perfCounters, perfMark, perfEnd, perfTerm, perfWaitingPrompt } from "./perf";
 import { benchParams } from "./bench";
 import { SIZE_KEY } from "./size";
@@ -47,10 +49,14 @@ function sharedTerm(): Shared {
     cursorBlink: true,
     // claude は入力欄から上を描き直し続けるので、遡る行はそれほど要らない。5000 から減らしてメモリと再描画の量を抑える（#8）
     scrollback: 1000, allowProposedApi: false,
+    // OSC 8 のリンク（claude が出す）を押したとき。既定は window.open なので、既定のブラウザで開く。http と https 以外は openExternal が開かない
+    linkHandler: { activate: (_e, uri) => { openExternal(uri); }, allowNonHttpProtocols: false },
     theme: { background: "#ffffff", foreground: "#2f2d36", cursor: "#2f2d36", selectionBackground: "#cfe0ff", black: "#2f2d36", brightBlack: "#8a8794" },
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
+  // 文字のままの URL を押したとき。既定のハンドラは window.open なので、既定のブラウザで開く
+  term.loadAddon(new WebLinksAddon((_e, uri) => { openExternal(uri); }, { urlRegex: TERM_URL_RE }));
   const el = document.createElement("div");
   el.className = "term-host";
   el.style.width = "100%"; el.style.height = "100%";

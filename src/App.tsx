@@ -20,7 +20,7 @@ import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
   MOOD_LABEL, NEEDS_YOU, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, targetLabel, taskOf,
 } from "./model";
-import { Markdown } from "./Markdown";
+import { Markdown, linkify } from "./Markdown";
 import { chatPerf } from "./chatPerf";
 import { elapsedText, liveSummary, mergeConv, msOf, sameLive, type ConvDelta, type Live } from "./conv";
 import { layoutFamily, type LNode } from "./layout/layout";
@@ -1351,7 +1351,7 @@ function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
   chatPerf.bubble++;
   if (item.role === "tool" && item.sent) return <SentLetter item={item} agent={agent} lineageDepth={lineageDepth} />;
   if (item.role === "tool") {
-    return <div className="tool-line">🔧 {item.text}{item.more ? ` ほか${item.more}件` : ""}</div>;
+    return <div className="tool-line">🔧 {linkify(item.text)}{item.more ? ` ほか${item.more}件` : ""}</div>;
   }
   if (item.role === "user" && item.letter) return <LetterBubble item={item} />;
   if (item.role === "user") {
