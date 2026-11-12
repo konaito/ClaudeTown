@@ -75,6 +75,11 @@ export default function App() {
   useEffect(() => {
     invoke<Peer[]>("peers").then((p) => setPeers(Array.isArray(p) ? p : [])).catch(() => {});
   }, []);
+  // オフラインで起動したときの peers は保存した一覧（別の機械の status が cached）。町の一覧が読めるようになったら取り直す
+  const snapOk = !!snap?.ccn_ok;
+  useEffect(() => {
+    if (snapOk && peers.some((p) => p.status === "cached")) invoke<Peer[]>("peers").then((p) => setPeers(Array.isArray(p) ? p : [])).catch(() => {});
+  }, [snapOk]);
 
   const reload = useRef<() => void>(() => {});
   // 一覧の取得が続けて失敗している数と、失敗し始めた時刻。1回の失敗では町を描き直さない
@@ -946,6 +951,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
 
   // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
   const shown = useMemo(() => collapseTools([...items, ...pending]), [items, pending]);
+  // 保存した履歴の印が出ているか。出ている間は中身の上に余白を足す（下の has-note）
+  const hasNote = shown.length > 0 && !!(convErr || cachedAt);
   const lastChoices = useMemo(() => {
     const lastAssistant = [...items].reverse().find((x) => x.role === "assistant");
     const lastIsAssistant = items.filter((x) => x.role !== "tool").slice(-1)[0]?.role === "assistant";
@@ -959,7 +966,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
     // 吹き出しの高さが描画のあとに決まる分（Markdown など）を拾う
     const raf = requestAnimationFrame(() => { if (stick.current) el.scrollTop = el.scrollHeight; });
     return () => cancelAnimationFrame(raf);
-  }, [items, pending, id, tab, chatReq]);
+    // 印が出て余白が付くと中身が伸びるので、一番下にいたら送り直す（開いたまま切れたとき、items は変わらない）
+  }, [items, pending, id, tab, chatReq, hasNote]);
 
   if (!agent && booting) {
     return <aside className="panel empty-panel"><div className="ep"><p className="ep-title">新しい世帯を立てている…</p><p className="hint">打ったキーはためておき、ターミナルが開いたら流す</p></div></aside>;
@@ -1036,7 +1044,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
           <span className="offline-note wait" title="最新を読み込んでいる"><i /><span>{savedLabel(cachedAt)} 時点の履歴・更新中</span></span>
         ) : null}
         {/* 印が出ている間は、中身の上に印の高さぶんの余白を足す（上端まで送ったとき、いちばん古い行が印の下に入らない）。外枠とグラデーションの位置は変えない */}
-        <ScrollEdgeGradient className={`talk ${shown.length > 0 && (convErr || cachedAt) ? "has-note" : ""}`} wrapClassName="seg-fill" ref={scroller}
+        <ScrollEdgeGradient className={`talk ${hasNote ? "has-note" : ""}`} wrapClassName="seg-fill" ref={scroller}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
           {convErr && shown.length === 0 && <div className="banner bad small">{convErr}</div>}
           {shown.length === 0 && !convErr && <p className="hint center">まだチャットが無い</p>}

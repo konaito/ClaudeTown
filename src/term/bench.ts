@@ -105,7 +105,10 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       for (let i = 0; i < secs; i++) {
         await log({ t: i, at: new Date().toISOString().slice(11, 23), town: text(".fam-title"), conn: text(".conn"), banner: text(".banner.bad"),
           note: text(".offline-note"), msgs: document.querySelectorAll(".talk .msg, .talk .tool-line").length, empty: !!document.querySelector(".talk .hint.center"),
-          tabs: document.querySelectorAll(".panel .tabs button").length, segTop: top(".panel .seg-top"), scrollTop: top(".panel .seg-scroll"), noteTop: top(".offline-note") });
+          tabs: document.querySelectorAll(".panel .tabs button").length, segTop: top(".panel .seg-top"), scrollTop: top(".panel .seg-scroll"), noteTop: top(".offline-note"),
+          // 一番下からの距離（印の余白が付いても、一番下に留まっているか）と、町の選択肢の数（保存した peers が出るか）
+          bottomGap: (() => { const e = document.querySelector(".panel .seg-scroll"); return e ? Math.round(e.scrollHeight - e.scrollTop - e.clientHeight) : null; })(),
+          towns: document.querySelectorAll("select.node option").length });
         await sleep(1000);
       }
       return;
