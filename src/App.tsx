@@ -427,7 +427,10 @@ function Panel({ agent, peer, lineage, onFocus, canFocus, onSent, onSent2, onErr
   const [items, setItems] = useState<ConvItem[]>([]);
   const [pending, setPending] = useState<ConvItem[]>([]);
   const [convErr, setConvErr] = useState<string | null>(null);
-  const [text, setText] = useState("");
+  // 下書きは宛先ごとに持つ。宛先を切り替えたとき、打ちかけの文が次の宛先に送られないようにする
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const text = agent ? drafts[agent.id] ?? "" : "";
+  const setText = (v: string) => { if (agent) setDrafts((d) => ({ ...d, [agent.id]: v })); };
   const [busy, setBusy] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);

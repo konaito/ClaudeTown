@@ -18,6 +18,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 const SPECTER_BUNDLE_ID: &str = "jp.fybe.specter";
+/// 非常停止。~/.family-computing/send-disabled があると、アプリからの送信（注文と承認のキー）を全部断る。
+/// `touch ~/.family-computing/send-disabled` で止め、消せば戻る（アプリの再起動は要らない）
+fn send_disabled() -> bool {
+    home().join(".family-computing/send-disabled").exists()
+}
 /// ccn では waiting_permission に見えるが、道具の承認ではない待ち（選択肢を選ぶ画面が出る）
 const NOT_TOOL_APPROVAL: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
 const KEEP_MESSAGES: usize = 80;
@@ -326,6 +331,9 @@ fn conversation(session_id: String, peer: Option<String>) -> Result<Vec<Value>, 
 
 #[tauri::command]
 fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
+    if send_disabled() {
+        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
+    }
     if text.trim().is_empty() {
         return Err("文が空".into());
     }
@@ -354,6 +362,9 @@ fn answer_permission(
     terminal_id: Option<String>,
     pid: Option<u64>,
 ) -> Result<String, String> {
+    if send_disabled() {
+        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
+    }
     if choice != "allow" && choice != "deny" {
         return Err("choice は allow か deny".into());
     }
@@ -495,6 +506,11 @@ pub fn run() {
         let expect = args.get(i + 3).cloned();
         let tid = read_json(&home().join(".specter/agents.json")).and_then(|v| v["agents"][&sid]["terminalId"].as_str().map(String::from));
         println!("{:?}", answer_permission(sid, choice, expect, tid, None));
+        return;
+    }
+    // family-computing --send <sessionId> <文>   注文を送る（画面の送信と同じ処理）
+    if let Some(i) = args.iter().position(|a| a == "--send") {
+        println!("{:?}", send_message(args.get(i + 1).cloned().unwrap_or_default(), args.get(i + 2).cloned().unwrap_or_default(), None));
         return;
     }
     if let Some(t) = arg_after("--focus") {
