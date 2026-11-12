@@ -194,10 +194,10 @@ export default function App() {
     ...[...others].flatMap(([town, v]) => ("agents" in v ? [{ town, agents: v.agents }] : [])),
   ]), [agents, others, curTown]);
   const unreachable = useMemo(() => [...others].filter(([, v]) => "error" in v).map(([t]) => t), [others]);
-  const openMail = useCallback((m: Mail, term = false) => {
+  const openMail = useCallback((m: Mail, chat = false) => {
     if (m.town !== curTown) setPeer(m.town === selfName ? "" : m.town);
     setSelected(m.agent.id);
-    if (term) setTermReq((n) => n + 1);
+    if (chat) setChatReq((n) => n + 1);
   }, [curTown, selfName]);
 
   const local = !peer;
@@ -254,7 +254,7 @@ export default function App() {
   useEffect(() => {
     if (!booting || booting === "pending") return;
     const a = agents.find((x) => x.id === booting);
-    if (a && !a.capabilities?.terminal) release("このノードにはターミナルの口がまだ無い。会話の欄から話しかけて");
+    if (a && !a.capabilities?.terminal) release("このノードにはターミナルの口がまだ無い。チャットの欄から話しかけて");
   }, [agents, booting, release]);
   // 別のノードや別の子を選んだら、起動待ちをやめる
   useEffect(() => { if (booting) release(); }, [peer]);
@@ -269,6 +269,8 @@ export default function App() {
 
   // 右クリックや「端末へ」で、その子を選んで右パネルの端末を開く
   const [termReq, setTermReq] = useState(0);
+  // お便りの「チャットへ」で、その子を選んで右パネルのチャットを開く
+  const [chatReq, setChatReq] = useState(0);
   const focus = useCallback((a: Agent) => { perfStart("open", a.id); setSelected(a.id); setTermReq((n) => n + 1); }, []);
   const sel = selected ? tree.byId.get(selected) ?? (fresh?.id === selected ? fresh : null) : null;
   // 一覧に載ったら仮の姿を捨てる
@@ -354,7 +356,7 @@ export default function App() {
               <button onClick={() => setZoom((z) => Math.min(1.6, +(((z === "fit" ? 1 : z) + 0.1).toFixed(2))))}>＋</button>
               <button className="fs" title="全画面" onClick={() => setFullscreen()}>⛶</button>
             </div>
-            <span className="hint">クリックで会話・右クリックでターミナル</span>
+            <span className="hint">クリックでチャット・右クリックでターミナル</span>
             <Credits />
           </div>
         </div>
@@ -363,7 +365,7 @@ export default function App() {
         {/* 町と右パネルの境目。ドラッグで右パネルを 380px からウィンドウ幅の半分まで広げられる。ダブルクリックで既定の幅に戻る */}
         <Separator className="split-handle" />
         <SplitPanel id="side" defaultSize={SIDE_DEFAULT} minSize={SIDE_MIN} maxSize="50%">
-        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} descendants={sel ? descOf(tree.childrenOf, sel.id) : []} termReq={termReq} peers={peers} takeEarly={takeEarly} booting={booting}
+        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} descendants={sel ? descOf(tree.childrenOf, sel.id) : []} termReq={termReq} chatReq={chatReq} peers={peers} takeEarly={takeEarly} booting={booting}
           onSent={(a) => toast(`${a.name} に届けた`)} onSent2={(m) => toast(m)} onError={(m) => toast(m, true)}
           needs={needs} onSelect={(a) => setSelected(a.id)} />
         </SplitPanel>
@@ -508,7 +510,7 @@ function KillConfirm({ agent, descendants, onCancel, onConfirm }: { agent: Agent
 
 function NextRow({ mails, curTown, unreachable, working, total, onOpen }: {
   mails: Mail[]; curTown: string; unreachable: string[]; working: number; total: number;
-  onOpen: (m: Mail, term?: boolean) => void;
+  onOpen: (m: Mail, chat?: boolean) => void;
 }) {
   // 先頭が大きい1枚、続く2件が小さいチップ、残りは「ほか N 件」。並びは src/mail.ts（親が先、その中は待ちが古い順）
   const first = mails[0];
@@ -531,7 +533,7 @@ function NextRow({ mails, curTown, unreachable, working, total, onOpen }: {
           <span className="next-icon">{icon(first.kind)}</span>
           {stamp(first)}
           <button className="next-text" onClick={() => onOpen(first)}>{mainText(first)}</button>
-          <button className="pane-btn" onClick={() => onOpen(first, true)}>ターミナルへ</button>
+          <button className="pane-btn" onClick={() => onOpen(first, true)}>チャットへ</button>
         </div>
       ) : (
         <div className="next-main nm-calm">
@@ -746,7 +748,7 @@ function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect:
         style={{ zoom: box.scale, width: box.w / box.scale, height: box.h / box.scale }}
         onClick={() => onSelect(agent)}
         onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
-        title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで広げて会話・右クリックでターミナル`}
+        title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで広げてチャット・右クリックでターミナル`}
       >
         <Avatar pick={agent.avatar} seed={agent.name} mood={mood} role={roleOf(depth)} size={32} dead={dying.has(agent.id)} />
         <span className="mini-name"><i className={`dot st-${mood}`} />{agent.name}</span>
@@ -826,7 +828,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
       style={{ width: LAYOUT.card.w, height: LAYOUT.card.h }}
       onClick={() => onSelect(agent)}
       onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
-      title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで会話・右クリックでターミナル`}
+      title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックでチャット・右クリックでターミナル`}
     >
       <div className="card-top">
         <span className="role">{ROLE_LABEL[Math.min(depth, 4)]}</span>
@@ -845,8 +847,8 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
 
 // ---------- 右のパネル ----------
 
-function Panel({ agent, peer, lineage, descendants, termReq, peers, takeEarly, booting, onSent, onSent2, onError, needs, onSelect }: {
-  agent: Agent | null; peer: string; lineage: Agent[]; descendants: Agent[]; termReq: number; peers: Peer[]; takeEarly: (id: string) => string; booting: string | null;
+function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, takeEarly, booting, onSent, onSent2, onError, needs, onSelect }: {
+  agent: Agent | null; peer: string; lineage: Agent[]; descendants: Agent[]; termReq: number; chatReq: number; peers: Peer[]; takeEarly: (id: string) => string; booting: string | null;
   onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
 }) {
   const hasTerm = !!agent?.capabilities?.terminal;
@@ -855,6 +857,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, peers, takeEarly, b
   // 端末を持つセッションは端末を先に出す。右クリックや「端末へ」でも端末を開く
   useEffect(() => { setTab(hasTerm ? "term" : "talk"); setSheet(null); }, [agent?.id, hasTerm]);
   useEffect(() => { if (termReq && hasTerm) setTab("term"); }, [termReq]);
+  useEffect(() => { if (chatReq) setTab("talk"); }, [chatReq]);
   const [items, setItems] = useState<ConvItem[]>([]);
   const [pending, setPending] = useState<ConvItem[]>([]);
   const [convErr, setConvErr] = useState<string | null>(null);
@@ -867,6 +870,9 @@ function Panel({ agent, peer, lineage, descendants, termReq, peers, takeEarly, b
   const stick = useRef(true);
   const id = agent?.id;
 
+  // チャットを開いたとき（セッションを選んだ、タブを切り替えた）は、必ず一番下から始める。
+  // 以前は stick を読み込みの effect でしか戻さず、タブの切り替えでは前の値が残り、容れ物も作り直されるのに items が変わらないので下へ送られなかった
+  useLayoutEffect(() => { stick.current = true; }, [id, tab, chatReq]);
   useEffect(() => {
     setItems([]); setPending([]); setConvErr(null); stick.current = true;
     if (!id) return;
@@ -887,10 +893,14 @@ function Panel({ agent, peer, lineage, descendants, termReq, peers, takeEarly, b
     return () => { alive = false; clearInterval(t); };
   }, [id, peer]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = scroller.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [items, pending]);
+    if (!el || !stick.current) return;
+    el.scrollTop = el.scrollHeight;
+    // 吹き出しの高さが描画のあとに決まる分（Markdown など）を拾う
+    const raf = requestAnimationFrame(() => { if (stick.current) el.scrollTop = el.scrollHeight; });
+    return () => cancelAnimationFrame(raf);
+  }, [items, pending, id, tab, chatReq]);
 
   if (!agent && booting) {
     return <aside className="panel empty-panel"><div className="ep"><p className="ep-title">新しい世帯を立てている…</p><p className="hint">打ったキーはためておき、ターミナルが開いたら流す</p></div></aside>;
@@ -949,7 +959,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, peers, takeEarly, b
       {sheet === "teleport" && <Teleport agent={agent} descendants={descendants} peers={peers} onDone={(m) => { setSheet(null); onSent2(m); }} onError={onError} />}
       <div className="tabs">
         {hasTerm && <button className={tab === "term" ? "on" : ""} onClick={() => setTab("term")}>ターミナル</button>}
-        <button className={tab === "talk" ? "on" : ""} onClick={() => setTab("talk")}>会話</button>
+        <button className={tab === "talk" ? "on" : ""} onClick={() => setTab("talk")}>チャット</button>
         <button className={tab === "state" ? "on" : ""} onClick={() => setTab("state")}>状態</button>
       </div>
       {mood === "approval" && (tab === "term" || tab === "state") && (
@@ -962,7 +972,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, peers, takeEarly, b
         <ScrollEdgeGradient className="talk" wrapClassName="seg-fill" ref={scroller}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
           {convErr && <div className="banner bad small">{convErr}</div>}
-          {shown.length === 0 && !convErr && <p className="hint center">まだ会話が無い</p>}
+          {shown.length === 0 && !convErr && <p className="hint center">まだチャットが無い</p>}
           {shown.map((x, i) => <Bubble key={i} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "approval" && (
             <Approval agent={agent} peer={peer} onDone={(m) => onSent2(m)} onError={onError} />
