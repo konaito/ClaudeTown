@@ -58,6 +58,18 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       await re;
       await sleep(800);
       await log({ reopen: true, cols: perfTerm.current?.cols, rules: rules() });
+      // ほかの画面が大きさを変えた（ここでは自分の書き手で送って真似る）。こちらは合わせるだけで、送り返さない
+      const t = perfTerm.current!;
+      const mine0 = { cols: t.cols, rows: t.rows };
+      const r0 = perfCounters.resizes;
+      await call("term_resize", { sessionId: r.id, cols: 50, rows: 20, peer: null });
+      await sleep(3000);
+      await log({ foreign: true, xterm: `${t.cols}x${t.rows}`, sentBack: perfCounters.resizes - r0, rules: rules() });
+      // 本人がここで打つと、こちらの大きさに戻す
+      t.input(" ");
+      await sleep(3000);
+      await log({ typed: true, xterm: `${t.cols}x${t.rows}`, mine: `${mine0.cols}x${mine0.rows}`, sent: perfCounters.resizes - r0, rules: rules() });
+      t.input("\x7f");
       return;
     }
     // watch: 40秒、1秒ごとに町の人数と接続の表示を記録する（一覧の取得が失敗しても町が消えないかを見る）
@@ -158,19 +170,29 @@ async function dragAndWatch(dx: number) {
   const box = sep.getBoundingClientRect();
   const x0 = box.left + box.width / 2, y = box.top + box.height / 2;
   const ev = (type: string, x: number) => new PointerEvent(type, { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0, buttons: type === "pointerup" ? 0 : 1 });
+  // 一番長い横線（入力欄の上下の線）が今の幅になり、折り返しの続きの横線が無い（見出し付きの枠の線は短いので見ない）
+  const clean = () => { const now = rules(); return now.wrapped === 0 && Math.max(0, ...now.widths) === t.cols; };
+  // 大きさを送るたびに、送ってから画面が今の幅で揃うまでを測る。窓が隠れていると setTimeout が間引かれるので、
+  // xterm が出力を解き終えたとき（onWriteParsed）に判定する
+  const lat: number[] = [];
+  let sentSeen = perfCounters.lastResizeAt;
+  let waiting = false;
+  const d = t.onWriteParsed(() => {
+    if (perfCounters.lastResizeAt !== sentSeen) { sentSeen = perfCounters.lastResizeAt; waiting = true; }
+    if (waiting && clean()) { lat.push(Math.round(performance.now() - sentSeen)); waiting = false; }
+  });
   sep.dispatchEvent(ev("pointerdown", x0));
   for (let i = 1; i <= 10; i++) {
     document.dispatchEvent(ev("pointermove", x0 + (dx * i) / 10));
     await sleep(50);
   }
   document.dispatchEvent(ev("pointerup", x0 + dx));
-  const t0 = performance.now();
-  let ok: number | null = null;
-  while (performance.now() - t0 < 3000) {
-    const now = rules();
-    // 一番長い横線（入力欄の上下の線）が新しい幅になり、折り返しの続きの横線が無い（見出し付きの枠の線は短いので見ない）
-    if (t.cols !== before.cols && now.wrapped === 0 && Math.max(0, ...now.widths) === t.cols) { ok = Math.round(performance.now() - t0); break; }
-    await sleep(25);
-  }
-  return { colsBefore: before.cols, colsAfter: t.cols, rulesBefore: before.rules, rulesAfter: rules(), redrawMs: ok, resizeCalls: perfCounters.resizes - r0 };
+  await sleep(4000);
+  d.dispose();
+  return {
+    colsBefore: before.cols, colsAfter: t.cols, rulesBefore: before.rules, rulesAfter: rules(), cleanAtEnd: clean(),
+    resizeCalls: perfCounters.resizes - r0,
+    // 大きさを送ってから、claude の描き直しが届いて画面が揃うまで（ms）。送った回ごと
+    redrawAfterSend: lat,
+  };
 }

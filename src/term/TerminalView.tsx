@@ -69,6 +69,11 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
       if (t) setTimeout(() => call("term_input", { sessionId, text: t, peer }).catch((e) => onError(`ターミナルに書けなかった: ${e}`)), 300);
     };
     let lastSize = "";
+    // PTY に最後に送った大きさ。届いた size がこれと違えば、ほかの画面（ccn.fybe.jp など）が大きさを変えた
+    let sentSize = "";
+    // ほかの画面の大きさに合わせている間は、replay のたびに自分の大きさを送り返さない（相手も送り返すと取り合いが続く）。
+    // 本人がここで打つか、右パネルの大きさが変わったら、こちらの大きさに戻す（後から操作した画面の大きさになる。#19）
+    let following = false;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const pushSize = () => {
       try { fit.fit(); } catch { return; }
@@ -80,11 +85,14 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         perfCounters.resizes++;
+        perfCounters.lastResizeAt = performance.now();
+        sentSize = `${term.cols}x${term.rows}`;
         call("term_resize", { sessionId, cols: term.cols, rows: term.rows, peer }).catch((e) => onError(`ターミナルの大きさを変えられなかった: ${e}`));
       }, 150);
     };
     const disposeInput = term.onData((text) => {
       if (replaying > 0) return;
+      if (following) { following = false; lastSize = ""; pushSize(); }
       call("term_input", { sessionId, text, peer }).catch((e) => onError(`ターミナルに書けなかった: ${e}`));
     });
     let close = () => {};
@@ -96,6 +104,7 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
           // 繋いだ直後か、ほかの画面が大きさを変えた。続けて replay が来たら、その前に画面を消す。
           // replay はノードの cols と rows で作った画面のスナップショットなので、まず xterm をその大きさにする（ccn PR #19）
           pendingReset = true;
+          if (sentSize && e.data?.cols && `${e.data.cols}x${e.data.rows}` !== sentSize) following = true;
           if (e.data?.cols && e.data?.rows && (e.data.cols !== term.cols || e.data.rows !== term.rows)) {
             try { term.resize(e.data.cols, e.data.rows); } catch { /* 大きさを変えられなくても書くのは続ける */ }
           }
@@ -103,8 +112,8 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
         case "replay":
           if (pendingReset) { term.reset(); pendingReset = false; }
           replaying++;
-          // 書き終えたら、右パネルの大きさに合わせ直して PTY にも伝える
-          term.write(e.data?.s ?? "", () => { replaying--; lastSize = ""; pushSize(); afterWrite(); });
+          // 書き終えたら、右パネルの大きさに合わせ直して PTY にも伝える。ほかの画面の大きさに合わせている間は送り返さない
+          term.write(e.data?.s ?? "", () => { replaying--; if (!following) { lastSize = ""; pushSize(); } afterWrite(); });
           if (e.data?.s) onFirstOutput();
           break;
         case "data":
@@ -128,7 +137,15 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
       perfMark("term_open", sessionId);
       if (closed) c(); else { close = c; pushSize(); term.focus(); }
     });
-    const ro = new ResizeObserver(() => pushSize());
+    let boxSize = "";
+    const ro = new ResizeObserver((es) => {
+      const r = es[es.length - 1]?.contentRect;
+      const k = r ? `${Math.round(r.width)}x${Math.round(r.height)}` : "";
+      if (following && k === boxSize) return;
+      boxSize = k;
+      if (following) { following = false; lastSize = ""; }
+      pushSize();
+    });
     ro.observe(box.current);
     return () => {
       closed = true;
