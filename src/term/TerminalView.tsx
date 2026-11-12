@@ -82,6 +82,8 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
           break;
         case "error":
           setStatus(e.data?.message ?? "端末に繋がらない");
+          // 端末が開かないなら、起動待ちでためた文字を捨てて横取りをやめる
+          takeEarly?.(sessionId);
           break;
       }
     }).then((c) => {

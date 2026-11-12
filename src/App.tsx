@@ -16,6 +16,8 @@ import { LAYOUT, boxOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
 
 const POLL_MS = 2000;
+/** 新しい世帯の端末が開くまで、打ったキーをためておく上限の時間 */
+const BOOT_TIMEOUT_MS = 12000;
 /**
  * 別の町（いま見ていない ccn のノード）のお便りを取りに行く間隔。町を1つずつ順に取り、前の回が終わるまで次の回を始めない。
  * 1回は町1つにつき手元のノード経由の GET /api/sessions 1本（中継先の ccn には 15 秒に1本）。peers が healthy でない町には取りに行かない。
@@ -182,12 +184,26 @@ export default function App() {
   // 新しい世帯を作った直後、端末が開くまでに打ったキーをためておく（端末が最初の出力を受けたら流す）
   const early = useRef<{ id: string | null; text: string }>({ id: null, text: "" });
   const [booting, setBooting] = useState<string | null>(null);
+  // 起動待ちをやめ、ためた文字を捨てる。why があれば、捨てた文字があるときだけ知らせる
+  // （2026-11-12、本番のノードに端末の口が無く最初の出力が来ないまま booting が残り、英字が全部食われた）
+  const release = useCallback((why?: string) => {
+    const had = early.current.text;
+    early.current = { id: null, text: "" };
+    setBooting(null);
+    if (why && had) toast(`${why}。打った文字（${had.length}字）は捨てた`, true);
+  }, [toast]);
   useEffect(() => {
     if (!booting) return;
+    // 端末が開かないまま残らないよう、時間切れで必ずやめる
+    const t = setTimeout(() => release(`端末が ${BOOT_TIMEOUT_MS / 1000} 秒たっても開かなかった`), BOOT_TIMEOUT_MS);
+    const editable = (el: Element | null) => !!el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement || (el as HTMLElement).isContentEditable);
     const k = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+      const el = document.activeElement;
       // 端末（xterm）にフォーカスが移った後は、xterm が自分で受ける
-      if ((document.activeElement as HTMLElement | null)?.closest?.(".term")) return;
+      if ((el as HTMLElement | null)?.closest?.(".term")) return;
+      // 入力欄に移ったら、横取りをやめる
+      if (editable(el)) { release(); return; }
       const map: Record<string, string> = { Enter: "\r", Backspace: "\x7f", Tab: "\t", Escape: "\x1b" };
       const t = e.key.length === 1 ? e.key : map[e.key];
       if (!t) return;
@@ -195,8 +211,8 @@ export default function App() {
       early.current.text += t;
     };
     window.addEventListener("keydown", k, true);
-    return () => window.removeEventListener("keydown", k, true);
-  }, [booting]);
+    return () => { clearTimeout(t); window.removeEventListener("keydown", k, true); };
+  }, [booting, release]);
   // 押した瞬間からキーをためる（作り終わるのを待つと、その間に打ったキーが落ちる）
   const startHousehold = useCallback(() => { early.current = { id: "pending", text: "" }; setBooting("pending"); }, []);
   const newHousehold = useCallback((r: any) => {
@@ -207,6 +223,15 @@ export default function App() {
     setTermReq((n) => n + 1);
     reload.current();
   }, []);
+  // 作った世帯に端末が無い（ノードに PTY の口がまだ無い）と分かったら、すぐやめる
+  useEffect(() => {
+    if (!booting || booting === "pending") return;
+    const a = agents.find((x) => x.id === booting);
+    if (a && !a.capabilities?.terminal) release("このノードには端末の口がまだ無い。会話の欄から話しかけて");
+  }, [agents, booting, release]);
+  // 別のノードや別の子を選んだら、起動待ちをやめる
+  useEffect(() => { if (booting) release(); }, [peer]);
+  useEffect(() => { if (booting && booting !== "pending" && selected !== booting) release(); }, [selected]);
   const takeEarly = useCallback((id: string) => {
     if (early.current.id !== id) return "";
     const t = early.current.text;

@@ -6,7 +6,9 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-const MOCK = !inTauri && typeof location !== "undefined" && location.search.includes("mock") ? "http://127.0.0.1:4399/api" : null;
+// ?mockport=<ポート> で、モック以外の口（本番のノードの前に置いた試験用の中継など）にも繋げる
+const MOCK = !inTauri && typeof location !== "undefined" && location.search.includes("mock")
+  ? `http://127.0.0.1:${new URLSearchParams(location.search).get("mockport") ?? "4399"}/api` : null;
 
 async function devJson<T>(name: string, fallback: T): Promise<T> {
   const r = await fetch(`/${name}`, { cache: "no-store" });
@@ -38,7 +40,7 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     case "peers": return [{ name: "mock", url: MOCK, status: "healthy", self: true }, { name: "vm", url: "", status: "healthy", self: false }] as T;
     case "create_session": {
       const headers: Record<string, string> = a.parent ? { "x-ccn-from": `agent:mock/${String(a.parent).slice(0, 8)}/town` } : {};
-      return post("/sessions", { terminal: true, cwd: a.cwd ?? "/tmp", prompt: a.prompt, name: a.name, cols: 120, rows: 40 }, headers) as T;
+      return post("/sessions", { terminal: true, cwd: a.cwd ?? new URLSearchParams(location.search).get("cwd") ?? "/tmp", prompt: a.prompt, name: a.name, cols: 120, rows: 40 }, headers) as T;
     }
     case "term_input": return post(`/sessions/${a.sessionId}/terminal/input`, { text: a.text }) as T;
     case "term_resize": return post(`/sessions/${a.sessionId}/terminal/resize`, { cols: a.cols, rows: a.rows }) as T;
