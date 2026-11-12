@@ -198,6 +198,30 @@ def write_queue(sid, q, data, phase, needs):
                 "phase": phase if q or phase != "needs_you" else "working", "needs": needs if q else None}, data)
 
 
+# 人が打った文ではない包み（裏の仕事の通知、システムの差し込み、ローカルコマンドの出力）。これで始まる入力は頼まれたことにしない
+NOT_HUMAN = re.compile(r"^\s*<(task-notification|system-reminder|local-command-[a-z-]+|bash-[a-z-]+)\b")
+
+
+def asked_of(prompt):
+    """UserPromptSubmit の文から（頼まれたことの1行目, 出どころ）を返す。出どころは human か session。頼まれたことにしない文は ("", None)"""
+    if NOT_HUMAN.match(prompt):
+        return "", None
+    # 別セッションからの文は <cross-session-message ...> で包まれていたり、1行目が from 行だったりするので、本文の1行目を取る
+    by = "session" if re.search(r"<cross-session-message[^>]*>|^from agent:\S+ via \S+", prompt.strip()) else "human"
+    body = re.sub(r"</?cross-session-message[^>]*>", "", prompt).strip()
+    body = re.sub(r"^from \S+ via \S+\s*\n", "", body)
+    if NOT_HUMAN.match(body):
+        return "", None
+    return clip(first_line(body)), by
+
+
+def cur_field(sid, key):
+    try:
+        return json.loads((STATE_DIR / f"{sid}.json").read_text()).get(key)
+    except Exception:
+        return None
+
+
 def emit_context(event, text):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=False))
 
@@ -224,11 +248,14 @@ def main():
 
     if ev == "UserPromptSubmit":
         prompt = data.get("prompt") or ""
-        # 別セッションからの文は <cross-session-message ...> で包まれていたり、1行目が from 行だったりするので、本文の1行目を取る
-        body = re.sub(r"</?cross-session-message[^>]*>", "", prompt).strip()
-        body = re.sub(r"^from \S+ via \S+\s*\n", "", body)
-        write(sid, {"phase": "working", "asked": clip(first_line(body)), "doing": "考え中", "needs": None, "tools": 0,
-                    "turn_started_at": int(time.time() * 1000), "perm_queue": [], "pending": None, "pending_count": 0}, data)
+        patch = {"phase": "working", "doing": "考え中", "needs": None, "tools": 0,
+                 "turn_started_at": int(time.time() * 1000), "perm_queue": [], "pending": None, "pending_count": 0}
+        asked, by = asked_of(prompt)
+        # 頼まれたことを上書きするのは、人が打った文か、まだ人の依頼が入っていないときの別セッションからの文だけ。
+        # 親に届く子の報告で、人の依頼が消えないようにする
+        if asked and (by == "human" or cur_field(sid, "asked_by") != "human"):
+            patch.update({"asked": asked, "asked_by": by})
+        write(sid, patch, data)
         nudge = house_nudge(sid)
         if nudge:
             emit_context("UserPromptSubmit", nudge)
