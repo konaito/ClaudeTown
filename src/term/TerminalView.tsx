@@ -16,6 +16,55 @@ export function lastTermSize(): { cols: number; rows: number } | null {
   try { const v = JSON.parse(localStorage.getItem(SIZE_KEY) ?? "null"); return v?.cols && v?.rows ? v : null; } catch { return null; }
 }
 
+/**
+ * ターミナルは1つだけ作って使い回す（#15）。開くたびに作って dispose すると、WebGL の面と xterm の物が
+ * WebContent に積もる（100回の開き直しで footprint が約 100MB から約 480MB に増えた。DOM の描き方では増えない）。開くときは要素を容れ物に付けて reset し、
+ * 閉じるときは要素を外すだけにする。WebGL の文脈も1つのまま
+ */
+type Shared = { term: Terminal; fit: FitAddon; el: HTMLDivElement; gl: WebglAddon | null };
+let shared: Shared | null = null;
+const forceDom = () => (import.meta.env.DEV && new URLSearchParams(location.search).get("renderer") === "dom") || import.meta.env.VITE_FC_SOAK_RENDERER === "dom";
+
+/**
+ * GPU で描く（#8）。何も指定しないと xterm.js は DOM で描き、claude の書き換えのたびに WebContent の負荷になる。
+ * WebGL が使えないときと、文脈を失ったときは、アドオンを外して DOM の描き方に戻す。
+ * 文脈を失った後は、次に開くときに付け直す（前の作りは開くたびに作っていたので、次の回は WebGL に戻っていた）
+ */
+function ensureGl(s: Shared) {
+  if (s.gl) return;
+  if (forceDom()) { perfCounters.renderer = "dom"; return; }
+  try {
+    const gl = new WebglAddon();
+    gl.onContextLoss(() => { gl.dispose(); if (s.gl === gl) s.gl = null; perfCounters.renderer = "dom（文脈を失った）"; });
+    s.term.loadAddon(gl);
+    s.gl = gl;
+    perfCounters.renderer = "webgl";
+  } catch { s.gl = null; perfCounters.renderer = "dom"; }
+}
+
+function sharedTerm(): Shared {
+  if (shared) return shared;
+  const term = new Terminal({
+    fontFamily: '"SF Mono", Menlo, "Hiragino Sans", monospace', fontSize: 12.5, lineHeight: 1.15,
+    cursorBlink: true,
+    // claude は入力欄から上を描き直し続けるので、遡る行はそれほど要らない。5000 から減らしてメモリと再描画の量を抑える（#8）
+    scrollback: 1000, allowProposedApi: false,
+    theme: { background: "#ffffff", foreground: "#2f2d36", cursor: "#2f2d36", selectionBackground: "#cfe0ff", black: "#2f2d36", brightBlack: "#8a8794" },
+  });
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  const el = document.createElement("div");
+  el.className = "term-host";
+  el.style.width = "100%"; el.style.height = "100%";
+  // xterm.js は open のときに要素が文書に付いている必要がある。いったん body に付けて開き、すぐ外す
+  document.body.appendChild(el);
+  term.open(el);
+  shared = { term, fit, el, gl: null };
+  ensureGl(shared);
+  el.remove();
+  return shared;
+}
+
 export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionId: string; peer: string | null; onError: (m: string) => void; takeEarly?: (id: string) => string }) {
   const box = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<string>("起動中…");
@@ -25,29 +74,13 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
     // 後始末のときには ref が外れているので、容れ物を今のうちに持っておく
     const host = box.current;
     perfMark("mount", sessionId);
-    const term = new Terminal({
-      fontFamily: '"SF Mono", Menlo, "Hiragino Sans", monospace', fontSize: 12.5, lineHeight: 1.15,
-      cursorBlink: true,
-      // claude は入力欄から上を描き直し続けるので、遡る行はそれほど要らない。5000 から減らしてメモリと再描画の量を抑える（#8）
-      scrollback: 1000, allowProposedApi: false,
-      theme: { background: "#ffffff", foreground: "#2f2d36", cursor: "#2f2d36", selectionBackground: "#cfe0ff", black: "#2f2d36", brightBlack: "#8a8794" },
-    });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(box.current);
+    const sh = sharedTerm();
+    const { term, fit, el } = sh;
+    host.appendChild(el);
+    ensureGl(sh);
+    // 前に開いたセッションの画面と、大きさの記録を消す。中身はこのあと replay で書き直す
+    term.reset();
     if (import.meta.env.DEV) perfTerm.current = term;
-    // GPU で描く（#8）。何も指定しないと xterm.js は DOM で描き、claude の書き換えのたびに WebContent の負荷になる。
-    // WebGL が使えないときと、文脈を失ったときは、アドオンを外して DOM の描き方に戻す
-    let gl: WebglAddon | null = null;
-    // 開発の計測用: ?renderer=dom で DOM の描き方のまま比べる
-    // 長時間の記録（#15）の比べ: VITE_FC_SOAK_RENDERER=dom でビルドした版も DOM の描き方にする
-    if ((import.meta.env.DEV && new URLSearchParams(location.search).get("renderer") === "dom") || import.meta.env.VITE_FC_SOAK_RENDERER === "dom") perfCounters.renderer = "dom";
-    else try {
-      gl = new WebglAddon();
-      gl.onContextLoss(() => { gl?.dispose(); gl = null; perfCounters.renderer = "dom（文脈を失った）"; });
-      term.loadAddon(gl);
-      perfCounters.renderer = "webgl";
-    } catch { gl = null; perfCounters.renderer = "dom"; }
     let pendingReset = false;
     // replay を書いている間に xterm.js が返す自動応答（カーソル位置の報告など）は PTY に送らない（claude の入力に混ざるため）
     let replaying = 0;
@@ -173,15 +206,8 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
       for (const ev of ["keydown", "paste", "compositionend"]) ta?.removeEventListener(ev, reclaim);
       disposeInput.dispose();
       close();
-      // WebGL の文脈は、xterm.js の dispose では手放されない（canvas を外すだけ）。GC まで GPU のメモリが WebContent に残り、
-      // 開き直すたびに積もる（#15、100回で footprint が約 420MB 増えた）。外す前に canvas を拾い、dispose の後で文脈を手放す
-      const canvases = [...host.querySelectorAll("canvas")];
-      term.dispose();
-      for (const c of canvases) {
-        const ctx = c.getContext("webgl2");
-        ctx?.getExtension("WEBGL_lose_context")?.loseContext();
-        c.width = 0; c.height = 0;
-      }
+      // ターミナルは使い回すので dispose しない。要素を外すだけ
+      el.remove();
     };
   }, [sessionId, peer]);
 
