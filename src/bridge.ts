@@ -36,13 +36,18 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
         ccn: MOCK, peer: null, ccn_ok: true, ccn_error: null, fetched_at: Date.now(),
         // お手紙の試し: public/dev-letters.json（無ければ空）
         letters: await fetch("/dev-letters.json", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
-        agents: live.map((s) => ({ id: s.id, name: s.title, kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities })),
+        // 名前は Rust の snapshot と同じく、題名が無ければ ID の先頭8字
+        agents: live.map((s) => ({ id: s.id, name: s.title || s.id.slice(0, 8), kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities })),
       } as T;
     }
     case "peers": return [{ name: "mock", url: MOCK, status: "healthy", self: true }, { name: "vm", url: "", status: "healthy", self: false }] as T;
     case "create_session": {
       const headers: Record<string, string> = a.parent ? { "x-ccn-from": `agent:mock/${String(a.parent).slice(0, 8)}/town` } : {};
-      return post("/sessions", { terminal: true, cwd: a.cwd ?? new URLSearchParams(location.search).get("cwd") ?? "/tmp", prompt: a.prompt, name: a.name, cols: 120, rows: 40 }, headers) as T;
+      // Rust の create_session と同じく、空の prompt と name は送らない（本番のノードは name: null を 400 で断る）
+      const body: Record<string, unknown> = { terminal: true, cwd: a.cwd || (new URLSearchParams(location.search).get("cwd") ?? "/tmp"), cols: 120, rows: 40 };
+      if (typeof a.prompt === "string" && a.prompt.trim()) body.prompt = a.prompt;
+      if (typeof a.name === "string" && a.name.trim()) body.name = a.name;
+      return post("/sessions", body, headers) as T;
     }
     case "term_input": return post(`/sessions/${a.sessionId}/terminal/input`, { text: a.text }) as T;
     case "term_resize": return post(`/sessions/${a.sessionId}/terminal/resize`, { cols: a.cols, rows: a.rows }) as T;
