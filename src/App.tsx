@@ -854,8 +854,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
   const hasTerm = !!agent?.capabilities?.terminal;
   const [tab, setTab] = useState<"term" | "talk" | "state">("talk");
   const [sheet, setSheet] = useState<"teleport" | null>(null);
-  // 端末を持つセッションは端末を先に出す。右クリックや「端末へ」でも端末を開く
-  useEffect(() => { setTab(hasTerm ? "term" : "talk"); setSheet(null); }, [agent?.id, hasTerm]);
+  // セッションを選んだときはチャットを出す。右クリックなどの termReq だけ端末を開く
+  useEffect(() => { setTab("talk"); setSheet(null); }, [agent?.id, hasTerm]);
   useEffect(() => { if (termReq && hasTerm) setTab("term"); }, [termReq]);
   useEffect(() => { if (chatReq) setTab("talk"); }, [chatReq]);
   const [items, setItems] = useState<ConvItem[]>([]);
@@ -958,9 +958,9 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
       </div>
       {sheet === "teleport" && <Teleport agent={agent} descendants={descendants} peers={peers} onDone={(m) => { setSheet(null); onSent2(m); }} onError={onError} />}
       <div className="tabs">
-        {hasTerm && <button className={tab === "term" ? "on" : ""} onClick={() => setTab("term")}>ターミナル</button>}
         <button className={tab === "talk" ? "on" : ""} onClick={() => setTab("talk")}>チャット</button>
         <button className={tab === "state" ? "on" : ""} onClick={() => setTab("state")}>状態</button>
+        {hasTerm && <button className={tab === "term" ? "on" : ""} onClick={() => setTab("term")}>ターミナル</button>}
       </div>
       {mood === "approval" && (tab === "term" || tab === "state") && (
         <div className="ap-float"><Approval agent={agent} peer={peer} onDone={(m) => onSent2(m)} onError={onError} /></div>
