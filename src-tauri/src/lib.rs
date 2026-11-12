@@ -1367,6 +1367,20 @@ fn perf_log(line: String) {
 #[tauri::command]
 fn perf_ping() {}
 
+/// 軽さの計測（scripts/bench.ts、#2）で、窓を隠すか最小化する。FC_PERF_LOG があるとき（計測のとき）だけ動く
+#[tauri::command]
+fn perf_window(window: tauri::WebviewWindow, op: String) -> Result<(), String> {
+    if std::env::var("FC_PERF_LOG").map(|p| p.is_empty()).unwrap_or(true) {
+        return Err("計測のときだけ使える".into());
+    }
+    match op.as_str() {
+        "hide" => window.hide(),
+        "minimize" => window.minimize(),
+        _ => return Err(format!("知らない操作: {op}")),
+    }
+    .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 開発用: 画面に渡すのと同じ JSON を出して終わる（ブラウザでの見た目の確認に使う）
@@ -1375,6 +1389,10 @@ pub fn run() {
     //   family-computing --answer <sessionId> <allow|deny> [expectId]
     // identifier はビルド時の設定（開発版は tauri.conf.json、安定版は tauri.stable.conf.json を重ねたもの）から取る。
     // 下の開発用の引数も、画面と同じ置き場所を使う
+    // 軽さの計測（scripts/bench.ts）: プロセスが始まった時刻を書く。画面が町を描いた時刻との差を、起動の時間にする
+    if std::env::var("FC_PERF_LOG").map(|p| !p.is_empty()).unwrap_or(false) {
+        perf_log(json!({ "bench": "proc", "procStartMs": now_ms() as u64 }).to_string());
+    }
     let context = tauri::generate_context!();
     let _ = APP_ID.set(context.config().identifier.clone());
     let args: Vec<String> = std::env::args().collect();
@@ -1454,7 +1472,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::send_message, set_house_name, cmd::answer_permission,
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, term_open, term_close, term_input, term_resize,
-            perf_log, perf_ping, town_watch, town_unwatch, town_kick
+            perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick
         ])
         .run(context)
         .expect("error while running tauri application");

@@ -7,6 +7,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { call, openTerminal } from "../bridge";
 import { perfCounters, perfMark, perfEnd, perfTerm, perfWaitingPrompt } from "./perf";
+import { benchParams } from "./bench";
 
 const SIZE_KEY = "claude-town.term-size";
 /** ほかの画面の大きさが右パネルに収まらないとき、こちらの大きさを送り返す間隔の下限 */
@@ -23,7 +24,8 @@ export function lastTermSize(): { cols: number; rows: number } | null {
  */
 type Shared = { term: Terminal; fit: FitAddon; el: HTMLDivElement; gl: WebglAddon | null };
 let shared: Shared | null = null;
-const forceDom = () => (import.meta.env.DEV && new URLSearchParams(location.search).get("renderer") === "dom") || import.meta.env.VITE_FC_SOAK_RENDERER === "dom";
+// 開発の計測用: ?renderer=dom（scripts/bench.ts では VITE_FC_BENCH の renderer=dom）で DOM の描き方のまま比べる
+const forceDom = () => (import.meta.env.DEV && benchParams.get("renderer") === "dom") || import.meta.env.VITE_FC_SOAK_RENDERER === "dom";
 
 /**
  * GPU で描く（#8）。何も指定しないと xterm.js は DOM で描き、claude の書き換えのたびに WebContent の負荷になる。
