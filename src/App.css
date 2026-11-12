@@ -36,6 +36,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .conn { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 5px 12px; border-radius: 10px; background: #f6f6f4; }
 .conn i { width: 9px; height: 9px; border-radius: 50%; background: var(--working); }
 .conn.bad i { background: #e5574a; }
+.conn.slow i { background: var(--approval); }
 
 .body { flex: 1; min-height: 0; }
 /* react-resizable-panels は中身を overflow: auto の div で包む。そこをスクロールさせず、高さを固定して中身の flex に任せる

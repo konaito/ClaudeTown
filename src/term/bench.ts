@@ -3,6 +3,7 @@
 // - new: 「＋ 新しい世帯」のボタンを押し、入力欄（❯）が出るまでを測る。測り終えたら、作ったセッションだけを止める
 // - open: 自分で作ったセッション1つを、選び直して右クリックと同じ操作で開き直し、❯ が見えるまでを測る
 // - all: new を n 回、続けて最後に作ったセッションで open を n 回
+// - watch: 40秒、1秒ごとに町の人数と接続の表示を記録する
 // - cpu: ?sid=<セッション> のターミナルを開いたまま30秒、IPC の回数を数える（#8、#9。scripts/mock-ccn-flood.ts と使う）
 // 結果は perf.ts が1回ごとに perf_log に書く。作るセッションには name に bench-ct-term を付ける。
 import { useEffect, useRef } from "react";
@@ -36,6 +37,14 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
   try {
     // cpu: ?sid=<セッション> のターミナルを開いたまま、5秒置いてから30秒、IPC の回数を数える。CPU 時間は外から ps で測る。
     // 窓が裏にあると WebKit が描画を止めるので、FC_BENCH_TOP=1 で起動して最前面に出す（lib.rs の setup）
+    // watch: 40秒、1秒ごとに町の人数と接続の表示を記録する（一覧の取得が失敗しても町が消えないかを見る）
+    if (mode === "watch") {
+      for (let i = 0; i < 40; i++) {
+        await log({ t: i, at: new Date().toISOString().slice(11, 23), town: document.querySelector(".fam-title")?.textContent ?? "", conn: document.querySelector(".conn")?.textContent ?? "", banner: !!document.querySelector(".banner.bad") });
+        await sleep(1000);
+      }
+      return;
+    }
     if (mode === "cpu") {
       const sid = params.get("sid") ?? "";
       h().focusId(sid);

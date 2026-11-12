@@ -28,6 +28,8 @@ const BOOT_TIMEOUT_MS = 12000;
  * 実測（2026-11-12）: 中継で incertotech 0.42 秒、vm 0.46 秒
  */
 const OTHER_TOWNS_POLL_MS = 15000;
+/** 別の町の一覧が取れなかったとき、前回の町を残す長さ */
+const OTHER_TOWN_KEEP_MS = 60000;
 /** 右パネルの幅（px）。最小と既定。最大はウィンドウ幅の半分（maxSize="50%"） */
 const SIDE_MIN = 380;
 const SIDE_DEFAULT = 380;
@@ -73,14 +75,33 @@ export default function App() {
   }, []);
 
   const reload = useRef<() => void>(() => {});
+  // 一覧の取得が続けて失敗している数と、失敗し始めた時刻。1回の失敗では町を描き直さない
+  // （2026-11-12、ノードが一瞬詰まって一覧の取得が時間切れになり、町が「0世帯・0人」になった）
+  const [fail, setFail] = useState<{ n: number; since: number; msg: string } | null>(null);
   useEffect(() => {
     let alive = true;
+    let running = false;
+    const want = peer || null;
+    setFail(null);
+    // 失敗したら、同じ町の前回の一覧があればそれを出し続ける。無いときだけ、失敗した一覧（空の町と赤い帯）を出す
+    const failed = (msg: string, s?: Snapshot) => {
+      setFail((f) => ({ n: (f?.n ?? 0) + 1, since: f?.since ?? Date.now(), msg }));
+      setSnap((prev) => (prev?.ccn_ok && (prev.peer ?? null) === want ? prev : s ?? prev));
+      if (!s) setErr((e) => e ?? msg);
+    };
     const load = async () => {
+      // 前の回の取得が終わるまで次を始めない（時間切れまで待つ回があると、要求が積み重なる）
+      if (running) return;
+      running = true;
       try {
-        const s = await invoke<Snapshot>("snapshot", { peer: peer || null });
-        if (alive) { setSnap(s); setErr(null); }
+        const s = await invoke<Snapshot>("snapshot", { peer: want });
+        if (!alive) return;
+        if (s.ccn_ok) { setSnap(s); setErr(null); setFail(null); }
+        else failed(s.ccn_error ?? "ccn につながらない", s);
       } catch (e) {
-        if (alive) setErr(String(e));
+        if (alive) failed(String(e));
+      } finally {
+        running = false;
       }
     };
     reload.current = load;
@@ -108,7 +129,7 @@ export default function App() {
   // 別の町のお便り。町の表示はいま選んだノードだけで、お便りは全部の町から集める
   const selfName = peers.find((p) => p.self)?.name ?? "このMac";
   const curTown = peer || selfName;
-  const [others, setOthers] = useState<Map<string, { agents: Agent[] } | { error: string }>>(new Map());
+  const [others, setOthers] = useState<Map<string, { agents: Agent[]; at?: number } | { error: string }>>(new Map());
   useEffect(() => {
     let alive = true;
     let running = false;
@@ -121,14 +142,21 @@ export default function App() {
       if (running) return;
       running = true;
       for (const t of towns) {
-        let v: { agents: Agent[] } | { error: string };
+        let v: { agents: Agent[]; at?: number } | { error: string };
         if (!t.healthy) v = { error: "つながらない" };
         else {
-          try { v = { agents: (await invoke<Snapshot>("snapshot", { peer: t.key || null })).agents }; }
-          catch (e) { v = { error: String(e) }; }
+          try {
+            const s = await invoke<Snapshot>("snapshot", { peer: t.key || null });
+            v = s.ccn_ok ? { agents: s.agents, at: Date.now() } : { error: s.ccn_error ?? "つながらない" };
+          } catch (e) { v = { error: String(e) }; }
         }
         if (!alive) break;
-        setOthers((m) => new Map(m).set(t.name, v));
+        // 取れなかった回は、60秒以内に取れた前回の町を残す（1回の時間切れで、お便りとゴーストが消えないように）
+        setOthers((m) => {
+          const prev = m.get(t.name);
+          if ("error" in v && prev && "agents" in prev && Date.now() - (prev.at ?? 0) < OTHER_TOWN_KEEP_MS) return m;
+          return new Map(m).set(t.name, v);
+        });
       }
       running = false;
     };
@@ -272,6 +300,8 @@ export default function App() {
   // お便りの「チャットへ」で、その子を選んで右パネルのチャットを開く
   const [chatReq, setChatReq] = useState(0);
   const focus = useCallback((a: Agent) => { perfStart("open", a.id); setSelected(a.id); setTermReq((n) => n + 1); }, []);
+  // 前回の町を出したまま、3回続けて、または10秒以上失敗している
+  const slow = !!fail && (fail.n >= 3 || Date.now() - fail.since > 10000);
   const sel = selected ? tree.byId.get(selected) ?? (fresh?.id === selected ? fresh : null) : null;
   // 一覧に載ったら仮の姿を捨てる
   useEffect(() => { if (fresh && tree.byId.has(fresh.id)) setFresh(null); }, [tree, fresh]);
@@ -296,7 +326,7 @@ export default function App() {
               <option key={p.name} value={p.name} disabled={p.status !== "healthy"}>{p.name}{p.status !== "healthy" ? "（つながらない）" : ""}</option>
             ))}
           </select>
-          <span className={`conn ${snap?.ccn_ok ? "ok" : "bad"}`}><i />{snap ? (snap.ccn_ok ? "接続中" : "つながらない") : "よみこみ中"}</span>
+          <span className={`conn ${!snap?.ccn_ok ? "bad" : slow ? "slow" : "ok"}`} title={fail?.msg ?? ""}><i />{snap ? (!snap.ccn_ok ? "つながらない" : slow ? "つながりにくい" : "接続中") : "よみこみ中"}</span>
         </div>
         <div className="top-right" />
       </header>
@@ -306,7 +336,7 @@ export default function App() {
         <div className="left">
           <NextRow mails={mails} curTown={curTown} unreachable={unreachable} working={counts.working} total={agents.length} onOpen={openMail} />
 
-          {(err || (snap && !snap.ccn_ok)) && (
+          {((err && !snap?.ccn_ok) || (snap && !snap.ccn_ok)) && (
             <div className="banner bad">
               {err ?? snap?.ccn_error}
               <span className="hint">次: ターミナルで <code>ccn doctor</code> を実行する</span>

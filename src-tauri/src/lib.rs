@@ -104,8 +104,9 @@ fn agent() -> &'static ureq::Agent {
 }
 
 /// 一覧（snapshot、peers）の時間切れ。別の機械への中継は実測 0.42〜0.46 秒（2026-11-12）。
-/// 命令は非同期なので、時間切れまで待っても画面は止まらない。止まった町の一覧を長く待たないために短くする（#3）
-const LIST_TIMEOUT: Duration = Duration::from_secs(3);
+/// 3秒にしたら、ノードが一瞬詰まった回（/api/sessions が最大 1.4 秒、2026-11-12 の meta-9d の実測）で取りこぼし、町が空になった。
+/// 命令は非同期で画面を止めず、画面は前の回が終わるまで次を始めないので、長めの5秒にする
+const LIST_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn get_json(url: &str) -> Result<Value, String> {
     get_json_t(url, Duration::from_secs(8))
