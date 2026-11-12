@@ -14,7 +14,9 @@ export type PerfResult = { kind: FlowKind; id: string | null; marks: Record<stri
 
 let cur: Flow | null = null;
 /** ターミナルの出力が画面に届いた回数（Rust から webview への IPC の回数）。bench.ts の cpu が1秒あたりに直す */
-export const perfCounters = { ipc: 0, bytes: 0, renderer: "" };
+export const perfCounters = { ipc: 0, bytes: 0, renderer: "", resizes: 0 };
+/** 開いているターミナル（自動の計測 bench.ts が画面の中身を読む）。開発版だけで入れる */
+export const perfTerm: { current: import("@xterm/xterm").Terminal | null } = { current: null };
 let waiters: ((r: PerfResult) => void)[] = [];
 /** 次に終わる流れの結果を待つ（自動の計測 bench.ts が使う） */
 export function perfNext(): Promise<PerfResult> { return new Promise((r) => waiters.push(r)); }

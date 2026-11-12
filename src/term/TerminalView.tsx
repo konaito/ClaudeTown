@@ -6,7 +6,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { call, openTerminal } from "../bridge";
-import { perfCounters, perfMark, perfEnd, perfWaitingPrompt } from "./perf";
+import { perfCounters, perfMark, perfEnd, perfTerm, perfWaitingPrompt } from "./perf";
 
 const SIZE_KEY = "claude-town.term-size";
 /** 最後に開いたターミナルの大きさ。新しい世帯をこの大きさで起動する */
@@ -31,6 +31,7 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(box.current);
+    if (import.meta.env.DEV) perfTerm.current = term;
     // GPU で描く（#8）。何も指定しないと xterm.js は DOM で描き、claude の書き換えのたびに WebContent の負荷になる。
     // WebGL が使えないときと、文脈を失ったときは、アドオンを外して DOM の描き方に戻す
     let gl: WebglAddon | null = null;
@@ -78,6 +79,7 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
       // 境目のドラッグ中は大きさが続けて変わるので、PTY への通知は止まってから 150ms 後に1回だけ送る（画面の fit はすぐ）
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
+        perfCounters.resizes++;
         call("term_resize", { sessionId, cols: term.cols, rows: term.rows, peer }).catch((e) => onError(`ターミナルの大きさを変えられなかった: ${e}`));
       }, 150);
     };
