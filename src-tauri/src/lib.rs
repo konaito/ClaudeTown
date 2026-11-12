@@ -333,9 +333,9 @@ fn simplify(m: &Value) -> Vec<Value> {
                             // 送ったお手紙（SendMessage、ccn の send_message と create_session）は、宛先と1行目を付ける
                             let first = |v: &Value| v.as_str().unwrap_or("").lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
                             let sent = match name {
-                                "SendMessage" if inp["message"].is_string() => Some(json!({ "to": inp["to"], "summary": inp["summary"].as_str().map(String::from).unwrap_or_else(|| first(&inp["message"])) })),
-                                "mcp__ccn__send_message" => Some(json!({ "to": inp["session"], "peer": inp["peer"], "summary": first(&inp["text"]) })),
-                                "mcp__ccn__create_session" => Some(json!({ "to": null, "peer": inp["peer"], "summary": first(&inp["prompt"]), "create": true })),
+                                "SendMessage" if inp["message"].is_string() => Some(json!({ "to": inp["to"], "summary": inp["summary"].as_str().map(String::from).unwrap_or_else(|| first(&inp["message"])), "text": inp["message"] })),
+                                "mcp__ccn__send_message" => Some(json!({ "to": inp["session"], "peer": inp["peer"], "summary": first(&inp["text"]), "text": inp["text"] })),
+                                "mcp__ccn__create_session" if inp["prompt"].is_string() => Some(json!({ "to": null, "peer": inp["peer"], "summary": first(&inp["prompt"]), "text": inp["prompt"], "create": true })),
                                 _ => None,
                             };
                             out.push(json!({ "role": "tool", "text": tool_line(name, inp), "at": at, "sent": sent }));

@@ -1159,7 +1159,7 @@ function timeOf(at?: string | null): string {
 }
 
 function Bubble({ item, agent, lineageDepth }: { item: ConvItem & { more?: number }; agent: Agent; lineageDepth: number }) {
-  if (item.role === "tool" && item.sent) return <SentLetter item={item} />;
+  if (item.role === "tool" && item.sent) return <SentLetter item={item} agent={agent} lineageDepth={lineageDepth} />;
   if (item.role === "tool") {
     return <div className="tool-line">🔧 {item.text}{item.more ? ` ほか${item.more}件` : ""}</div>;
   }
@@ -1192,38 +1192,37 @@ function useLetterPeer(raw: string | null | undefined, name?: string | null): Ag
   return (id && town.find((a) => a.id === id)) || null;
 }
 
-/** 相手の顔。町にいればキャラの顔（町と同じ絵）、いなければ封筒の印 */
-function LetterFace({ who, size }: { who: Agent | null; size: number }) {
-  if (!who) return <img className="letter-ico" src={LETTER_IMG} alt="" style={{ width: size * 0.7, height: size * 0.7 }} />;
-  return <Avatar pick={who.avatar} seed={who.name} mood="idle" role={who.parent ? "child" : "parent"} size={size} />;
-}
-
-/** 受け取ったお手紙。肌色の吹き出しに、送り手の顔と名前を添える。包みのタグは出さず本文だけ */
+/**
+ * 受け取ったお手紙。並びは普通の発言と同じ（顔、名前と時刻、吹き出し）で、吹き出しの色だけ肌色にする（2026-11-12 本人の指示）。
+ * 顔は送り手のキャラ（町と同じ絵）。送り手が町にいなければ、名前から決まる仮の顔
+ */
 function LetterBubble({ item }: { item: ConvItem }) {
   const raw = item.letter?.fromRaw ?? null;
   const who = useLetterPeer(raw, item.letter?.fromName);
   const name = who?.name ?? item.letter?.fromName ?? raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? "別のセッション";
   return (
-    <div className="msg letter">
-      <div className="mini-av"><LetterFace who={who} size={32} /></div>
+    <div className="msg kid letter">
+      <div className="mini-av"><Avatar pick={who?.avatar} seed={name} mood="idle" role={who?.parent ? "child" : "parent"} size={32} /></div>
       <div>
-        <div className="meta"><b>{name}</b> からのお手紙{timeOf(item.at) ? ` ・ ${timeOf(item.at)}` : ""}</div>
+        <div className="meta"><b>{name}</b>{timeOf(item.at)}</div>
         <div className="b"><Markdown text={item.text} /></div>
       </div>
     </div>
   );
 }
 
-/** 送ったお手紙。道具の1行の代わりに、宛先の小さい顔と1行目を出す */
-function SentLetter({ item }: { item: ConvItem }) {
+/** 送ったお手紙。このセッション自身の発言として出し、名前の行に宛先（→ 名前）を添える。吹き出しは肌色 */
+function SentLetter({ item, agent, lineageDepth }: { item: ConvItem; agent: Agent; lineageDepth: number }) {
   const s = item.sent!;
   const who = useLetterPeer(s.to ?? null, s.to ?? null);
-  const name = s.create ? "新しい子" : who?.name ?? (s.to ? String(s.to).replace(/^uds:.*\/(\d+)\.sock$/, "pid $1") : "相手");
+  const to = s.create ? "新しい子" : who?.name ?? (s.to ? String(s.to).replace(/^uds:.*\/(\d+)\.sock$/, "pid $1") : "相手");
   return (
-    <div className="sent-letter">
-      <img className="letter-ico" src={LETTER_IMG} alt="" />
-      <span className="sl-to">{!s.create && <LetterFace who={who} size={20} />}<b>{name}</b>{s.peer ? `（${s.peer}）` : ""} へ{s.create ? "最初のお手紙" : "お手紙"}</span>
-      {s.summary && <span className="sl-sum">{s.summary}</span>}
+    <div className="msg kid letter">
+      <div className="mini-av"><Avatar pick={agent.avatar} seed={agent.name} mood="idle" role={roleOf(lineageDepth)} size={32} /></div>
+      <div>
+        <div className="meta"><b>{agent.name}</b><span className="to">→ {to}{s.peer ? `（${s.peer}）` : ""}</span>{timeOf(item.at)}</div>
+        <div className="b"><Markdown text={s.text || s.summary || ""} /></div>
+      </div>
     </div>
   );
 }
