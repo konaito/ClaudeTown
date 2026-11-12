@@ -1027,17 +1027,16 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
 
       {tab === "term" ? (
         <TerminalView sessionId={agent.id} peer={peer || null} onError={onError} takeEarly={takeEarly} />
-      ) : tab === "talk" ? (
+      ) : tab === "talk" ? (<>
+        {convErr && shown.length > 0 ? (
+          // 読めないが、保存分か前に読めた分を出している。中身の失敗は title に入れる
+          <div className="offline-note" title={convErr}><i />つながらない・{cachedAt ? `${savedLabel(cachedAt)} に保存した履歴` : "最後に読めた履歴"}を表示中</div>
+        ) : !convErr && cachedAt ? (
+          <div className="offline-note wait"><i />{savedLabel(cachedAt)} に保存した履歴・最新を読み込み中</div>
+        ) : null}
         <ScrollEdgeGradient className="talk" wrapClassName="seg-fill" ref={scroller}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
-          {convErr && shown.length > 0 ? (
-            // 読めないが、保存分か前に読めた分を出している。中身の失敗は title に入れる
-            <div className="offline-note" title={convErr}><i />つながらない・{cachedAt ? `${savedLabel(cachedAt)} に保存した履歴` : "最後に読めた履歴"}を表示中</div>
-          ) : convErr ? (
-            <div className="banner bad small">{convErr}</div>
-          ) : cachedAt ? (
-            <div className="offline-note wait"><i />{savedLabel(cachedAt)} に保存した履歴・最新を読み込み中</div>
-          ) : null}
+          {convErr && shown.length === 0 && <div className="banner bad small">{convErr}</div>}
           {shown.length === 0 && !convErr && <p className="hint center">まだチャットが無い</p>}
           {shown.map((x, i) => <Bubble key={x.n ?? `p${x.at ?? i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "approval" && (
@@ -1049,7 +1048,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
             </div>
           )}
         </ScrollEdgeGradient>
-      ) : (
+      </>) : (
         <StateTab agent={agent} mood={mood} />
       )}
 

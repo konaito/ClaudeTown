@@ -5,6 +5,8 @@
 // - all: new を n 回、続けて最後に作ったセッションで open を n 回
 // - watch: 40秒、1秒ごとに町の人数と接続の表示を記録する
 // - resize: 新しい世帯の右パネルの境目をドラッグし、claude が新しい幅で描き直すまでを測る（#19）
+// - offline: ?sid=<セッション> のチャットを開き、?secs=<秒>（既定 60）のあいだ1秒ごとに、会話の欄の吹き出しの数、保存した履歴の印、
+//   町の人数、接続の表示、赤い帯を記録する（オフラインのキャッシュ、src-tauri/src/offline.rs。scripts/offline-ccn-proxy.ts と使う）
 // - cpu: ?sid=<セッション> のターミナルを開いたまま30秒、IPC の回数を数える（#8、#9。scripts/mock-ccn-flood.ts と使う）
 // 結果は perf.ts が1回ごとに perf_log に書く。作るセッションには name に bench-ct-term を付ける。
 import { useEffect, useRef } from "react";
@@ -90,6 +92,17 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
     if (mode === "watch") {
       for (let i = 0; i < 40; i++) {
         await log({ t: i, at: new Date().toISOString().slice(11, 23), town: document.querySelector(".fam-title")?.textContent ?? "", conn: document.querySelector(".conn")?.textContent ?? "", banner: !!document.querySelector(".banner.bad") });
+        await sleep(1000);
+      }
+      return;
+    }
+    if (mode === "offline") {
+      h().select(params.get("sid"));
+      const secs = Number(params.get("secs") ?? 60);
+      const text = (sel: string) => document.querySelector(sel)?.textContent ?? null;
+      for (let i = 0; i < secs; i++) {
+        await log({ t: i, at: new Date().toISOString().slice(11, 23), town: text(".fam-title"), conn: text(".conn"), banner: text(".banner.bad"),
+          note: text(".offline-note"), msgs: document.querySelectorAll(".talk .msg, .talk .tool-line").length, empty: !!document.querySelector(".talk .hint.center") });
         await sleep(1000);
       }
       return;
