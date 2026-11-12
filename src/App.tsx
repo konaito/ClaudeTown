@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { call as invoke, setFullscreen } from "./bridge";
 import { TerminalView } from "./term/TerminalView";
+import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
 import {
@@ -228,7 +229,7 @@ function Stage({ zoom, items, onBlank }: { zoom: number | "fit"; items: { id: st
   const packed = packHouseholds(items.map(({ id, w, h }) => ({ id, w, h })), width, LAYOUT.group.gap);
   const at = new Map(packed.items.map((p) => [p.id, p]));
   return (
-    <div className="stage" ref={outer}
+    <ScrollEdgeGradient className="stage" wrapClassName="seg-fill" ref={outer}
       onClick={(e) => { if (!(e.target as HTMLElement).closest(".card, .mini, .pop, .g-head")) onBlank(); }}>
       <div className="stage-inner" style={{ zoom: scale, width, height: packed.height + 20 }}>
         {items.map((b) => {
@@ -241,7 +242,7 @@ function Stage({ zoom, items, onBlank }: { zoom: number | "fit"; items: { id: st
           );
         })}
       </div>
-    </div>
+    </ScrollEdgeGradient>
   );
 }
 
@@ -538,7 +539,7 @@ function Panel({ agent, peer, lineage, termReq, peers, onSent, onSent2, onError,
       {tab === "term" ? (
         <TerminalView sessionId={agent.id} peer={peer || null} onError={onError} />
       ) : tab === "talk" ? (
-        <div className="talk" ref={scroller}
+        <ScrollEdgeGradient className="talk" wrapClassName="seg-fill" ref={scroller}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
           {convErr && <div className="banner bad small">{convErr}</div>}
           {shown.length === 0 && !convErr && <p className="hint center">まだ会話が無い</p>}
@@ -551,7 +552,7 @@ function Panel({ agent, peer, lineage, termReq, peers, onSent, onSent2, onError,
               {choices.map((c) => <button key={c} className="choice" disabled={busy} onClick={() => send(c)}>{c}</button>)}
             </div>
           )}
-        </div>
+        </ScrollEdgeGradient>
       ) : (
         <StateTab agent={agent} mood={mood} />
       )}
@@ -620,7 +621,7 @@ function Approval({ agent, peer, onDone, onError }: {
       ) : p ? (
         <div>
           <div className="ap-tool">{p.toolName}</div>
-          {detail && <pre className="ap-detail">{detail}</pre>}
+          {detail && <ScrollEdgeGradient className="ap-detail">{detail}</ScrollEdgeGradient>}
           {(pending?.length ?? 0) > 1 && <div className="hint">ほかに{pending!.length - 1}件の承認が待っている。1件ずつ答える。</div>}
         </div>
       ) : (
@@ -786,10 +787,10 @@ function StateTab({ agent, mood }: { agent: Agent; mood: Mood }) {
     ["セッション", agent.id],
   ];
   return (
-    <dl className="state-tab">
+    <ScrollEdgeGradient className="state-scroll" wrapClassName="seg-fill"><dl className="state-tab">
       {rows.filter(([, v]) => v).map(([k, v]) => (<div key={k}><dt>{k}</dt><dd>{v}</dd></div>))}
       {!r && <p className="hint">状態 hook が入っていないので、頼まれたことと次の一手は出ない（README の「hook」を参照）。</p>}
-    </dl>
+    </dl></ScrollEdgeGradient>
   );
 }
 
