@@ -270,7 +270,8 @@ export default function App() {
     if (!r?.id) { early.current = { id: null, text: "" }; setBooting(null); return; }
     early.current = { id: r.id, text: early.current.id === "pending" ? early.current.text : "" };
     setFresh({
-      id: r.id, name: r.id.slice(0, 8), kind: "terminal", state: "running", cwd: r.cwd ?? "", canSend: true, parent: null,
+      // 名前は一覧と同じく cwd の最後の名前（#30）。一覧に載ったときに名前が変わって見えないようにする
+      id: r.id, name: String(r.cwd ?? "").split("/").filter(Boolean).pop() ?? r.id.slice(0, 8), kind: "terminal", state: "running", cwd: r.cwd ?? "", canSend: true, parent: null,
       startedAt: Date.now(), capabilities: { terminal: true, send: true, stop: true },
     });
     setBooting(r.id);
