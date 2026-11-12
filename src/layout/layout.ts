@@ -5,7 +5,8 @@
 // 3. 根の子は下向き（0 度）を中心に、孫より下は親の角度を中心に、必要な幅だけ空けて並べる
 // 4. 角度と半径から座標を出す（下向きが 0 度、右が正。x = R·sinθ、y = R·cosθ）
 // 5. 実際の矩形で重なりを検査し、残れば決まった順序で角度の余白、次に半径を広げてやり直す
-// 6. 兄弟を並べる弧の上限を変えた候補を作り、検査を通るもののうち s が一番小さいものを選ぶ
+// 6. 兄弟を並べる弧の上限を変えた候補を作り、検査を通るもののうち s が一番小さいものを選ぶ。
+//    前に選んだ候補は引き継がない。同じ顔ぶれなら、どの町で、どの順で増えても同じ配置になる（docs/design/geometric-layout.md の末尾）
 
 import { LAYOUT } from "./params";
 
@@ -33,14 +34,12 @@ export type Metrics = {
   adjustments: number;
 };
 
-export type LayoutResult = { nodes: Placed[]; metrics: Metrics; arcIndex: number; valid: boolean; candidates: { arcIndex: number; valid: boolean; s: number }[] };
+export type LayoutResult = { nodes: Placed[]; metrics: Metrics; arcIndex: number; valid: boolean; candidates: { arcIndex: number; valid: boolean; s: number; width: number; height: number }[] };
 
 export type LayoutOptions = {
   gap?: number;
   radialGap?: number;
   view?: { w: number; h: number };
-  /** 前回選んだ候補（位置を保つため、余裕の範囲で使い続ける） */
-  prevArcIndex?: number;
 };
 
 type Tree = {
@@ -249,10 +248,6 @@ export function layoutFamily(input: LNode[], opt: LayoutOptions = {}): LayoutRes
   const ok = (c: (typeof cands)[number]) => !c.m.overlaps && !c.m.crossings && !c.m.edgeThroughNode && !c.m.interleave;
   const valid = cands.filter(ok);
   const pool = valid.length ? valid : cands;
-  let best = pool.reduce((a, b) => (b.m.s < a.m.s ? b : a));
-  // 前回の候補が今も検査を通り、s が大きく悪くなければ使い続ける（更新のたびに形が変わらないように）
-  const prev = cands.find((c) => c.i === opt.prevArcIndex);
-  // 使っている間は位置を保つほうを優先する。前の候補が検査を通り、画面に収まる（s ≤ 1）か、新しい候補より大きく悪くなければ使い続ける
-  if (prev && ok(prev) && (prev.m.s <= 1 || best.m.s >= prev.m.s * LAYOUT.keepMargin)) best = prev;
-  return { nodes: best.nodes, metrics: best.m, arcIndex: best.i, valid: ok(best), candidates: cands.map((c) => ({ arcIndex: c.i, valid: ok(c), s: Number(c.m.s.toFixed(3)) })) };
+  const best = pool.reduce((a, b) => (b.m.s < a.m.s ? b : a));
+  return { nodes: best.nodes, metrics: best.m, arcIndex: best.i, valid: ok(best), candidates: cands.map((c) => ({ arcIndex: c.i, valid: ok(c), s: Number(c.m.s.toFixed(3)), width: c.m.width, height: c.m.height })) };
 }

@@ -21,8 +21,6 @@ export const LAYOUT = {
   maxAdjust: 40,
   /** s の基準にする表示領域（右の会話欄を除いた左側）。窓の大きさが変わっても配置し直さないよう固定値にする */
   view: { w: 1000, h: 660 },
-  /** 前回の候補を使い続ける余裕。新しい候補の s がこの割合より良くなければ切り替えない（行ったり来たりを防ぐ） */
-  keepMargin: 0.9,
   /** 家族の枠の内側の余白 */
   framePad: 18,
   /** 世帯モジュール（淡い色の枠）の寸法。並べ方（pack.ts）はこの大きさで箱を置く */
@@ -30,6 +28,13 @@ export const LAYOUT = {
   /** 新しい座標へ移るアニメーションの時間（ms） */
   moveMs: 350,
 };
+
+/** 世帯モジュールの外寸（並べ方に渡す大きさ）。配置の幅と高さに、家族の枠の余白と世帯の枠の見出し・余白・線を足す。描くときもこの大きさにする */
+export function groupSizeOf(m: { width: number; height: number }): { w: number; h: number } {
+  const G = LAYOUT.group;
+  const cw = m.width + LAYOUT.framePad * 2, ch = m.height + LAYOUT.framePad * 2;
+  return { w: Math.ceil(Math.max(G.minW, cw + G.padX * 2 + G.border * 2)), h: Math.ceil(G.head + ch + G.padTop + G.padBottom + G.border * 2) };
+}
 
 /** 名前の幅の見積もり（11px の太字）。全角は 11px、半角は 6.8px で数える */
 export function textWidth(s: string, fontPx = 11): number {
