@@ -18,6 +18,12 @@ describe("mergeConv", () => {
     // 前からある項目は同じもの（吹き出しの memo が効く）
     expect(next[0]).toBe(prev[1]);
   });
+  test("同じ差分が2回届いても足すのは1回", () => {
+    const d = { items: [item(2)], total: 3, reset: false };
+    const once = mergeConv([item(0), item(1)], d);
+    expect(mergeConv(once, d)).toBe(once);
+    expect(once.map((x) => x.n)).toEqual([0, 1, 2]);
+  });
   test("reset なら置き換える", () => {
     const next = mergeConv([item(0)], { items: [item(5), item(6)], total: 7, reset: true });
     expect(next.map((x) => x.n)).toEqual([5, 6]);

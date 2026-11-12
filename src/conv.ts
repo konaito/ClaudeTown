@@ -11,8 +11,11 @@ export type ConvDelta = { items: ConvItem[]; total: number; reset: boolean };
 /** 差分を足した一覧。増えていなければ prev をそのまま返す（描き直さない） */
 export function mergeConv(prev: ConvItem[], d: ConvDelta, keep = KEEP_CONV): ConvItem[] {
   if (d.reset) return d.items.length > keep ? d.items.slice(-keep) : d.items;
-  if (!d.items.length) return prev;
-  const next = prev.concat(d.items);
+  // 取得が重なって同じ差分が2回届いても、持っている番号より後だけを足す
+  const last = prev[prev.length - 1]?.n ?? -1;
+  const add = d.items.filter((x) => (x.n ?? Infinity) > last);
+  if (!add.length) return prev;
+  const next = prev.concat(add);
   return next.length > keep ? next.slice(-keep) : next;
 }
 

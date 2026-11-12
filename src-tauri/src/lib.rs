@@ -349,6 +349,16 @@ struct ConvDelta {
 }
 
 impl Conv {
+    /// ccn の after=from から next まで読んだ分を足す。同じセッションの取得が重なり、
+    /// ほかの呼び出しが先に同じ範囲を足していたら（c.next が読み始めと違う）、足さない
+    fn absorb(&mut self, from: u64, next: u64, fresh: Vec<Value>) {
+        if self.next != from {
+            return;
+        }
+        self.next = next;
+        self.push(fresh);
+    }
+
     fn push(&mut self, fresh: Vec<Value>) {
         for mut v in fresh {
             if let Value::Object(o) = &mut v {
@@ -501,10 +511,11 @@ fn simplify(m: &Value) -> Vec<Value> {
 fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<ConvDelta, String> {
     let peer = peer.filter(|p| !p.is_empty());
     let key = format!("{}|{session_id}", peer.clone().unwrap_or_default());
-    let mut next = {
+    let from = {
         let g = CONVS.lock().map_err(|e| e.to_string())?;
         g.as_ref().and_then(|m| m.get(&key)).map(|c| c.next).unwrap_or(0)
     };
+    let mut next = from;
     let mut fresh = vec![];
     // 1回の呼び出しで読むのは最大20ページ（4000件）。続きは次の呼び出しで読む
     for _ in 0..20 {
@@ -524,8 +535,7 @@ fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) ->
     let mut g = CONVS.lock().map_err(|e| e.to_string())?;
     let map = g.get_or_insert_with(HashMap::new);
     let c = map.entry(key).or_insert_with(Conv::default);
-    c.next = next;
-    c.push(fresh);
+    c.absorb(from, next, fresh);
     Ok(c.since(since))
 }
 
@@ -1156,6 +1166,29 @@ mod tests {
         assert_eq!(d.total, 4 + KEEP_MESSAGES as u64 + 5);
         // 画面のほうが先に進んでいる（キャッシュを作り直した）ときも reset
         assert!(c.since(Some(d.total + 1)).reset);
+    }
+
+    #[test]
+    fn overlapping_reads_do_not_add_twice() {
+        use super::Conv;
+        use serde_json::json;
+        let mut c = Conv::default();
+        let fresh = || vec![json!({ "role": "user", "text": "a" })];
+        // 同じ after=0 から読んだ2回。先に終わった方だけ足す
+        c.absorb(0, 5, fresh());
+        c.absorb(0, 5, fresh());
+        assert_eq!(c.total, 1);
+        assert_eq!(c.next, 5);
+        c.absorb(5, 6, fresh());
+        assert_eq!(c.total, 2);
+    }
+
+    #[test]
+    fn conv_delta_is_sent_as_an_object() {
+        use super::ConvDelta;
+        use serde_json::json;
+        let d = ConvDelta { items: vec![json!({ "role": "user", "text": "a", "n": 0 })], total: 1, reset: true };
+        assert_eq!(serde_json::to_value(&d).unwrap(), json!({ "items": [{ "role": "user", "text": "a", "n": 0 }], "total": 1, "reset": true }));
     }
 
     #[test]

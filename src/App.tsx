@@ -882,7 +882,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
   useEffect(() => { if (termReq && hasTerm) setTab("term"); }, [termReq]);
   useEffect(() => { if (chatReq) setTab("talk"); }, [chatReq]);
   const [items, setItems] = useState<ConvItem[]>([]);
-  const [pending, setPending] = useState<ConvItem[]>([]);
+  // 送ったばかりの文。after は送り始めたときに持っていた最後の番号で、これより後に届いた発言とだけ比べる
+  const [pending, setPending] = useState<(ConvItem & { after: number })[]>([]);
   const [convErr, setConvErr] = useState<string | null>(null);
   // 下書きは宛先ごとに持つ。宛先を切り替えたとき、打ちかけの文が次の宛先に送られないようにする
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -906,7 +907,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
       try {
         const d = await invoke<ConvDelta>("conversation", { sessionId: id, peer: peer || null, since });
         if (!alive) return;
-        since = d.total;
+        since = Math.max(since ?? 0, d.total);
+        if (d.reset) since = d.total;
         setConvErr(null);
         if (d.reset || d.items.length) setItems((prev) => mergeConv(prev, d));
       } catch (e) {
@@ -918,11 +920,11 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
     return () => { alive = false; clearInterval(t); };
   }, [id, peer]);
 
-  // 送ったばかりの文は、会話に出たら仮の項目を消す。届いた発言の差分ではなく、持っている全部と比べる（送る前に届いていた回も拾う）
+  // 送ったばかりの文は、送り始めたあとに会話に出たら仮の項目を消す（前の同じ文、「はい」や選択肢では消さない）
   useEffect(() => {
     setPending((p) => {
       if (!p.length) return p;
-      const q = p.filter((x) => !items.some((y) => y.role === "user" && y.text.trim() === x.text.trim()));
+      const q = p.filter((x) => !items.some((y) => (y.n ?? -1) > x.after && y.role === "user" && y.text.trim() === x.text.trim()));
       return q.length === p.length ? p : q;
     });
   }, [items, pending.length]);
@@ -965,9 +967,10 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
   const send = async (body: string) => {
     if (!body.trim() || busy) return;
     setBusy(true);
+    const after = items[items.length - 1]?.n ?? -1;
     try {
       await invoke("send_message", { sessionId: agent.id, text: body, peer: peer || null });
-      setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString() }]);
+      setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
       setText("");
       stick.current = true;
       onSent(agent);
@@ -1012,7 +1015,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
           {convErr && <div className="banner bad small">{convErr}</div>}
           {shown.length === 0 && !convErr && <p className="hint center">まだチャットが無い</p>}
-          {shown.map((x, i) => <Bubble key={x.n ?? `p${i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
+          {shown.map((x, i) => <Bubble key={x.n ?? `p${x.at ?? i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "approval" && (
             <Approval agent={agent} peer={peer} onDone={(m) => onSent2(m)} onError={onError} />
           )}
@@ -1300,15 +1303,7 @@ function LetterBubble({ item }: { item: ConvItem }) {
   const raw = item.letter?.fromRaw ?? null;
   const who = useLetterPeer(raw, item.letter?.fromName);
   const name = who?.name ?? item.letter?.fromName ?? raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? "別のセッション";
-  return (
-    <div className="msg kid letter">
-      <div className="mini-av"><Avatar pick={who?.avatar} seed={who?.id ?? name} mood="idle" role={who?.parent ? "child" : "parent"} size={32} /></div>
-      <div>
-        <div className="meta"><b>{name}</b>{timeOf(item.at)}</div>
-        <div className="b"><Markdown text={item.text} /></div>
-      </div>
-    </div>
-  );
+  return <LetterView pick={who?.avatar} seed={who?.id ?? name} role={who?.parent ? "child" : "parent"} name={name} at={item.at} text={item.text} />;
 }
 
 /** 送ったお手紙。このセッション自身の発言として出し、名前の行に宛先（→ 名前）を添える。吹き出しは肌色 */
@@ -1316,16 +1311,27 @@ function SentLetter({ item, agent, lineageDepth }: { item: ConvItem; agent: Agen
   const s = item.sent!;
   const who = useLetterPeer(s.to ?? null, s.to ?? null);
   const to = s.create ? "新しい子" : who?.name ?? (s.to ? String(s.to).replace(/^uds:.*\/(\d+)\.sock$/, "pid $1") : "相手");
+  return <LetterView pick={agent.avatar} seed={agent.id} role={roleOf(lineageDepth)} name={agent.name} to={`→ ${to}${s.peer ? `（${s.peer}）` : ""}`} at={item.at} text={s.text || s.summary || ""} />;
+}
+
+type LetterViewProps = { pick?: Agent["avatar"]; seed: string; role: Role; name: string; to?: string; at?: string | number | null; text: string };
+/**
+ * お手紙の吹き出しの見た目。お手紙の相手は町の一覧（TownCtx）から引くので、一覧を取るたびに上の2つは描き直される。
+ * 見た目に使う値が変わらなければ、ここで止める（#10）
+ */
+const LetterView = memo(function LetterView({ pick, seed, role, name, to, at, text }: LetterViewProps) {
+  chatPerf.bubble++;
   return (
     <div className="msg kid letter">
-      <div className="mini-av"><Avatar pick={agent.avatar} seed={agent.id} mood="idle" role={roleOf(lineageDepth)} size={32} /></div>
+      <div className="mini-av"><Avatar pick={pick} seed={seed} mood="idle" role={role} size={32} /></div>
       <div>
-        <div className="meta"><b>{agent.name}</b><span className="to">→ {to}{s.peer ? `（${s.peer}）` : ""}</span>{timeOf(item.at)}</div>
-        <div className="b"><Markdown text={s.text || s.summary || ""} /></div>
+        <div className="meta"><b>{name}</b>{to && <span className="to">{to}</span>}{timeOf(at)}</div>
+        <div className="b"><Markdown text={text} /></div>
       </div>
     </div>
   );
-}
+}, (a, b) => a.seed === b.seed && a.role === b.role && a.name === b.name && a.to === b.to && a.at === b.at && a.text === b.text
+  && a.pick?.char === b.pick?.char && a.pick?.hue === b.pick?.hue);
 
 function fromLabel(from: string): string {
   // "from agent:<名前> via <ノード>" / "from local via <ノード>" / "from <メール> via <ノード>"
