@@ -63,6 +63,15 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
         await done;
         await sleep(800);
       }
+      // ?type=1: 1字ずつ待たずに term_input を投げ、打った順に届くかを見る（#3）。届いた画面は ccn の replay で確かめる
+      if (params.get("type")) {
+        const text = "ordercheck-0123456789abcdefghijklmnopqrstuvwxyz";
+        for (const ch of text) call("term_input", { sessionId: last, text: ch, peer: null });
+        await sleep(1500);
+        await log({ typed: text, id: last });
+        await sleep(15000);
+        await call("term_input", { sessionId: last, text: "\x15", peer: null });
+      }
     }
   } finally {
     h().select(null);

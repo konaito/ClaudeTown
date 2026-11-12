@@ -7,6 +7,12 @@ import "@xterm/xterm/css/xterm.css";
 import { call, openTerminal } from "../bridge";
 import { perfMark, perfEnd, perfWaitingPrompt } from "./perf";
 
+const SIZE_KEY = "claude-town.term-size";
+/** 最後に開いたターミナルの大きさ。新しい世帯をこの大きさで起動する */
+export function lastTermSize(): { cols: number; rows: number } | null {
+  try { const v = JSON.parse(localStorage.getItem(SIZE_KEY) ?? "null"); return v?.cols && v?.rows ? v : null; } catch { return null; }
+}
+
 const b64ToBytes = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
 export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionId: string; peer: string | null; onError: (m: string) => void; takeEarly?: (id: string) => string }) {
@@ -56,6 +62,7 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
       const key = `${term.cols}x${term.rows}`;
       if (key === lastSize) return;
       lastSize = key;
+      try { localStorage.setItem(SIZE_KEY, JSON.stringify({ cols: term.cols, rows: term.rows })); } catch { /* 残せなくても動きは変えない */ }
       // 境目のドラッグ中は大きさが続けて変わるので、PTY への通知は止まってから 150ms 後に1回だけ送る（画面の fit はすぐ）
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
@@ -93,6 +100,9 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
           break;
         case "exit":
           setStatus(`終わった（${e.data?.reason ?? ""}${e.data?.code != null ? `、終了コード ${e.data.code}` : ""}）`);
+          break;
+        case "input_error":
+          onError(e.data?.message ?? "ターミナルに書けなかった");
           break;
         case "error":
           setStatus(e.data?.message ?? "ターミナルに繋がらない");
