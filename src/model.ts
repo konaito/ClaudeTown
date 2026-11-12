@@ -122,14 +122,11 @@ export function buildTree(agents: Agent[]) {
   }
   for (const list of childrenOf.values()) list.sort((x, y) => (x.startedAt ?? 0) - (y.startedAt ?? 0));
   const collect = (a: Agent): Agent[] => [a, ...(childrenOf.get(a.id) ?? []).flatMap(collect)];
-  const rank = (f: Family) => {
-    const moods = f.all.map(moodOf);
-    return moods.some((m) => NEEDS_YOU.includes(m)) ? 0 : moods.includes("working") ? 1 : 2;
-  };
   const families = agents
     .filter((a) => !a.parent)
     .map((root) => ({ root, all: collect(root) }))
-    .sort((a, b) => rank(a) - rank(b) || (b.all.length - a.all.length));
+    // 世帯の並び順は、親（根）のセッションの開始時刻の順、同じなら ID の順。大きさや状態では並べ替えない（docs/design/household-packing.md）
+    .sort((a, b) => (a.root.startedAt ?? 0) - (b.root.startedAt ?? 0) || (a.root.id < b.root.id ? -1 : a.root.id > b.root.id ? 1 : 0));
   const lineage = (a: Agent): Agent[] => {
     const out: Agent[] = [];
     for (let cur: Agent | undefined = a; cur; cur = cur.parent ? byId.get(cur.parent) : undefined) out.unshift(cur);

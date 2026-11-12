@@ -25,6 +25,8 @@ export const LAYOUT = {
   keepMargin: 0.9,
   /** 家族の枠の内側の余白 */
   framePad: 18,
+  /** 世帯モジュール（淡い色の枠）の寸法。並べ方（pack.ts）はこの大きさで箱を置く */
+  group: { padX: 18, padTop: 12, padBottom: 18, head: 34, border: 1.5, minW: 240, gap: 28 },
   /** 新しい座標へ移るアニメーションの時間（ms） */
   moveMs: 350,
 };
@@ -32,7 +34,7 @@ export const LAYOUT = {
 /** 名前の幅の見積もり（11px の太字）。全角は 11px、半角は 6.8px で数える */
 export function textWidth(s: string, fontPx = 11): number {
   let w = 0;
-  for (const ch of s) w += /[\u0000-ÿ]/.test(ch) ? fontPx * 0.62 : fontPx;
+  for (const ch of s) w += /[\u0000-\u00ff]/.test(ch) ? fontPx * 0.62 : fontPx;
   return w;
 }
 

@@ -10,6 +10,7 @@ import {
 import { Markdown } from "./Markdown";
 import { layoutFamily, type LNode } from "./layout/layout";
 import { LAYOUT, boxOf } from "./layout/params";
+import { packHouseholds } from "./layout/pack";
 
 const POLL_MS = 2000;
 const CONV_POLL_MS = 2500;
@@ -120,19 +121,23 @@ export default function App() {
               <NewHousehold big disabled={!local} onCreated={(r) => { toast("最初の世帯を作った"); if (r?.id) setSelected(r.id); }} onError={(m) => toast(m, true)} />
             </div>
           )}
-          <Stage zoom={zoom} deps={agents.map((a) => `${a.id}|${a.parent ?? ""}|${a.name}`).join(",")} onBlank={() => setSelected(null)}>
-            {/* 並べ方は大きいグループから（一番大きいものを左、残りを右に詰める） */}
-            {[...tree.families].sort((x, y) => y.all.length - x.all.length).map((f) => (
-              <Group key={f.root.id} root={f.root} all={f.all} count={f.all.length}
-                onRename={async (name) => {
-                  try { await invoke("set_house_name", { sessionId: f.root.id, name }); toast(name ? `世帯の名前を「${name}」にした` : "世帯の名前を戻した"); }
-                  catch (e) { toast(`世帯の名前を変えられなかった: ${e}`, true); }
-                }}
-                hasNeeds={f.all.some((a) => NEEDS_YOU.includes(moodOf(a)))}>
-                <FamilyCanvas all={f.all} selected={selected} onSelect={(a) => setSelected(a.id)} onFocus={focus} />
-              </Group>
-            ))}
-          </Stage>
+          <Stage zoom={zoom} onBlank={() => setSelected(null)} items={tree.families.map((f) => {
+            const r = layoutOf(f.all);
+            const size = groupSize(r);
+            return {
+              id: f.root.id, ...size,
+              node: (
+                <Group root={f.root} all={f.all} count={f.all.length} size={size}
+                  onRename={async (name) => {
+                    try { await invoke("set_house_name", { sessionId: f.root.id, name }); toast(name ? `世帯の名前を「${name}」にした` : "世帯の名前を戻した"); }
+                    catch (e) { toast(`世帯の名前を変えられなかった: ${e}`, true); }
+                  }}
+                  hasNeeds={f.all.some((a) => NEEDS_YOU.includes(moodOf(a)))}>
+                  <FamilyCanvas all={f.all} result={r} selected={selected} onSelect={(a) => setSelected(a.id)} onFocus={focus} />
+                </Group>
+              ),
+            };
+          })} />
 
           <div className="left-foot">
             <div className="zoom">
@@ -203,52 +208,39 @@ function NextRow({ needs, done, working, total, onSelect, onFocus }: {
 // ---------- 家と木 ----------
 
 /**
- * グループを並べる場所。一番大きいグループを左に置き、残りは右の余った幅に折り返して詰める。
- * 右に一番広い小さいグループが入る倍率が 0.6 を下回るときは、残りを下に回して大きいグループだけで幅を合わせる。
- * zoom が fit のときはこの倍率を使う（最小 0.4。それでも入らなければ横にスクロールする）。
+ * 世帯モジュールを並べる場所（docs/design/household-packing.md、src/layout/pack.ts）。
+ * 入力順（親の開始時刻、同じなら ID）に、決まった横幅の中へ上詰めで置く。大きさや状態で並べ替えない。
+ * zoom が fit のときは、一番広い世帯が横幅に入る倍率にする（最小 0.4）。横幅はその倍率で割り戻した幅。
  */
-function Stage({ zoom, deps, onBlank, children }: { zoom: number | "fit"; deps: string; onBlank: () => void; children: React.ReactNode[] }) {
+function Stage({ zoom, items, onBlank }: { zoom: number | "fit"; items: { id: string; w: number; h: number; node: React.ReactNode }[]; onBlank: () => void }) {
   const outer = useRef<HTMLDivElement>(null);
-  const inner = useRef<HTMLDivElement>(null);
-  const [fit, setFit] = useState(1);
   const [avail, setAvail] = useState(1000);
-  const [side, setSide] = useState(true);
-  const [bigW, setBigW] = useState(0);
-  const applied = useRef(1);
-  const GAP = 28;
   useLayoutEffect(() => {
-    const measure = () => {
-      if (!outer.current || !inner.current) return;
-      const w = outer.current.clientWidth - 36;
-      // 画面上の幅は zoom をかけた後の値なので、かけている倍率で割って元の幅に戻す
-      const widths = Array.from(inner.current.querySelectorAll<HTMLElement>(".group"))
-        .map((g) => g.getBoundingClientRect().width / applied.current);
-      const big = widths[0] ?? 1;
-      const restMax = Math.max(0, ...widths.slice(1));
-      const withSide = restMax ? w / (big + GAP + restMax) : w / big;
-      const useSide = restMax > 0 && withSide >= 0.6;
-      setSide(useSide);
-      setBigW(big);
-      setAvail(w);
-      setFit(Math.max(0.4, Math.min(1, useSide ? withSide : w / big)));
-    };
+    const measure = () => { if (outer.current) setAvail(outer.current.clientWidth - 36); };
     measure();
     const ro = new ResizeObserver(measure);
     if (outer.current) ro.observe(outer.current);
     return () => ro.disconnect();
-  }, [deps]);
+  }, []);
+  const widest = Math.max(1, ...items.map((b) => b.w));
+  const fit = Math.max(0.4, Math.min(1, avail / widest));
   const scale = zoom === "fit" ? fit : zoom;
-  applied.current = scale;
   const width = Math.floor(avail / scale);
-  const [first, ...rest] = children;
+  const packed = packHouseholds(items.map(({ id, w, h }) => ({ id, w, h })), width, LAYOUT.group.gap);
+  const at = new Map(packed.items.map((p) => [p.id, p]));
   return (
     <div className="stage" ref={outer}
       onClick={(e) => { if (!(e.target as HTMLElement).closest(".card, .mini, .pop, .g-head")) onBlank(); }}>
-      <div className={`stage-inner ${side ? "side" : "below"}`} ref={inner} style={{ zoom: scale, width }}>
-        {first}
-        {rest.length > 0 && (
-          <div className="rest" style={side ? { width: Math.max(0, width - bigW - GAP) } : undefined}>{rest}</div>
-        )}
+      <div className="stage-inner" style={{ zoom: scale, width, height: packed.height + 20 }}>
+        {items.map((b) => {
+          const p = at.get(b.id)!;
+          return (
+            <div key={b.id} className="slot"
+              style={{ left: p.x, top: p.y, width: b.w, height: b.h, transition: `left ${LAYOUT.moveMs}ms ease, top ${LAYOUT.moveMs}ms ease` }}>
+              {b.node}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -258,15 +250,15 @@ function Stage({ zoom, deps, onBlank, children }: { zoom: number | "fit"; deps: 
 const GROUP_TINTS = ["#f3f7ff", "#fff6ec", "#f1faf3", "#f8f3ff", "#fff2f5", "#eff9f9", "#fbf8ec"];
 const GROUP_LINES = ["#d9e4fb", "#f6dfc4", "#d3ecd9", "#e4d8f6", "#f6d6df", "#cfe9e9", "#ece4c2"];
 
-function Group({ root, all, count, hasNeeds, onRename, children }: {
-  root: Agent; all: Agent[]; count: number; hasNeeds: boolean; onRename: (name: string) => void; children: React.ReactNode;
+function Group({ root, all, count, size, hasNeeds, onRename, children }: {
+  root: Agent; all: Agent[]; count: number; size: { w: number; h: number }; hasNeeds: boolean; onRename: (name: string) => void; children: React.ReactNode;
 }) {
   const house = houseNameOf(root, all);
   const [editing, setEditing] = useState(false);
   const tint = hashOf(root.id) % GROUP_TINTS.length;
   return (
     <section className={`group ${hasNeeds ? "has-needs" : ""}`}
-      style={{ background: GROUP_TINTS[tint], borderColor: hasNeeds ? undefined : GROUP_LINES[tint] }}>
+      style={{ width: size.w, height: size.h, background: GROUP_TINTS[tint], borderColor: hasNeeds ? undefined : GROUP_LINES[tint] }}>
       <div className="g-head" onDoubleClick={() => setEditing(true)}
         title={`ダブルクリックで名前を変える（${house.by === "human" ? "あなたが付けた名前" : house.by === "agent" ? `${root.name}が付けた名前` : "仮の名前"}）`}>
         {editing ? (
@@ -301,31 +293,50 @@ const prevArc = new Map<string, number>();
  * 配置を計算し直すのは、家族の顔ぶれ（id、親、名前）が変わったときだけ。状態や会話の更新では動かさない。
  * 線は、配置の検査に使ったのと同じ「親の中心から子の中心」の線分を SVG で引く。
  */
-function FamilyCanvas({ all, selected, onSelect, onFocus }: {
-  all: Agent[]; selected: string | null; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;
-}) {
+/**
+ * 世帯の中の配置を計算する（src/layout/layout.ts）。顔ぶれ（id、親、名前、開始時刻）が変わったときだけ計算し直し、
+ * 状態や会話の更新では動かさない。前に選んだ候補を世帯ごとに引き継ぐ。
+ */
+const layoutCache = new Map<string, { sig: string; result: ReturnType<typeof layoutFamily> }>();
+function layoutOf(all: Agent[]) {
   const rootId = all[0].id;
   const sig = all.map((a) => `${a.id}|${a.parent ?? ""}|${a.name}|${a.startedAt ?? 0}`).join(",");
-  const result = useMemo(() => {
-    const inFam = new Set(all.map((a) => a.id));
-    const depthOf = new Map<string, number>();
-    const d = (a: Agent): number => {
-      if (depthOf.has(a.id)) return depthOf.get(a.id)!;
-      const p = a.parent && inFam.has(a.parent) ? all.find((x) => x.id === a.parent) : undefined;
-      const v = p ? d(p) + 1 : 0;
-      depthOf.set(a.id, v);
-      return v;
-    };
-    const nodes: LNode[] = all.map((a) => {
-      const b = boxOf(d(a), a.name);
-      return { id: a.id, parent: a.parent && inFam.has(a.parent) ? a.parent : null, order: a.startedAt ?? 0, w: b.w, h: b.h };
-    });
-    const r = layoutFamily(nodes, { prevArcIndex: prevArc.get(rootId) });
-    prevArc.set(rootId, r.arcIndex);
-    if (!r.valid) console.warn("Claude Town: 配置の検査に通る候補が無かった", rootId, r.metrics, r.candidates);
-    return r;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sig]);
+  const hit = layoutCache.get(rootId);
+  if (hit && hit.sig === sig) return hit.result;
+  const inFam = new Set(all.map((a) => a.id));
+  const depthOf = new Map<string, number>();
+  const d = (a: Agent): number => {
+    if (depthOf.has(a.id)) return depthOf.get(a.id)!;
+    const p = a.parent && inFam.has(a.parent) ? all.find((x) => x.id === a.parent) : undefined;
+    const v = p ? d(p) + 1 : 0;
+    depthOf.set(a.id, v);
+    return v;
+  };
+  const nodes: LNode[] = all.map((a) => {
+    const b = boxOf(d(a), a.name);
+    return { id: a.id, parent: a.parent && inFam.has(a.parent) ? a.parent : null, order: a.startedAt ?? 0, w: b.w, h: b.h };
+  });
+  const r = layoutFamily(nodes, { prevArcIndex: prevArc.get(rootId) });
+  prevArc.set(rootId, r.arcIndex);
+  if (!r.valid) console.warn("Claude Town: 配置の検査に通る候補が無かった", rootId, r.metrics, r.candidates);
+  layoutCache.set(rootId, { sig, result: r });
+  return r;
+}
+
+/** 世帯モジュールの外寸（並べ方に渡す大きさ）。描くときもこの大きさにする */
+function groupSize(r: ReturnType<typeof layoutFamily>) {
+  const G = LAYOUT.group;
+  const cw = r.metrics.width + LAYOUT.framePad * 2, ch = r.metrics.height + LAYOUT.framePad * 2;
+  return { w: Math.ceil(Math.max(G.minW, cw + G.padX * 2 + G.border * 2)), h: Math.ceil(G.head + ch + G.padTop + G.padBottom + G.border * 2) };
+}
+
+/**
+ * 家族の木を、配置計算が決めた座標に置いて描く。
+ * 線は、配置の検査に使ったのと同じ「親の中心から子の中心」の線分を SVG で引く。
+ */
+function FamilyCanvas({ all, result, selected, onSelect, onFocus }: {
+  all: Agent[]; result: ReturnType<typeof layoutFamily>; selected: string | null; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;
+}) {
   const pad = LAYOUT.framePad;
   const minX = Math.min(...result.nodes.map((n) => n.x - n.w / 2));
   const minY = Math.min(...result.nodes.map((n) => n.y - n.h / 2));
