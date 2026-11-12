@@ -561,13 +561,17 @@ function FamilyCanvas({ all, result, selected, onSelect, onFocus }: {
         return (
           <div key={n.id} className={`fnode ${selected === n.id ? "open" : ""} ${delay !== undefined ? "dying" : ""} ${n.depth >= 2 ? "is-mini" : ""}`}
             style={{ left: n.x - n.w / 2 + ox, top: n.y - n.h / 2 + oy, width: n.w, height: n.h, transition: `left ${LAYOUT.moveMs}ms ease, top ${LAYOUT.moveMs}ms ease`, ["--kd" as string]: `${delay ?? 0}ms` }}>
-            <Card agent={a} depth={n.depth} selected={selected === n.id} onSelect={onSelect} onFocus={onFocus} />
+            {/* × はカード（札）の角を基準に置くので、カードと同じ大きさの包みに入れる（カードは overflow: hidden） */}
+            <div className={`fnode-body ${n.depth >= 2 ? "k-mini" : "k-card"}`}
+              style={n.depth >= 2 ? { ["--kx-k" as string]: boxOf(n.depth, a.name).scale } : undefined}>
+              <Card agent={a} depth={n.depth} selected={selected === n.id} onSelect={onSelect} onFocus={onFocus} />
+              {a.capabilities?.stop && delay === undefined && (
+                <button className="kill-x" title="閉じる（⌘ を押しながらで確認なし）" aria-label={`${a.name} を閉じる`}
+                  onClick={(e) => { e.stopPropagation(); kill.ask(a, e.metaKey); }}
+                  onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}>×</button>
+              )}
+            </div>
             {delay !== undefined && <KillFx w={n.w} h={n.h} />}
-            {a.capabilities?.stop && delay === undefined && (
-              <button className="kill-x" title="閉じる（⌘ を押しながらで確認なし）" aria-label={`${a.name} を閉じる`}
-                onClick={(e) => { e.stopPropagation(); kill.ask(a, e.metaKey); }}
-                onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}>×</button>
-            )}
           </div>
         );
       })}

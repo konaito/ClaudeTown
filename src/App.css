@@ -300,8 +300,16 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .ap-detail { font-family: ui-monospace, Menlo, monospace; }
 
 /* ノードの右上の小さい ×。枠線の上に半分乗せる。ふだんは薄く、ホバーで濃く。押せる範囲は 24px */
+/* × の中心は、角丸の枠線（太さの中心線）の 45 度の位置: 右端と上端から d = r − (r − bw/2)·cos45° 内側。
+   r と bw はカードと札で違うので、包み（.fnode-body）に持たせる。.card と .mini の border-radius と border の太さに合わせる */
+.fnode-body { position: relative; display: flex; flex: none; --kx-size: 15px; }
+.fnode-body.k-card { --kx-r: 14px; --kx-bw: 1.5px; }
+/* 札は zoom（--kx-k）で縮むので、角丸と枠線も同じ倍率にする */
+.fnode-body.k-mini { --kx-r: calc(10px * var(--kx-k, 1)); --kx-bw: calc(1.5px * var(--kx-k, 1)); }
 .kill-x {
-  position: absolute; top: -7px; right: -7px; z-index: 8; width: 15px; height: 15px; padding: 0; border-radius: 50%;
+  --kx-d: calc(var(--kx-r) - (var(--kx-r) - var(--kx-bw) / 2) * 0.70711);
+  position: absolute; top: calc(var(--kx-d) - var(--kx-size) / 2); right: calc(var(--kx-d) - var(--kx-size) / 2);
+  z-index: 8; width: var(--kx-size); height: var(--kx-size); padding: 0; border-radius: 50%; box-sizing: border-box; transform-origin: 50% 50%;
   display: grid; place-items: center; font-size: 11px; line-height: 1; color: #9a96a3; background: #fff; border: 1px solid #dcd8d1;
   opacity: 0.5; transition: opacity 0.12s, color 0.12s, border-color 0.12s;
 }
@@ -337,7 +345,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 /* 最後にノードごと消える。消えたあと周りが新しい配置へ動いて詰まる */
 .fnode.dying { animation: kill-out 1.15s var(--kd) forwards; }
 @keyframes kill-out { 0%, 80% { opacity: 1; } 100% { opacity: 0; } }
-.fnode.dying > .card, .fnode.dying > .mini { pointer-events: none; }
+.fnode.dying .card, .fnode.dying .mini { pointer-events: none; }
 @media (prefers-reduced-motion: reduce) {
   .kill-fx { display: none; }
   .fc-dead .fc-body > img:first-child, .fc-deadimg { animation: none; }
