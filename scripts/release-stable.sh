@@ -11,6 +11,8 @@
 #   3. できた .app の識別子と名前が安定版の値か確かめる（違えば中断）
 #   4. 安定版が動いていれば、その実行ファイルの pid だけを終わらせる
 #   5. 今の /Applications/Claude Town.app を退避先に移し（1つ前の版として残す）、新しい .app を入れる
+#      タグの状態 hook（hooks/ と scripts/hook.py）を退避先と同じ置き場の hooks/ と scripts/ に写す
+#      （~/.claude/settings.json はここを登録するので、作業ツリーの hook を書き換えても安定版に出る内容は変わらない）
 #   6. 安定版を起動する
 #
 # 戻すときは scripts/rollback-stable.sh（今の版と1つ前の版を入れ替える）。
@@ -99,6 +101,7 @@ fi
 mkdir -p "$DEST_DIR"
 mv "$staged" "$DEST"
 echo "$tag $sha" > "$STATE/current.ref"
+install_hooks "$repo" "$tag" "$STATE"
 echo "$(date '+%Y-%m-%d %H:%M:%S') release $tag $sha" >> "$STATE/releases.log"
 echo "入れた: $DEST ($tag $sha)"
 

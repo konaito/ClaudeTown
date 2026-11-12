@@ -34,3 +34,31 @@ stop_stable() {
   done
   return 0
 }
+
+# タグの状態 hook（hooks/ と scripts/hook.py）を、安定版の置き場（$2）の下に同じ相対位置で写す。
+#   install_hooks <リポジトリ> <タグか ref> <置き場>
+# fc-report.py は ../scripts/hook.py を世帯の名付けの案内に使うので、hook.py も写す。
+# 写す前に一時の場所へ取り出して構文を確かめ、ファイルごとに mv で置き換える（登録先のファイルが無い瞬間を作らない。
+# 登録先が無いと python3 が 2 で終わり、PreToolUse の hook としては道具を止める扱いになる）。
+install_hooks() {
+  local repo="$1" ref="$2" dest="$3" tmp f
+  tmp="$dest/hooks-incoming"
+  rm -rf "$tmp"
+  mkdir -p "$tmp"
+  git -C "$repo" archive "$ref" hooks scripts/hook.py | tar -x -C "$tmp"
+  [ -f "$tmp/hooks/fc-report.py" ] || { echo "タグに hooks/fc-report.py が無い: $ref" >&2; rm -rf "$tmp"; return 1; }
+  for f in hooks/fc-report.py scripts/hook.py; do
+    [ -f "$tmp/$f" ] || continue
+    /usr/bin/python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$tmp/$f" \
+      || { echo "構文が読めない: $ref:$f" >&2; rm -rf "$tmp"; return 1; }
+  done
+  (cd "$tmp" && find . -type f) | while read -r f; do
+    f="${f#./}"
+    mkdir -p "$dest/$(dirname "$f")"
+    cp -p "$tmp/$f" "$dest/$f.incoming"
+    mv -f "$dest/$f.incoming" "$dest/$f"
+  done
+  rm -rf "$tmp"
+  echo "$ref $(git -C "$repo" rev-parse "$ref^{commit}")" > "$dest/hooks.ref"
+  echo "状態 hook を写した: $ref -> $dest/hooks/"
+}
