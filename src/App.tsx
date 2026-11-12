@@ -610,7 +610,7 @@ function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect:
 
 /**
  * 人狼の「夜に襲われる」風の演出。暗くなる → 赤い爪痕の3本線が順に走る → 倒れて灰色 → 幽霊が昇って消える。
- * 爪痕は本人の見本（/tmp/fc-claw-ref.png）どおり、左下から右上へ約55度の太い赤線を3本、等間隔に引く。
+ * 爪痕は本人の見本（/tmp/fc-claw-ref.png）どおりの約55度の太い赤線3本を、等間隔に置く。引く向きは右上の端から左下の端へ（2026-11-12 に上から下へ変えた）。ずらしは右の線から 70ms ずつ。
  * 太さはノードの高さの 5.5%。ノードの角丸の内側で切れる（.kill-fx の overflow: hidden）。
  */
 const CLAW = { color: "#E8352B", angleDeg: 55, width: 0.055, starts: [0.11, 0.37, 0.63] };
@@ -621,11 +621,12 @@ function KillFx({ w, h }: { w: number; h: number }) {
       <div className="kill-night" />
       <svg className="kill-claws" width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
         {CLAW.starts.map((s, i) => {
-          const x1 = s * w, y1 = h + 2, x2 = x1 + dx, y2 = -2;
+          // 上から下へ引く: 描き始め（x1, y1）を右上の端、描き終わり（x2, y2）を左下の端にする。線の位置と角度は見本のまま
+          const x2 = s * w, y2 = h + 2, x1 = x2 + dx, y1 = -2;
           const len = Math.hypot(x2 - x1, y2 - y1);
           return (
             <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke={CLAW.color} strokeWidth={Math.max(2, h * CLAW.width)} strokeLinecap="butt"
-              style={{ strokeDasharray: len, strokeDashoffset: len, ["--cl" as string]: `${len}`, ["--cd" as string]: `${i * 70}ms` }} />
+              style={{ strokeDasharray: len, strokeDashoffset: len, ["--cl" as string]: `${len}`, ["--cd" as string]: `${(CLAW.starts.length - 1 - i) * 70}ms` }} />
           );
         })}
       </svg>
