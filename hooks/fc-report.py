@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -29,8 +30,12 @@ STATE_DIR = Path(os.environ.get("FC_STATE_DIR", Path.home() / ".family-computing
 LETTERS = Path(os.environ.get("FC_LETTERS", Path.home() / ".family-computing" / "letters.jsonl"))
 LETTERS_MAX = 1024 * 1024
 HOUSES = Path(os.environ.get("FC_HOUSES", Path.home() / ".family-computing" / "houses.json"))
-# 子を作る道具。ccn の MCP の create_session（親は from 行で ccn に残る）
-MAKE_CHILD = "mcp__ccn__create_session"
+# 子を作る道具。ccn の MCP の create_session（親は from 行で ccn に残る）と、Specter の spawn_child（ccn には親が残らない）
+MAKE_CHILD = ("mcp__ccn__create_session", "mcp__specter-agents__spawn_child")
+# 振り分けの場所（依頼を振り分けるだけの場所）。src-tauri/src/naming.rs と src/model.ts の一覧と同じ。
+# ホーム（/Users/<名前> か /home/<名前>）からの相対の分（空はホームそのもの）と、絶対パスの分
+DISPATCH_UNDER_HOME = ["", "Documents", "Documents/meta", ".local/share/ccn/lobby"]
+DISPATCH_ABSOLUTE = ["/", "/tmp", "/private/tmp", "/root"]
 NAME_CMD = f"python3 {Path(__file__).resolve().parent.parent / 'scripts' / 'hook.py'} name"
 KEEP_SEC = 3 * 24 * 3600
 MAX = 90
@@ -71,8 +76,8 @@ def first_line(s):
 
 def describe_tool(name, inp):
     inp = inp if isinstance(inp, dict) else {}
-    if name == MAKE_CHILD:
-        return clip(f"子を呼ぶ: {inp.get('name') or first_line(inp.get('prompt')) or ''}", 60)
+    if name in MAKE_CHILD:
+        return clip(f"子を呼ぶ: {inp.get('name') or first_line(inp.get('prompt') or inp.get('task')) or ''}", 60)
     if name.startswith("mcp__"):
         parts = name.split("__")
         return f"{parts[1] if len(parts) > 1 else 'mcp'}: {parts[-1]}"
@@ -153,26 +158,73 @@ def write(sid, patch, data):
     os.replace(tmp, p)
 
 
-def house_nudge(sid):
-    """ccn で子を作ったセッションに世帯の名前が無ければ、名前を付けるよう1回だけ促す文を返す。
-    hook からは自分が根かどうか分からないので、子を作った中間の親にも1回出る（名前は根の分だけ画面に出る）"""
+def is_dispatch_place(cwd):
+    """cwd が振り分けの場所か。パスの形だけで決める（src-tauri/src/naming.rs の is_dispatch_place と同じ）"""
+    segs = [x for x in str(cwd or "").split("/") if x]
+    if "/" + "/".join(segs) in DISPATCH_ABSOLUTE:
+        return True
+    if len(segs) >= 2 and segs[0] in ("Users", "home"):
+        return "/".join(segs[2:]) in DISPATCH_UNDER_HOME
+    return False
+
+
+def project_of(cwd):
+    """cwd のプロジェクトの名前。git の worktree なら本体のディレクトリの名前、`<名前>.wt/<x>` なら <名前>、
+    それ以外は最後の名前（src-tauri/src/naming.rs の project_of と同じ）"""
+    try:
+        dot = Path(cwd) / ".git"
+        if dot.is_file():
+            raw = next((l[len("gitdir:"):].strip() for l in dot.read_text().splitlines() if l.startswith("gitdir:")), "")
+            gitdir = Path(raw) if os.path.isabs(raw) else Path(cwd) / raw
+            common = None
+            if (gitdir / "commondir").is_file():
+                c = (gitdir / "commondir").read_text().strip()
+                common = Path(c) if os.path.isabs(c) else gitdir / c
+            elif gitdir.parent.name == "worktrees":
+                common = gitdir.parent.parent
+            if common is not None:
+                common = Path(os.path.normpath(common))
+                name = common.parent.name if common.name == ".git" else common.name.removesuffix(".git")
+                if name:
+                    return name
+    except Exception:
+        pass
+    segs = [x for x in str(cwd or "").split("/") if x]
+    if len(segs) >= 2 and segs[-2].endswith(".wt") and len(segs[-2]) > 3:
+        return segs[-2][:-3]
+    return segs[-1] if segs else None
+
+
+def house_nudge(sid, own_cwd, child_cwd):
+    """振り分けの場所（meta など）で動く親が、別のプロジェクトで子を作ったら、世帯の名前をそのプロジェクトの
+    ディレクトリの名前にするよう促す文を返す。プロジェクトごとに1回だけ。
+    振り分けの場所でない親は、自分の cwd のプロジェクトがそのまま名前になるので促さない"""
+    own_cwd, child_cwd = (os.path.expanduser(str(c)) if c else c for c in (own_cwd, child_cwd))
+    if not own_cwd or not is_dispatch_place(own_cwd) or not child_cwd or is_dispatch_place(child_cwd):
+        return None
+    project = project_of(child_cwd)
+    if not project:
+        return None
     try:
         houses = json.loads(HOUSES.read_text())
     except Exception:
         houses = {}
-    if (houses.get(sid) or {}).get("name"):
+    cur = houses.get(sid) or {}
+    if cur.get("by") == "human" or cur.get("name") == project:
         return None
-    try:
-        cur = json.loads((STATE_DIR / f"{sid}.json").read_text())
-    except Exception:
+    nudged = cur_field(sid, "house_nudged_projects") or []
+    if not isinstance(nudged, list) or project in nudged:
         return None
-    if not cur.get("made_child") or cur.get("house_nudged"):
-        return None
-    write(sid, {"house_nudged": True}, {})
+    write(sid, {"house_nudged_projects": nudged + [project]}, {})
+    cmd = f"`{NAME_CMD} {shlex.quote(project)}`"
+    head = "Claude Town: この世帯の名前は、作業しているプロジェクトのディレクトリの名前にします。依頼の文の要約は名前にしません。"
+    if cur.get("name"):
+        return (
+            f"{head}今の名前は「{cur.get('name')}」です。子を {project} で動かしました。"
+            f"この世帯で主に作業するのが {project} なら、Bash で {cmd} を1回実行して付け直してください。そうでなければ何もしません。"
+        )
     return (
-        "Claude Town: あなたは子を持つ親なので、この世帯（あなたとその子孫）の名前を付けてください。"
-        "いまの依頼の中身から、短い名前（12字以内。例「TANGLE の掘り出し」「ccn の引っ越し」）を決めて、"
-        f"Bash で `{NAME_CMD} \"<世帯の名前>\"` を1回実行します。仕事の中身が大きく変わったら付け直してかまいません。"
+        f"{head}子を {project} で動かしたので、Bash で {cmd} を1回実行してください。"
         "本人が付けた名前があるときは変わりません。"
     )
 
@@ -236,7 +288,7 @@ def cur_field(sid, key):
 
 
 # お手紙（セッションどうしのやり取り）。送った道具の名前 → 記録の種類
-LETTER_TOOLS = {"SendMessage": "send", "mcp__ccn__send_message": "ccn_send", MAKE_CHILD: "ccn_create"}
+LETTER_TOOLS = {"SendMessage": "send", "mcp__ccn__send_message": "ccn_send", "mcp__ccn__create_session": "ccn_create"}
 UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
@@ -332,9 +384,6 @@ def main():
         if asked and (by == "human" or cur_field(sid, "asked_by") != "human"):
             patch.update({"asked": asked, "asked_by": by})
         write(sid, patch, data)
-        nudge = house_nudge(sid)
-        if nudge:
-            emit_context("UserPromptSubmit", nudge)
     elif ev == "PreToolUse":
         p = STATE_DIR / f"{sid}.json"
         try:
@@ -362,9 +411,11 @@ def main():
                 letter_sent(sid, data.get("tool_name"), data.get("tool_input"), data.get("tool_response"))
             except Exception:
                 pass
-        if ev == "PostToolUse" and data.get("tool_name") == MAKE_CHILD:
+        if ev == "PostToolUse" and data.get("tool_name") in MAKE_CHILD:
             write(sid, {"made_child": True}, data)
-            nudge = house_nudge(sid)
+            inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
+            # cwd を省いた子は、ccn なら受け口、Specter なら親と同じ場所で動く。どちらも振り分けの場所なので促さない
+            nudge = house_nudge(sid, data.get("cwd"), inp.get("cwd"))
             if nudge:
                 emit_context("PostToolUse", nudge)
     elif ev == "Notification":

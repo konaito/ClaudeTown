@@ -1,0 +1,104 @@
+[
+  {
+    "name": "meta の根で、子が family-computing の worktree にいる",
+    "sessions": [
+      { "id": "root0001", "cwd": "/Users/x/Documents/meta", "startedAt": 1 },
+      { "id": "kid00001", "cwd": "/Users/x/Documents/family-computing.wt/chat", "parent": "root0001", "startedAt": 2 },
+      { "id": "kid00002", "cwd": "/Users/x/Documents/elsewhere/wt9", "project": "family-computing", "parent": "root0001", "startedAt": 3 }
+    ],
+    "expect": { "root0001": "family-computing", "kid00001": "family-computing", "kid00002": "family-computing" }
+  },
+  {
+    "name": "meta の根で、子はいないが hook の名前がある",
+    "sessions": [
+      { "id": "root0001", "cwd": "/Users/x/Documents/meta", "agentName": "sidenote" }
+    ],
+    "expect": { "root0001": "sidenote" }
+  },
+  {
+    "name": "meta の根で、何も無い",
+    "sessions": [
+      { "id": "root0001", "cwd": "/Users/x/Documents/meta/" }
+    ],
+    "expect": { "root0001": "meta" }
+  },
+  {
+    "name": "worktree の子だけ（親が ccn でつながっていない）",
+    "sessions": [
+      { "id": "kid00001", "cwd": "/Users/x/Documents/family-computing.wt/chat" },
+      { "id": "kid00002", "cwd": "/Users/x/Documents/claude-code-nodes.wt/perf-idle" }
+    ],
+    "expect": { "kid00001": "family-computing", "kid00002": "claude-code-nodes" }
+  },
+  {
+    "name": "cwd の無いセッション",
+    "sessions": [
+      { "id": "abcdef0123", "title": "題" },
+      { "id": "0123456789", "cwd": "" }
+    ],
+    "expect": { "abcdef0123": "題", "0123456789": "01234567" }
+  },
+  {
+    "name": "子孫で一番多いプロジェクト。hook の名前より子孫を先に見る",
+    "sessions": [
+      { "id": "root0001", "cwd": "/Users/x/Documents/meta", "agentName": "ClaudeTown 軽量化", "startedAt": 1 },
+      { "id": "kid00001", "cwd": "/Users/x/Documents/sidenote", "parent": "root0001", "startedAt": 2 },
+      { "id": "kid00002", "cwd": "/Users/x/Documents/family-computing", "parent": "root0001", "startedAt": 3 },
+      { "id": "kid00003", "cwd": "/Users/x/Documents/family-computing.wt/idle", "parent": "root0001", "startedAt": 4 }
+    ],
+    "expect": { "root0001": "family-computing" }
+  },
+  {
+    "name": "同数なら先に始まった子孫のプロジェクト",
+    "sessions": [
+      { "id": "root0001", "cwd": "/Users/x/Documents/meta", "startedAt": 1 },
+      { "id": "kid00002", "cwd": "/Users/x/Documents/family-computing", "parent": "root0001", "startedAt": 9 },
+      { "id": "kid00001", "cwd": "/Users/x/Documents/sidenote", "parent": "root0001", "startedAt": 2 }
+    ],
+    "expect": { "root0001": "sidenote" }
+  },
+  {
+    "name": "meta の子も meta なら孫のプロジェクト。振り分けの場所の子孫は数えない",
+    "sessions": [
+      { "id": "root0001", "cwd": "/Users/x/Documents/meta", "startedAt": 1 },
+      { "id": "kid00001", "cwd": "/Users/x/Documents/meta", "parent": "root0001", "startedAt": 2 },
+      { "id": "kid00002", "cwd": "/Users/x/Documents/meta", "parent": "root0001", "startedAt": 3 },
+      { "id": "gkid0001", "cwd": "/Users/x/Documents/aimokuyokai", "parent": "kid00001", "startedAt": 4 }
+    ],
+    "expect": { "root0001": "aimokuyokai", "kid00001": "aimokuyokai", "kid00002": "meta" }
+  },
+  {
+    "name": "振り分けの場所でない根は、子がどこにいても自分のプロジェクト",
+    "sessions": [
+      { "id": "root0001", "cwd": "/Users/x/Documents/family-computing", "agentName": "ファミコン作り", "startedAt": 1 },
+      { "id": "kid00001", "cwd": "/Users/x/Documents/sidenote", "parent": "root0001", "startedAt": 2 }
+    ],
+    "expect": { "root0001": "family-computing", "kid00001": "sidenote" }
+  },
+  {
+    "name": "meta の worktree は meta のリポジトリの作業なので meta",
+    "sessions": [
+      { "id": "root0001", "cwd": "/Users/x/Documents/meta.wt/delegation", "agentName": "委譲の決まり" }
+    ],
+    "expect": { "root0001": "meta" }
+  },
+  {
+    "name": "ccn の受け口、ホーム、/tmp",
+    "sessions": [
+      { "id": "lobby001", "cwd": "/Users/x/.local/share/ccn/lobby", "startedAt": 1 },
+      { "id": "kid00001", "cwd": "/Users/x/Documents/claude-code-nodes", "parent": "lobby001", "startedAt": 2 },
+      { "id": "home0001", "cwd": "/Users/x" },
+      { "id": "tmp00001", "cwd": "/tmp", "agentName": "  " },
+      { "id": "tmp00002", "cwd": "/tmp/scratch" }
+    ],
+    "expect": { "lobby001": "claude-code-nodes", "home0001": "x", "tmp00001": "tmp", "tmp00002": "scratch" }
+  },
+  {
+    "name": "親子が輪になっていても止まる",
+    "sessions": [
+      { "id": "aaaa0001", "cwd": "/Users/x/Documents/meta", "parent": "bbbb0001" },
+      { "id": "bbbb0001", "cwd": "/Users/x/Documents/meta", "parent": "aaaa0001" }
+    ],
+    "expect": { "aaaa0001": "meta", "bbbb0001": "meta" }
+  }
+]

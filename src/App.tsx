@@ -12,7 +12,7 @@ import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
 import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
-  MOOD_LABEL, NEEDS_YOU, buildTree, choicesOf, houseNameOf, moodOf, nowOf, sinceText, targetLabel, taskOf,
+  MOOD_LABEL, NEEDS_YOU, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, targetLabel, taskOf,
 } from "./model";
 import { Markdown } from "./Markdown";
 import { chatPerf } from "./chatPerf";
@@ -272,8 +272,8 @@ export default function App() {
     if (!r?.id) { early.current = { id: null, text: "" }; setBooting(null); return; }
     early.current = { id: r.id, text: early.current.id === "pending" ? early.current.text : "" };
     setFresh({
-      // 名前は一覧と同じく cwd の最後の名前（#30）。一覧に載ったときに名前が変わって見えないようにする
-      id: r.id, name: String(r.cwd ?? "").split("/").filter(Boolean).pop() ?? r.id.slice(0, 8), kind: "terminal", state: "running", cwd: r.cwd ?? "", canSend: true, parent: null,
+      // 名前は一覧と同じ決め方（cardNames）。一覧に載ったときに名前が変わって見えないようにする
+      id: r.id, name: cardNames([{ id: r.id, cwd: r.cwd ?? "" }]).get(r.id) ?? r.id.slice(0, 8), kind: "terminal", state: "running", cwd: r.cwd ?? "", canSend: true, parent: null,
       startedAt: Date.now(), capabilities: { terminal: true, send: true, stop: true },
     });
     setBooting(r.id);
