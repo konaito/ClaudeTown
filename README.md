@@ -39,27 +39,30 @@ Claude Town の違いは3つある。データ源を ccn に寄せること、�
 
 ## データの取り方
 
+2026-11-12 に、右パネルを本物の端末にする方針（`docs/design/terminal-panel.md` の A2）に切り替えた。claude は ccn のノードが PTY の中で対話モードのまま動かし、Claude Town は ccn の口だけを使う。Specter（Ghostty の改名版）には依存しない。ccn の PTY の口は ccn-pty（別のセッション）が `~/Documents/claude-code-nodes.wt/pty-driver` で作っている。入るまでは、同じ口を持つモックのノード（`scripts/mock-ccn-pty.ts`）で画面を作る。
+
 | 知りたいこと | 取り方 |
 | --- | --- |
-| 親子の木、名前、Specter のペイン | `~/.specter/agents.json`（specter-agents の記録）。ccn は親子を保存しない |
-| 生きているセッションと状態 | 手元の ccn ノードの `GET /api/sessions`。ポートは `~/.config/ccn/ccn.json` の `port`（この機械では 4323） |
-| 状態の種類 | ccn から取れるのは running、waiting_permission、idle の3つ |
+| 生きているセッション、状態、親子 | 手元の ccn ノードの `GET /api/sessions`。親は一覧の parent（`agent:<ノード>/<親の sid 先頭8>/<役割>`）から引く。ポートは `~/.config/ccn/ccn.json` の `port` |
+| 端末の画面 | `GET /api/sessions/<id>/terminal`（SSE）。最初に size、続けて末尾の replay、以後 data。Rust で読み、Tauri のイベントで xterm.js に流す |
+| 承認の中身 | `GET /api/sessions/<id>` の pending（toolName、input、requestId） |
 | 頼まれたこと、いまやっていること、最後の報告、次の一手 | hook が書く `~/.family-computing/state/<session_id>.json` |
 | 閉じてよいか | close-check-state hook が書く `~/.claude/close-check/<session_id>.json` |
-| 子が自分で残した状態 | `agents.json` の selfStatus（specter-agents の set_status） |
 
-2026-11-12 に試した時点では、生きているセッション12件が全部 `agents.json` の記録と一致した。ccn の一覧の取得には0.37秒かかった。アプリは2秒ごとに読み直す。
+人が Specter などの端末で開いた古いセッションは、ccn から一覧と送信だけができる。親子は `~/.specter/agents.json` を予備として読むだけにした（AppleScript の操作は外した）。
 
 ccn は Origin 付きの要求を CSRF として断る。このため、HTTP の要求は画面からではなく Tauri の Rust 側から出す。
 
 ## 操作
 
-- 子供を左クリックすると、右のパネルにその子の会話が出る。会話は ccn の `GET /api/sessions/<id>/messages` から読み、発言と道具の1行に縮めて出す。下の欄に打った文は ccn の `POST /api/sessions/<id>/messages` で、その子のセッションに届く。届いた文は、相手の入力欄に入るのではなく、別のセッションからの文として届き、相手はすぐに読む。
-- 子の返事の最後が問いで、短い選択肢の行が並んでいれば、選択肢をボタンにする。押すとその文を送る。
-- 上の帯のノードの切り替えで、ccn につながる別の機械のセッションも出せる。別の機械には Specter のツリーが無いので、親子は ccn の from 行から導き、ペインへの移動はできない。
-- 子供を右クリックすると、Specter のその子のペインへ移る。Specter の通知をクリックしたときと同じく、窓を前に出してペインにフォーカスする。使うのは Specter の AppleScript の `focus` 命令で、specter-agents の focus_agent と同じ方法である。
-- 承認待ちの子は、右のパネルに承認の中身（道具と、コマンドやファイル）を出し、「許可する」「拒否する」で答えられる。中身は状態 hook が PermissionRequest で並びとして控えたもの。並びが2件以上あるときと、質問（AskUserQuestion）や計画の確認（ExitPlanMode）の待ちには、画面からは許可しない。押すと、今も承認待ちで中身が同じかを確かめてから、Specter のその端末に `send key`（許可は `digit1`、拒否は `escape`）を送る。許可は中身が一致したときだけ送る。ノードが立てたセッション（claude -p）には ccn の permissions で答える。「今後も許可」はその子の設定を書き換えるので、まだ入れていない。迷ったときのために「ペインへ」も残す。
-- 2026-11-12 に権限モード default の試験台で、許可（ファイルができた）、拒否（できなかった）、中身の id がずれたときと承認待ちでないときに送らないこと、id が無いときに許可を送らないこと、質問の待ちに許可を送らないことを確かめた。1ターンに承認が2つ並ぶ試験では、PermissionRequest は1つ目に答えてから2つ目が来て、画面の中身と端末の承認がそろった。
+- 子供を左クリックすると、右のパネルにその子が出る。端末のセッションは「端末」の欄が先に開き、打ったキーはそのまま PTY に届く（`POST /api/sessions/<id>/terminal/input`）。端末の大きさは、開いたときに ccn に伝える（後に開いた画面に合わせる）。
+- 子供を右クリックすると、その子を選んで端末を開く。
+- 右パネルの「＋ 子を足す」で、選んだ子の下に端末のセッションを足す。作業場所は親と同じで、最初の依頼を付けて立てる。親は `x-ccn-from: agent:<ノード名>/<親の sid 先頭8>/town` で名乗り、一覧の parent に入る。
+- 上の「＋ 新しい世帯」で、親のいない端末のセッションを `~/Documents/meta` で立てる。セッションが0本の空の町でも、ここから最初の世帯を作れる。
+- 右パネルの「転出」で、ccn の teleport（PR #18）を呼び、別の機械へ移す（move）か複製する（fork）。下見は移動元の説明（`GET /api/sessions/<id>/teleport`）だけを見せる。行き先の下見は clone することがあるので、実行の中で ccn に任せる。作業中と承認待ちのセッションは転出できない。世帯ごとの転出は出していない。ccn に一括の口が無く、1つずつ移すと子の parent が転出を呼んだ側に変わり、同じリポジトリの子が行き先の同じ作業ツリーを書き換え合うため（`docs/research/ccn-teleport.md`）。
+- 承認待ちの子は、カードの枠が黄色で点滅し、右パネルに承認の中身と「許可する」「拒否する」を出す。押すと、今も承認待ちで requestId が同じかを確かめてから、ccn の permissions の口で答える。質問（AskUserQuestion）や計画の確認（ExitPlanMode）の待ちには許可を送らない。人が端末で開いたセッションは、その端末で答える。
+- 上の帯のノードの切り替えで、ccn につながる別の機械のセッションも出せる。
+- 送信の非常停止: `~/.family-computing/send-disabled` があると、注文、端末への入力、承認、作成、転出を全部断る。
 
 ## hook
 
@@ -99,9 +102,13 @@ hook は本物の `claude -p` で試し、頼まれたこと、道具、最後�
 bun install
 bun run tauri dev
 
-# 見た目だけをブラウザで確かめるとき（送信とペインへの移動はしない）
+# 見た目だけをブラウザで確かめるとき（送信はしない）
 src-tauri/target/debug/family-computing --snapshot > public/dev-snapshot.json
 bun run dev   # http://localhost:1420/
+
+# 端末の口のモック（中身は bash。FC_MOCK_CMD=claude で claude）。ブラウザは http://localhost:1420/?mock で直接繋ぐ
+bun run scripts/mock-ccn-pty.ts
+FC_CCN_URL=http://127.0.0.1:4399 bun run tauri dev   # Tauri をモックに繋ぐ
 
 # 配置計算だけの検証（8ケース。重なり、交差、線の通り抜け、混ざり、s を出す）
 bun test src/layout

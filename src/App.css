@@ -266,3 +266,4 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .new-house-form.big input { width: 24em; font-size: 14px; padding: 8px 12px; }
 .empty { display: flex; flex-direction: column; align-items: center; gap: 12px; }
 .empty p { margin: 0; }
+.sheet-foot .primary, .new-house-form .primary { white-space: nowrap; flex: none; }
