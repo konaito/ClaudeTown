@@ -221,9 +221,10 @@ fn peers() -> Result<Value, String> {
     get_json_t(&format!("{}/api/peers", ccn_base()), LIST_TIMEOUT)
 }
 
-fn snapshot(peer: Option<String>) -> Snapshot {
-    let peer = peer.filter(|p| !p.is_empty());
-    let (sessions, ccn_error) = match get_json_t(&format!("{}/sessions", api(&peer)), LIST_TIMEOUT) {
+/// ccn の一覧を、画面に渡すセッションの形に直す。読めなければ（空の一覧, 理由）。
+/// この機械の町（peer が None）だけ、hook の報告と close-check の判定を足す。キャラの割り当ては足さない
+fn fetch_agents(peer: &Option<String>) -> (Vec<Value>, Option<String>) {
+    let (sessions, ccn_error) = match get_json_t(&format!("{}/sessions", api(peer)), LIST_TIMEOUT) {
         Ok(Value::Array(v)) => (v, None),
         Ok(_) => (vec![], Some("一覧の形が想定と違う".into())),
         Err(e) => (vec![], Some(e)),
@@ -299,6 +300,12 @@ fn snapshot(peer: Option<String>) -> Snapshot {
             })),
         }));
     }
+    (agents, ccn_error)
+}
+
+fn snapshot(peer: Option<String>) -> Snapshot {
+    let peer = peer.filter(|p| !p.is_empty());
+    let (mut agents, ccn_error) = fetch_agents(&peer);
     // キャラの絵の割り当て。世代（親をたどった深さ）に合う見た目を重み付きの乱数で選び、保存して以後変えない。
     // 別の機械の町も、機械ごとのファイルに保存する（乱数なので、保存しないと読むたびに顔が変わる）
     let mut order: Vec<&Value> = agents.iter().collect();
@@ -335,6 +342,24 @@ fn snapshot(peer: Option<String>) -> Snapshot {
 }
 
 static AVATARS_LOCK: Mutex<()> = Mutex::new(());
+
+/// 別の町（いま見ていない町）のセッションの一覧（#14）。お便りと転出のゴーストにだけ使う。
+/// snapshot と違い、キャラを割り当てず保存もしない（前に割り当てた分を読むだけ）。お手紙の記録も読まない。
+/// まだ割り当てていないセッションは avatar が無く、画面は ID から決まる仮の顔を出す。その町を開いたときに snapshot が割り当てる
+fn town_agents(peer: Option<String>) -> Result<Vec<Value>, String> {
+    let peer = peer.filter(|p| !p.is_empty());
+    let (mut agents, err) = fetch_agents(&peer);
+    if let Some(e) = err {
+        return Err(e);
+    }
+    let (assigned, _) = avatars::load(&avatars_path(&peer));
+    for a in agents.iter_mut() {
+        if let Some(v) = a["id"].as_str().and_then(|id| assigned.get(id)) {
+            a["avatar"] = json!({ "char": v.char, "hue": v.hue });
+        }
+    }
+    Ok(agents)
+}
 
 /// キャラの割り当ての保存先。FC_AVATARS で差し替えられる（モックの ccn で試すとき、本物の割り当てを消さないため）。
 /// 別の機械の町は、同じ場所の avatars-peer-<機械>.json に分けて置く
@@ -1064,6 +1089,8 @@ mod cmd {
     #[tauri::command]
     pub async fn snapshot(peer: Option<String>) -> Result<Snapshot, String> { blocking(move || Ok(super::snapshot(peer))).await }
     #[tauri::command]
+    pub async fn town_agents(peer: Option<String>) -> Result<Vec<Value>, String> { blocking(move || super::town_agents(peer)).await }
+    #[tauri::command]
     pub async fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<super::ConvDelta, String> {
         blocking(move || super::conversation(session_id, peer, since)).await
     }
@@ -1287,7 +1314,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            cmd::snapshot, cmd::peers, cmd::conversation, cmd::send_message, set_house_name, cmd::answer_permission,
+            cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::send_message, set_house_name, cmd::answer_permission,
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, town_watch, town_unwatch, town_kick
         ])

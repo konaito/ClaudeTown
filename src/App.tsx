@@ -9,7 +9,7 @@ import { withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { isVisible, onVisibleChange, pollBackoff, pollWhileVisible, shownAt } from "./visible";
 import { reuseAgents, reuseSnap } from "./snap";
-import { kickTown, watchTown } from "./town";
+import { kickTown, otherTownRetryMs, watchTown } from "./town";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
@@ -131,6 +131,8 @@ export default function App() {
   const [others, setOthers] = useState<Map<string, { agents: Agent[] } | { error: string }>>(new Map());
   // 別の町の一覧が最後に取れた時刻。others に入れると取るたびに町が描き直されるので、別に持つ（#4）
   const okAt = useRef<Map<string, number>>(new Map());
+  // 町ごとの、続けて失敗した回数と、次に取りに行ってよい時刻（#14）
+  const retry = useRef<Map<string, { fails: number; at: number }>>(new Map());
   useEffect(() => {
     let alive = true;
     let running = false;
@@ -143,16 +145,22 @@ export default function App() {
       if (running) return;
       running = true;
       for (const t of towns) {
+        // 失敗が続いている町は、決めた時刻まで取りに行かない（前の結果を残す）
+        const r = retry.current.get(t.name);
+        if (r && Date.now() < r.at) continue;
         let v: { agents: Agent[] } | { error: string };
         if (!t.healthy) v = { error: "つながらない" };
         else {
-          try {
-            const s = await invoke<Snapshot>("snapshot", { peer: t.key || null });
-            v = s.ccn_ok ? { agents: s.agents } : { error: s.ccn_error ?? "つながらない" };
-          } catch (e) { v = { error: String(e) }; }
+          // 一覧と、前に決めたキャラの割り当てを読むだけの軽い命令（#14）。snapshot と違い、割り当ての保存も状態ファイルの読み込みもしない
+          try { v = { agents: await invoke<Agent[]>("town_agents", { peer: t.key || null }) }; }
+          catch (e) { v = { error: String(e) }; }
         }
         if (!alive) break;
-        if ("agents" in v) okAt.current.set(t.name, Date.now());
+        if ("agents" in v) { okAt.current.set(t.name, Date.now()); retry.current.delete(t.name); }
+        else if (t.healthy) {
+          const fails = (r?.fails ?? 0) + 1;
+          retry.current.set(t.name, { fails, at: Date.now() + otherTownRetryMs(fails, OTHER_TOWNS_POLL_MS) });
+        }
         // 取れなかった回は、60秒以内に取れた前回の町を残す（1回の時間切れで、お便りとゴーストが消えないように）
         // 前回と同じなら Map を作り直さない（#4）
         const got = v;

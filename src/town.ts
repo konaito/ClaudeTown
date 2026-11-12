@@ -46,3 +46,11 @@ export function kickTown(): void {
   if (inTauri) invoke("town_kick").catch(() => {});
   else browserKick?.();
 }
+
+/**
+ * 別の町の一覧を取れなかったときに、次に取りに行くまでの長さ（#14）。続けて失敗した回数から決める。
+ * 取れている町は OTHER_TOWNS_POLL_MS ごと。1回失敗したら1分、2回以上続けて失敗したら5分あける
+ */
+export function otherTownRetryMs(fails: number, pollMs: number): number {
+  return fails <= 0 ? pollMs : fails === 1 ? 60_000 : 300_000;
+}
