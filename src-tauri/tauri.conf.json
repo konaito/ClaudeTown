@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Claude Town",
+  "productName": "Claude Town Dev",
   "version": "0.1.0",
-  "identifier": "jp.fybe.family-computing",
+  "identifier": "jp.fybe.family-computing.dev",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Claude Town",
+        "title": "Claude Town Dev（開発版）",
         "width": 1440,
         "height": 900,
         "minWidth": 900,
@@ -27,11 +27,11 @@
     "active": true,
     "targets": "all",
     "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
+      "icons-dev/32x32.png",
+      "icons-dev/128x128.png",
+      "icons-dev/128x128@2x.png",
+      "icons-dev/icon.icns",
+      "icons-dev/icon.ico"
     ]
   }
 }

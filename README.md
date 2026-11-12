@@ -119,11 +119,63 @@ hook は本物の `claude -p` で試し、頼まれたこと、道具、最後�
 - 見本ページの Kenney のプレビュー画像（`docs/research/assets/kenney-toon-characters.png`）: Kenney（https://kenney.nl）。CC0 で、帰属表示は要らない。
 - 見本ページ（`docs/research/assets/`）は、比べたときの素材を全部参照している。絞った後の public には一部しか残っていないので、見本ページの画像は一部が出ない。
 
+## 安定版と開発版
+
+本人は安定版で作業し、子や開発者は開発版で確かめる。子が作業ツリーを書き換えても、安定版は変わらない。
+
+| | 安定版 | 開発版 |
+|---|---|---|
+| 名前（productName） | Claude Town | Claude Town Dev |
+| Dock の名前 | Claude Town | family-computing（`tauri dev` は .app にならず、実行ファイル名が出る） |
+| identifier | `jp.fybe.family-computing` | `jp.fybe.family-computing.dev` |
+| 置き場所 | `/Applications/Claude Town.app` | 作業ツリーから `bun tauri dev` で起動する |
+| アイコン | `src-tauri/icons/` | `src-tauri/icons-dev/`（橙の DEV の帯付き） |
+| ウィンドウの題 | Claude Town | Claude Town Dev（開発版） |
+| 中身 | `stable-` で始まる git のタグ | 作業ツリーのいまの中身 |
+
+`src-tauri/tauri.conf.json` は開発版の設定にしてある。何も付けずに `bun tauri dev` や `bun tauri build` を動かすと、必ず開発版になる。安定版は `src-tauri/tauri.stable.conf.json` を Tauri の `--config` で重ねてビルドする（`--config` に渡した JSON は元の設定に重なる。配列が丸ごと置き換わる前提で、窓の定義とアイコンの一覧は全部書いてある）。開発版は 1420 番のポートを使う。安定版はビルドした画面を中に持つのでポートを使わない。2つは同時に起動できる。
+
+子と開発者の決まり:
+
+- 起動と確認には開発版だけを使う。
+- 安定版（`/Applications/Claude Town.app`）を止めない、差し替えない、消さない。
+- 安定版へ上げるのは、本人か親が頼んだときだけにする。
+
+安定版へ上げる:
+
+```bash
+scripts/release-stable.sh <ref>    # 例: scripts/release-stable.sh feat/app-v1
+```
+
+スクリプトは次の順に進む。
+
+1. ref に `stable-YYYYMMDD-HHMM` のタグを打つ。既存の `stable-` のタグを渡すと、タグを打たずにそのタグを使う。
+2. 作業ツリーとは別の一時 worktree にタグを取り出し、`bun install --frozen-lockfile` と `tauri build --bundles app` を行う。Rust のビルド結果は `$HOME/.cache/claude-town/stable-target` に置き、次のリリースで使い回す。
+3. できた .app の identifier と名前が安定版の値か確かめる。違えば入れずに中断する。
+4. 安定版が動いていれば終わらせる。終わらせるのは `/Applications/Claude Town.app` の実行ファイルの pid だけで、開発版や他のプロセスには触らない。
+5. 今の .app を `$HOME/.family-computing/stable/previous/` に退避し、新しい .app を入れる。
+6. 安定版を起動する。
+
+入っている版は `$HOME/.family-computing/stable/current.ref`、履歴は同じ場所の `releases.log` に残る。
+
+1つ前の版に戻す:
+
+```bash
+scripts/rollback-stable.sh    # 今の版と1つ前の版を入れ替える。もう一度回すと元に戻る
+```
+
+開発版のアイコンは、安定版のアイコンに帯を重ねて作る。`src-tauri/icons/` を作り直したら `scripts/make-dev-icon.sh` も回してコミットする（ImageMagick が要る）。
+
+両版で共有しているもの:
+
+- 状態 hook は、`~/.claude/settings.json` から本体の作業ツリーの `hooks/fc-report.py` を直接呼んでいる。hook を書き換えると、安定版に出る内容もすぐ変わる。
+- `~/.family-computing/` の状態ファイル（state、letters.jsonl、avatars.json、avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json、houses.json、send-disabled）は両版が同じものを読む。avatars で始まるファイルと houses.json は両版が書く。開発版でこれらの形を変えると、安定版の表示が崩れることがある。avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json の3つは、キャラの選び方の変更（feat/char-age）が入った版から使う。
+
 ## 開発
 
 ```bash
 bun install
-bun run tauri dev
+bun run tauri dev   # 開発版（Claude Town Dev）が起動する
 
 # 見た目だけをブラウザで確かめるとき（送信はしない）
 src-tauri/target/debug/family-computing --snapshot > public/dev-snapshot.json
