@@ -275,9 +275,14 @@ fn tool_line(name: &str, input: &Value) -> String {
 }
 
 /// SDK の1件を、画面に出す0件以上の項目に縮める。考えた中身と道具の結果は捨てる
+/// ccn の messages は、セッションの種類で形が違う。node はトランスクリプトの行そのまま（type、message、timestamp）。
+/// pty は {at, type, data: {type, message, …}, seq} で、中身は data に入り、時刻は at（ms）にある。
 fn simplify(m: &Value) -> Vec<Value> {
+    let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
+        Some(d) => (d, m["at"].clone()),
+        None => (m, m["timestamp"].clone()),
+    };
     let ty = m["type"].as_str().unwrap_or("");
-    let at = m["timestamp"].clone();
     let content = &m["message"]["content"];
     let mut out = vec![];
     match ty {
@@ -856,4 +861,44 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 2026-11-12 に本番のノードの pty のセッションから読んだ messages の形
+    #[test]
+    fn pty_messages_are_read_from_data() {
+        let user = json!({"at": 1794490104245u64, "type": "user", "seq": 1,
+            "data": {"type": "user", "message": {"role": "user", "content": "from local via konaito-pro\n\nちゃんと動くのかテスト"}}});
+        let out = simplify(&user);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[0]["text"], "ちゃんと動くのかテスト");
+        assert_eq!(out[0]["from"], "from local via konaito-pro");
+        assert_eq!(out[0]["at"], 1794490104245u64);
+
+        let asst = json!({"at": 1794490107988u64, "type": "assistant", "seq": 2,
+            "data": {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "届いてる"}]}}});
+        let out = simplify(&asst);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "assistant");
+        assert_eq!(out[0]["text"], "届いてる");
+
+        let result = json!({"at": 1794490107988u64, "type": "result", "seq": 3, "data": {"type": "result", "result": "届いてる"}});
+        assert!(simplify(&result).is_empty());
+    }
+
+    #[test]
+    fn node_messages_keep_the_transcript_shape() {
+        let asst = json!({"type": "assistant", "timestamp": "2026-11-12T13:00:00Z",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "はい"}]}});
+        let out = simplify(&asst);
+        assert_eq!(out[0]["text"], "はい");
+        assert_eq!(out[0]["at"], "2026-11-12T13:00:00Z");
+        // トランスクリプトの行に data が付いていても、message があればそちらを読む
+        let with_data = json!({"type": "user", "timestamp": "t", "data": {"type": "hook_progress"}, "message": {"role": "user", "content": "やあ"}});
+        assert_eq!(simplify(&with_data)[0]["text"], "やあ");
+    }
 }

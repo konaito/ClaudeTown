@@ -1186,7 +1186,8 @@ function collapseTools(items: ConvItem[]): (ConvItem & { more?: number })[] {
   return out;
 }
 
-function timeOf(at?: string | null): string {
+/** at は node のセッションなら ISO の文字列、pty のセッションなら ms の数 */
+function timeOf(at?: string | number | null): string {
   if (!at) return "";
   const d = new Date(at);
   return isNaN(+d) ? "" : d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
