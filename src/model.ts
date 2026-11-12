@@ -173,3 +173,12 @@ export function houseNameOf(root: Agent, _all?: Agent[]): { name: string; by: "h
   if (root.house?.by === "human" && root.house.name) return { name: root.house.name, by: "human" };
   return { name: projectOf(root), by: "dir" };
 }
+
+/**
+ * 送信先として出す名前（#36）。町に同じ名前の人がほかにいるときは、ID の先頭8字を添えて見分けられるようにする。
+ * 名前は作業ディレクトリの最後の名前なので、同じディレクトリで立てたセッションどうしは同じ名前になる
+ */
+export function targetLabel(agent: Agent, town: Agent[]): string {
+  const twin = town.some((a) => a.id !== agent.id && a.name === agent.name);
+  return twin ? `${agent.name}（${agent.id.slice(0, 8)}）` : agent.name;
+}

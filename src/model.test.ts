@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { houseNameOf, type Agent } from "./model";
+import { houseNameOf, targetLabel, type Agent } from "./model";
 
 const ag = (id: string, cwd: string, over: Partial<Agent> = {}): Agent => ({
   id, name: id, kind: "terminal", state: "idle", cwd, canSend: true, parent: null, ...over,
@@ -30,5 +30,18 @@ describe("houseNameOf", () => {
   });
   test("cwd の末尾のスラッシュは無視する", () => {
     expect(houseNameOf(ag("r", "/a/b/"), []).name).toBe("b");
+  });
+});
+
+describe("targetLabel", () => {
+  test("同じ名前がいなければ名前だけ", () => {
+    const a = ag("aaaaaaaa-1", "/tmp/a", { name: "a" });
+    expect(targetLabel(a, [a, ag("bbbbbbbb-2", "/tmp/b", { name: "b" })])).toBe("a");
+  });
+  test("同じ名前がいたら ID の先頭8字を添える", () => {
+    const a = ag("aaaaaaaa-1", "/tmp", { name: "tmp" });
+    const b = ag("bbbbbbbb-2", "/tmp", { name: "tmp" });
+    expect(targetLabel(a, [a, b])).toBe("tmp（aaaaaaaa）");
+    expect(targetLabel(b, [a, b])).toBe("tmp（bbbbbbbb）");
   });
 });
