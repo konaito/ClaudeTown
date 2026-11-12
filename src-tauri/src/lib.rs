@@ -1,5 +1,5 @@
 // family-computing の裏側。画面から呼ばれる命令:
-// - snapshot(peer): ccn の一覧（状態と送信先）、Specter のツリー（親子とペイン）、hook の報告、close-check の判定を1つにまとめる
+// - snapshot(peer): ccn の一覧（状態、送信先、親子）、hook の報告、close-check の判定を1つにまとめる
 // - peers: ccn につながっている機械の一覧
 // - conversation(session_id, peer): ccn の messages を差分で読み、画面に出す形（発言と道具の1行）に縮めて返す
 // - send_message(session_id, text, peer): ccn の POST /api/sessions/<id>/messages で文を届ける
@@ -99,16 +99,6 @@ fn snapshot(peer: Option<String>) -> Snapshot {
         Ok(_) => (vec![], Some("一覧の形が想定と違う".into())),
         Err(e) => (vec![], Some(e)),
     };
-    // Specter のツリーはこの機械のものだけ
-    let reg = if peer.is_none() {
-        read_json(&home().join(".specter/agents.json"))
-            .and_then(|v| v.get("agents").cloned())
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default()
-    } else {
-        Default::default()
-    };
-
     let live: Vec<&Value> = sessions
         .iter()
         .filter(|s| s.get("state").and_then(|x| x.as_str()) != Some("exited"))
@@ -118,12 +108,7 @@ fn snapshot(peer: Option<String>) -> Snapshot {
     let mut name_of: HashMap<String, String> = HashMap::new();
     for s in &live {
         let id = s["id"].as_str().unwrap_or_default().to_string();
-        let name = reg
-            .get(&id)
-            .and_then(|r| r["name"].as_str())
-            .or(s["title"].as_str())
-            .unwrap_or(&id[..8.min(id.len())])
-            .to_string();
+        let name = s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(&id[..8.min(id.len())]).to_string();
         name_of.insert(id, name);
     }
     // ccn の parent は from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）
@@ -137,12 +122,8 @@ fn snapshot(peer: Option<String>) -> Snapshot {
     let mut agents = vec![];
     for s in &live {
         let id = s["id"].as_str().unwrap_or_default().to_string();
-        let r = reg.get(&id).cloned().unwrap_or(Value::Null);
-        // 親が生きていなければ根として扱う
-        // 親は ccn の parent（from 行の呼び手）から引く。人が Specter で開いた古いセッションのために、Specter の記録は予備として読むだけにする
-        let parent = parent_from_ccn(s)
-            .or_else(|| r["parent"].as_str().map(String::from))
-            .filter(|p| live_ids.contains(p) && *p != id);
+        // 親は ccn の parent（from 行の呼び手）だけから引く。親が生きていなければ根として扱う
+        let parent = parent_from_ccn(s).filter(|p| *p != id);
         let (report, close_check) = if peer.is_none() {
             (
                 read_json(&home().join(format!(".family-computing/state/{id}.json"))),
@@ -161,10 +142,7 @@ fn snapshot(peer: Option<String>) -> Snapshot {
             "startedAt": s["startedAt"],
             "canSend": s["capabilities"]["send"],
             "parent": parent,
-            "depth": r["depth"],
-            "title": r["title"],
             "capabilities": s["capabilities"],
-            "selfStatus": r["selfStatus"],
             "house": houses.get(&id).cloned(),
             "report": report,
             // status が ok/ng なら short は直下、working/checking なら前回の判定が last に入っている
@@ -377,7 +355,7 @@ fn send_message(session_id: String, text: String, peer: Option<String>) -> Resul
 /// 承認待ちに答える。choice は "allow" か "deny"。ccn の pending と permissions の口で答える（PTY のセッションも同じ口）。
 /// 送る前に、今も承認待ちで、承認を求めている requestId が画面で見せたもの（expect_id）と同じかを確かめ、ずれていたら送らない。
 /// 質問（AskUserQuestion）と計画の確認（ExitPlanMode）の待ちには許可を送らない。
-/// 人が Specter などの端末で開いたセッション（kind=terminal）は ccn から答えられないので断る。
+/// 人が端末で開いたセッション（kind=terminal）は ccn から答えられないので断る。
 #[tauri::command]
 fn answer_permission(session_id: String, choice: String, expect_id: Option<String>, peer: Option<String>) -> Result<String, String> {
     if send_disabled() {

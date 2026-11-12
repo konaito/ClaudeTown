@@ -27,7 +27,8 @@ from pathlib import Path
 
 STATE_DIR = Path(os.environ.get("FC_STATE_DIR", Path.home() / ".family-computing" / "state"))
 HOUSES = Path(os.environ.get("FC_HOUSES", Path.home() / ".family-computing" / "houses.json"))
-REGISTRY = Path(os.environ.get("FC_SPECTER_REGISTRY", Path.home() / ".specter" / "agents.json"))
+# 子を作る道具。ccn の MCP の create_session（親は from 行で ccn に残る）
+MAKE_CHILD = "mcp__ccn__create_session"
 NAME_CMD = f"python3 {Path(__file__).resolve().parent.parent / 'scripts' / 'hook.py'} name"
 KEEP_SEC = 3 * 24 * 3600
 MAX = 90
@@ -68,8 +69,8 @@ def first_line(s):
 
 def describe_tool(name, inp):
     inp = inp if isinstance(inp, dict) else {}
-    if name.startswith("mcp__specter-agents__spawn_child"):
-        return f"子を呼ぶ: {inp.get('title') or inp.get('name') or ''}"
+    if name == MAKE_CHILD:
+        return clip(f"子を呼ぶ: {inp.get('name') or first_line(inp.get('prompt')) or ''}", 60)
     if name.startswith("mcp__"):
         parts = name.split("__")
         return f"{parts[1] if len(parts) > 1 else 'mcp'}: {parts[-1]}"
@@ -151,7 +152,8 @@ def write(sid, patch, data):
 
 
 def house_nudge(sid):
-    """子を持つ根のセッションに世帯の名前が無ければ、名前を付けるよう1回だけ促す文を返す"""
+    """ccn で子を作ったセッションに世帯の名前が無ければ、名前を付けるよう1回だけ促す文を返す。
+    hook からは自分が根かどうか分からないので、子を作った中間の親にも1回出る（名前は根の分だけ画面に出る）"""
     try:
         houses = json.loads(HOUSES.read_text())
     except Exception:
@@ -159,17 +161,11 @@ def house_nudge(sid):
     if (houses.get(sid) or {}).get("name"):
         return None
     try:
-        rec = json.loads(REGISTRY.read_text())["agents"].get(sid) or {}
+        cur = json.loads((STATE_DIR / f"{sid}.json").read_text())
     except Exception:
         return None
-    if rec.get("parent") or not rec.get("children"):
+    if not cur.get("made_child") or cur.get("house_nudged"):
         return None
-    p = STATE_DIR / f"{sid}.json"
-    try:
-        if json.loads(p.read_text()).get("house_nudged"):
-            return None
-    except Exception:
-        pass
     write(sid, {"house_nudged": True}, {})
     return (
         "Claude Town: あなたは子を持つ親なので、この世帯（あなたとその子孫）の名前を付けてください。"
@@ -258,7 +254,8 @@ def main():
         q = [x for x in read_queue(sid) if x["id"] != done_id]
         write_queue(sid, q, data, phase="working", needs=None)
         # 初めて子を作った直後にも促す（その会話の中で名前を付けられるように）
-        if ev == "PostToolUse" and "spawn_child" in (data.get("tool_name") or ""):
+        if ev == "PostToolUse" and data.get("tool_name") == MAKE_CHILD:
+            write(sid, {"made_child": True}, data)
             nudge = house_nudge(sid)
             if nudge:
                 emit_context("PostToolUse", nudge)

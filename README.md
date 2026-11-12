@@ -22,7 +22,7 @@ Claude Town は、Claude Code のセッションの親子を、町に住む家�
 
 ## 解決したいこと
 
-Specter（Ghostty の改名版のターミナル）では、子と孫が増えるたびにペインが分割される。孫が16体になると、各ペインは数文字の幅しかなく、誰が何をしていて誰が人を待っているかが読めない。`/Users/konaito/Desktop/スクリーンショット 2026-11-12 16.52.58.png` と `/Users/konaito/Desktop/スクリーンショット 2026-11-12 17.43.01.png` がその状態である。
+子と孫をペインの分割で並べるターミナルでは、子と孫が増えるたびにペインが分かれる。孫が16体になると、各ペインは数文字の幅しかなく、誰が何をしていて誰が人を待っているかが読めない。`/Users/konaito/Desktop/スクリーンショット 2026-11-12 16.52.58.png` と `/Users/konaito/Desktop/スクリーンショット 2026-11-12 17.43.01.png` がその状態である。
 
 Claude Town は、ペインの中身を読まなくても、状態と次の一手が分かる画面を目指す。20〜30体を1画面で読めることを成功条件にする。
 
@@ -39,7 +39,7 @@ Claude Town の違いは3つある。データ源を ccn に寄せること、�
 
 ## データの取り方
 
-2026-11-12 に、右パネルを本物の端末にする方針（`docs/design/terminal-panel.md` の A2）に切り替えた。claude は ccn のノードが PTY の中で対話モードのまま動かし、Claude Town は ccn の口だけを使う。Specter（Ghostty の改名版）には依存しない。ccn の PTY の口は ccn-pty（別のセッション）が `~/Documents/claude-code-nodes.wt/pty-driver` で作っている。入るまでは、同じ口を持つモックのノード（`scripts/mock-ccn-pty.ts`）で画面を作る。
+2026-11-12 に、右パネルを本物の端末にする方針（`docs/design/terminal-panel.md` の A2）に切り替えた。claude は ccn のノードが PTY の中で対話モードのまま動かし、Claude Town は ccn の口だけを使う。ほかのターミナルアプリには依存しない。ccn の PTY の口は ccn-pty（別のセッション）が `~/Documents/claude-code-nodes.wt/pty-driver` で作っている。入るまでは、同じ口を持つモックのノード（`scripts/mock-ccn-pty.ts`）で画面を作る。
 
 | 知りたいこと | 取り方 |
 | --- | --- |
@@ -49,7 +49,7 @@ Claude Town の違いは3つある。データ源を ccn に寄せること、�
 | 頼まれたこと、いまやっていること、最後の報告、次の一手 | hook が書く `~/.family-computing/state/<session_id>.json` |
 | 閉じてよいか | close-check-state hook が書く `~/.claude/close-check/<session_id>.json` |
 
-人が Specter などの端末で開いた古いセッションは、ccn から一覧と送信だけができる。親子は `~/.specter/agents.json` を予備として読むだけにした（AppleScript の操作は外した）。
+人がターミナルで開いたセッションは、ccn から一覧と送信だけができる。親子は ccn の parent だけから引く。ccn を通さずに作った子は、親とつながらず別の世帯として出る。名前は ccn の題名、無ければセッション ID の先頭8字にする。
 
 ccn は Origin 付きの要求を CSRF として断る。このため、HTTP の要求は画面からではなく Tauri の Rust 側から出す。
 

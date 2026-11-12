@@ -167,7 +167,7 @@ export default function App() {
     return t;
   }, []);
 
-  // 右クリックや「端末へ」で、その子を選んで右パネルの端末を開く（Specter のペインには移らない）
+  // 右クリックや「端末へ」で、その子を選んで右パネルの端末を開く
   const [termReq, setTermReq] = useState(0);
   const focus = useCallback((a: Agent) => { setSelected(a.id); setTermReq((n) => n + 1); }, []);
   const sel = selected ? tree.byId.get(selected) ?? null : null;
@@ -986,10 +986,9 @@ function StateTab({ agent, mood }: { agent: Agent; mood: Mood }) {
   const r = agent.report;
   const rows: [string, string | null | undefined][] = [
     ["いま", nowOf(agent, mood)],
-    ["頼まれたこと", r?.asked ?? agent.title],
+    ["頼まれたこと", r?.asked],
     ["最後の報告", r?.said],
     ["次の一手", r?.next],
-    ["自分で残した状態", agent.selfStatus ? `${agent.selfStatus.state}: ${agent.selfStatus.note}` : null],
     ["閉じていい？", agent.closeCheck ? (agent.closeCheck.status === "ok" ? "閉じてOK" : agent.closeCheck.status === "ng" ? `まだ: ${agent.closeCheck.short ?? ""}` : "判定中") : null],
     ["作業中の時間", mood === "working" ? sinceText(r?.turn_started_at) : null],
     ["場所", agent.cwd.replace(/^\/Users\/[^/]+/, "~")],

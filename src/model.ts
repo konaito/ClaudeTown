@@ -27,10 +27,7 @@ export type Agent = {
   startedAt?: number;
   canSend: boolean;
   parent: string | null;
-  depth?: number | null;
-  title?: string | null;
   capabilities?: { send?: boolean; permissions?: boolean; interrupt?: boolean; stop?: boolean; terminal?: boolean } | null;
-  selfStatus?: { state: string; note: string; at: string } | null;
   report?: Report | null;
   closeCheck?: { status: "working" | "checking" | "ok" | "ng" | "error"; short?: string | null } | null;
   /** キャラの絵（Rust が町の中で被らないように割り当てる）。hue は色相のずらし（度） */
@@ -62,8 +59,7 @@ export function moodOf(a: Agent): Mood {
   if (a.state === "waiting_permission") return "approval";
   if (a.state === "running") return "working";
   if (a.report?.phase === "needs_you") return "reply";
-  if (a.selfStatus?.state === "blocked") return "reply";
-  if (a.closeCheck?.status === "ok" || a.selfStatus?.state === "done") return "done";
+  if (a.closeCheck?.status === "ok") return "done";
   return "idle";
 }
 
@@ -81,10 +77,9 @@ export const NEEDS_YOU: Mood[] = ["approval", "reply"];
 export function taskOf(a: Agent, mood: Mood): string {
   const r = a.report;
   if (mood === "approval") return "承認を待っています";
-  if (mood === "reply") return r?.next ?? r?.needs ?? a.selfStatus?.note ?? "返事を待っています";
+  if (mood === "reply") return r?.next ?? r?.needs ?? "返事を待っています";
   if (mood === "done") return "完了";
-  const t = a.title && !a.title.startsWith("（") ? a.title : null;
-  return t ?? r?.asked ?? (a.parent ? "おてつだい" : "全体をまとめる");
+  return r?.asked ?? (a.parent ? "おてつだい" : "全体をまとめる");
 }
 
 /** いまの様子の1行（作業中なら道具、待機なら理由） */
@@ -93,9 +88,9 @@ export function nowOf(a: Agent, mood: Mood): string | null {
   switch (mood) {
     case "approval": return r?.needs ?? r?.doing ?? null;
     case "reply": return r?.said ?? r?.needs ?? null;
-    case "working": return r?.doing ?? a.selfStatus?.note ?? null;
-    case "done": return r?.said ?? a.selfStatus?.note ?? null;
-    case "idle": return a.selfStatus?.note ?? a.closeCheck?.short ?? r?.said ?? null;
+    case "working": return r?.doing ?? null;
+    case "done": return r?.said ?? null;
+    case "idle": return a.closeCheck?.short ?? r?.said ?? null;
   }
 }
 
