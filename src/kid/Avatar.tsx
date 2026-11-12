@@ -33,16 +33,18 @@ export type Role = "parent" | "child" | "grandchild";
  * size は体の一辺の px。16px の絵の整数倍（32、48、64）にすると、ドット絵がにじまない。
  * 箱の高さは size に吹き出しの余白を足した分で、印の有無で変わらない。
  */
-export function Avatar({ seed, mood, role, size }: { seed: string; mood: Mood; role: Role; size: number }) {
+export function Avatar({ seed, mood, role, size, pick }: { seed: string; mood: Mood; role: Role; size: number; pick?: { char: string; hue: number } | null }) {
   const list = role === "parent" ? ADULTS : KIDS;
-  // 名前が似ていても散らばるよう、役割の文字を混ぜてから選ぶ
-  const char = list[hash(`${role}:${seed}`) % list.length];
+  // 絵は Rust が町の中で被らないように割り当てたもの（pick）を使う。無いとき（ブラウザ表示など）は名前の hash で選ぶ
+  const char = pick?.char ?? list[hash(`${role}:${seed}`) % list.length];
+  const hue = pick?.hue ?? 0;
   const walking = mood === "working";
   const mark = MARK[mood];
   return (
     <span className={`fc-avatar fc-${mood}`} style={{ ["--fc-size" as string]: `${size}px` }} aria-hidden>
       <span className="fc-body">
-        <img src={`/sprites/ninja/characters/${char}/SeparateAnim/${walking ? "Walk" : "Idle"}.png`} alt="" draggable={false} />
+        <img src={`/sprites/ninja/characters/${char}/SeparateAnim/${walking ? "Walk" : "Idle"}.png`} alt="" draggable={false}
+          style={hue ? { filter: `hue-rotate(${hue}deg)` } : undefined} />
       </span>
       {mark && (
         <span className="fc-bubble"><img src={`/sprites/noto/${mark}/512.webp`} alt="" draggable={false} /></span>

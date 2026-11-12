@@ -9,6 +9,8 @@
 // ccn は Origin 付きの要求を CSRF として断るので、HTTP は必ずこちら（webview ではなく Rust）から出す。
 // 別の機械（peer）は手元のノードの中継 /n/<peer>/api/... を通す。
 
+mod avatars;
+
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -171,6 +173,27 @@ fn snapshot(peer: Option<String>) -> Snapshot {
                 "short": if c["short"].is_string() { c["short"].clone() } else { c["last"]["short"].clone() },
             })),
         }));
+    }
+    // キャラの絵の割り当て。この機械のセッションは保存して以後変えない。別の機械は毎回同じ規則で決める
+    let mut order: Vec<&Value> = agents.iter().collect();
+    order.sort_by(|a, b| a["startedAt"].as_u64().unwrap_or(0).cmp(&b["startedAt"].as_u64().unwrap_or(0)).then(a["id"].as_str().cmp(&b["id"].as_str())));
+    let live: Vec<(String, bool)> = order.iter().map(|a| (a["id"].as_str().unwrap_or_default().to_string(), a["parent"].is_null())).collect();
+    let path = home().join(".family-computing/avatars.json");
+    let prev: std::collections::BTreeMap<String, avatars::Assign> = if peer.is_none() {
+        fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    } else {
+        Default::default()
+    };
+    let next = avatars::assign(&prev, &live);
+    if peer.is_none() && ccn_error.is_none() && next != prev {
+        if let Some(dir) = path.parent() { let _ = fs::create_dir_all(dir); }
+        let tmp = path.with_extension("tmp");
+        if fs::write(&tmp, serde_json::to_string_pretty(&next).unwrap_or_default()).is_ok() { let _ = fs::rename(&tmp, &path); }
+    }
+    for a in agents.iter_mut() {
+        if let Some(v) = a["id"].as_str().and_then(|id| next.get(id)) {
+            a["avatar"] = json!({ "char": v.char, "hue": v.hue });
+        }
     }
     Snapshot { ccn: ccn_base(), peer, ccn_ok: ccn_error.is_none(), ccn_error, agents, fetched_at: now_ms() }
 }

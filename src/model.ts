@@ -33,6 +33,8 @@ export type Agent = {
   selfStatus?: { state: string; note: string; at: string } | null;
   report?: Report | null;
   closeCheck?: { status: "working" | "checking" | "ok" | "ng" | "error"; short?: string | null } | null;
+  /** キャラの絵（Rust が町の中で被らないように割り当てる）。hue は色相のずらし（度） */
+  avatar?: { char: string; hue: number } | null;
   /** 世帯の名前（根のセッションだけ意味がある）。by=human は本人がアプリで付けた名前 */
   house?: { name: string; by: "agent" | "human" } | null;
 };

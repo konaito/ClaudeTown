@@ -384,7 +384,7 @@ function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect:
         onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
         title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで広げて会話・右クリックで端末`}
       >
-        <Avatar seed={agent.name} mood={mood} role={roleOf(depth)} size={32} />
+        <Avatar pick={agent.avatar} seed={agent.name} mood={mood} role={roleOf(depth)} size={32} />
         <span className="mini-name"><i className={`dot st-${mood}`} />{agent.name}</span>
       </button>
       {selected && (
@@ -416,7 +416,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
         <span className="task">{task}</span>
       </div>
       <div className="card-main">
-        <Avatar seed={agent.name} mood={mood} role={roleOf(depth)} size={48} />
+        <Avatar pick={agent.avatar} seed={agent.name} mood={mood} role={roleOf(depth)} size={48} />
         <div className="card-info">
           <span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}{since && <em>{since}</em>}</span>
           <span className="cname">{agent.name}</span>
@@ -514,7 +514,7 @@ function Panel({ agent, peer, lineage, termReq, peers, onSent, onSent2, onError,
   return (
     <aside className={`panel pm-${mood}`}>
       <div className="p-head">
-        <div className="p-avatar"><Avatar seed={agent.name} mood={mood} role={roleOf(lineage.length - 1)} size={64} /></div>
+        <div className="p-avatar"><Avatar pick={agent.avatar} seed={agent.name} mood={mood} role={roleOf(lineage.length - 1)} size={64} /></div>
         <div className="p-id">
           <div className="p-name"><span className="pn">{agent.name}</span><span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}</span></div>
           <div className="p-line">{lineage.map((a, i) => (
@@ -755,7 +755,7 @@ function Bubble({ item, agent, lineageDepth }: { item: ConvItem & { more?: numbe
   }
   return (
     <div className="msg kid">
-      <div className="mini-av"><Avatar seed={agent.name} mood="idle" role={roleOf(lineageDepth)} size={32} /></div>
+      <div className="mini-av"><Avatar pick={agent.avatar} seed={agent.name} mood="idle" role={roleOf(lineageDepth)} size={32} /></div>
       <div>
         <div className="meta"><b>{agent.name}</b>{timeOf(item.at)}</div>
         <div className="b"><Markdown text={item.text} /></div>

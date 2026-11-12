@@ -16,7 +16,7 @@
 
 ## このディレクトリの中身
 
-- characters/: パックの Actor/Character をそのまま複製した。キャラごとに SpriteSheet.png、Faceset.png、SeparateAnim/（Idle、Walk、Attack、Jump、Item、Dead、Special1、Special2）がある。1コマは 16x16px。
+- characters/: パックの Actor/Character から、人に見える55体（大人22、子供33）の SeparateAnim/Idle.png、Walk.png、Dead.png と Faceset.png を、改変せずに複製した。
 - characters-animated/: パックの Actor/CharacterAnimated をそのまま複製した。
 - emote/: パックの Ui/Emote（emote1.png から emote30.png、14x13px）を複製した。
 - 改変は加えていない。
