@@ -5,7 +5,11 @@
   python3 scripts/hook.py install --worktree   # この hook.py の隣の hooks/fc-report.py を登録する（作業ツリーの hook を試すとき。済んだら install で戻す）
   python3 scripts/hook.py uninstall   # 外す
   python3 scripts/hook.py status      # 登録されているかを見る
-  python3 scripts/hook.py name "<世帯の名前>"   # このセッション（親）の世帯の名前を付ける。引数なしなら今の名前を出す
+  python3 scripts/hook.py name <プロジェクトの名前>   # このセッション（親）の世帯の名前を付ける。引数なしなら今の名前を出す
+
+世帯の名前は、作業しているプロジェクトのディレクトリの名前（例 family-computing）にする。依頼の文の要約は付けない。
+アプリがこの名前を使うのは、セッションが振り分けの場所（~/Documents/meta、ccn の受け口など）で動いていて、
+子孫の作業場所からプロジェクトが分からないときだけ（src-tauri/src/naming.rs）。
 
 安定版の写しは scripts/release-stable.sh か scripts/install-stable-hooks.sh が、安定版のタグから作る。
 作業ツリーの hook を登録したままにすると、子が hook を書き換えたとたんに安定版に出る内容も変わる（#24）。
@@ -71,7 +75,8 @@ def strip(data):
 
 
 def name_house(args):
-    """世帯の名前を付ける。本人がアプリで付けた名前（by=human）があれば、エージェントからは上書きしない"""
+    """世帯の名前（作業しているプロジェクトのディレクトリの名前）を付ける。
+    本人がアプリで付けた名前（by=human）があれば、エージェントからは上書きしない"""
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("FC_SESSION_ID")
     if not sid:
         sys.exit("セッション ID が分からない。Claude Code の中（Bash）で実行する")

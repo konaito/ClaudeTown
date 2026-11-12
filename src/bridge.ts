@@ -5,7 +5,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { perfCounters } from "./term/perf";
 import { deltaOf } from "./conv";
-import type { ConvItem } from "./model";
+import { cardNames, projectFromPath, type ConvItem } from "./model";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 // ?mockport=<ポート> で、モック以外の口（本番のノードの前に置いた試験用の中継など）にも繋げる
@@ -40,8 +40,11 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
         ccn: MOCK, peer: null, ccn_ok: true, ccn_error: null, fetched_at: Date.now(),
         // お手紙の試し: public/dev-letters.json（無ければ空）
         letters: await fetch("/dev-letters.json", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
-        // 名前は Rust の snapshot（display_name）と同じく、cwd の最後の名前。cwd が無ければ題名、それも無ければ ID の先頭8字
-        agents: live.map((s) => ({ id: s.id, name: String(s.cwd ?? "").split("/").filter(Boolean).pop() || s.title || s.id.slice(0, 8), kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities })),
+        // 名前は Rust の snapshot と同じ決め方（src/model.ts の cardNames）。モックでは .git を読まないので、パスの形だけで決める
+        agents: (() => {
+          const names = cardNames(live.map((s) => ({ id: s.id, cwd: s.cwd, title: s.title, parent: parentOf(s), startedAt: s.startedAt })));
+          return live.map((s) => ({ id: s.id, name: names.get(s.id), project: s.cwd ? projectFromPath(s.cwd) : null, kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities }));
+        })(),
       } as T;
     }
     case "peers": return [{ name: "mock", url: MOCK, status: "healthy", self: true }, { name: "vm", url: "", status: "healthy", self: false }] as T;

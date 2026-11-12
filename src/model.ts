@@ -23,6 +23,8 @@ export type Agent = {
   kind: "terminal" | "node";
   state: "running" | "waiting_permission" | "idle";
   cwd: string;
+  /** cwd のプロジェクトの名前（worktree なら本体の名前。Rust が .git を読んで出す）。モックと古い一覧には無い */
+  project?: string | null;
   pid?: number;
   startedAt?: number;
   /** ccn が最後に動きを見た時刻（ms） */
@@ -148,8 +150,102 @@ export function buildTree(agents: Agent[]) {
   return { byId, childrenOf, families, lineage };
 }
 
+// ---------- 名前 ----------
+// カードと世帯の名前は、そのセッションが作業しているプロジェクトの名前にする。
+// 同じ規則を src-tauri/src/naming.rs にも書いてある。試験の事例は src/naming-cases.json にまとめ、両方で読む。
+// .git を読んで worktree の本体を出すのは Rust だけ（Agent.project）。ここではパスの形だけで決める。
+
+/** 振り分けの場所のうち、ホーム（/Users/<名前> か /home/<名前>）からの相対の分。空はホームそのもの */
+export const DISPATCH_UNDER_HOME = ["", "Documents", "Documents/meta", ".local/share/ccn/lobby"];
+/** 振り分けの場所のうち、絶対パスの分 */
+export const DISPATCH_ABSOLUTE = ["/", "/tmp", "/private/tmp", "/root"];
+
+const segs = (p: string) => p.split("/").filter(Boolean);
+
+/** cwd が振り分けの場所（依頼を振り分けるだけの場所）か。パスの形だけで決める */
+export function isDispatchPlace(cwd: string): boolean {
+  const s = segs(cwd);
+  if (DISPATCH_ABSOLUTE.includes("/" + s.join("/"))) return true;
+  if (s.length >= 2 && (s[0] === "Users" || s[0] === "home")) {
+    const rest = s.slice(2).join("/");
+    return DISPATCH_UNDER_HOME.includes(rest);
+  }
+  return false;
+}
+
+/** パスの形だけで出すプロジェクトの名前。`<名前>.wt/<x>` なら <名前>、それ以外は最後の名前 */
+export function projectFromPath(cwd: string): string | null {
+  const s = segs(cwd);
+  if (s.length >= 2) {
+    const m = s[s.length - 2].match(/^(.+)\.wt$/);
+    if (m) return m[1];
+  }
+  return s.length ? s[s.length - 1] : null;
+}
+
+/** 名前を決めるのに使う、1つのセッションの材料（Rust の naming::Who と同じ） */
+export type Who = {
+  id: string;
+  cwd?: string | null;
+  title?: string | null;
+  parent?: string | null;
+  /** cwd のプロジェクトの名前（Rust が .git を読んで出す）。無ければパスの形で出す */
+  project?: string | null;
+  /** エージェントが hook（scripts/hook.py name）で付けた名前（houses.json の by=agent） */
+  agentName?: string | null;
+  startedAt?: number | null;
+};
+
+/**
+ * カードの名前を全員分決める。
+ * 1. cwd が無ければ ccn の題名、それも無ければ ID の先頭8字
+ * 2. cwd が振り分けの場所でなければ、cwd のプロジェクトの名前
+ * 3. 振り分けの場所なら、a. 子孫のプロジェクト（振り分けの場所にいる子孫は数えない）で一番多いもの。同数なら先に始まった子孫の分
+ *    b. エージェントが hook で付けた名前、c. cwd の最後の名前
+ */
+export function cardNames(ws: Who[]): Map<string, string> {
+  const ids = new Set(ws.map((w) => w.id));
+  const kids = new Map<string, Who[]>();
+  for (const w of ws) {
+    if (w.parent && w.parent !== w.id && ids.has(w.parent)) kids.set(w.parent, [...(kids.get(w.parent) ?? []), w]);
+  }
+  for (const v of kids.values()) v.sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const own = (w: Who): string | null => {
+    if (!w.cwd || isDispatchPlace(w.cwd)) return null;
+    return w.project || projectFromPath(w.cwd);
+  };
+  const out = new Map<string, string>();
+  for (const w of ws) {
+    let name: string;
+    if (!w.cwd) name = w.title || w.id.slice(0, 8);
+    else if (!isDispatchPlace(w.cwd)) name = own(w) ?? w.id.slice(0, 8);
+    else {
+      const order: string[] = [];
+      const count = new Map<string, number>();
+      const seen = new Set([w.id]);
+      const queue = [...(kids.get(w.id) ?? [])];
+      for (let i = 0; i < queue.length; i++) {
+        const d = queue[i];
+        if (seen.has(d.id)) continue;
+        seen.add(d.id);
+        const p = own(d);
+        if (p) {
+          if (!count.has(p)) order.push(p);
+          count.set(p, (count.get(p) ?? 0) + 1);
+        }
+        queue.push(...(kids.get(d.id) ?? []));
+      }
+      const best = order.reduce<string | null>((b, p) => (b !== null && count.get(b)! >= count.get(p)! ? b : p), null);
+      name = best ?? (w.agentName?.trim() || null) ?? projectFromPath(w.cwd) ?? "/";
+    }
+    out.set(w.id, name);
+  }
+  return out;
+}
+
+/** cwd のプロジェクトの名前（worktree なら本体の名前）。Rust が出した分が無ければパスの形で出す */
 export function projectOf(a: Agent): string {
-  return a.cwd.split("/").filter(Boolean).pop() ?? a.cwd;
+  return a.project || projectFromPath(a.cwd) || a.cwd;
 }
 
 /** 返事の最後の段落が問いで、その中に短い選択肢の行があれば取り出す（ボタンにする） */
@@ -166,12 +262,12 @@ export function choicesOf(text: string): string[] {
 }
 
 /**
- * 世帯の名前。本人が画面で付けた名前（by=human）を優先し、無ければ根のセッションの作業ディレクトリの最後の名前。
- * 子の場所、最初の依頼、エージェントが hook で付けた名前（by=agent）は使わない。
+ * 世帯の名前。本人が画面で付けた名前（by=human）を優先し、無ければ根のカードの名前（cardNames と同じ決め方。
+ * Rust の snapshot が name に入れてある）。
  */
-export function houseNameOf(root: Agent, _all?: Agent[]): { name: string; by: "human" | "dir" } {
+export function houseNameOf(root: Agent, _all?: Agent[]): { name: string; by: "human" | "project" } {
   if (root.house?.by === "human" && root.house.name) return { name: root.house.name, by: "human" };
-  return { name: projectOf(root), by: "dir" };
+  return { name: root.name, by: "project" };
 }
 
 /**

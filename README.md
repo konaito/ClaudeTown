@@ -69,7 +69,7 @@ Claude Town の違いは3つある。データ源を ccn に寄せること、�
 | 頼まれたこと、いまやっていること、最後の報告、次の一手 | hook が書く `~/.family-computing/state/<session_id>.json` |
 | 閉じてよいか | close-check-state hook が書く `~/.claude/close-check/<session_id>.json` |
 
-人がターミナルで開いたセッションは、ccn から一覧と送信だけができる。親子は ccn の parent だけから引く。ccn を通さずに作った子は、親とつながらず別の世帯として出る。名前は ccn の題名、無ければセッション ID の先頭8字にする。
+人がターミナルで開いたセッションは、ccn から一覧と送信だけができる。親子は ccn の parent だけから引く。ccn を通さずに作った子は、親とつながらず別の世帯として出る。名前の決め方は、ccn で作ったセッションと同じにする（下の「世帯とカードの名前」）。
 
 ccn は Origin 付きの要求を CSRF として断る。このため、HTTP の要求は画面からではなく Tauri の Rust 側から出す。
 
@@ -104,7 +104,13 @@ hook は本物の `claude -p` で試し、頼まれたこと、道具、最後�
 - キャラの体は Ninja Adventure Asset Pack（CC0）のドット絵、状態の印は Noto Animated Emoji（CC BY 4.0）の WebP にする（見本ページの案 C）。印の置き方は案 A の位置の2段階目（A2）。親には大人のキャラ6体、子より下には子供のキャラ18体から、名前で決めて当てる。見本は `docs/research/assets/index.html` と `docs/research/assets/balance.html`。
 - 家の絵（屋根、壁、床）は描かない。世帯は淡い色の枠で見分ける。
 - プロダクト名は Claude Town にする（2026-11-12）。数える単位は世帯で、画面の見出しは「5世帯・23人」のように出す。
-- 世帯の名前は、親（根のセッション）が自分で付ける。子を持つ親に名前が無ければ、状態 hook が1回だけ「依頼の中身から短い名前を決めて `python3 scripts/hook.py name "<名前>"` で付けて」と促す。名前は `~/.family-computing/houses.json` に入る。本人は画面で世帯の名前をダブルクリックして直せて、本人が付けた名前は親が付けた名前より優先する。名前が無いあいだは、子と孫の作業場所で一番多いディレクトリ名を仮の名前にする。
+- 世帯とカードの名前は、そのセッションが作業しているプロジェクトの名前にする（2026-11-13）。プロジェクトの名前は、リポジトリの本体のディレクトリの名前（例 family-computing）。決め方は `src-tauri/src/naming.rs` と `src/model.ts` の cardNames に同じものを書き、試験の事例は `src/naming-cases.json` にまとめて両方で読む。
+  1. git の worktree は、`.git` の gitdir から本体の名前に直す（この機械の町だけ）。`.git` を読めないときは `<名前>.wt/<x>` を <名前> にし、それ以外は cwd の最後の名前にする。
+  2. cwd が振り分けの場所（ホーム、`~/Documents`、`~/Documents/meta`、`~/.local/share/ccn/lobby`、`/`、`/tmp`、`/private/tmp`、`/root`）なら、子孫のプロジェクトで一番多いものにする。振り分けの場所にいる子孫は数えず、同数なら先に始まった子孫の分にする。
+  3. 子孫から分からなければ、エージェントが `python3 scripts/hook.py name <プロジェクトの名前>` で付けた名前にする。それも無ければ cwd の最後の名前（meta など）のままにする。
+  4. cwd が無ければ ccn の題名、それも無ければセッション ID の先頭8字にする。
+- 世帯の名前は、根のカードの名前と同じにする。本人は画面で世帯の名前をダブルクリックして直せて、本人が付けた名前が最優先になる。名前は `~/.family-computing/houses.json` に入る。
+- 振り分けの場所で動く親が、別のプロジェクトで子を作ると（ccn の create_session か Specter の spawn_child）、状態 hook が「そのプロジェクトのディレクトリの名前を `hook.py name` で付けて」と促す。プロジェクトごとに1回だけ促す。Specter の子は ccn に親が残らず、アプリが子孫として数えられないので、この名前で世帯の名前が分かる。
 
 ## 決まっていないこと
 
@@ -181,7 +187,7 @@ echo '{"session_id":"0123abcd-0000-0000-0000-000000000001","hook_event_name":"Us
 
 - 状態 hook は1つだけ登録してあり、両版が同じ状態ファイルを読む。登録先は安定版のタグから写した `~/.family-computing/stable/hooks/fc-report.py` なので、作業ツリーの hook を書き換えても、安定版を上げ直すまで両版に出る内容は変わらない。
 - hook が書くファイル（state/、letters.jsonl）と、送信の非常停止（send-disabled）は、両版が `~/.family-computing/` の同じものを読む。非常停止は1か所で両版を止めるために共有にしてある。
-- 世帯の名前は、エージェントが hook（`scripts/hook.py name`）で付けた分が `~/.family-computing/houses.json` に入り、両版が読む。
+- エージェントが hook（`scripts/hook.py name`）で付けた世帯の名前は、`~/.family-computing/houses.json` に入り、両版が読む。
 
 両版で分けているもの:
 

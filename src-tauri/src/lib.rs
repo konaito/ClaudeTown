@@ -11,6 +11,7 @@
 // 別の機械（peer）は手元のノードの中継 /n/<peer>/api/... を通す。
 
 mod avatars;
+mod naming;
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -157,14 +158,6 @@ fn peers() -> Result<Value, String> {
     get_json_t(&format!("{}/api/peers", ccn_base()), LIST_TIMEOUT)
 }
 
-/// カードの名前。セッションの cwd の最後の名前。cwd が無いときだけ ccn の title、それも無ければ ID の先頭8字
-fn display_name(cwd: Option<&str>, title: Option<&str>, id: &str) -> String {
-    if let Some(d) = cwd.and_then(|c| c.split('/').filter(|p| !p.is_empty()).last()) {
-        return d.to_string();
-    }
-    title.filter(|t| !t.is_empty()).map(String::from).unwrap_or_else(|| id[..8.min(id.len())].to_string())
-}
-
 fn snapshot(peer: Option<String>) -> Snapshot {
     let peer = peer.filter(|p| !p.is_empty());
     let (sessions, ccn_error) = match get_json_t(&format!("{}/sessions", api(&peer)), LIST_TIMEOUT) {
@@ -178,12 +171,6 @@ fn snapshot(peer: Option<String>) -> Snapshot {
         .collect();
     let live_ids: HashSet<String> = live.iter().filter_map(|s| s["id"].as_str().map(String::from)).collect();
 
-    let mut name_of: HashMap<String, String> = HashMap::new();
-    for s in &live {
-        let id = s["id"].as_str().unwrap_or_default().to_string();
-        let name = display_name(s["cwd"].as_str(), s["title"].as_str(), &id);
-        name_of.insert(id, name);
-    }
     // ccn の parent は from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）
     let parent_from_ccn = |s: &Value| -> Option<String> {
         let p = s["parent"].as_str()?;
@@ -192,6 +179,25 @@ fn snapshot(peer: Option<String>) -> Snapshot {
     };
 
     let houses = read_houses();
+    // 名前は、そのセッションが作業しているプロジェクトの名前（src-tauri/src/naming.rs）。
+    // .git を読むのはこの機械の町だけ。別の機械の cwd はパスの形だけで決める
+    let local = peer.is_none();
+    let whos: Vec<naming::Who> = live.iter().map(|s| {
+        let id = s["id"].as_str().unwrap_or_default().to_string();
+        let cwd = s["cwd"].as_str().filter(|c| !c.is_empty());
+        let house = houses.get(&id);
+        naming::Who {
+            parent: parent_from_ccn(s).filter(|p| *p != id),
+            cwd: cwd.map(String::from),
+            title: s["title"].as_str().map(String::from),
+            project: cwd.and_then(|c| naming::project_of(c, local)),
+            agent_name: house.filter(|h| h["by"] == "agent").and_then(|h| h["name"].as_str()).map(String::from),
+            started_at: s["startedAt"].as_u64().unwrap_or(0),
+            id,
+        }
+    }).collect();
+    let name_of = naming::card_names(&whos);
+    let project_of: HashMap<&str, Option<&String>> = whos.iter().map(|w| (w.id.as_str(), w.project.as_ref())).collect();
     let mut agents = vec![];
     for s in &live {
         let id = s["id"].as_str().unwrap_or_default().to_string();
@@ -208,6 +214,8 @@ fn snapshot(peer: Option<String>) -> Snapshot {
         agents.push(json!({
             "id": id,
             "name": name_of.get(&id),
+            // cwd のプロジェクトの名前（worktree なら本体の名前）。振り分けの場所でも cwd の分を入れる
+            "project": project_of.get(id.as_str()).copied().flatten(),
             "kind": s["kind"],
             "state": s["state"],
             "cwd": s["cwd"],
@@ -1189,15 +1197,6 @@ mod tests {
         use serde_json::json;
         let d = ConvDelta { items: vec![json!({ "role": "user", "text": "a", "n": 0 })], total: 1, reset: true };
         assert_eq!(serde_json::to_value(&d).unwrap(), json!({ "items": [{ "role": "user", "text": "a", "n": 0 }], "total": 1, "reset": true }));
-    }
-
-    #[test]
-    fn display_name_is_cwd_basename() {
-        use super::display_name;
-        assert_eq!(display_name(Some("/Users/x/Documents/meta"), Some("[Image #5] 安定"), "abcdef0123"), "meta");
-        assert_eq!(display_name(Some("/a/b/"), None, "abcdef0123"), "b");
-        assert_eq!(display_name(None, Some("題"), "abcdef0123"), "題");
-        assert_eq!(display_name(Some(""), None, "abcdef0123"), "abcdef01");
     }
 
     use super::*;
