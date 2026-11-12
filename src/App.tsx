@@ -12,7 +12,7 @@ import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
 import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
-  MOOD_LABEL, NEEDS_YOU, buildTree, choicesOf, houseNameOf, moodOf, nowOf, sinceText, taskOf,
+  MOOD_LABEL, NEEDS_YOU, buildTree, choicesOf, houseNameOf, moodOf, nowOf, sinceText, targetLabel, taskOf,
 } from "./model";
 import { Markdown } from "./Markdown";
 import { chatPerf } from "./chatPerf";
@@ -875,6 +875,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
   onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
 }) {
   const hasTerm = !!agent?.capabilities?.terminal;
+  const town = useContext(TownCtx);
   const [tab, setTab] = useState<"term" | "talk" | "state">("talk");
   const [sheet, setSheet] = useState<"teleport" | null>(null);
   // セッションを選んだときはチャットを出す。右クリックなどの termReq だけ端末を開く
@@ -964,6 +965,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
   }
 
   const mood = moodOf(agent);
+  // 同じ名前の人が町にいたら、送信先に ID の先頭8字を添える（#36）。見出しは幅が足りず ID が切れるので名前だけにする
+  const target = targetLabel(agent, town);
   const send = async (body: string) => {
     if (!body.trim() || busy) return;
     setBusy(true);
@@ -1030,7 +1033,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
       )}
 
       {tab !== "term" && <div className="composer">
-        <div className="to">送信先: {agent.name}</div>
+        <div className="to">送信先: {target}</div>
         <div className="box">
           <textarea
             value={text}
