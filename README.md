@@ -125,14 +125,15 @@ hook は本物の `claude -p` で試し、頼まれたこと、道具、最後�
 
 | | 安定版 | 開発版 |
 |---|---|---|
-| 名前 | Claude Town | Claude Town Dev |
+| 名前（productName） | Claude Town | Claude Town Dev |
+| Dock の名前 | Claude Town | family-computing（`tauri dev` は .app にならず、実行ファイル名が出る） |
 | identifier | `jp.fybe.family-computing` | `jp.fybe.family-computing.dev` |
 | 置き場所 | `/Applications/Claude Town.app` | 作業ツリーから `bun tauri dev` で起動する |
 | アイコン | `src-tauri/icons/` | `src-tauri/icons-dev/`（橙の DEV の帯付き） |
 | ウィンドウの題 | Claude Town | Claude Town Dev（開発版） |
 | 中身 | `stable-` で始まる git のタグ | 作業ツリーのいまの中身 |
 
-`src-tauri/tauri.conf.json` は開発版の設定にしてある。何も付けずに `bun tauri dev` や `bun tauri build` を動かすと、必ず開発版になる。安定版は `src-tauri/tauri.stable.conf.json` を Tauri の `--config` で重ねてビルドする（`--config` に渡した JSON は JSON Merge Patch として重なり、配列は丸ごと置き換わる。そのため窓の定義とアイコンの一覧は全部書いてある）。開発版は 1420 番のポートを使う。安定版はビルドした画面を中に持つのでポートを使わない。2つは同時に起動できる。
+`src-tauri/tauri.conf.json` は開発版の設定にしてある。何も付けずに `bun tauri dev` や `bun tauri build` を動かすと、必ず開発版になる。安定版は `src-tauri/tauri.stable.conf.json` を Tauri の `--config` で重ねてビルドする（`--config` に渡した JSON は元の設定に重なる。配列が丸ごと置き換わる前提で、窓の定義とアイコンの一覧は全部書いてある）。開発版は 1420 番のポートを使う。安定版はビルドした画面を中に持つのでポートを使わない。2つは同時に起動できる。
 
 子と開発者の決まり:
 
