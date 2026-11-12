@@ -168,7 +168,7 @@ scripts/rollback-stable.sh    # 今の版と1つ前の版を入れ替える。�
 両版で共有しているもの:
 
 - 状態 hook は、`~/.claude/settings.json` から本体の作業ツリーの `hooks/fc-report.py` を直接呼んでいる。hook を書き換えると、安定版に出る内容もすぐ変わる。
-- `~/.family-computing/` の状態ファイル（state、letters.jsonl、avatars.json、houses.json、send-disabled）は両版が同じものを読み、avatars.json と houses.json は両版が書く。開発版でこれらの形を変えると、安定版の表示が崩れることがある。
+- `~/.family-computing/` の状態ファイル（state、letters.jsonl、avatars.json、avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json、houses.json、send-disabled）は両版が同じものを読む。avatars で始まるファイルと houses.json は両版が書く。開発版でこれらの形を変えると、安定版の表示が崩れることがある。avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json の3つは、キャラの選び方の変更（feat/char-age）が入った版から使う。
 
 ## 開発
 
