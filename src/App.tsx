@@ -727,7 +727,7 @@ function Approval({ agent, peer, onDone, onError }: {
       ) : p ? (
         <div>
           <div className="ap-tool">{p.toolName}</div>
-          {detail && <ScrollEdgeGradient className="ap-detail">{detail}</ScrollEdgeGradient>}
+          {detail && <ScrollEdgeGradient className="ap-detail"><span>{detail}</span></ScrollEdgeGradient>}
           {(pending?.length ?? 0) > 1 && <div className="hint">ほかに{pending!.length - 1}件の承認が待っている。1件ずつ答える。</div>}
         </div>
       ) : (

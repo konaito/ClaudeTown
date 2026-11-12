@@ -1,13 +1,15 @@
-// スクロールできる方向の端に、淡いブルーグレーから透明へのグラデーションを重ねる（docs/design/scroll-edge-gradient.md）。
-// グラデーションはスクロールの容れ物の上端と下端に固定し、中身と一緒には動かない。操作は妨げない（pointer-events: none）。
+// スクロールできる方向の端に、淡いブルーグレーから透明へのグラデーションを出す（docs/design/scroll-edge-gradient.md）。
+// グラデーションは中身（世帯の枠、カード、会話の吹き出し）の裏、容れ物の地の上に置く。中身はフェードさせず、端の地の色だけが変わる。
+// やり方: スクロールの容れ物の最初と最後の子に position: sticky の層を置き（top: 0 と bottom: 0）、負の margin で高さを打ち消す。
+// 中身の子は position: relative と z-index: 1 で、その層より上に描く。層は操作を妨げない（pointer-events: none）。
 // 上に続きがあれば上端、下に続きがあれば下端に出し、端に着いたらその側を消す。スクロールが要らなければ両方消す。
 // 判定は実際のスクロールの容れ物から行い、スクロール、大きさの変更（ResizeObserver）、中身の増減（MutationObserver）に追従する。
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState, type CSSProperties, type ReactNode, type UIEvent } from "react";
 
 /** 場所ごとの濃さ。town は世帯の表示領域（続きの方向をはっきり見せる）、soft は会話や欄（控えめ） */
 export const SEG_STRENGTH = {
-  town: { height: 46, alpha: 0.95 },
-  soft: { height: 16, alpha: 0.35 },
+  town: { height: 40, alpha: 0.45 },
+  soft: { height: 14, alpha: 0.22 },
 } as const;
 
 type Props = {
@@ -57,12 +59,12 @@ export const ScrollEdgeGradient = forwardRef<HTMLDivElement, Props>(function Scr
   return (
     <div className={`seg-wrap ${wrapClassName ?? ""}`}
       style={{ ["--seg-h" as string]: `${SEG_STRENGTH[strength].height}px`, ["--seg-a" as string]: SEG_STRENGTH[strength].alpha } as CSSProperties}>
-      <div ref={ref} className={className} style={style} onClick={onClick}
+      <div ref={ref} className={`seg-scroll ${className ?? ""}`} style={style} onClick={onClick}
         onScroll={(e) => { update(); onScroll?.(e); }}>
+        <div className={`seg seg-top ${edges.top ? "on" : ""}`} aria-hidden />
         {children}
+        <div className={`seg seg-bottom ${edges.bottom ? "on" : ""}`} aria-hidden />
       </div>
-      <div className={`seg seg-top ${edges.top ? "on" : ""}`} aria-hidden />
-      <div className={`seg seg-bottom ${edges.bottom ? "on" : ""}`} aria-hidden />
     </div>
   );
 });

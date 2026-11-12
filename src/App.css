@@ -267,13 +267,14 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .empty p { margin: 0; }
 .sheet-foot .primary, .new-house-form .primary { white-space: nowrap; flex: none; }
 
-/* スクロールの端のグラデーション（src/ScrollEdgeGradient.tsx）。容れ物の上端と下端に固定し、操作は妨げない */
+/* スクロールの端のグラデーション（src/ScrollEdgeGradient.tsx）。中身の裏、地の上に sticky で置く */
 .seg-wrap { position: relative; display: flex; flex-direction: column; min-height: 0; }
-.seg-wrap > :first-child { flex: 1; min-height: 0; }
+.seg-wrap > .seg-scroll { flex: 1; min-height: 0; }
 .seg-fill { flex: 1; min-height: 0; }
-.seg { position: absolute; left: 0; right: 0; height: var(--seg-h, 16px); pointer-events: none; opacity: 0; transition: opacity 0.18s ease; z-index: 6; }
-.seg-top { top: 0; background: linear-gradient(to bottom, rgb(208 217 232 / var(--seg-a, 0.35)), rgb(208 217 232 / 0)); }
-.seg-bottom { bottom: 0; background: linear-gradient(to top, rgb(208 217 232 / var(--seg-a, 0.35)), rgb(208 217 232 / 0)); }
+.seg-scroll > :not(.seg) { position: relative; z-index: 1; }
+.seg { position: sticky; left: 0; right: 0; flex: none; height: var(--seg-h, 14px); pointer-events: none; opacity: 0; transition: opacity 0.18s ease; z-index: 0; }
+.seg-top { top: 0; margin-bottom: calc(-1 * var(--seg-h, 14px)); background: linear-gradient(to bottom, rgb(208 217 232 / var(--seg-a, 0.22)), rgb(208 217 232 / 0)); }
+.seg-bottom { bottom: 0; margin-top: calc(-1 * var(--seg-h, 14px)); background: linear-gradient(to top, rgb(208 217 232 / var(--seg-a, 0.22)), rgb(208 217 232 / 0)); }
 .seg.on { opacity: 1; }
 .ap-detail { font-family: ui-monospace, Menlo, monospace; }
 
