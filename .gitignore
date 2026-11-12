@@ -27,3 +27,4 @@ dist-ssr
 public/dev-snapshot.json
 public/dev-conversation.json
 public/dev-peers.json
+__pycache__/
