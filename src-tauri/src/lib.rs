@@ -26,7 +26,7 @@ use std::time::Duration;
 /// 非常停止。~/.family-computing/send-disabled があると、アプリからの送信（注文と承認のキー）を全部断る。
 /// `touch ~/.family-computing/send-disabled` で止め、消せば戻る（アプリの再起動は要らない）
 fn send_disabled() -> bool {
-    home().join(".family-computing/send-disabled").exists()
+    fc_path(Scope::Shared, "send-disabled").exists()
 }
 /// ccn では waiting_permission に見えるが、道具の承認ではない待ち（選択肢を選ぶ画面が出る）
 const NOT_TOOL_APPROVAL: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
@@ -34,6 +34,43 @@ const KEEP_MESSAGES: usize = 80;
 
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()))
+}
+
+// ---------- 状態ファイルの置き場所（#23） ----------
+
+/// 安定版の identifier（tauri.stable.conf.json と同じ値）
+const STABLE_ID: &str = "jp.fybe.family-computing";
+/// このバイナリの identifier。run() の最初に、ビルド時の設定（generate_context）から入れる
+static APP_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// どちらの置き場所に置くか
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Scope {
+    /// 両版で同じもの。hook が書くもの（state/、letters.jsonl）と、非常停止（send-disabled）。houses.json も hook が書くので、共有側にもある
+    Shared,
+    /// アプリが書くもの（avatars*.json、houses.json）。安定版は共有と同じ場所、開発版は dev/ の下
+    App,
+}
+
+/// ~/.family-computing の下のファイルの置き場所を決める。Rust で置き場所を組み立てるのはここだけにする
+fn fc_path(scope: Scope, name: &str) -> PathBuf {
+    place(&home(), APP_ID.get().map(String::as_str), std::env::var("FC_APP_HOME").ok().filter(|s| !s.is_empty()), scope, name)
+}
+
+/// fc_path の中身（試験のために環境から切り離してある）。
+/// App は、FC_APP_HOME があればそこ、identifier が安定版の値か分からないときは ~/.family-computing、それ以外（開発版）は ~/.family-computing/dev。
+/// 分からないときに安定版と同じ場所へ落とすのは、逆にすると安定版が割り当てと世帯の名前を見失うため
+fn place(home: &std::path::Path, app_id: Option<&str>, app_home: Option<String>, scope: Scope, name: &str) -> PathBuf {
+    let shared = home.join(".family-computing");
+    let dir = match scope {
+        Scope::Shared => shared,
+        Scope::App => match (app_home, app_id) {
+            (Some(h), _) => PathBuf::from(h),
+            (None, Some(id)) if id != STABLE_ID => shared.join("dev"),
+            _ => shared,
+        },
+    };
+    dir.join(name)
 }
 
 fn read_json(p: &PathBuf) -> Option<Value> {
@@ -103,7 +140,7 @@ struct Snapshot {
 const LETTERS_WINDOW_MS: u128 = 10 * 60 * 1000;
 const LETTERS_MAX: usize = 300;
 fn recent_letters() -> Vec<Value> {
-    let Ok(text) = fs::read_to_string(home().join(".family-computing/letters.jsonl")) else { return vec![] };
+    let Ok(text) = fs::read_to_string(fc_path(Scope::Shared, "letters.jsonl")) else { return vec![] };
     let since = now_ms().saturating_sub(LETTERS_WINDOW_MS);
     let mut out: Vec<Value> = text
         .lines()
@@ -146,7 +183,7 @@ fn snapshot(peer: Option<String>) -> Snapshot {
         live_ids.iter().find(|id| id.starts_with(sid8)).cloned()
     };
 
-    let houses = read_json(&houses_path()).unwrap_or(json!({}));
+    let houses = read_houses();
     let mut agents = vec![];
     for s in &live {
         let id = s["id"].as_str().unwrap_or_default().to_string();
@@ -154,7 +191,7 @@ fn snapshot(peer: Option<String>) -> Snapshot {
         let parent = parent_from_ccn(s).filter(|p| *p != id);
         let (report, close_check) = if peer.is_none() {
             (
-                read_json(&home().join(format!(".family-computing/state/{id}.json"))),
+                read_json(&fc_path(Scope::Shared, &format!("state/{id}.json"))),
                 read_json(&home().join(format!(".claude/close-check/{id}.json"))),
             )
         } else {
@@ -183,22 +220,32 @@ fn snapshot(peer: Option<String>) -> Snapshot {
             })),
         }));
     }
-    // キャラの絵の割り当て。この機械のセッションは保存して以後変えない。別の機械は毎回同じ規則で決める
+    // キャラの絵の割り当て。世代（親をたどった深さ）に合う見た目を重み付きの乱数で選び、保存して以後変えない。
+    // 別の機械の町も、機械ごとのファイルに保存する（乱数なので、保存しないと読むたびに顔が変わる）
     let mut order: Vec<&Value> = agents.iter().collect();
     order.sort_by(|a, b| a["startedAt"].as_u64().unwrap_or(0).cmp(&b["startedAt"].as_u64().unwrap_or(0)).then(a["id"].as_str().cmp(&b["id"].as_str())));
-    let live: Vec<(String, bool)> = order.iter().map(|a| (a["id"].as_str().unwrap_or_default().to_string(), a["parent"].is_null())).collect();
-    let path = home().join(".family-computing/avatars.json");
-    let prev: std::collections::BTreeMap<String, avatars::Assign> = if peer.is_none() {
-        fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
-    } else {
-        Default::default()
+    let parent_of: HashMap<String, Option<String>> = agents.iter()
+        .map(|a| (a["id"].as_str().unwrap_or_default().to_string(), a["parent"].as_str().map(String::from)))
+        .collect();
+    let depth = avatars::depths(&parent_of);
+    let live: Vec<(String, u32)> = order.iter().map(|a| {
+        let id = a["id"].as_str().unwrap_or_default().to_string();
+        let d = depth.get(&id).copied().unwrap_or(0);
+        (id, d)
+    }).collect();
+    let path = avatars_path(&peer);
+    let next = {
+        // 読む、決める、書くの間に、同じアプリの別の snapshot が割り込まないようにする
+        let _guard = AVATARS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (prev, mut recent) = avatars::load(&path);
+        let before = recent.clone();
+        let next = avatars::assign(&prev, &mut recent, &live, &mut fastrand::Rng::new());
+        // 一覧を読めなかったときは、全員がいなくなったように見えるので書かない
+        if ccn_error.is_none() && (next != prev || recent != before) {
+            avatars::save(&path, &next, &recent);
+        }
+        next
     };
-    let next = avatars::assign(&prev, &live);
-    if peer.is_none() && ccn_error.is_none() && next != prev {
-        if let Some(dir) = path.parent() { let _ = fs::create_dir_all(dir); }
-        let tmp = path.with_extension("tmp");
-        if fs::write(&tmp, serde_json::to_string_pretty(&next).unwrap_or_default()).is_ok() { let _ = fs::rename(&tmp, &path); }
-    }
     for a in agents.iter_mut() {
         if let Some(v) = a["id"].as_str().and_then(|id| next.get(id)) {
             a["avatar"] = json!({ "char": v.char, "hue": v.hue });
@@ -208,16 +255,54 @@ fn snapshot(peer: Option<String>) -> Snapshot {
     Snapshot { ccn: ccn_base(), peer, ccn_ok: ccn_error.is_none(), ccn_error, agents, letters, fetched_at: now_ms() }
 }
 
-// ---------- 家の名前 ----------
+static AVATARS_LOCK: Mutex<()> = Mutex::new(());
 
-fn houses_path() -> PathBuf {
-    std::env::var("FC_HOUSES").map(PathBuf::from).unwrap_or_else(|_| home().join(".family-computing/houses.json"))
+/// キャラの割り当ての保存先。FC_AVATARS で差し替えられる（モックの ccn で試すとき、本物の割り当てを消さないため）。
+/// 別の機械の町は、同じ場所の avatars-peer-<機械>.json に分けて置く
+/// FC_CCN_URL で別のノード（モックなど）に向けたのに FC_AVATARS が無いときは、avatars-custom-ccn.json に分ける。
+/// 本物の avatars.json を使うと、モックにいない本物のセッションの割り当てが全部消える（乱数なので元に戻らない）。
+/// 直近の記録（avatars-recent.json）は、同じ場所に avatars::recent_path が組み立てる。開発版はどれも dev/ の下になる
+fn avatars_path(peer: &Option<String>) -> PathBuf {
+    let default = if std::env::var("FC_CCN_URL").is_ok() { "avatars-custom-ccn.json" } else { "avatars.json" };
+    let base = std::env::var("FC_AVATARS").map(PathBuf::from).unwrap_or_else(|_| fc_path(Scope::App, default));
+    match peer {
+        None => base,
+        Some(p) => {
+            let safe: String = p.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+            base.with_file_name(format!("avatars-peer-{safe}.json"))
+        }
+    }
 }
 
-/// 本人が画面で家の名前を付ける。空なら本人の名前を消す（親が付けた名前か仮の名前に戻る）
+// ---------- 家の名前 ----------
+
+/// 世帯の名前の置き場所。（共有の分, アプリが書く分）を返す。
+/// 共有の分には、hook（scripts/hook.py name）でエージェントが付けた名前が入る。アプリは自分の分にだけ書く。
+/// 安定版では2つは同じファイル。FC_HOUSES があれば、両方ともそのファイルにする
+fn houses_paths() -> (PathBuf, PathBuf) {
+    match std::env::var("FC_HOUSES") {
+        Ok(p) if !p.is_empty() => (PathBuf::from(&p), PathBuf::from(p)),
+        _ => (fc_path(Scope::Shared, "houses.json"), fc_path(Scope::App, "houses.json")),
+    }
+}
+
+/// 世帯の名前を読む。共有の分を下地にして、アプリの分（開発版なら開発版で付けた名前）を上に重ねる
+fn read_houses() -> Value {
+    let (shared, own) = houses_paths();
+    let mut out = read_json(&shared).filter(Value::is_object).unwrap_or(json!({}));
+    if own != shared {
+        if let (Some(base), Some(Value::Object(top))) = (out.as_object_mut(), read_json(&own)) {
+            base.extend(top);
+        }
+    }
+    out
+}
+
+/// 本人が画面で家の名前を付ける。空なら本人の名前を消す（親が付けた名前か仮の名前に戻る）。
+/// 開発版では開発版の分にだけ書く。開発版で消しても、共有の分にある名前は残って見える
 #[tauri::command]
 fn set_house_name(session_id: String, name: String) -> Result<(), String> {
-    let p = houses_path();
+    let p = houses_paths().1;
     let mut houses = read_json(&p).unwrap_or(json!({}));
     let obj = houses.as_object_mut().ok_or("houses.json の形が想定と違う")?;
     let name: String = name.trim().chars().take(24).collect();
@@ -811,8 +896,31 @@ pub fn run() {
     //   family-computing --snapshot             一覧
     //   family-computing --conversation <id>    会話
     //   family-computing --answer <sessionId> <allow|deny> [expectId]
+    // identifier はビルド時の設定（開発版は tauri.conf.json、安定版は tauri.stable.conf.json を重ねたもの）から取る。
+    // 下の開発用の引数も、画面と同じ置き場所を使う
+    let context = tauri::generate_context!();
+    let _ = APP_ID.set(context.config().identifier.clone());
     let args: Vec<String> = std::env::args().collect();
     let arg_after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    // family-computing --paths   identifier と、状態ファイルの置き場所を出す（両版で分かれているかの確認に使う）
+    if args.iter().any(|a| a == "--paths") {
+        let (houses_shared, houses_own) = houses_paths();
+        println!("{}", serde_json::to_string_pretty(&json!({
+            "identifier": APP_ID.get(),
+            "shared": fc_path(Scope::Shared, ""),
+            "app": fc_path(Scope::App, ""),
+            "avatars": avatars_path(&None),
+            "avatarsRecent": avatars::recent_path(&avatars_path(&None)),
+            "housesShared": houses_shared,
+            "houses": houses_own,
+        })).unwrap_or_default());
+        return;
+    }
+    // family-computing --house-name <sessionId> <名前>   世帯の名前を付ける（画面で名前を付けるのと同じ処理）。空にすると消す
+    if let Some(i) = args.iter().position(|a| a == "--house-name") {
+        println!("{:?}", set_house_name(args.get(i + 1).cloned().unwrap_or_default(), args.get(i + 2).cloned().unwrap_or_default()));
+        return;
+    }
     if args.iter().any(|a| a == "--snapshot") {
         println!("{}", serde_json::to_string_pretty(&snapshot(arg_after("--peer"))).unwrap_or_default());
         return;
@@ -859,13 +967,41 @@ pub fn run() {
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dev_keeps_app_files_apart_from_stable() {
+        let h = std::path::Path::new("/h");
+        let p = |id: Option<&str>, over: Option<&str>, scope, name| place(h, id, over.map(String::from), scope, name);
+        // 安定版と、identifier が分からないときは、今までの場所
+        assert_eq!(p(Some(STABLE_ID), None, Scope::App, "avatars.json"), PathBuf::from("/h/.family-computing/avatars.json"));
+        assert_eq!(p(None, None, Scope::App, "houses.json"), PathBuf::from("/h/.family-computing/houses.json"));
+        // 開発版のアプリの分は dev/ の下
+        let dev = Some("jp.fybe.family-computing.dev");
+        assert_eq!(p(dev, None, Scope::App, "avatars-recent.json"), PathBuf::from("/h/.family-computing/dev/avatars-recent.json"));
+        assert_eq!(p(dev, None, Scope::App, "houses.json"), PathBuf::from("/h/.family-computing/dev/houses.json"));
+        // hook が書くものと非常停止は、開発版でも共有
+        assert_eq!(p(dev, None, Scope::Shared, "state/x.json"), PathBuf::from("/h/.family-computing/state/x.json"));
+        assert_eq!(p(dev, None, Scope::Shared, "letters.jsonl"), PathBuf::from("/h/.family-computing/letters.jsonl"));
+        assert_eq!(p(dev, None, Scope::Shared, "send-disabled"), PathBuf::from("/h/.family-computing/send-disabled"));
+        // FC_APP_HOME はアプリの分だけを差し替える
+        assert_eq!(p(Some(STABLE_ID), Some("/t"), Scope::App, "avatars.json"), PathBuf::from("/t/avatars.json"));
+        assert_eq!(p(dev, Some("/t"), Scope::Shared, "letters.jsonl"), PathBuf::from("/h/.family-computing/letters.jsonl"));
+    }
+
+    #[test]
+    fn stable_conf_identifier_matches() {
+        let conf: Value = serde_json::from_str(include_str!("../tauri.stable.conf.json")).unwrap();
+        assert_eq!(conf["identifier"], STABLE_ID);
+        let dev: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_ne!(dev["identifier"], STABLE_ID);
+    }
 
     // 2026-11-12 に本番のノードの pty のセッションから読んだ messages の形
     #[test]

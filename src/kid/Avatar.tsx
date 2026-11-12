@@ -4,13 +4,8 @@
 import type { Mood } from "../model";
 import "./avatar.css";
 
-/** 根のセッション（親）に当てる大人のキャラ */
-const ADULTS = ["Woman", "Noble", "Knight", "Inspector", "Princess", "Hunter"];
-/** 子より下に当てる子供のキャラ */
-const KIDS = [
-  "Boy", "Princess", "EggBoy", "EggGirl", "Cavegirl", "Cavegirl2", "LionBoy", "Villager2", "Villager4",
-  "NinjaBlue", "NinjaGreen", "NinjaRed", "NinjaYellow", "Eskimo", "MaskFrog", "MaskRacoon", "Hunter", "FighterRed",
-];
+// 年齢の印象の点数と世代の目標は Rust（src-tauri/src/avatars.rs の AGES）が正本。ages.json はそこから生成したもの
+import AGES from "./ages.json";
 
 /** 状態ごとの印（Noto のコードポイント）。無い状態は印を出さない */
 const MARK: Partial<Record<Mood, string>> = {
@@ -30,13 +25,29 @@ export function hash(s: string): number {
 export type Role = "parent" | "child" | "grandchild";
 
 /**
+ * Rust の割り当て（pick）が無いとき（?mock のブラウザ表示など）の代わりの選び方。
+ * Rust と同じ重み（世代の目標に近い点数ほど大きい）で、乱数の代わりに seed の hash で引く。
+ * 同じ人が大きさの違う複数の場所に描かれるので、描くたびに変わらないよう seed で固定する。
+ */
+export function fallbackChar(role: Role, seed: string): string {
+  const target = AGES.targets[role];
+  const items = Object.entries(AGES.ages).map(([c, s]) => [c, Math.exp(-(((s - target) / AGES.sigma) ** 2) / 2)] as const);
+  const total = items.reduce((a, [, w]) => a + w, 0);
+  let r = (hash(`${role}:${seed}`) / 2 ** 32) * total;
+  for (const [c, w] of items) {
+    if (r < w) return c;
+    r -= w;
+  }
+  return items[items.length - 1][0];
+}
+
+/**
  * size は体の一辺の px。16px の絵の整数倍（32、48、64）にすると、ドット絵がにじまない。
  * 箱の高さは size に吹き出しの余白を足した分で、印の有無で変わらない。
  */
 export function Avatar({ seed, mood, role, size, pick, dead }: { seed: string; mood: Mood; role: Role; size: number; pick?: { char: string; hue: number } | null; dead?: boolean }) {
-  const list = role === "parent" ? ADULTS : KIDS;
-  // 絵は Rust が町の中で被らないように割り当てたもの（pick）を使う。無いとき（ブラウザ表示など）は名前の hash で選ぶ
-  const char = pick?.char ?? list[hash(`${role}:${seed}`) % list.length];
+  // 絵は Rust が世代に合わせて町の中で被らないように割り当てたもの（pick）を使う。無いとき（ブラウザ表示など）は seed の hash で選ぶ
+  const char = pick?.char ?? fallbackChar(role, seed);
   const hue = pick?.hue ?? 0;
   const walking = mood === "working";
   const mark = MARK[mood];

@@ -91,7 +91,7 @@ ccn は Origin 付きの要求を CSRF として断る。このため、HTTP の
 - A（採用）: 各セッションに、いまの様子を書き出させる hook。UserPromptSubmit、PreToolUse、PermissionRequest、PostToolUse、Notification、Stop、SessionStart、SessionEnd で、頼まれたこと、いまやっていること、最後の報告、次の一手、人を待っているかを状態ファイルに書く。LLM は呼ばない。
 - B（不採用）: 各エージェントに、終わった子を閉じさせ、ツリーを浅く保たせる hook。
 
-hook の本体は `hooks/fc-report.py` に置く。2026-11-12 に本人に確かめて `~/.claude/settings.json` に登録した（同じ日に PermissionRequest も足した）。登録と解除は `python3 scripts/hook.py install` と `python3 scripts/hook.py uninstall` で行う。書く前に settings.json の控えを残す。cam の各プロファイルの settings.json は `~/.claude/settings.json` へのリンクなので、1か所で全部に効く。
+hook の本体は `hooks/fc-report.py` に置く。2026-11-12 に本人に確かめて `~/.claude/settings.json` に登録した（同じ日に PermissionRequest も足した）。`~/.claude/settings.json` が呼ぶのは作業ツリーの hook ではなく、安定版のタグから写した `~/.family-computing/stable/hooks/fc-report.py` である（下の「安定版と開発版」）。登録と解除は `python3 scripts/hook.py install` と `python3 scripts/hook.py uninstall` で行う。install は写した先を登録し、写した先が無ければ何も書かずに止まる。書く前に settings.json の控えを残す。cam の各プロファイルの settings.json は `~/.claude/settings.json` へのリンクなので、1か所で全部に効く。
 
 hook は本物の `claude -p` で試し、頼まれたこと、道具、最後の報告、次の一手が状態ファイルに入ることを確かめた。
 
@@ -153,7 +153,7 @@ scripts/release-stable.sh <ref>    # 例: scripts/release-stable.sh feat/app-v1
 2. 作業ツリーとは別の一時 worktree にタグを取り出し、`bun install --frozen-lockfile` と `tauri build --bundles app` を行う。Rust のビルド結果は `$HOME/.cache/claude-town/stable-target` に置き、次のリリースで使い回す。
 3. できた .app の identifier と名前が安定版の値か確かめる。違えば入れずに中断する。
 4. 安定版が動いていれば終わらせる。終わらせるのは `/Applications/Claude Town.app` の実行ファイルの pid だけで、開発版や他のプロセスには触らない。
-5. 今の .app を `$HOME/.family-computing/stable/previous/` に退避し、新しい .app を入れる。
+5. 今の .app を `$HOME/.family-computing/stable/previous/` に退避し、新しい .app を入れる。タグの `hooks/` と `scripts/hook.py` を `$HOME/.family-computing/stable/` の下に同じ相対位置で写す。どのタグから写したかは同じ場所の `hooks.ref` に残る。
 6. 安定版を起動する。
 
 入っている版は `$HOME/.family-computing/stable/current.ref`、履歴は同じ場所の `releases.log` に残る。
@@ -164,12 +164,33 @@ scripts/release-stable.sh <ref>    # 例: scripts/release-stable.sh feat/app-v1
 scripts/rollback-stable.sh    # 今の版と1つ前の版を入れ替える。もう一度回すと元に戻る
 ```
 
+戻すときも、状態 hook を戻した先の版のタグから写し直す。アプリを入れ替えずに hook だけを写し直すときは `scripts/install-stable-hooks.sh [タグ]` を使う（タグを省くと、いま入っている版のタグから写す）。
+
+作業ツリーの hook を試すときは、手で見本の入力を流す。`FC_STATE_DIR`、`FC_LETTERS`、`FC_HOUSES` を一時の場所に向けると、本物の状態ファイルに書かない。
+
+```bash
+echo '{"session_id":"0123abcd-0000-0000-0000-000000000001","hook_event_name":"UserPromptSubmit","prompt":"試し"}' \
+  | FC_STATE_DIR=/tmp/fc-try FC_LETTERS=/tmp/fc-try/letters.jsonl FC_HOUSES=/tmp/fc-try/houses.json python3 hooks/fc-report.py
+```
+
+本物のセッションで試すときだけ、`python3 scripts/hook.py install --worktree` で作業ツリーの hook に登録を替える。その間は安定版にも作業ツリーの hook の内容が出るので、済んだら `python3 scripts/hook.py install` で写した先に戻す。2つを同時に登録しないのは、同じ状態ファイルに2つの版の hook が書くと、作業ツリーの hook がまた安定版の表示に混ざるためである。
+
 開発版のアイコンは、安定版のアイコンに帯を重ねて作る。`src-tauri/icons/` を作り直したら `scripts/make-dev-icon.sh` も回してコミットする（ImageMagick が要る）。
 
 両版で共有しているもの:
 
-- 状態 hook は、`~/.claude/settings.json` から本体の作業ツリーの `hooks/fc-report.py` を直接呼んでいる。hook を書き換えると、安定版に出る内容もすぐ変わる。
-- `~/.family-computing/` の状態ファイル（state、letters.jsonl、avatars.json、avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json、houses.json、send-disabled）は両版が同じものを読む。avatars で始まるファイルと houses.json は両版が書く。開発版でこれらの形を変えると、安定版の表示が崩れることがある。avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json の3つは、キャラの選び方の変更（feat/char-age）が入った版から使う。
+- 状態 hook は1つだけ登録してあり、両版が同じ状態ファイルを読む。登録先は安定版のタグから写した `~/.family-computing/stable/hooks/fc-report.py` なので、作業ツリーの hook を書き換えても、安定版を上げ直すまで両版に出る内容は変わらない。
+- hook が書くファイル（state/、letters.jsonl）と、送信の非常停止（send-disabled）は、両版が `~/.family-computing/` の同じものを読む。非常停止は1か所で両版を止めるために共有にしてある。
+- 世帯の名前は、エージェントが hook（`scripts/hook.py name`）で付けた分が `~/.family-computing/houses.json` に入り、両版が読む。
+
+両版で分けているもの:
+
+- アプリが書くファイル（avatars.json、avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json、houses.json）は、安定版は `~/.family-computing/` に、開発版は `~/.family-computing/dev/` に置く。開発版でキャラの割り当てや世帯の名前を変えても、安定版のファイルは変わらない。
+- どちらに置くかは、ビルドに入った identifier で決める。安定版の identifier なら今までの場所、それ以外（開発版）なら dev/ にする。環境変数を付け忘れても、開発版が安定版のファイルに書かない。
+- 開発版の世帯の名前は、共有の houses.json を下地に読み、開発版の houses.json を上に重ねる。本人が開発版の画面で付けた名前は開発版の分にだけ書く。開発版で名前を消しても、共有の分にある名前は残って見える。
+- 置き場所を決める関数は `src-tauri/src/lib.rs` の `fc_path` だけにしてある。`FC_APP_HOME` を付けると、アプリが書くファイルの置き場所だけを差し替えられる。`FC_AVATARS` と `FC_HOUSES` は今までどおり使える。
+- 置き場所は `src-tauri/target/debug/family-computing --paths` で確かめられる。identifier と、各ファイルの置き場所を出す。
+- 開発版の dev/ は、初めて起動したときは空なので、キャラは安定版と違う顔ぶれで振り直される。avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json の3つは、キャラの選び方の変更（feat/char-age）が入った版から使う。
 
 ## 開発
 

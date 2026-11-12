@@ -11,6 +11,8 @@
 #   3. できた .app の識別子と名前が安定版の値か確かめる（違えば中断）
 #   4. 安定版が動いていれば、その実行ファイルの pid だけを終わらせる
 #   5. 今の /Applications/Claude Town.app を退避先に移し（1つ前の版として残す）、新しい .app を入れる
+#      タグの状態 hook（hooks/ と scripts/hook.py）を退避先と同じ置き場の hooks/ と scripts/ に写す
+#      （~/.claude/settings.json はここを登録するので、作業ツリーの hook を書き換えても安定版に出る内容は変わらない）
 #   6. 安定版を起動する
 #
 # 戻すときは scripts/rollback-stable.sh（今の版と1つ前の版を入れ替える）。
@@ -82,6 +84,8 @@ if [ "$got_id" != "$STABLE_ID" ] || [ "$got_name" != "$APP_NAME" ]; then
 fi
 
 mkdir -p "$STATE/previous" "$STATE/staging"
+# 状態 hook は、安定版を止める前に取り出して確かめる。だめならここで中断し、安定版には触らない
+stage_hooks "$repo" "$tag" "$STATE"
 staged="$STATE/staging/$APP_NAME.app"
 rm -rf "$staged"
 ditto "$built" "$staged"
@@ -99,6 +103,7 @@ fi
 mkdir -p "$DEST_DIR"
 mv "$staged" "$DEST"
 echo "$tag $sha" > "$STATE/current.ref"
+commit_hooks "$repo" "$tag" "$STATE" || echo "状態 hook を写せなかった。scripts/install-stable-hooks.sh $tag で写し直す" >&2
 echo "$(date '+%Y-%m-%d %H:%M:%S') release $tag $sha" >> "$STATE/releases.log"
 echo "入れた: $DEST ($tag $sha)"
 
