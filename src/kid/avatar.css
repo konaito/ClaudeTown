@@ -37,3 +37,26 @@
   background: #fff; border-left: 1.5px solid #d4d4d4; border-bottom: 1.5px solid #d4d4d4;
   transform: skewY(-25deg) rotate(-10deg);
 }
+
+/* ポケモンスキン（src/kid/pokemon.ts）。GIF は種ごとに寸法がばらばらなので、体の箱に収めて下揃えにする。
+   上の Ninja 用の指定（幅4倍、足踏み）が当たらないよう、詳しさを上げて上書きする */
+.fc-avatar.pk .fc-body { overflow: visible; }
+.fc-avatar.pk .fc-body .pk-img {
+  position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+  object-fit: contain; object-position: center bottom; image-rendering: auto; animation: none;
+}
+/* 作業中: GIF の動きに、小さな跳ねを足す。孫の 32px でも動いているのが分かるように */
+.fc-avatar.pk.fc-working .fc-body .pk-img { animation: pk-hop 0.7s ease-in-out infinite; }
+@keyframes pk-hop { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-9%); } }
+/* 閉じたとき: 揺れてから灰色になって倒れる */
+.fc-avatar.pk.fc-dead .fc-body .pk-img { animation: pk-dead 1.15s var(--kd, 0ms) forwards; transform-origin: center bottom; }
+@keyframes pk-dead {
+  0%, 30% { transform: none; filter: none; }
+  35% { transform: translateX(-2px); } 40% { transform: translateX(2px); } 45% { transform: translateX(-2px); filter: none; }
+  56%, 100% { transform: rotate(90deg) scale(0.8); filter: grayscale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fc-avatar.pk.fc-dead .fc-body .pk-img { animation: none; filter: grayscale(1); }
+  /* 跳ねは止める。GIF の動きで作業中は分かる */
+  .fc-avatar.pk.fc-working .fc-body .pk-img { animation: none; }
+}

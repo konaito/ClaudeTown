@@ -31,11 +31,13 @@ const findBySid8 = (agents: Agent[], sid8: string) => {
  * others は、いま見ている町以外の町の一覧。
  */
 export function withGhosts(cur: Town, others: Town[]): Agent[] {
-  const out: Agent[] = cur.agents.map((a) => ({ ...a }));
+  // 書き換えないセッションは元のオブジェクトのまま返す。カードの memo が、取り直しのたびに外れないようにする（#4）
+  const out: Agent[] = [...cur.agents];
   const byId = new Map(out.map((a) => [a.id, a]));
   const added = new Set<string>();
   // 子の町: 親がこの町にいない子
-  for (const x of out) {
+  for (let i = 0; i < cur.agents.length; i++) {
+    const x = cur.agents[i];
     if (x.parent) continue;
     const sid8 = parentSid8(x.parentRaw);
     if (!sid8 || findBySid8(cur.agents, sid8)) continue;
@@ -47,7 +49,7 @@ export function withGhosts(cur: Town, others: Town[]): Agent[] {
         added.add(gid);
         out.push(ghost(p, t.town, null, "parent"));
       }
-      x.parent = gid;
+      out[i] = { ...x, parent: gid };
       break;
     }
   }
