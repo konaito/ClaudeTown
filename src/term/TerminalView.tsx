@@ -37,12 +37,17 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
       if (t) setTimeout(() => call("term_input", { sessionId, text: t, peer }).catch((e) => onError(`端末に書けなかった: ${e}`)), 300);
     };
     let lastSize = "";
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const pushSize = () => {
       try { fit.fit(); } catch { return; }
       const key = `${term.cols}x${term.rows}`;
       if (key === lastSize) return;
       lastSize = key;
-      call("term_resize", { sessionId, cols: term.cols, rows: term.rows, peer }).catch((e) => onError(`端末の大きさを変えられなかった: ${e}`));
+      // 境目のドラッグ中は大きさが続けて変わるので、PTY への通知は止まってから 150ms 後に1回だけ送る（画面の fit はすぐ）
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        call("term_resize", { sessionId, cols: term.cols, rows: term.rows, peer }).catch((e) => onError(`端末の大きさを変えられなかった: ${e}`));
+      }, 150);
     };
     const disposeInput = term.onData((text) => {
       if (replaying > 0) return;

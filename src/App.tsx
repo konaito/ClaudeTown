@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { call as invoke, setFullscreen } from "./bridge";
 import { TerminalView } from "./term/TerminalView";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
+import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
 import {
@@ -14,6 +15,15 @@ import { LAYOUT, boxOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
 
 const POLL_MS = 2000;
+/** 右パネルの幅（px）。最小と既定。最大はウィンドウ幅の半分（maxSize="50%"） */
+const SIDE_MIN = 380;
+const SIDE_DEFAULT = 380;
+const SPLIT_KEY = "claude-town.split";
+/** 前回の境目の位置。次に起動したときも同じにする */
+function savedSplit(): Layout | undefined {
+  try { const v = JSON.parse(localStorage.getItem(SPLIT_KEY) ?? "null"); return v && typeof v === "object" ? v : undefined; } catch { return undefined; }
+}
+function saveSplit(l: Layout) { try { localStorage.setItem(SPLIT_KEY, JSON.stringify(l)); } catch { /* 保存できなくても動きは変えない */ } }
 /** 閉じる演出の長さ（ms）。CSS の kill-* と合わせる */
 const KILL_MS = 1150;
 /** 子孫を葉から順に倒すときのずらし（ms） */
@@ -183,7 +193,8 @@ export default function App() {
         <div className="top-right" />
       </header>
 
-      <div className="body">
+      <SplitGroup className="body" orientation="horizontal" defaultLayout={savedSplit()} onLayoutChanged={saveSplit}>
+        <SplitPanel id="town" minSize="50%">
         <div className="left">
           <NextRow needs={needs} done={done} working={counts.working} total={agents.length}
             onSelect={(a) => setSelected(a.id)} onFocus={focus} />
@@ -243,10 +254,15 @@ export default function App() {
           </div>
         </div>
 
+        </SplitPanel>
+        {/* 町と右パネルの境目。ドラッグで右パネルを 380px からウィンドウ幅の半分まで広げられる。ダブルクリックで既定の幅に戻る */}
+        <Separator className="split-handle" />
+        <SplitPanel id="side" defaultSize={SIDE_DEFAULT} minSize={SIDE_MIN} maxSize="50%">
         <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} termReq={termReq} peers={peers} takeEarly={takeEarly} booting={booting}
           onSent={(a) => toast(`${a.name} に届けた`)} onSent2={(m) => toast(m)} onError={(m) => toast(m, true)}
           needs={needs} onSelect={(a) => setSelected(a.id)} />
-      </div>
+        </SplitPanel>
+      </SplitGroup>
 
       {killAsk && (
         <KillConfirm agent={killAsk} descendants={countDesc(tree.childrenOf, killAsk.id)}

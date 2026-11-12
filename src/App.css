@@ -37,8 +37,14 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .conn i { width: 9px; height: 9px; border-radius: 50%; background: var(--working); }
 .conn.bad i { background: #e5574a; }
 
-.body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 380px; grid-template-rows: minmax(0, 1fr); }
-.left { min-width: 0; min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+.body { flex: 1; min-height: 0; }
+.body > [data-panel] { min-height: 0; display: flex; flex-direction: column; }
+.body > [data-panel] > .left, .body > [data-panel] > .panel { flex: 1; min-height: 0; }
+/* 境目のつまみ。ふだんは細い線、ホバーとドラッグ中は太く青く */
+.split-handle { position: relative; flex: none; width: 6px; margin: 0 -3px; z-index: 10; cursor: col-resize; background: transparent; }
+.split-handle::after { content: ""; position: absolute; top: 0; bottom: 0; left: 2.5px; width: 1px; background: var(--line); transition: background 0.12s, width 0.12s, left 0.12s; }
+.split-handle:hover::after, .split-handle[data-separator="active"]::after, .split-handle[data-resize-handle-state="drag"]::after { left: 1.5px; width: 3px; background: #b9c9e6; }
+.left { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 
 /* 次の一手 */
 .next-row { display: flex; align-items: center; gap: 10px; padding: 10px 18px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
@@ -328,3 +334,8 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
   .fnode.dying { animation: kill-out-fast 0.3s var(--kd) forwards; }
   @keyframes kill-out-fast { to { opacity: 0; } }
 }
+/* 町が狭いとき（右パネルを広げたとき）に見出しが途中で折れないようにする */
+.fam-head { flex-wrap: wrap; row-gap: 4px; }
+.fam-title, .fam-count, .new-house { white-space: nowrap; }
+.legend { flex-wrap: wrap; justify-content: flex-end; row-gap: 2px; }
+.lg { white-space: nowrap; }
