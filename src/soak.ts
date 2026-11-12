@@ -57,14 +57,14 @@ async function reopen() {
     const onLost = () => lost++;
     const cvs = [...document.querySelectorAll<HTMLCanvasElement>(".term canvas")];
     for (const cv of cvs) cv.addEventListener("webglcontextlost", onLost);
-    await sleep(800);
+    await sleep(400);
     const live = cvs.map((cv) => cv.getContext("webgl2")).filter((x): x is WebGL2RenderingContext => !!x && !x.isContextLost());
     if (ok) drawn++;
     if (live.length > 0) gl++;
     for (const cv of cvs) cv.removeEventListener("webglcontextlost", onLost);
     tab("チャット")!.click();
     await until(() => !document.querySelector(".xterm"));
-    await sleep(300);
+    await sleep(200);
     if (i % 10 === 0) log({ ev: "reopen", i, drawn, gl, lost, ms: Date.now() - t0 });
   }
   log({ ev: "done", drawn, gl, lost });
