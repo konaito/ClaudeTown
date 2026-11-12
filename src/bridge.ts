@@ -61,6 +61,10 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   }
   if (cmd === "peers") return devJson<T>("dev-peers.json", [] as T);
   // ブラウザ表示では本物の会話を読めない。別のセッションの会話を見せて取り違えに見えないよう、仮の1件だけ返す
+  // 見た目の確認用: ?longconv を付けると、スクロールが要る長さの仮の会話を返す
+  if (cmd === "conversation" && location.search.includes("longconv")) {
+    return Array.from({ length: 24 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", text: `（仮の会話 ${i + 1}）スクロールの端のグラデーションを確かめるための文。` })) as T;
+  }
   if (cmd === "conversation") return [{ role: "assistant", text: `（ブラウザ表示の仮の会話）${String(args?.sessionId ?? "").slice(0, 8)} の会話は、Tauri の中で ccn から読む。` }] as T;
   console.info("[ブラウザ表示なので実行しない]", cmd, args);
   return "ブラウザ表示" as T;

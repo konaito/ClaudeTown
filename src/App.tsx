@@ -229,7 +229,7 @@ function Stage({ zoom, items, onBlank }: { zoom: number | "fit"; items: { id: st
   const packed = packHouseholds(items.map(({ id, w, h }) => ({ id, w, h })), width, LAYOUT.group.gap);
   const at = new Map(packed.items.map((p) => [p.id, p]));
   return (
-    <ScrollEdgeGradient className="stage" wrapClassName="seg-fill" ref={outer}
+    <ScrollEdgeGradient className="stage" wrapClassName="seg-fill" strength="town" ref={outer}
       onClick={(e) => { if (!(e.target as HTMLElement).closest(".card, .mini, .pop, .g-head")) onBlank(); }}>
       <div className="stage-inner" style={{ zoom: scale, width, height: packed.height + 20 }}>
         {items.map((b) => {
