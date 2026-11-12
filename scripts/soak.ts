@@ -97,7 +97,8 @@ if (!kinds.WebContent) { stop("WebContent が見つからない"); }
 const watch: Record<string, number> = { app: app.pid!, ...kinds };
 console.log(`起動: ${JSON.stringify(watch)}（${DIR}）`);
 
-const load1 = () => Number(sh("/usr/sbin/sysctl", ["-n", "vm.loadavg"]).trim().replace(/[{}]/g, "").split(/\s+/)[0]);
+// vm.loadavg は "{ 1.23 4.56 7.89 }"。括弧を外してから空白を詰める
+const load1 = () => Number(sh("/usr/sbin/sysctl", ["-n", "vm.loadavg"]).replace(/[{}]/g, "").trim().split(/\s+/)[0]);
 /** ps の time（[[dd-]hh:]mm:ss.cc）を秒に */
 function cpuS(pid: number) {
   const t = sh("/bin/ps", ["-o", "time=", "-p", String(pid)]).trim();
@@ -149,7 +150,7 @@ function stop(why: string): never {
   if (!stopped) {
     stopped = true;
     console.log(`終わり: ${why}`);
-    if (samples.length) { appendFileSync(join(DIR, "summary.md"), `\n終わり: ${why}\n`); }
+    if (samples.length) { dumpFootprint("stop"); appendFileSync(join(DIR, "summary.md"), `\n終わり: ${why}\n`); }
     // 止めるのは、ここで起動した pid だけ
     try { process.kill(app.pid!, "SIGTERM"); } catch { /* もう終わっている */ }
     try { process.kill(mock.pid!, "SIGTERM"); } catch { /* もう終わっている */ }
@@ -200,12 +201,14 @@ if (MODE === "town") {
   stop(`${HOURS} 時間たった`);
 } else {
   let doneAt = 0;
+  let lastDump = 0;
   while (Date.now() < end) {
     await sleep(INTERVAL_S * 1000);
     const ls = perfLines();
     const err = ls.find((l) => l.ev === "error");
     if (err) stop(`画面の失敗: ${err.message}`);
     const n = Math.max(0, ...ls.filter((l) => l.ev === "reopen").map((l) => l.i));
+    if (n > 0 && n % 50 === 0 && n !== lastDump) { lastDump = n; dumpFootprint(`n${n}`); }
     const done = ls.find((l) => l.ev === "done");
     if (!doneAt && done) { doneAt = Date.now(); dumpFootprint("done"); sample(`開き直し ${REOPEN_N(ls)} 回が終わった（描けた ${done.drawn}、文脈が生きていた ${done.gl}、文脈を失った知らせ ${done.lost}）`); continue; }
     sample(doneAt ? `終わってから ${Math.round((Date.now() - doneAt) / 1000)} 秒` : `開き直し ${n} 回`);
