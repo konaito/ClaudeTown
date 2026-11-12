@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>family-computing キャラと状態の印の配置案</title>
+<style>
+  /* =========================================================
+     アプリに移す部分（アバター1体）
+     HTML の形は全案で同じ:
+       <div class="fc-avatar" data-state="work|approve|reply|done|idle|error">
+         <span class="fc-body"><img src=".../SeparateAnim/Walk.png 又は Idle.png"></span>
+         <span class="fc-bubble"><img src=".../noto/<cp>/512.webp"></span>
+       </div>
+     案の違いは親の .fc-plan-a / -b / -c と CSS 変数だけで出す。
+     --fc-size  体の一辺。16px の絵の整数倍（48 = 3倍、64 = 4倍）
+     --fc-room  体の上に取る吹き出し用の余白。印の有無で箱の大きさは変えない
+     --fc-bub   吹き出し（枠）の一辺
+     --fc-emo   絵文字の一辺
+     ========================================================= */
+  .fc-avatar {
+    --fc-size: 48px;
+    position: relative;
+    width: var(--fc-size);
+    height: calc(var(--fc-size) + var(--fc-room));
+    flex: none;
+  }
+  .fc-avatar.fc-lg { --fc-size: 64px; }
+  .fc-body {
+    position: absolute; left: 0; bottom: 0;
+    width: var(--fc-size); height: var(--fc-size);
+    overflow: hidden;
+  }
+  /* シートは横4列（下、上、左、右向き）。1列目の前向きだけ見せる */
+  .fc-body img {
+    position: absolute; left: 0; top: 0;
+    width: calc(var(--fc-size) * 4); height: auto;
+    image-rendering: pixelated;
+  }
+  /* 作業中: Walk の前向き4コマで足踏み。絵文字は出さない */
+  .fc-avatar[data-state="work"] .fc-body img { animation: fc-step .6s steps(4) infinite; }
+  @keyframes fc-step { to { transform: translateY(-100%); } }
+
+  .fc-bubble { position: absolute; display: none; box-sizing: border-box; }
+  .fc-bubble img { display: block; width: var(--fc-emo); height: var(--fc-emo); }
+  .fc-avatar:is([data-state="approve"], [data-state="reply"], [data-state="done"], [data-state="error"]) .fc-bubble { display: block; }
+
+  /* ---- 案 A: 白い丸の吹き出しと尻尾。右斜め上 ---- */
+  /* 位置は体の左上を原点にした2つの値で決める。
+     --fc-bx  吹き出しの左端を、体の左端から右へずらす量
+     --fc-ov  吹き出しの下端を、体の上端より下へ重ねる量
+     体の上の余白は --fc-bub - --fc-ov に自動で決まるので、吹き出しの上端が箱の上端になる */
+  .fc-plan-a .fc-avatar {
+    --fc-bub: calc(var(--fc-size) * .50); --fc-emo: calc(var(--fc-size) * .34);
+    --fc-bx: calc(var(--fc-size) * .60); --fc-ov: calc(var(--fc-size) * .10);
+    --fc-room: calc(var(--fc-bub) - var(--fc-ov));
+  }
+  /* A の位置の3段階（右下へずらす。大きさ、縁、影、尻尾は A と同じ） */
+  .fc-a1 .fc-avatar { --fc-bx: calc(var(--fc-size) * .66); --fc-ov: calc(var(--fc-size) * .18); }
+  .fc-a2 .fc-avatar { --fc-bx: calc(var(--fc-size) * .72); --fc-ov: calc(var(--fc-size) * .26); }
+  .fc-a3 .fc-avatar { --fc-bx: calc(var(--fc-size) * .78); --fc-ov: calc(var(--fc-size) * .34); }
+  .fc-plan-a .fc-bubble {
+    left: var(--fc-bx); top: 0;
+    width: var(--fc-bub); height: var(--fc-bub);
+    border-radius: 50%;
+    background: #fff;
+    border: 1.5px solid #d4d4d4;
+    box-shadow: 0 1px 3px rgba(0,0,0,.12);
+    display: none; align-items: center; justify-content: center;
+  }
+  .fc-plan-a .fc-avatar:is([data-state="approve"], [data-state="reply"], [data-state="done"], [data-state="error"]) .fc-bubble { display: flex; }
+  .fc-plan-a .fc-bubble::after {
+    content: ""; position: absolute;
+    left: calc(var(--fc-bub) * .08); bottom: calc(var(--fc-bub) * -.06);
+    width: calc(var(--fc-bub) * .22); height: calc(var(--fc-bub) * .22);
+    background: #fff;
+    border-left: 1.5px solid #d4d4d4; border-bottom: 1.5px solid #d4d4d4;
+    transform: skewY(-25deg) rotate(-10deg);
+    z-index: -1;
+  }
+  .fc-plan-a .fc-bubble { isolation: isolate; }
+  /* 待機: 何も出さない */
+
+  /* ---- 案 B: 枠なし。頭の真上に小さく、影を付ける ---- */
+  .fc-plan-b .fc-avatar { --fc-room: calc(var(--fc-size) * .40); --fc-emo: calc(var(--fc-size) * .36); }
+  .fc-plan-b .fc-bubble {
+    left: 50%; top: 0; transform: translateX(-50%);
+    filter: drop-shadow(0 1.5px 1.5px rgba(0,0,0,.30));
+  }
+  /* 待機: 体を薄くする。絵文字は出さない */
+  .fc-plan-b .fc-avatar[data-state="idle"] .fc-body { opacity: .45; filter: grayscale(.4); }
+
+  /* ---- 案 C: 角の立った四角いバッジ。太い枠と影をずらさず置く（ドット絵の UI に寄せる） ---- */
+  .fc-plan-c .fc-avatar { --fc-room: calc(var(--fc-size) * .40); --fc-bub: calc(var(--fc-size) * .46); --fc-emo: calc(var(--fc-size) * .32); }
+  .fc-plan-c .fc-bubble {
+    left: calc(var(--fc-size) * .62); top: 0;
+    width: var(--fc-bub); height: var(--fc-bub);
+    background: #fff;
+    border: 2px solid #2b2b2b;
+    border-radius: 3px;
+    box-shadow: 2px 2px 0 rgba(0,0,0,.18);
+    align-items: center; justify-content: center;
+  }
+  .fc-plan-c .fc-avatar:is([data-state="approve"], [data-state="reply"], [data-state="done"], [data-state="error"], [data-state="idle"]) .fc-bubble { display: flex; }
+  /* 待機: 同じ位置に小さく灰色のバッジ（寝顔） */
+  .fc-plan-c .fc-avatar[data-state="idle"] .fc-bubble {
+    --fc-bub: calc(var(--fc-size) * .32); --fc-emo: calc(var(--fc-size) * .22);
+    top: calc(var(--fc-size) * .14);
+    border-color: #bbb; box-shadow: none; opacity: .7;
+  }
+  .fc-plan-c .fc-avatar[data-state="idle"] .fc-bubble img { filter: grayscale(1); }
+
+  /* =========================================================
+     ここから下は見本ページだけの体裁
+     ========================================================= */
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #fff; color: #222; font: 13px/1.5 -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  header { padding: 14px 24px 6px; display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap; }
+  h1 { font-size: 17px; margin: 0; }
+  .meta { color: #666; font-size: 12px; margin: 0; }
+  #loaded { font-size: 12px; font-variant-numeric: tabular-nums; padding: 1px 8px; border-radius: 10px; background: #f1f1f1; }
+  #loaded.ok { background: #e6f4ea; color: #1a7f37; }
+  #loaded.ng { background: #fde8e7; color: #b42318; }
+  .plans { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; padding: 6px 24px 16px; }
+  .plan { border: 1px solid #e6e6e6; border-radius: 10px; padding: 10px 12px; }
+  .plan h2 { margin: 0; font-size: 15px; }
+  .grp { margin: 10px 24px 0; font-size: 15px; }
+  .grp-note { margin: 2px 24px 0; color: #666; font-size: 12px; }
+  .plan .what { margin: 2px 0 8px; color: #555; font-size: 12px; min-height: 54px; }
+  .row5 { display: grid; grid-template-columns: repeat(6, 1fr); border-top: 1px solid #eee; border-bottom: 1px solid #eee; padding: 8px 0 4px; }
+  .row5 .cell { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 2px; height: 110px; }
+  .row5 .lab { font-size: 11px; color: #444; white-space: nowrap; }
+  .row5 .lab.opt { color: #999; }
+  .sub { font-size: 11px; color: #888; margin: 8px 0 4px; }
+  .crowd { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+  .card { border: 1px solid #ececec; border-radius: 8px; padding: 4px 2px 3px; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 92px; }
+  .card .nm { font-size: 10px; color: #777; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .foot { padding: 0 24px 20px; color: #666; font-size: 12px; }
+  .foot code, .foot pre { font: 11px/1.5 ui-monospace, Menlo, monospace; }
+  .foot pre { background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: 8px 10px; margin: 6px 0; overflow-x: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>キャラと状態の印の配置案</h1>
+  <p class="meta">2026-11-12 作成。体は Ninja Adventure、印は Noto Animated Emoji の WebP（512px を縮めて表示）。案の並び順に意味はない。</p>
+  <span id="loaded">画像 読み込み中</span>
+</header>
+
+<h2 class="grp">決まった案 A の、印の位置の3段階</h2>
+<p class="grp-note">案 A の吹き出しを右下へずらし、頭の右上に重ねる量を3段階で変えた。大きさ（枠 0.50 倍、絵文字 0.34 倍）、縁、影、尻尾は A と同じで、変えたのは位置だけ。参考に、元の A は下の「前の3案」の左にある（右へ 0.60 倍、重なり 0.10 倍）。</p>
+<div class="plans">
+  <section class="plan fc-plan-a fc-a1">
+    <h2>A1 少し右下</h2>
+    <p class="what">吹き出しの左端を体の左端から 0.66 倍右へ、下端を体の上端から 0.18 倍下へ重ねる。48px の体で右へ 32px、重なり 9px。</p>
+    <div class="row5" data-size="lg"></div>
+    <p class="sub">48px のカードで20体</p>
+    <div class="crowd"></div>
+  </section>
+  <section class="plan fc-plan-a fc-a2">
+    <h2>A2 中くらい右下</h2>
+    <p class="what">右へ 0.72 倍、重なり 0.26 倍。48px の体で右へ 35px、重なり 12px。</p>
+    <div class="row5" data-size="lg"></div>
+    <p class="sub">48px のカードで20体</p>
+    <div class="crowd"></div>
+  </section>
+  <section class="plan fc-plan-a fc-a3">
+    <h2>A3 大きめに右下</h2>
+    <p class="what">右へ 0.78 倍、重なり 0.34 倍。48px の体で右へ 37px、重なり 16px。</p>
+    <div class="row5" data-size="lg"></div>
+    <p class="sub">48px のカードで20体</p>
+    <div class="crowd"></div>
+  </section>
+</div>
+
+<h2 class="grp">前の3案</h2>
+<div class="plans">
+  <section class="plan fc-plan-a">
+    <h2>案 A 白い丸の吹き出し</h2>
+    <p class="what">絵文字を白い丸と細い灰色の縁で囲み、左下に尻尾を付けて右斜め上に置く。大きさは体の 0.50 倍の枠に 0.34 倍の絵文字。待機は何も出さない。</p>
+    <div class="row5" data-size="lg"></div>
+    <p class="sub">48px のカードで20体</p>
+    <div class="crowd"></div>
+  </section>
+  <section class="plan fc-plan-b">
+    <h2>案 B 枠なしで頭の真上</h2>
+    <p class="what">枠を付けず、体の 0.36 倍の絵文字を頭の真上の中央に置き、下に薄い影を落とす。待機は印を出さず体を薄くする。</p>
+    <div class="row5" data-size="lg"></div>
+    <p class="sub">48px のカードで20体</p>
+    <div class="crowd"></div>
+  </section>
+  <section class="plan fc-plan-c">
+    <h2>案 C 四角いバッジ</h2>
+    <p class="what">2px の濃い枠と角の小さい四角に入れ、影をぼかさずずらして置き、ドット絵の UI に寄せる。枠 0.46 倍、絵文字 0.32 倍。待機は同じ位置に小さい灰色のバッジ。</p>
+    <div class="row5" data-size="lg"></div>
+    <p class="sub">48px のカードで20体</p>
+    <div class="crowd"></div>
+  </section>
+</div>
+
+<div class="foot">
+  <p>共通: 体は 16px の絵を 48px（3倍）と 64px（4倍）に image-rendering: pixelated で拡大。体の上に吹き出し用の余白を固定で取り、印の位置は箱の上端からの固定の距離にしたので、キャラが違っても距離はそろう。作業中は Walk の前向き4コマの足踏みだけで、印は出さない。ほかの状態の体は Idle の前向き。</p>
+  <p>状態と絵文字の対応（返事待ちは仮置き）: 承認待ち 270b raised-hand、返事待ち 1f97a pleading-face、完了 2705 check-mark、エラー 2049 ⁉（足す場合）、待機 1f634 sleep（案 C だけ）。返事待ちは前の見本の砂時計（23f3）が「ほかの子を待ってる」用だったので、人に返事を求める顔に替えた。</p>
+  <p>20体の状態: 作業中10、承認待ち3、返事待ち2、完了2、待機2、エラー1。キャラと並びは3案とも同じ。</p>
+  <pre>&lt;div class="fc-avatar" data-state="approve"&gt;
+  &lt;span class="fc-body"&gt;&lt;img src="sprites/ninja/characters/Boy/SeparateAnim/Idle.png" alt=""&gt;&lt;/span&gt;
+  &lt;span class="fc-bubble"&gt;&lt;img src="sprites/noto/270b/512.webp" alt=""&gt;&lt;/span&gt;
+&lt;/div&gt;</pre>
+</div>
+
+<script>
+  const S = "../../../public/sprites/";
+  const STATES = [
+    { key: "work",    label: "作業中" },
+    { key: "approve", label: "承認待ち", cp: "270b" },
+    { key: "reply",   label: "返事待ち", cp: "1f97a" },
+    { key: "done",    label: "完了",     cp: "2705" },
+    { key: "idle",    label: "待機",     cp: "1f634" },
+    { key: "error",   label: "エラー",   cp: "2049_fe0f", opt: true },
+  ];
+  const CP = Object.fromEntries(STATES.map(s => [s.key, s.cp]));
+
+  // 20体: キャラ、名前、状態（作業中10、承認待ち3、返事待ち2、完了2、待機2、エラー1）
+  const CROWD = [
+    ["Boy","meta-fc","work"], ["NinjaBlue","family-comp","approve"], ["Princess","fc-assets","work"], ["NinjaRed","fc-research","work"], ["Monk","fc-balance","done"],
+    ["EggGirl","api-fix","work"], ["Knight","web-ui","reply"], ["OldMan","docs","idle"], ["Villager2","ci-watch","work"], ["NinjaGreen","db-mig","approve"],
+    ["Cavegirl","e2e","work"], ["Samurai","review","error"], ["Inspector","lint","work"], ["LionBoy","bench","work"], ["Eskimo","deploy","approve"],
+    ["NinjaYellow","icons","done"], ["FighterRed","search","work"], ["Hunter","notes","idle"], ["Noble","i18n","reply"], ["MaskFrog","perf","work"],
+  ];
+
+  // アバター1体。HTML の形は全案で同じ
+  function avatar(char, state, large) {
+    const a = document.createElement("div");
+    a.className = "fc-avatar" + (large ? " fc-lg" : "");
+    a.dataset.state = state;
+    const body = document.createElement("span"); body.className = "fc-body";
+    const bi = new Image(); bi.alt = "";
+    bi.src = `${S}ninja/characters/${char}/SeparateAnim/${state === "work" ? "Walk" : "Idle"}.png`;
+    body.appendChild(bi);
+    const bub = document.createElement("span"); bub.className = "fc-bubble";
+    if (CP[state]) { const ei = new Image(); ei.alt = ""; ei.src = `${S}noto/${CP[state]}/512.webp`; bub.appendChild(ei); }
+    a.append(body, bub);
+    return a;
+  }
+
+  for (const plan of document.querySelectorAll(".plan")) {
+    const row = plan.querySelector(".row5");
+    for (const s of STATES) {
+      const c = document.createElement("div"); c.className = "cell";
+      c.appendChild(avatar("Boy", s.key, true));
+      const l = document.createElement("div"); l.className = "lab" + (s.opt ? " opt" : "");
+      l.textContent = s.opt ? s.label + "（足す場合）" : s.label;
+      c.appendChild(l); row.appendChild(c);
+    }
+    const crowd = plan.querySelector(".crowd");
+    for (const [ch, nm, st] of CROWD) {
+      const card = document.createElement("div"); card.className = "card";
+      card.appendChild(avatar(ch, st, false));
+      const n = document.createElement("div"); n.className = "nm"; n.textContent = nm;
+      card.appendChild(n); crowd.appendChild(card);
+    }
+  }
+
+  // 画像の読み込み数を上に出す（スナップショットだけで画像切れを判定するため）
+  const imgs = [...document.images];
+  const el = document.getElementById("loaded");
+  function tally() {
+    const done = imgs.filter(i => i.complete);
+    const bad = done.filter(i => i.naturalWidth === 0).length;
+    const ok = done.length - bad;
+    el.textContent = `画像 ${ok}/${imgs.length} 読み込み済み` + (bad ? `、失敗 ${bad}` : "");
+    el.className = bad ? "ng" : (ok === imgs.length ? "ok" : "");
+  }
+  imgs.forEach(i => { i.addEventListener("load", tally); i.addEventListener("error", tally); });
+  tally();
+</script>
+</body>
+</html>

@@ -28,6 +28,8 @@ export type Agent = {
   selfStatus?: { state: string; note: string; at: string } | null;
   report?: Report | null;
   closeCheck?: { status: "working" | "checking" | "ok" | "ng" | "error"; short?: string | null } | null;
+  /** 家の名前（根のセッションだけ意味がある）。by=human は本人がアプリで付けた名前 */
+  house?: { name: string; by: "agent" | "human" } | null;
 };
 
 export type Snapshot = {
@@ -146,4 +148,25 @@ export function choicesOf(text: string): string[] {
     if (m && m[1].length <= 40) opts.push(m[1].replace(/\*\*/g, ""));
   }
   return opts.length >= 2 && opts.length <= 5 ? opts : [];
+}
+
+/**
+ * 家の名前。本人が付けた名前 > 親が付けた名前 > 仮の名前。
+ * 仮の名前は、子や孫の作業場所で一番多いディレクトリ名（親の場所は meta などで共通なので除く）。無ければ最初の依頼の先頭。
+ */
+export function houseNameOf(root: Agent, all: Agent[]): { name: string; by: "human" | "agent" | "guess" } {
+  if (root.house?.name) return { name: root.house.name, by: root.house.by };
+  const rootDir = projectOf(root);
+  const count = new Map<string, number>();
+  for (const a of all) {
+    if (a.id === root.id) continue;
+    const d = projectOf(a);
+    if (d === rootDir) continue;
+    count.set(d, (count.get(d) ?? 0) + 1);
+  }
+  const top = [...count.entries()].sort((x, y) => y[1] - x[1])[0]?.[0];
+  if (top) return { name: top, by: "guess" };
+  const asked = root.report?.asked?.trim();
+  if (asked) return { name: clip(asked, 12), by: "guess" };
+  return { name: rootDir, by: "guess" };
 }

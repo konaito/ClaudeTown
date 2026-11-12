@@ -1,0 +1,39 @@
+/* アバター1体。値は docs/research/assets/balance.html の案 A と、位置の段階 A2 から移した。
+   --fc-size  体の一辺（16px の絵の整数倍）
+   --fc-bub   吹き出しの一辺、--fc-emo 絵文字の一辺
+   --fc-bx    吹き出しの左端を、体の左端から右へずらす量
+   --fc-ov    吹き出しの下端を、体の上端より下へ重ねる量
+   体の上の余白（--fc-room）は --fc-bub - --fc-ov に決まり、吹き出しの上端が箱の上端になる */
+.fc-avatar {
+  --fc-size: 48px;
+  --fc-bub: calc(var(--fc-size) * 0.5);
+  --fc-emo: calc(var(--fc-size) * 0.34);
+  --fc-bx: calc(var(--fc-size) * 0.72);
+  --fc-ov: calc(var(--fc-size) * 0.26);
+  --fc-room: calc(var(--fc-bub) - var(--fc-ov));
+  position: relative; display: block; flex: none;
+  width: var(--fc-size); height: calc(var(--fc-size) + var(--fc-room));
+}
+.fc-body { position: absolute; left: 0; bottom: 0; width: var(--fc-size); height: var(--fc-size); overflow: hidden; }
+/* シートは横4列（下、上、左、右向き）。1列目の前向きだけを見せる */
+.fc-body img { position: absolute; left: 0; top: 0; width: calc(var(--fc-size) * 4); height: auto; image-rendering: pixelated; }
+/* 作業中: Walk の前向き4コマで足踏み */
+.fc-working .fc-body img { animation: fc-step 0.6s steps(4) infinite; }
+@keyframes fc-step { to { transform: translateY(-100%); } }
+/* 待機は少し薄く */
+.fc-idle .fc-body { opacity: 0.85; }
+
+.fc-bubble {
+  position: absolute; left: var(--fc-bx); top: 0; box-sizing: border-box; isolation: isolate;
+  width: var(--fc-bub); height: var(--fc-bub); border-radius: 50%;
+  background: #fff; border: 1.5px solid #d4d4d4; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  display: flex; align-items: center; justify-content: center;
+}
+.fc-bubble img { display: block; width: var(--fc-emo); height: var(--fc-emo); }
+.fc-bubble::after {
+  content: ""; position: absolute; z-index: -1;
+  left: calc(var(--fc-bub) * 0.08); bottom: calc(var(--fc-bub) * -0.06);
+  width: calc(var(--fc-bub) * 0.22); height: calc(var(--fc-bub) * 0.22);
+  background: #fff; border-left: 1.5px solid #d4d4d4; border-bottom: 1.5px solid #d4d4d4;
+  transform: skewY(-25deg) rotate(-10deg);
+}

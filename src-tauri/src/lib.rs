@@ -122,6 +122,7 @@ fn snapshot(peer: Option<String>) -> Snapshot {
         live_ids.iter().find(|id| id.starts_with(sid8)).cloned()
     };
 
+    let houses = read_json(&houses_path()).unwrap_or(json!({}));
     let mut agents = vec![];
     for s in &live {
         let id = s["id"].as_str().unwrap_or_default().to_string();
@@ -154,6 +155,7 @@ fn snapshot(peer: Option<String>) -> Snapshot {
             "title": r["title"],
             "terminalId": r["terminalId"],
             "selfStatus": r["selfStatus"],
+            "house": houses.get(&id).cloned(),
             "report": report,
             // status が ok/ng なら short は直下、working/checking なら前回の判定が last に入っている
             "closeCheck": close_check.map(|c| json!({
@@ -163,6 +165,32 @@ fn snapshot(peer: Option<String>) -> Snapshot {
         }));
     }
     Snapshot { ccn: ccn_base(), peer, ccn_ok: ccn_error.is_none(), ccn_error, agents, fetched_at: now_ms() }
+}
+
+// ---------- 家の名前 ----------
+
+fn houses_path() -> PathBuf {
+    std::env::var("FC_HOUSES").map(PathBuf::from).unwrap_or_else(|_| home().join(".family-computing/houses.json"))
+}
+
+/// 本人が画面で家の名前を付ける。空なら本人の名前を消す（親が付けた名前か仮の名前に戻る）
+#[tauri::command]
+fn set_house_name(session_id: String, name: String) -> Result<(), String> {
+    let p = houses_path();
+    let mut houses = read_json(&p).unwrap_or(json!({}));
+    let obj = houses.as_object_mut().ok_or("houses.json の形が想定と違う")?;
+    let name: String = name.trim().chars().take(24).collect();
+    if name.is_empty() {
+        obj.remove(&session_id);
+    } else {
+        obj.insert(session_id, json!({ "name": name, "by": "human", "at": now_ms() as u64 }));
+    }
+    if let Some(dir) = p.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = p.with_extension("tmp");
+    fs::write(&tmp, serde_json::to_string_pretty(&houses).unwrap_or_default()).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &p).map_err(|e| e.to_string())
 }
 
 // ---------- 会話 ----------
@@ -381,7 +409,7 @@ pub fn run() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![snapshot, peers, conversation, send_message, focus_pane])
+        .invoke_handler(tauri::generate_handler![snapshot, peers, conversation, send_message, focus_pane, set_house_name])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

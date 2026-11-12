@@ -24,6 +24,9 @@ import time
 from pathlib import Path
 
 STATE_DIR = Path(os.environ.get("FC_STATE_DIR", Path.home() / ".family-computing" / "state"))
+HOUSES = Path(os.environ.get("FC_HOUSES", Path.home() / ".family-computing" / "houses.json"))
+REGISTRY = Path(os.environ.get("FC_SPECTER_REGISTRY", Path.home() / ".specter" / "agents.json"))
+NAME_CMD = f"python3 {Path(__file__).resolve().parent.parent / 'scripts' / 'hook.py'} name"
 KEEP_SEC = 3 * 24 * 3600
 MAX = 90
 
@@ -145,6 +148,39 @@ def write(sid, patch, data):
     os.replace(tmp, p)
 
 
+def house_nudge(sid):
+    """子を持つ根のセッションに家の名前が無ければ、名前を付けるよう1回だけ促す文を返す"""
+    try:
+        houses = json.loads(HOUSES.read_text())
+    except Exception:
+        houses = {}
+    if (houses.get(sid) or {}).get("name"):
+        return None
+    try:
+        rec = json.loads(REGISTRY.read_text())["agents"].get(sid) or {}
+    except Exception:
+        return None
+    if rec.get("parent") or not rec.get("children"):
+        return None
+    p = STATE_DIR / f"{sid}.json"
+    try:
+        if json.loads(p.read_text()).get("house_nudged"):
+            return None
+    except Exception:
+        pass
+    write(sid, {"house_nudged": True}, {})
+    return (
+        "family-computing: あなたは子を持つ親なので、家族の家の名前を付けてください。"
+        "いまの依頼の中身から、短い名前（12字以内。例「TANGLE の掘り出し」「ccn の引っ越し」）を決めて、"
+        f"Bash で `{NAME_CMD} \"<家の名前>\"` を1回実行します。仕事の中身が大きく変わったら付け直してかまいません。"
+        "本人が付けた名前があるときは変わりません。"
+    )
+
+
+def emit_context(event, text):
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=False))
+
+
 def sweep():
     now = time.time()
     for p in STATE_DIR.glob("*.json"):
@@ -171,6 +207,9 @@ def main():
         body = re.sub(r"^from \S+ via \S+\s*\n", "", prompt)
         write(sid, {"phase": "working", "asked": clip(first_line(body)), "doing": "考え中", "needs": None, "tools": 0,
                     "turn_started_at": int(time.time() * 1000)}, data)
+        nudge = house_nudge(sid)
+        if nudge:
+            emit_context("UserPromptSubmit", nudge)
     elif ev == "PreToolUse":
         p = STATE_DIR / f"{sid}.json"
         try:
@@ -180,6 +219,11 @@ def main():
         write(sid, {"phase": "working", "doing": describe_tool(data.get("tool_name", ""), data.get("tool_input")), "needs": None, "tools": n}, data)
     elif ev in ("PostToolUse", "PostToolUseFailure"):
         write(sid, {"phase": "working", "needs": None}, data)
+        # 初めて子を作った直後にも促す（その会話の中で名前を付けられるように）
+        if ev == "PostToolUse" and "spawn_child" in (data.get("tool_name") or ""):
+            nudge = house_nudge(sid)
+            if nudge:
+                emit_context("PostToolUse", nudge)
     elif ev == "Notification":
         kind = data.get("notification_type") or ""
         msg = data.get("message") or ""

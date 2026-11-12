@@ -20,4 +20,3 @@
 - characters-animated/: パックの Actor/CharacterAnimated をそのまま複製した。
 - emote/: パックの Ui/Emote（emote1.png から emote30.png、14x13px）を複製した。
 - 改変は加えていない。
-- tiles/: パックの Backgrounds/Tilesets/TilesetHouse.png から切り出した。roof-orange.png は (0,0) から 64x32、roof-red.png は (192,0) から 64x32、door.png は (22,32) から 20x16。切り出しのほかは改変していない。

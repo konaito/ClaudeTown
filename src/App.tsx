@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { call as invoke, setFullscreen } from "./bridge";
 import "./App.css";
-import { Kid, type Role } from "./kid/Kid";
+import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
 import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
-  MOOD_LABEL, NEEDS_YOU, buildTree, choicesOf, clip, moodOf, nowOf, projectOf, sinceText, taskOf,
+  MOOD_LABEL, NEEDS_YOU, buildTree, choicesOf, clip, houseNameOf, moodOf, nowOf, sinceText, taskOf,
 } from "./model";
 import { Markdown } from "./Markdown";
 
@@ -118,17 +118,22 @@ export default function App() {
             </span>
           </div>
 
+          {snap && agents.length === 0 && snap.ccn_ok && (
+            <div className="empty">いまは誰もいない。Specter で Claude Code を開くと、ここに家族がふえる。</div>
+          )}
           <Stage zoom={zoom} deps={agents.length} onBlank={() => setSelected(null)}>
-            {tree.families.map((f) => (
-              <House key={f.root.id} root={f.root} count={f.all.length}
+            {/* 並べ方は大きいグループから（一番大きいものを左、残りを右に詰める） */}
+            {[...tree.families].sort((x, y) => y.all.length - x.all.length).map((f) => (
+              <Group key={f.root.id} root={f.root} all={f.all} count={f.all.length}
+                onRename={async (name) => {
+                  try { await invoke("set_house_name", { sessionId: f.root.id, name }); toast(name ? `グループの名前を「${name}」にした` : "グループの名前を戻した"); }
+                  catch (e) { toast(`グループの名前を変えられなかった: ${e}`, true); }
+                }}
                 hasNeeds={f.all.some((a) => NEEDS_YOU.includes(moodOf(a)))}>
                 <Tree agent={f.root} depth={0} childrenOf={tree.childrenOf}
                   selected={selected} onSelect={(a) => setSelected(a.id)} onFocus={focus} />
-              </House>
+              </Group>
             ))}
-            {snap && agents.length === 0 && snap.ccn_ok && (
-              <div className="empty">いまは誰もいない。Specter で Claude Code を開くと、ここに家族がふえる。</div>
-            )}
           </Stage>
 
           <div className="left-foot">
@@ -141,6 +146,7 @@ export default function App() {
               <button className="fs" title="全画面" onClick={() => setFullscreen()}>⛶</button>
             </div>
             <span className="hint">クリックで会話・右クリックでペインへ</span>
+            <Credits />
           </div>
         </div>
 
@@ -198,24 +204,34 @@ function NextRow({ needs, done, working, total, onSelect, onFocus }: {
 // ---------- 家と木 ----------
 
 /**
- * 家族の家を並べる場所。家は横に並べ、幅が足りなければ次の段に折り返す（街並み）。
- * zoom が fit のときは、一番広い家が横幅に収まるまで縮める（最小 0.4。それでも入らなければ横にスクロールする）。
+ * グループを並べる場所。一番大きいグループを左に置き、残りは右の余った幅に折り返して詰める。
+ * 右に一番広い小さいグループが入る倍率が 0.6 を下回るときは、残りを下に回して大きいグループだけで幅を合わせる。
+ * zoom が fit のときはこの倍率を使う（最小 0.4。それでも入らなければ横にスクロールする）。
  */
-function Stage({ zoom, deps, onBlank, children }: { zoom: number | "fit"; deps: number; onBlank: () => void; children: React.ReactNode }) {
+function Stage({ zoom, deps, onBlank, children }: { zoom: number | "fit"; deps: number; onBlank: () => void; children: React.ReactNode[] }) {
   const outer = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
   const [fit, setFit] = useState(1);
   const [avail, setAvail] = useState(1000);
+  const [side, setSide] = useState(true);
+  const [bigW, setBigW] = useState(0);
   const applied = useRef(1);
+  const GAP = 28;
   useLayoutEffect(() => {
     const measure = () => {
       if (!outer.current || !inner.current) return;
       const w = outer.current.clientWidth - 36;
       // 画面上の幅は zoom をかけた後の値なので、かけている倍率で割って元の幅に戻す
-      const widest = Math.max(1, ...Array.from(inner.current.querySelectorAll<HTMLElement>(".house"))
-        .map((h) => h.getBoundingClientRect().width / applied.current));
+      const widths = Array.from(inner.current.querySelectorAll<HTMLElement>(".group"))
+        .map((g) => g.getBoundingClientRect().width / applied.current);
+      const big = widths[0] ?? 1;
+      const restMax = Math.max(0, ...widths.slice(1));
+      const withSide = restMax ? w / (big + GAP + restMax) : w / big;
+      const useSide = restMax > 0 && withSide >= 0.6;
+      setSide(useSide);
+      setBigW(big);
       setAvail(w);
-      setFit(Math.max(0.4, Math.min(1, w / (widest + 40))));
+      setFit(Math.max(0.4, Math.min(1, useSide ? withSide : w / big)));
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -224,39 +240,53 @@ function Stage({ zoom, deps, onBlank, children }: { zoom: number | "fit"; deps: 
   }, [deps]);
   const scale = zoom === "fit" ? fit : zoom;
   applied.current = scale;
+  const width = Math.floor(avail / scale);
+  const [first, ...rest] = children;
   return (
     <div className="stage" ref={outer}
-      onClick={(e) => { if (!(e.target as HTMLElement).closest(".card, .mini, .pop")) onBlank(); }}>
-      <div className="stage-inner" ref={inner} style={{ zoom: scale, width: Math.floor(avail / scale) }}>{children}</div>
+      onClick={(e) => { if (!(e.target as HTMLElement).closest(".card, .mini, .pop, .g-head")) onBlank(); }}>
+      <div className={`stage-inner ${side ? "side" : "below"}`} ref={inner} style={{ zoom: scale, width }}>
+        {first}
+        {rest.length > 0 && (
+          <div className="rest" style={side ? { width: Math.max(0, width - bigW - GAP) } : undefined}>{rest}</div>
+        )}
+      </div>
     </div>
   );
 }
 
-const ROOFS = ["red", "orange"] as const;
+/** グループ（根のセッション1つとその子孫）ごとの淡い色。名前から決まる */
+const GROUP_TINTS = ["#f3f7ff", "#fff6ec", "#f1faf3", "#f8f3ff", "#fff2f5", "#eff9f9", "#fbf8ec"];
+const GROUP_LINES = ["#d9e4fb", "#f6dfc4", "#d3ecd9", "#e4d8f6", "#f6d6df", "#cfe9e9", "#ece4c2"];
 
-function House({ root, count, hasNeeds, children }: { root: Agent; count: number; hasNeeds: boolean; children: React.ReactNode }) {
-  const roof = ROOFS[hashOf(projectOf(root)) % ROOFS.length];
+function Group({ root, all, count, hasNeeds, onRename, children }: {
+  root: Agent; all: Agent[]; count: number; hasNeeds: boolean; onRename: (name: string) => void; children: React.ReactNode;
+}) {
+  const house = houseNameOf(root, all);
+  const [editing, setEditing] = useState(false);
+  const tint = hashOf(root.id) % GROUP_TINTS.length;
   return (
-    <section className={`house roof-${roof} ${hasNeeds ? "has-needs" : ""}`}>
-      <div className="h-roof">
-        <div className="h-sign">
-          <span className="ht-name">{projectOf(root)}</span>
-          <span className="ht-sub">{root.name}の家・{count}人</span>
-        </div>
+    <section className={`group ${hasNeeds ? "has-needs" : ""}`}
+      style={{ background: GROUP_TINTS[tint], borderColor: hasNeeds ? undefined : GROUP_LINES[tint] }}>
+      <div className="g-head" onDoubleClick={() => setEditing(true)}
+        title={`ダブルクリックで名前を変える（${house.by === "human" ? "あなたが付けた名前" : house.by === "agent" ? `${root.name}が付けた名前` : "仮の名前"}）`}>
+        {editing ? (
+          <input className="g-input" autoFocus defaultValue={house.by === "human" ? house.name : ""} placeholder={house.name}
+            maxLength={24}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { onRename(e.currentTarget.value); setEditing(false); }
+              if (e.key === "Escape") setEditing(false);
+            }}
+            onBlur={() => setEditing(false)} />
+        ) : (
+          <span className={`g-name ${house.by === "guess" ? "guess" : ""}`}>{house.name}</span>
+        )}
+        <span className="g-sub">{count}人</span>
+        {hasNeeds && <span className="g-needs">あなたの番</span>}
       </div>
-      <div className="h-wall">
-        {children}
-        <img className="h-door" src="/sprites/ninja/tiles/door.png" alt="" draggable={false} />
-      </div>
-      <div className="h-ground" />
+      {children}
     </section>
   );
-}
-
-function hashOf(s: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
-  return h >>> 0;
 }
 
 function roleOf(depth: number): Role {
@@ -304,7 +334,7 @@ function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect:
         onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
         title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで広げて会話・右クリックでペインへ`}
       >
-        <Kid seed={agent.name} mood={mood} role={roleOf(depth)} size={40} />
+        <Avatar seed={agent.name} mood={mood} role={roleOf(depth)} size={32} />
         <span className="mini-name"><i className={`dot st-${mood}`} />{agent.name}</span>
       </button>
       {selected && (
@@ -349,7 +379,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
         <span className="task">{clip(task, 14)}</span>
       </div>
       <div className="card-main">
-        <Kid seed={agent.name} mood={mood} role={roleOf(depth)} size={54} />
+        <Avatar seed={agent.name} mood={mood} role={roleOf(depth)} size={48} />
         <div className="card-info">
           <span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}{since && <em>{since}</em>}</span>
           <span className="cname">{agent.name}</span>
@@ -440,7 +470,7 @@ function Panel({ agent, peer, lineage, onFocus, canFocus, onSent, onError, needs
   return (
     <aside className={`panel pm-${mood}`}>
       <div className="p-head">
-        <div className="p-avatar"><Kid seed={agent.name} mood={mood} role={roleOf(lineage.length - 1)} size={60} /></div>
+        <div className="p-avatar"><Avatar seed={agent.name} mood={mood} role={roleOf(lineage.length - 1)} size={64} /></div>
         <div className="p-id">
           <div className="p-name"><span className="pn">{agent.name}</span><span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}</span></div>
           <div className="p-line">{lineage.map((a, i) => (
@@ -460,7 +490,7 @@ function Panel({ agent, peer, lineage, onFocus, canFocus, onSent, onError, needs
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
           {convErr && <div className="banner bad small">{convErr}</div>}
           {shown.length === 0 && !convErr && <p className="hint center">まだ会話が無い</p>}
-          {shown.map((x, i) => <Bubble key={i} item={x} agent={agent} mood={mood} />)}
+          {shown.map((x, i) => <Bubble key={i} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "approval" && (
             <div className="c-warn">承認待ちはここからは答えられない。「ペインへ」で答える。{r?.needs ? `（${r.needs}）` : ""}</div>
           )}
@@ -512,7 +542,7 @@ function timeOf(at?: string | null): string {
   return isNaN(+d) ? "" : d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
 }
 
-function Bubble({ item, agent, mood }: { item: ConvItem & { more?: number }; agent: Agent; mood: Mood }) {
+function Bubble({ item, agent, lineageDepth }: { item: ConvItem & { more?: number }; agent: Agent; lineageDepth: number }) {
   if (item.role === "tool") {
     return <div className="tool-line">🔧 {item.text}{item.more ? ` ほか${item.more}件` : ""}</div>;
   }
@@ -527,7 +557,7 @@ function Bubble({ item, agent, mood }: { item: ConvItem & { more?: number }; age
   }
   return (
     <div className="msg kid">
-      <div className="mini"><Kid seed={agent.name} mood={mood === "working" ? "working" : "idle"} role="child" size={30} /></div>
+      <div className="mini-av"><Avatar seed={agent.name} mood="idle" role={roleOf(lineageDepth)} size={32} /></div>
       <div>
         <div className="meta"><b>{agent.name}</b>{timeOf(item.at)}</div>
         <div className="b"><Markdown text={item.text} /></div>
@@ -563,6 +593,25 @@ function StateTab({ agent, mood }: { agent: Agent; mood: Mood }) {
       {rows.filter(([, v]) => v).map(([k, v]) => (<div key={k}><dt>{k}</dt><dd>{v}</dd></div>))}
       {!r && <p className="hint">状態 hook が入っていないので、頼まれたことと次の一手は出ない（README の「hook」を参照）。</p>}
     </dl>
+  );
+}
+
+// ---------- 素材のクレジット ----------
+
+function Credits() {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="credits">
+      <button className="credit-btn" onClick={() => setOpen((o) => !o)}>素材</button>
+      {open && (
+        <span className="credit-pop" onMouseLeave={() => setOpen(false)}>
+          <b>キャラ</b>: Ninja Adventure Asset Pack（Pixel-boy、AAA）、CC0 1.0。
+          <br /><b>状態の印</b>: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0
+          （creativecommons.org/licenses/by/4.0）。Source: googlefonts.github.io/noto-emoji-animation
+          <br />どちらも配布元のファイルを改変せずに使い、表示のときに縮めている。
+        </span>
+      )}
+    </span>
   );
 }
 

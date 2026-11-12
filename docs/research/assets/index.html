@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>family-computing キャラ素材の見本（2択）</title>
+<style>
+  :root { --line:#e6e6e6; --sub:#666; --ok:#1a7f37; --warn:#9a6700; --ng:#b42318; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:#fff; color:#222; font:14px/1.6 -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+  header { padding:20px 32px 4px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .meta { color:var(--sub); font-size:12px; margin:0 0 12px; }
+  .points { border:1px solid var(--line); border-radius:8px; padding:10px 16px; margin:0; max-width:1100px; }
+  .points b { display:block; margin-bottom:2px; }
+  .points ol { margin:0; padding-left:20px; }
+  h2 { font-size:16px; margin:28px 32px 4px; }
+  .h2note { color:var(--sub); font-size:12px; margin:0 32px 12px; }
+
+  /* 案A/B/C */
+  .plans { display:grid; grid-template-columns:repeat(3, 1fr); gap:16px; padding:0 32px; }
+  .plan { border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .plan h3 { margin:0 0 2px; font-size:15px; }
+  .plan p { margin:0 0 8px; color:var(--sub); font-size:12px; }
+  .srow { display:grid; grid-template-columns:7.5em 76px 1fr; align-items:center; gap:8px; border-top:1px solid var(--line); padding:6px 0; font-size:12px; }
+  .srow .st { font-weight:600; font-size:13px; }
+  .srow .use { color:#444; }
+  .stage { width:72px; height:88px; position:relative; display:flex; align-items:flex-end; justify-content:center; }
+
+  /* Ninja のスプライト。16px の絵を4倍で表示する */
+  .nj { width:64px; height:64px; background-repeat:no-repeat; image-rendering:pixelated; }
+  .nj.idle { background-size:256px 64px; background-position:0 0; }
+  .nj.walk { background-size:256px 256px; animation:walk .6s steps(4) infinite; }
+  .nj.single { background-size:64px 64px; }
+  .nj.jump { background-size:256px 64px; animation:hop .5s ease-in-out infinite alternate; }
+  @keyframes walk { from { background-position:0 0; } to { background-position:0 -256px; } }
+  @keyframes hop { from { transform:translateY(0); } to { transform:translateY(-10px); } }
+  .emote { position:absolute; top:0; left:50%; width:28px; height:26px; transform:translateX(4px); image-rendering:pixelated; }
+  .emote.bounce { animation:bounce .5s ease-in-out infinite alternate; }
+  @keyframes bounce { from { top:0; } to { top:-5px; } }
+  .noto64 { width:64px; height:64px; }
+  .mark { position:absolute; top:0; left:50%; width:28px; height:28px; transform:translateX(4px); }
+
+  /* 20体の見た目 */
+  .crowds { display:grid; grid-template-columns:repeat(3, 1fr); gap:16px; padding:0 32px; }
+  .crowd { border:1px solid var(--line); border-radius:10px; padding:10px 12px; }
+  .crowd h3 { margin:0 0 6px; font-size:14px; }
+  .crowd .people { display:grid; grid-template-columns:repeat(5, 72px); gap:4px 6px; justify-content:center; }
+  .crowd .noto56 { width:56px; height:56px; margin:16px 8px; }
+
+  table { border-collapse:collapse; margin:0 32px; font-size:13px; }
+  th, td { border:1px solid var(--line); padding:4px 10px; text-align:left; vertical-align:top; }
+  th { background:#fafafa; font-weight:600; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .lic { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:0 32px; }
+  .lic div { border:1px solid var(--line); border-radius:10px; padding:10px 14px; font-size:13px; }
+  .lic h3 { margin:0 0 4px; font-size:14px; }
+  blockquote { margin:6px 0; padding:4px 10px; border-left:3px solid #ddd; color:#333; background:#fafafa; font-size:12px; }
+  .shots { display:grid; grid-template-columns:repeat(5, 1fr); gap:10px; padding:0 32px; }
+  .shots figure { margin:0; border:1px solid var(--line); border-radius:8px; padding:6px; font-size:12px; }
+  .shots img { width:100%; display:block; }
+  .ng { color:var(--ng); font-weight:600; }
+  .okc { color:var(--ok); font-weight:600; }
+  .divider { margin:40px 32px 0; border-top:2px solid var(--line); padding-top:8px; color:var(--sub); font-size:12px; }
+
+  /* 前の候補一覧 */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:16px; padding:0 32px; }
+  .card { border:1px solid var(--line); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; }
+  .preview { background:#fafafa; border-bottom:1px solid var(--line); height:200px; display:flex; align-items:center; justify-content:center; gap:8px; padding:8px; overflow:hidden; }
+  .preview img { flex:1 1 0; min-width:0; height:100%; object-fit:contain; }
+  .pixel img { image-rendering:pixelated; }
+  .real { display:flex; align-items:flex-end; gap:6px; padding:8px 12px; border-bottom:1px solid var(--line); background:#fff; }
+  .real span { color:var(--sub); font-size:11px; margin-right:4px; }
+  .real img { width:64px; height:64px; object-fit:contain; }
+  .body { padding:12px 14px 14px; display:flex; flex-direction:column; gap:6px; flex:1; }
+  .name { font-weight:600; font-size:15px; }
+  .kind { display:inline-block; font-size:11px; color:var(--sub); border:1px solid var(--line); border-radius:999px; padding:0 8px; margin-left:6px; vertical-align:2px; }
+  dl { margin:0; display:grid; grid-template-columns:5.5em 1fr; gap:3px 8px; font-size:13px; }
+  dt { color:var(--sub); }
+  dd { margin:0; }
+  .cond-ok { color:var(--ok); font-weight:600; }
+  .cond-unk { color:var(--warn); font-weight:600; }
+  .link { margin-top:auto; padding-top:6px; font-size:13px; }
+  a { color:#0b57d0; }
+  .excluded { margin:0 32px; padding-left:20px; font-size:13px; }
+  footer { color:var(--sub); font-size:12px; padding:24px 32px 40px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>family-computing キャラ素材の見本（Ninja Adventure と Noto Animated Emoji）</h1>
+  <p class="meta">2026-11-12 作成。素材は public/sprites/ninja と public/sprites/noto に置いたファイルを読み込んでいる。案の並び順に意味はない。</p>
+  <div class="points">
+    <b>選ぶときに見るところ</b>
+    <ol>
+      <li>6つの状態を、20〜30体の中で一目で見分けられるか。下の「20体の見た目」で比べる。</li>
+      <li>「家族の子供たちが働いている」に見えるか。キャラ本体があるのは案 A と C、顔だけなのは案 B。</li>
+      <li>表示の重さとファイルの大きさ。Noto の形式ごとの測定は下の表にある。Ninja は1体あたり数 KB の PNG。</li>
+    </ol>
+  </div>
+</header>
+
+<h2>案 A、B、C と状態の対応</h2>
+<p class="h2note">各行の絵は実物のファイルを 64px で表示している。Ninja のキャラは Boy。</p>
+<div class="plans" id="plans"></div>
+
+<h2>20体の見た目（白い背景）</h2>
+<p class="h2note">状態の割合は仮置き（はたらいてる8、あなたの番3、まってる3、おわった2、ひとやすみ3、エラー1）。A と C は 64px、B は 56px。</p>
+<div class="crowds" id="crowds"></div>
+
+<h2>ライセンス</h2>
+<div class="lic">
+  <div>
+    <h3>Ninja Adventure Asset Pack（pixel-boy、AAA）</h3>
+    <p>CC0 1.0。商用可、改変可、再配布可、帰属表示は不要（あれば嬉しいと記載）。</p>
+    <p>itch.io の素材ページ（<a href="https://pixel-boy.itch.io/ninja-adventure-asset-pack" target="_blank" rel="noopener">pixel-boy.itch.io/ninja-adventure-asset-pack</a>）の原文:</p>
+    <blockquote>They are released under the Creative Commons Zero (CC0) license. You can use any and all of the assets found in this package in your own games, even commercial ones. Attribution is not required but appreciated.</blockquote>
+    <p>パックに同梱の README.md の原文（上と同じ文）:</p>
+    <blockquote># License<br>They are released under the Creative Commons Zero (CC0) license.<br>You can use any and all of the assets found in this package in your own games, even commercial ones. Attribution is not required but appreciated.</blockquote>
+    <p>パックに同梱の LICENSE.txt は CC0 1.0 Universal の全文。1行目は「CC0 1.0 Universal」。原本は public/sprites/ninja/LICENSE-CC0.txt に置いた。</p>
+  </div>
+  <div>
+    <h3>Noto Animated Emoji（Google）</h3>
+    <p>CC BY 4.0。商用可、改変可、再配布可、帰属表示が必要。</p>
+    <p>配布サイトの Documentation ページ（<a href="https://googlefonts.github.io/noto-emoji-animation/documentation" target="_blank" rel="noopener">googlefonts.github.io/noto-emoji-animation/documentation</a>）の FAQ の原文:</p>
+    <blockquote>Can I use these animated assets commercially: for a video, for broadcast, apps, etc.?<br>Animated Noto Emoji is licensed under CC BY 4.0. See the full license for all details.</blockquote>
+    <p>「full license」のリンク先は <a href="https://creativecommons.org/licenses/by/4.0/legalcode" target="_blank" rel="noopener">creativecommons.org/licenses/by/4.0/legalcode</a>。同じ FAQ に「.json and 512x512 .avif, .webp, and .gif are available.」とある。</p>
+    <p>CC BY 4.0 の帰属表示では、作者名、ライセンス名とリンク、改変の有無を示す。アプリのクレジット画面か LICENSE に書く形が考えられる（表記の場所は未決定）。</p>
+  </div>
+</div>
+
+<h2>Noto の形式ごとの大きさ（1体あたり、配布されている 512px の版）</h2>
+<p class="h2note">配布は 512px のみで、64px などの小さい版は 404 だった。96px への縮小は手元で ffmpeg と gif2webp を使って試した値。</p>
+<table id="sizes">
+  <thead><tr><th>絵文字</th><th>GIF 512</th><th>WebP 512</th><th>AVIF 512</th><th>Lottie JSON</th><th>GIF 96（縮小）</th><th>WebP 96（縮小）</th></tr></thead>
+  <tbody>
+    <tr><td>1f913 nerd-face</td><td class="num">1,325,604</td><td class="num">744,998</td><td class="num">66,778</td><td class="num">34,888</td><td class="num">318,017</td><td class="num">162,294</td></tr>
+    <tr><td>1f97a pleading</td><td class="num">2,090,817</td><td class="num">1,028,808</td><td class="num">77,543</td><td class="num">45,677</td><td class="num">458,988</td><td class="num">226,062</td></tr>
+    <tr><td>1fae3 peeking</td><td class="num">2,709,947</td><td class="num">1,053,304</td><td class="num">107,912</td><td class="num">117,202</td><td class="num">500,946</td><td class="num">204,708</td></tr>
+    <tr><td>1f973 partying</td><td class="num">957,983</td><td class="num">534,632</td><td class="num">128,191</td><td class="num">67,877</td><td class="num">152,173</td><td class="num">110,708</td></tr>
+    <tr><td>1f634 sleep</td><td class="num">1,087,836</td><td class="num">518,828</td><td class="num">70,558</td><td class="num">24,420</td><td class="num">265,860</td><td class="num">120,414</td></tr>
+    <tr><td>1f635_200d_1f4ab dizzy-face</td><td class="num">1,203,221</td><td class="num">696,288</td><td class="num">131,865</td><td class="num">37,987</td><td class="num">261,384</td><td class="num">143,670</td></tr>
+    <tr><td>1f4bb laptop</td><td class="num">867,381</td><td class="num">300,782</td><td class="num">40,109</td><td class="num">83,476</td><td class="num">186,645</td><td class="num">62,750</td></tr>
+    <tr><td>270b raised-hand</td><td class="num">268,074</td><td class="num">196,142</td><td class="num">23,702</td><td class="num">33,153</td><td class="num">76,759</td><td class="num">46,026</td></tr>
+    <tr><td>23f3 hourglass</td><td class="num">554,328</td><td class="num">468,728</td><td class="num">23,864</td><td class="num">30,043</td><td class="num">181,257</td><td class="num">82,358</td></tr>
+    <tr><td>2705 check-mark</td><td class="num">175,653</td><td class="num">90,322</td><td class="num">13,652</td><td class="num">15,925</td><td class="num">72,643</td><td class="num">20,810</td></tr>
+    <tr><td>2049_fe0f exclamation-question</td><td class="num">473,861</td><td class="num">442,552</td><td class="num">47,318</td><td class="num">73,729</td><td class="num">169,658</td><td class="num">76,412</td></tr>
+    <tr><th>11種の合計</th><th class="num">11.7 MB</th><th class="num">6.1 MB</th><th class="num">0.73 MB</th><th class="num">0.56 MB</th><th class="num">2.6 MB</th><th class="num">1.3 MB</th></tr>
+  </tbody>
+</table>
+<p class="h2note" style="margin-top:6px">単位はバイト。Lottie は再生に lottie-web（lottie_light.min.js 5.12.2 は 168,236 バイト）が別に要る。Ninja の PNG は 1枚 1KB 未満から数 KB で、95キャラと Emote 30個で public/sprites/ninja 全体が 4.7MB（CharacterAnimated の GIF を含む）。</p>
+
+<h2>WKWebView（macOS の Tauri と同じ部品）での表示</h2>
+<p class="h2note">Swift で WKWebView を1枚だけ開く小さなプログラムを作り、bench.html に30体を並べて14秒後にスナップショットを撮った。ページはローカルの HTTP サーバーから配った（file:// では lottie-web が JSON を読めなかったため）。</p>
+<div class="shots">
+  <figure><img src="wk/wk-gif.png" alt=""><figcaption>GIF: <span class="okc">表示できた</span>（30/30）</figcaption></figure>
+  <figure><img src="wk/wk-webp.png" alt=""><figcaption>WebP: <span class="okc">表示できた</span>（30/30）</figcaption></figure>
+  <figure><img src="wk/wk-avif.png" alt=""><figcaption>AVIF: <span class="ng">透過が黒くなる</span>（30/30 読み込みはできた）</figcaption></figure>
+  <figure><img src="wk/wk-lottie.png" alt=""><figcaption>Lottie（lottie-web、SVG 描画）: <span class="okc">表示できた</span>（30/30）</figcaption></figure>
+  <figure><img src="wk/wk-ninja.png" alt=""><figcaption>Ninja（PNG と CSS のコマ送り）: <span class="okc">表示できた</span>（30/30）</figcaption></figure>
+</div>
+<p class="h2note" style="margin-top:8px">CPU 使用率（WKWebView の各プロセスの CPU 時間を8秒間で割った値。file:// で1回、HTTP で3回。Lottie は HTTP の3回のみ）: GIF 0.8〜15.6%、WebP 0.4〜17.8%、AVIF 0.4〜11.0%（file:// で測った1回目は 392%）、Lottie 0.1〜0.6%、Ninja 0.4〜4.1%。回ごとのぶれが大きく、形式の間の差は言い切れない。AVIF の1回目を除き、どの回も 18% 以下だった。</p>
+
+<div class="divider">ここから下は、前に作った候補一覧（12件）。2択に絞る前の比較のために残した。</div>
+<h2>前の候補一覧</h2>
+<h2 style="font-size:14px">依頼の条件（改変とリポジトリへの同梱）を満たすもの 9件</h2>
+<p class="h2note">CC0、MIT、CC BY、CC BY-SA、Lottie Simple License、ぴぽやの独自規約。</p>
+<div class="grid">
+
+  <div class="card">
+    <div class="preview pixel">
+      <img src="https://img.itch.zone/aW1hZ2UvOTMyNjc3LzU0NzM5MjMuZ2lm/original/YzEJnE.gif" alt="Ninja Adventure のプレビュー">
+    </div>
+    <div class="body">
+      <div class="name">Ninja Adventure Asset Pack<span class="kind">ドット絵 16px</span></div>
+      <dl>
+        <dt>ライセンス</dt><dd>CC0 1.0。商用可、改変可、クレジット不要（あれば嬉しいと記載）、点数制限なし</dd>
+        <dt>条件</dt><dd class="cond-ok">満たす</dd>
+        <dt>動き</dt><dd>50体超のキャラに動きと顔グラフィックあり。4方向の歩行とジャンプは確認、他の内訳は未確認</dd>
+        <dt>合う点</dt><dd>頭の大きい二頭身で、16px でも可愛い。人数が多く、親子孫を描き分けられる</dd>
+        <dt>合わない点</dt><dd>忍者と冒険者の衣装が中心で、子供や家族の普段着ではない</dd>
+      </dl>
+      <div class="link"><a href="https://pixel-boy.itch.io/ninja-adventure-asset-pack" target="_blank" rel="noopener">pixel-boy.itch.io/ninja-adventure-asset-pack</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="preview pixel">
+      <img src="https://img.itch.zone/aW1nLzkwNDM4NTguZ2lm/original/8WunFh.gif" alt="Puny Characters のアニメ">
+    </div>
+    <div class="body">
+      <div class="name">Puny Characters（Shade）<span class="kind">ドット絵 16px</span></div>
+      <dl>
+        <dt>ライセンス</dt><dd>CC0（OpenGameArt の License 欄）。作者が商用でも可と記載、改変可、クレジット不要</dd>
+        <dt>条件</dt><dd class="cond-ok">満たす</dd>
+        <dt>動き</dt><dd>8方向の待機、歩行、攻撃3種、投げる、被弾、倒れる。作業中や寝るは無い</dd>
+        <dt>合う点</dt><dd>素体が共通で、服や髪の色を変えて大人数を作りやすい</dd>
+        <dt>合わない点</dt><dd>戦闘向けの動きが中心で、デスク作業の表現は描き足しが要る</dd>
+      </dl>
+      <div class="link"><a href="https://opengameart.org/content/puny-characters" target="_blank" rel="noopener">opengameart.org/content/puny-characters</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="preview">
+      <img src="kenney-toon-characters.png" alt="Kenney Toon Characters のプレビュー">
+    </div>
+    <div class="body">
+      <div class="name">Kenney Toon Characters 1<span class="kind">ベクター調 2D</span></div>
+      <dl>
+        <dt>ライセンス</dt><dd>CC0。商用可、改変可、クレジット不要、点数制限なし</dd>
+        <dt>条件</dt><dd class="cond-ok">満たす</dd>
+        <dt>動き</dt><dd>6キャラ、各45ポーズ（プレビュー画像の記載）。ポーズの内訳は未確認</dd>
+        <dt>合う点</dt><dd>頭身が低く表情がはっきりしていて、64px でも誰か分かる</dd>
+        <dt>合わない点</dt><dd>大人と冒険者とゾンビとロボットで、子供のキャラは無い</dd>
+      </dl>
+      <div class="link"><a href="https://kenney.nl/assets/toon-characters-1" target="_blank" rel="noopener">kenney.nl/assets/toon-characters-1</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="preview pixel">
+      <img src="https://pipoya.net/sozai/wp-content/uploads/2018/07/0700fb214812ac8dbcf927936da7ec7c.gif" alt="ぴぽや キャラチップ">
+      <img src="https://pipoya.net/sozai/wp-content/uploads/2018/07/0e94d7f3138f396f7ca1588693805f2c.gif" alt="ぴぽや キャラチップ">
+      <img src="https://pipoya.net/sozai/wp-content/uploads/2018/07/261fe2e275dcb827b0c185c4814cc083.gif" alt="ぴぽや キャラチップ">
+      <img src="https://pipoya.net/sozai/wp-content/uploads/2018/07/31f419b96b587b26822fbc86950be831.gif" alt="ぴぽや キャラチップ">
+      <img src="https://pipoya.net/sozai/wp-content/uploads/2018/07/375bbfa61f0aa21c7409ebe1be19b8d0.gif" alt="ぴぽや キャラチップ">
+    </div>
+    <div class="body">
+      <div class="name">ぴぽや倉庫 キャラクターチップ1<span class="kind">ドット絵 32px</span></div>
+      <dl>
+        <dt>ライセンス</dt><dd>独自規約。商用可、改変可、著作権表記不要、点数制限の記載なし。無償の再配布は規約を添える条件で可、販売と転売は不可</dd>
+        <dt>条件</dt><dd class="cond-ok">満たす</dd>
+        <dt>動き</dt><dd>4方向の歩行3コマのみ</dd>
+        <dt>合う点</dt><dd>日本の RPG ツクール系の 32px 規格。上の見本はこのページにあった季節キャラで、子供のキャラが入っているかは未確認</dd>
+        <dt>合わない点</dt><dd>歩行しかなく、作業中や寝るなどの状態は全部描き足しになる</dd>
+      </dl>
+      <div class="link"><a href="https://pipoya.net/sozai/assets/charachip/character-chip-1/" target="_blank" rel="noopener">pipoya.net キャラクターチップ1</a>、<a href="https://pipoya.net/sozai/terms-of-use/" target="_blank" rel="noopener">利用規約</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="preview">
+      <img src="https://cdn.prod.website-files.com/5e51b3b0337309d672efd94c/5e5352682c16e8c454168a64_mix-1.svg" alt="Open Peeps の組み合わせ例">
+      <img src="https://cdn.prod.website-files.com/5e51b3b0337309d672efd94c/5e535cc533d36869f23e5264_mix-6.svg" alt="Open Peeps の組み合わせ例">
+    </div>
+    <div class="body">
+      <div class="name">Open Peeps（Pablo Stanley）<span class="kind">手描き風ベクター</span></div>
+      <dl>
+        <dt>ライセンス</dt><dd>CC0。商用可、改変可、再配布可、クレジット不要</dd>
+        <dt>条件</dt><dd class="cond-ok">満たす</dd>
+        <dt>動き</dt><dd>静止画。腕、脚、表情の部品を組み合わせて立ち姿と座り姿を作る</dd>
+        <dt>合う点</dt><dd>表情と姿勢の部品があり、考え中や喜ぶを組み合わせで作れる。白地に合う線画</dd>
+        <dt>合わない点</dt><dd>大人の体型が中心で、64px に縮めると線が細く表情が読みにくい</dd>
+      </dl>
+      <div class="link"><a href="https://www.openpeeps.com/" target="_blank" rel="noopener">openpeeps.com</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="preview">
+      <img src="https://raw.githubusercontent.com/microsoft/fluentui-emoji/main/assets/Child/Default/3D/child_3d_default.png" alt="Child">
+      <img src="https://raw.githubusercontent.com/microsoft/fluentui-emoji/main/assets/Technologist/Default/3D/technologist_3d_default.png" alt="Technologist">
+      <img src="https://raw.githubusercontent.com/microsoft/fluentui-emoji/main/assets/Person%20raising%20hand/Default/3D/person_raising_hand_3d_default.png" alt="Person raising hand">
+    </div>
+    <div class="real">
+      <span>64px 実寸</span>
+      <img src="https://raw.githubusercontent.com/microsoft/fluentui-emoji/main/assets/Child/Default/3D/child_3d_default.png" alt="">
+      <img src="https://raw.githubusercontent.com/microsoft/fluentui-emoji/main/assets/Baby/Default/3D/baby_3d_default.png" alt="">
+      <img src="https://raw.githubusercontent.com/microsoft/fluentui-emoji/main/assets/Thinking%20face/3D/thinking_face_3d.png" alt="">
+      <img src="https://raw.githubusercontent.com/microsoft/fluentui-emoji/main/assets/Sleeping%20face/3D/sleeping_face_3d.png" alt="">
+      <img src="https://raw.githubusercontent.com/microsoft/fluentui-emoji/main/assets/Partying%20face/3D/partying_face_3d.png" alt="">
+    </div>
+    <div class="body">
+      <div class="name">Microsoft Fluent Emoji（3D）<span class="kind">絵文字 3D / Flat / SVG</span></div>
+      <dl>
+        <dt>ライセンス</dt><dd>MIT。商用可、改変可、再配布可。同梱時は著作権表示と許諾文を残す</dd>
+        <dt>条件</dt><dd class="cond-ok">満たす</dd>
+        <dt>動き</dt><dd>静止画。状態は別の絵文字（技術者、手を挙げる人、寝顔、考え顔、パーティ顔、ベッドの人）で表せる</dd>
+        <dt>合う点</dt><dd>子供と赤ちゃんの絵文字があり、64px でも表情が読める。肌の色を6段階で選べる</dd>
+        <dt>合わない点</dt><dd>人物と顔が別の絵文字で、同じ子が状態ごとに表情を変える形にはならない</dd>
+      </dl>
+      <div class="link"><a href="https://github.com/microsoft/fluentui-emoji" target="_blank" rel="noopener">github.com/microsoft/fluentui-emoji</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="preview">
+      <img src="https://fonts.gstatic.com/s/e/notoemoji/latest/1f914/512.gif" alt="thinking">
+      <img src="https://fonts.gstatic.com/s/e/notoemoji/latest/1f634/512.gif" alt="sleeping">
+    </div>
+    <div class="real">
+      <span>64px 実寸</span>
+      <img src="https://fonts.gstatic.com/s/e/notoemoji/latest/1f60a/512.gif" alt="">
+      <img src="https://fonts.gstatic.com/s/e/notoemoji/latest/1f914/512.gif" alt="">
+      <img src="https://fonts.gstatic.com/s/e/notoemoji/latest/270b/512.gif" alt="">
+      <img src="https://fonts.gstatic.com/s/e/notoemoji/latest/1f634/512.gif" alt="">
+      <img src="https://fonts.gstatic.com/s/e/notoemoji/latest/1f973/512.gif" alt="">
+    </div>
+    <div class="body">
+      <div class="name">Noto Animated Emoji（Google）<span class="kind">アニメ絵文字 Lottie / GIF / WebP</span></div>
+      <dl>
+        <dt>ライセンス</dt><dd>CC BY 4.0（Google 開発者ブログ 2022-09 の記載。配布サイトには記載を見つけられなかった）。商用可、改変可、クレジット必須</dd>
+        <dt>条件</dt><dd class="cond-ok">満たす（クレジット表記が要る）</dd>
+        <dt>動き</dt><dd>アニメあり。考え顔、寝顔、手、パーティ顔、ノートPC など。人物は8種のみで、ほぼ顔の絵文字</dd>
+        <dt>合う点</dt><dd>考え中、寝る、喜ぶ、手を挙げるがそのまま動く状態アイコンになる</dd>
+        <dt>合わない点</dt><dd>子供の全身キャラではなく顔だけで、家族の見た目は出せない</dd>
+      </dl>
+      <div class="link"><a href="https://googlefonts.github.io/noto-emoji-animation/" target="_blank" rel="noopener">googlefonts.github.io/noto-emoji-animation</a>、<a href="https://developers.googleblog.com/en/updates-to-emoji-new-characters-new-animation-new-color-customization-and-more/" target="_blank" rel="noopener">ライセンスの記載（ブログ）</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="preview">
+      <img src="https://openmoji.org/data/color/svg/1F9D2.svg" alt="child">
+      <img src="https://openmoji.org/data/color/svg/1F9D1-200D-1F4BB.svg" alt="technologist">
+      <img src="https://openmoji.org/data/color/svg/1F64B.svg" alt="raising hand">
+    </div>
+    <div class="real">
+      <span>64px 実寸</span>
+      <img src="https://openmoji.org/data/color/svg/1F9D2.svg" alt="">
+      <img src="https://openmoji.org/data/color/svg/1F9D1-200D-1F4BB.svg" alt="">
+      <img src="https://openmoji.org/data/color/svg/1F64B.svg" alt="">
+      <img src="https://openmoji.org/data/color/svg/1F634.svg" alt="">
+    </div>
+    <div class="body">
+      <div class="name">OpenMoji<span class="kind">絵文字 フラット SVG</span></div>
+      <dl>
+        <dt>ライセンス</dt><dd>CC BY-SA 4.0。商用可、改変可、クレジット必須、改変物も CC BY-SA 4.0 で配布</dd>
+        <dt>条件</dt><dd class="cond-ok">満たす（クレジットと継承の条件が付く）</dd>
+        <dt>動き</dt><dd>静止画。状態は別の絵文字で表す</dd>
+        <dt>合う点</dt><dd>太い線のフラットな絵で、白地の小さい表示でも輪郭がはっきりする</dd>
+        <dt>合わない点</dt><dd>可愛さより記号寄りの絵。改変した絵も同じライセンスで出す必要がある</dd>
+      </dl>
+      <div class="link"><a href="https://openmoji.org/" target="_blank" rel="noopener">openmoji.org</a>、<a href="https://openmoji.org/faq/" target="_blank" rel="noopener">ライセンスの FAQ</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="preview">
+      <img src="https://assets-v2.lottiefiles.com/a/7ef3b222-1180-11ee-a931-63675f0fcb34/wJiv32saep.gif" alt="Boy working on desk with a laptop">
+    </div>
+    <div class="body">
+      <div class="name">LottieFiles 無料アニメ（例 Boy working on desk with a laptop）<span class="kind">Lottie アニメ</span></div>
+      <dl>
+        <dt>ライセンス</dt><dd>Lottie Simple License（作品ページに記載を確認）。商用可、改変可、クレジット任意。配布するときは同じ条件を付ける</dd>
+        <dt>条件</dt><dd class="cond-ok">満たす（配布時に同じ条件を付ける）</dd>
+        <dt>動き</dt><dd>この1本はノートPCで作業する男の子のループアニメ。他の状態は作者ごとに別の作品を探すことになる</dd>
+        <dt>合う点</dt><dd>作業中の動きが最初から付いていて、ベクターなので縮めても崩れない</dd>
+        <dt>合わない点</dt><dd>作品ごとに作者と絵柄が違い、同じ子の6状態をそろえるのは難しい</dd>
+      </dl>
+      <div class="link"><a href="https://lottiefiles.com/free-animation/boy-working-on-desk-with-a-laptop-X44FEHAzoD" target="_blank" rel="noopener">lottiefiles.com の作品ページ</a>、<a href="https://lottiefiles.com/page/license" target="_blank" rel="noopener">Lottie Simple License</a></div>
+    </div>
+  </div>
+
+</div>
+
+<h2>規約の一部を確認できていないもの 3件</h2>
+<p class="h2note">見た目の比較のために載せた。改変かリポジトリへの同梱の可否が原文で確認できていない。</p>
+<div class="grid">
+
+  <div class="card">
+    <div class="preview">
+      <img src="https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEi52RbA-MP8y_gg_uoJuWBpA6vir71rcwcpWUqovWtcx1-pPhQcoFvs-hwQYDkCVEF56KQjVokidAa8-YCYh0jTJzNOls8keTOG7PuzQY9BdHI4jcigcH4PD8SlOrJXTmlV3TvqC02JuLfe/s400/computer_tokui_boy.png" alt="コンピューターを使いこなす子供（男の子）">
+      <img src="https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEgGAyYkOHCIBu6-8Y89xD1mtsg4dXsjFQrp-zhTCXIRK1JYE8RenN9ZYZ8ECgB5JBEi2x85p_EVroxieXKeBg_p1KBpplxcusRepJavcXmaI7EmCQaaYELqFM10cNfRPDanQ4g7XUbcVaw/s400/computer_girl.png" alt="コンピューターを使いこなす子供">
+    </div>
+    <div class="body">
+      <div class="name">いらすとや<span class="kind">イラスト 静止画</span></div>
+      <dl>
+        <dt>ライセンス</dt><dd>独自規約。商用可、編集と加工は可、クレジットの定めなし。21点以上を使う商用デザインは有料。素材を主体としたコンテンツの再配布と販売は禁止</dd>
+        <dt>条件</dt><dd class="cond-unk">未確認（アプリへの組み込みとリポジトリ同梱が「素材を主体とした再配布」に当たるかの記載なし）</dd>
+        <dt>動き</dt><dd>静止画。パソコンを使う子供、プログラマーの男の子など状態に近い絵が個別にある</dd>
+        <dt>合う点</dt><dd>子供の絵が多く、家族の雰囲気がそのまま出る</dd>
+        <dt>合わない点</dt><dd>絵ごとに構図が違い、同じ子の状態違いはそろわない。キャラが画面の主役になるので再配布禁止に触れやすい</dd>
+      </dl>
+      <div class="link"><a href="https://www.irasutoya.com/2021/01/blog-post_42.html" target="_blank" rel="noopener">素材ページ（男の子）</a>、<a href="https://www.irasutoya.com/p/terms.html" target="_blank" rel="noopener">ご利用について</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="preview pixel">
+      <img src="https://img.itch.zone/aW1hZ2UvNDkzMTExMS8yOTQ5MTkwMC5wbmc=/original/vCtrLE.png" alt="CozyMates のプレビュー">
+    </div>
+    <div class="body">
+      <div class="name">CozyMates（JM Brods Works）<span class="kind">ドット絵 36px</span></div>
+      <dl>
+        <dt>ライセンス</dt><dd>ページには個人と商用のゲームで使えると記載。改変と再配布の条件は同梱の LICENSE にあり、未読</dd>
+        <dt>条件</dt><dd class="cond-unk">未確認（同梱の LICENSE を読んでいない）</dd>
+        <dt>動き</dt><dd>男の子と女の子の2体。歩行や待機は「作りやすい」との記載で、同梱されている動きは未確認</dd>
+        <dt>合う点</dt><dd>子供の男女で、まさに家族の子供らしい見た目</dd>
+        <dt>合わない点</dt><dd>2体だけで、20〜30体を描き分けるには色替えか描き足しが要る</dd>
+      </dl>
+      <div class="link"><a href="https://jmbrodsworks.itch.io/cozymates" target="_blank" rel="noopener">jmbrodsworks.itch.io/cozymates</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="preview pixel">
+      <img src="https://img.itch.zone/aW1nLzU3MDM5ODIucG5n/original/gppHxF.png" alt="Modern Interiors 無料版の中身">
+    </div>
+    <div class="body">
+      <div class="name">LimeZu Modern Interiors 無料版<span class="kind">ドット絵 16px</span></div>
+      <dl>
+        <dt>ライセンス</dt><dd>無料版は非商用のみ可（devlog の記載）。改変と再配布の条件は同梱の LICENSE.txt にあり、未読。有料版（1.50ドル以上）は商用可、改変可、クレジット必須、再配布不可</dd>
+        <dt>条件</dt><dd class="cond-unk">未確認（LICENSE.txt を読んでいない。非商用のみ）</dd>
+        <dt>動き</dt><dd>無料版はキャラ4体（全方向の動きつきと記載）。読書や座りなどの動きは有料版のキャラ生成ツール側</dd>
+        <dt>合う点</dt><dd>机、PC、教室の家具がそろっていて、働く部屋を作りやすい</dd>
+        <dt>合わない点</dt><dd>無料版は人数も動きも少なく、子供のキャラではない</dd>
+      </dl>
+      <div class="link"><a href="https://limezu.itch.io/moderninteriors/devlog/244045/free-version-overview-18042021-update" target="_blank" rel="noopener">無料版の devlog</a>、<a href="https://limezu.itch.io/moderninteriors" target="_blank" rel="noopener">素材ページ</a></div>
+    </div>
+  </div>
+
+</div>
+
+<h2>調べたが外したもの</h2>
+<ul class="excluded">
+  <li>craftpix の freebies。規約 2.2.1 が、素材ファイルを他の利用者が使える形で再配布することを禁じている。リポジトリへの同梱と合わない。子供のキャラのパックも見つけられなかった。</li>
+  <li>MetroCity、BitBop。理由は docs/research/similar-products.md の3章に書いた。</li>
+</ul>
+
+<footer>
+  プレビュー画像は各素材ページの画像を直接読み込んでいる（Kenney だけは読み込みが断られたので同じディレクトリに保存した）。素材そのものはダウンロードしていない。
+</footer>
+
+<script>
+  // 案 A、B、C の状態対応と20体の並びを、public/sprites の実物から組み立てる
+  const S = "../../../public/sprites/";
+  const NJ = (c, a) => `${S}ninja/characters/${c}/SeparateAnim/${a}.png`;
+  const EM = n => `${S}ninja/emote/emote${n}.png`;
+  const NT = cp => `${S}noto/${cp}/512.webp`;
+
+  const STATES = [
+    { key:"work",  label:"はたらいてる", sub:"作業中" },
+    { key:"turn",  label:"あなたの番",   sub:"承認待ち、入力待ち" },
+    { key:"wait",  label:"まってる",     sub:"ほかの子を待ってる" },
+    { key:"done",  label:"おわった",     sub:"閉じてOK" },
+    { key:"idle",  label:"ひとやすみ",   sub:"待機" },
+    { key:"error", label:"エラー",       sub:"" },
+  ];
+  // 案 A の体の動きと吹き出し
+  const A = {
+    work:  { anim:"Walk", cls:"walk",   emote:null, bounce:false, use:"Walk の前向き4コマで足踏み。作業専用の動きは無いので代用" },
+    turn:  { anim:"Item", cls:"single", emote:22,   bounce:true,  use:"Item（両手で掲げる）と Emote22 の赤い「!」を弾ませる" },
+    wait:  { anim:"Idle", cls:"idle",   emote:20,   bounce:false, use:"Idle の前向きと Emote20 の「…」" },
+    done:  { anim:"Jump", cls:"jump",   emote:27,   bounce:false, use:"Jump を上下に弾ませ、Emote27 のハート" },
+    idle:  { anim:"Idle", cls:"idle",   emote:28,   bounce:false, use:"Idle の前向きと Emote28 の「Zz」" },
+    error: { anim:"Dead", cls:"single", emote:3,    bounce:false, use:"Dead（倒れた姿）と Emote3 の×目" },
+  };
+  // 案 B の顔
+  const B = {
+    work:  { cp:"1f913", use:"1f913 nerd-face（めがねの顔）" },
+    turn:  { cp:"1f97a", use:"1f97a pleading（お願いの顔）" },
+    wait:  { cp:"1fae3", use:"1fae3 peeking（指のすき間からのぞく顔）" },
+    done:  { cp:"1f973", use:"1f973 partying（パーティの顔）" },
+    idle:  { cp:"1f634", use:"1f634 sleep（寝顔）" },
+    error: { cp:"1f635_200d_1f4ab", use:"1f635_200d_1f4ab dizzy-face（目を回す顔）" },
+  };
+  // 案 C の頭上マーク
+  const C = {
+    work:  { cp:"1f4bb", use:"体は案 A と同じ。頭上に 1f4bb laptop" },
+    turn:  { cp:"270b",  use:"体は案 A と同じ。頭上に 270b raised-hand" },
+    wait:  { cp:"23f3",  use:"体は案 A と同じ。頭上に 23f3 hourglass" },
+    done:  { cp:"2705",  use:"体は案 A と同じ。頭上に 2705 check-mark" },
+    idle:  { cp:"1f634", use:"体は案 A と同じ。頭上に 1f634 sleep" },
+    error: { cp:"2049_fe0f", use:"体は案 A と同じ。頭上に 2049 ⁉" },
+  };
+
+  function ninjaBody(char, st) {
+    const a = A[st];
+    const d = document.createElement("div");
+    d.className = "nj " + a.cls;
+    d.style.backgroundImage = `url("${NJ(char, a.anim)}")`;
+    return d;
+  }
+  function stage(plan, char, st) {
+    const w = document.createElement("div"); w.className = "stage";
+    if (plan === "B") {
+      const i = new Image(); i.src = NT(B[st].cp); i.className = "noto64"; w.appendChild(i);
+      return w;
+    }
+    w.appendChild(ninjaBody(char, st));
+    if (plan === "A" && A[st].emote) {
+      const e = new Image(); e.src = EM(A[st].emote); e.className = "emote" + (A[st].bounce ? " bounce" : ""); w.appendChild(e);
+    }
+    if (plan === "C") {
+      const m = new Image(); m.src = NT(C[st].cp); m.className = "mark"; w.appendChild(m);
+    }
+    return w;
+  }
+
+  const PLANS = [
+    { id:"A", title:"案 A　Ninja Adventure だけ", desc:"キャラの動き（Idle、Walk、Item、Jump、Dead）と、同じパックの吹き出し（Emote）で状態を表す。", map:A },
+    { id:"B", title:"案 B　Noto Animated Emoji だけ", desc:"動く顔の絵文字1つで状態を表す。キャラ本体は無い。", map:B },
+    { id:"C", title:"案 C　組み合わせ", desc:"キャラ本体は Ninja Adventure、頭の上の状態マークを Noto Animated Emoji にする。", map:C },
+  ];
+  const plansEl = document.getElementById("plans");
+  for (const p of PLANS) {
+    const box = document.createElement("div"); box.className = "plan";
+    box.innerHTML = `<h3>${p.title}</h3><p>${p.desc}</p>`;
+    for (const s of STATES) {
+      const r = document.createElement("div"); r.className = "srow";
+      const name = document.createElement("div"); name.className = "st"; name.innerHTML = `${s.label}<br><span style="font-weight:400;color:#666;font-size:11px">${s.sub}</span>`;
+      const use = document.createElement("div"); use.className = "use"; use.textContent = p.map[s.key].use;
+      r.appendChild(name); r.appendChild(stage(p.id, "Boy", s.key)); r.appendChild(use);
+      box.appendChild(r);
+    }
+    plansEl.appendChild(box);
+  }
+
+  // 20体。状態の割合は仮置き
+  const CHARS = ["Boy","EggGirl","Princess","EggBoy","NinjaBlue","Villager","Woman","NinjaGreen","Monk","Villager2","Eskimo","NinjaRed","Inspector","Villager3","Cavegirl","Hunter","NinjaYellow","Noble","Villager4","Samurai"];
+  const MIX = ["work","work","turn","work","wait","work","idle","work","done","turn","work","wait","work","idle","error","turn","wait","done","idle","work"];
+  const crowdsEl = document.getElementById("crowds");
+  for (const p of PLANS) {
+    const box = document.createElement("div"); box.className = "crowd";
+    box.innerHTML = `<h3>${p.title}</h3>`;
+    const people = document.createElement("div"); people.className = "people";
+    CHARS.forEach((c, i) => {
+      const st = MIX[i];
+      if (p.id === "B") {
+        const im = new Image(); im.src = NT(B[st].cp); im.className = "noto56"; im.title = st; people.appendChild(im);
+      } else {
+        const sg = stage(p.id, c, st); sg.title = c + " / " + st; people.appendChild(sg);
+      }
+    });
+    box.appendChild(people);
+    crowdsEl.appendChild(box);
+  }
+</script>
+
+</body>
+</html>
