@@ -1,6 +1,6 @@
 // 長時間の記録（#15、scripts/soak.ts）で、画面を人の代わりに動かす。VITE_FC_SOAK を付けてビルドしたときだけ入る。
 //   town    町を出したまま、SWITCH_MS ごとに次のセッションを選んでチャットを開く（会話の取得と切り替えを続ける）
-//   reopen  1つのセッションを選び、1分待ってから、ターミナルのタブを REOPEN 回開いて閉じる
+//   reopen  1つのセッションを選び、35秒待ってから、ターミナルのタブを REOPEN 回開いて閉じる。開くたびに描けているかを数える
 //   misroute #36 の再現。名前が同じ2世帯を交互に選び、SENDS 回送る。送る直前の選択と送信先の表示を残す（届いた先は外で mock に聞く）
 //   check10 #10 の確かめ。モックの長い会話（FC_MOCK_CONV）で、吹き出しの並び、増えた分、送った文の仮の表示、選択肢、切り替えを見る
 // 進み具合は perf_log（FC_PERF_LOG のファイル）に1行の JSON で書く。外の scripts/soak.ts がそれを読む
@@ -42,20 +42,28 @@ async function town() {
 async function reopen() {
   const c = await until(() => cards()[0]);
   c.click();
-  // 始めの記録（外の scripts/soak.ts が起動から30秒と55秒で取る）が済むまで待つ
-  await sleep(60_000);
+  // 始めの記録（外の scripts/soak.ts が起動から30秒で取る）が済むまで待つ
+  await sleep(35_000);
   await until(() => tab("ターミナル"));
   log({ ev: "start", id: c.aid });
+  // 開くたびに、描けているかを見る。WebGL の文脈が生きている、文脈を失った知らせが来ていない、「起動中…」が消えている
+  let lost = 0, drawn = 0, gl = 0;
   for (let i = 1; i <= REOPEN; i++) {
     tab("ターミナル")!.click();
     await until(() => document.querySelector(".xterm"));
-    await sleep(1500);
+    const ok = await until(() => !document.querySelector(".term-status"), 10_000).then(() => true, () => false);
+    for (const cv of document.querySelectorAll<HTMLCanvasElement>(".term canvas")) cv.addEventListener("webglcontextlost", () => lost++);
+    await sleep(800);
+    const live = [...document.querySelectorAll<HTMLCanvasElement>(".term canvas")]
+      .map((cv) => cv.getContext("webgl2")).filter((x): x is WebGL2RenderingContext => !!x && !x.isContextLost());
+    if (ok) drawn++;
+    if (live.length > 0) gl++;
     tab("チャット")!.click();
     await until(() => !document.querySelector(".xterm"));
-    await sleep(500);
-    if (i % 10 === 0) log({ ev: "reopen", i });
+    await sleep(300);
+    if (i % 10 === 0) log({ ev: "reopen", i, drawn, gl, lost });
   }
-  log({ ev: "done" });
+  log({ ev: "done", drawn, gl, lost });
 }
 
 /** 会話の欄の「仮の会話 N」の番号を、上から順に */

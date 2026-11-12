@@ -16,7 +16,7 @@
 //   - 画面（src/soak.ts）は10分ごとに次のセッションを選んでチャットを開く
 //   - --interval 秒（既定 600）ごとに RSS と footprint を記録する
 // ターミナルの開き直し（--mode reopen）:
-//   - 画面がターミナルのタブを100回開いて閉じる。10秒ごとに記録し、終わってから --after 秒（既定 180）待って記録する。全部で10分以内に収まる
+//   - 画面がターミナルのタブを100回開いて閉じる。10秒ごとに記録し、終わってから --after 秒（既定 120）待って記録する。全部で10分以内に収まる
 //
 // 結果は /tmp/ct-soak-<mode>/samples.jsonl と summary.md。ディスクの空きが 20GB を切ったら止める。
 import { spawn, spawnSync } from "node:child_process";
@@ -28,7 +28,7 @@ const MODE = arg("mode", "town")!;
 const BIN = arg("bin");
 const HOURS = Number(arg("hours", MODE === "town" ? "8" : "1"));
 const INTERVAL_S = Number(arg("interval", MODE === "town" ? "600" : "10"));
-const AFTER_S = Number(arg("after", "180"));
+const AFTER_S = Number(arg("after", "120"));
 const PORT = Number(arg("port", MODE === "town" ? "4511" : "4512"));
 const DIR = arg("dir", `/tmp/ct-soak-${MODE}`)!;
 const HOME = join(DIR, "home");
@@ -164,7 +164,7 @@ const perfLines = () => readFileSync(perfLog, "utf8").split("\n").filter(Boolean
 
 await sleep(30_000);
 sample("起動から30秒");
-if (MODE === "reopen") { await sleep(25_000); sample("開き直しの前"); }
+
 const end = t0 + HOURS * 3600_000;
 if (MODE === "town") {
   const timers = [setInterval(letter, 60_000), setInterval(() => { churn().catch(() => {}); }, 15 * 60_000)];
@@ -185,7 +185,8 @@ if (MODE === "town") {
     const err = ls.find((l) => l.ev === "error");
     if (err) stop(`画面の失敗: ${err.message}`);
     const n = Math.max(0, ...ls.filter((l) => l.ev === "reopen").map((l) => l.i));
-    if (!doneAt && ls.some((l) => l.ev === "done")) { doneAt = Date.now(); sample(`開き直し ${REOPEN_N(ls)} 回が終わった`); continue; }
+    const done = ls.find((l) => l.ev === "done");
+    if (!doneAt && done) { doneAt = Date.now(); sample(`開き直し ${REOPEN_N(ls)} 回が終わった（描けた ${done.drawn}、文脈が生きていた ${done.gl}、文脈を失った知らせ ${done.lost}）`); continue; }
     sample(doneAt ? `終わってから ${Math.round((Date.now() - doneAt) / 1000)} 秒` : `開き直し ${n} 回`);
     if (doneAt && Date.now() - doneAt >= AFTER_S * 1000) stop("開き直しの後の記録が済んだ");
   }
