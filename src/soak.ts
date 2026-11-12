@@ -11,7 +11,8 @@ const REOPEN = Number(import.meta.env.VITE_FC_SOAK_REOPEN ?? 100);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const log = (o: Record<string, unknown>) => call("perf_log", { line: JSON.stringify({ soak: MODE, at: Date.now(), ...o }) }).catch(() => {});
-const cards = () => [...document.querySelectorAll<HTMLElement>("[data-aid]")];
+// 押す先はカードそのもの（data-aid の包みの最初の子）。包みには onClick が無い
+const cards = () => [...document.querySelectorAll<HTMLElement>("[data-aid]")].map((w) => Object.assign(w.firstElementChild as HTMLElement, { aid: w.dataset.aid }));
 const tab = (label: string) => [...document.querySelectorAll<HTMLButtonElement>(".tabs button")].find((b) => b.textContent === label);
 
 async function until<T>(f: () => T | null | undefined | false, ms = 30_000): Promise<T> {
@@ -32,7 +33,7 @@ async function town() {
     c.click();
     await sleep(500);
     tab("チャット")?.click();
-    log({ ev: "select", i, id: c.dataset.aid, cards: cs.length, bubbles: document.querySelectorAll(".talk .msg, .talk .tool-line").length });
+    log({ ev: "select", i, id: c.aid, cards: cs.length, bubbles: document.querySelectorAll(".talk .msg, .talk .tool-line").length });
     await sleep(SWITCH_MS);
   }
 }
@@ -43,7 +44,7 @@ async function reopen() {
   // 始めの記録（外の scripts/soak.ts が起動から30秒と55秒で取る）が済むまで待つ
   await sleep(60_000);
   await until(() => tab("ターミナル"));
-  log({ ev: "start", id: c.dataset.aid });
+  log({ ev: "start", id: c.aid });
   for (let i = 1; i <= REOPEN; i++) {
     tab("ターミナル")!.click();
     await until(() => document.querySelector(".xterm"));
@@ -69,9 +70,16 @@ async function check10() {
   await sleep(1000);
   const a = nums();
   r.open = { count: a.length, first: a[0], last: a[a.length - 1], ordered: ordered(a), who: talkName() };
-  await sleep(11_000);
+  // 待つ間、1秒ごとに、選ばれているカードと会話の欄の持ち主を残す
+  const trace: string[] = [];
+  for (let k = 0; k < 11; k++) {
+    await sleep(1000);
+    trace.push(`${(document.querySelector(".fnode.open [data-aid]") as HTMLElement | null)?.dataset.aid?.slice(0, 8)}:${talkName()}`);
+  }
+  r.trace = trace;
+  r.ids = cards().map((c) => `${c.aid?.slice(0, 8)}`);
   const b = nums();
-  r.grow = { last: b[b.length - 1], added: b[b.length - 1] - a[a.length - 1], ordered: ordered(b) };
+  r.grow = { who: talkName(), last: b[b.length - 1], added: b[b.length - 1] - a[a.length - 1], ordered: ordered(b) };
   // 送る。仮の吹き出しが出て、会話に出たら消え、返事の選択肢が出る
   const text = `確かめの文 ${Date.now()}`;
   const ta = document.querySelector<HTMLTextAreaElement>(".composer textarea")!;
