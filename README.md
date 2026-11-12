@@ -2,6 +2,26 @@
 
 Claude Town は、Claude Code のセッションの親子を、町に住む家族の子供たちが働く姿として見せる Tauri 製のデスクトップアプリである。旧名はファミリーコンピューティングで、リポジトリとディレクトリの名前（family-computing）、bundle identifier、hook と状態の置き場（`~/.family-computing/`）は旧名のまま使う。画面の子供をクリックすると、その子に注文を出せる。この文書は企画書で、決まったことと決まっていないことを分けて書く。
 
+## ccn とセットで動く
+
+Claude Town は、ccn（Claude Code Nodes）とセットで動くアプリである。Claude Town だけでは動かない。ccn は作者が作っている別のプロダクトで、リポジトリは公開していない。
+
+ccn は、機械ごとに常駐するノードである。ノードは、その機械で Claude Code のセッションを立て、一覧にし、文を送り、承認に答える HTTP の口を出す。ノードどうしをつなぐと、別の機械のセッションも同じ口で扱える。
+
+Claude Town は、手元のノード（`127.0.0.1`、ポートは `~/.config/ccn/ccn.json` の `port`）に次の口を呼ぶ。別の機械のセッションは、パスの頭に `/n/<ノード名>` を付けて、手元のノードに中継してもらう。
+
+| 用途 | ccn の口 |
+| --- | --- |
+| 機械の一覧 | `GET /api/peers` |
+| セッションの一覧、状態、親子 | `GET /api/sessions` |
+| 承認の中身などの詳細 | `GET /api/sessions/<id>` |
+| 新しい世帯を立てる | `POST /api/sessions`（`terminal: true`） |
+| 会話を読む、文を送る | `GET /api/sessions/<id>/messages`、`POST /api/sessions/<id>/messages` |
+| 端末 | `GET /api/sessions/<id>/terminal`（SSE）、`POST /api/sessions/<id>/terminal/input`、`POST /api/sessions/<id>/terminal/resize` |
+| 承認に答える | `POST /api/sessions/<id>/permissions/<requestId>` |
+| 閉じる | `DELETE /api/sessions/<id>` |
+| 別の機械へ移す（転出） | `GET /api/sessions/<id>/teleport`、`POST /api/sessions/<id>/teleport` |
+
 ## 何を作るか
 
 エージェンティックコーディングでは、1人の人が Claude Code を親、子、孫と何十体も並べて動かす。Claude Town は、この並びを「家族」として扱う。人が開いたセッションが親で、親が作ったセッションが子、子が作ったセッションが孫になる。1つの親とその子孫を1世帯と数え、町は世帯の集まりになる。
@@ -22,7 +42,7 @@ Claude Town は、Claude Code のセッションの親子を、町に住む家�
 
 ## 解決したいこと
 
-子と孫をペインの分割で並べるターミナルでは、子と孫が増えるたびにペインが分かれる。孫が16体になると、各ペインは数文字の幅しかなく、誰が何をしていて誰が人を待っているかが読めない。`/Users/konaito/Desktop/スクリーンショット 2026-11-12 16.52.58.png` と `/Users/konaito/Desktop/スクリーンショット 2026-11-12 17.43.01.png` がその状態である。
+子と孫をペインの分割で並べるターミナルでは、子と孫が増えるたびにペインが分かれる。孫が16体になると、各ペインは数文字の幅しかなく、誰が何をしていて誰が人を待っているかが読めない。
 
 Claude Town は、ペインの中身を読まなくても、状態と次の一手が分かる画面を目指す。20〜30体を1画面で読めることを成功条件にする。
 
@@ -39,7 +59,7 @@ Claude Town の違いは3つある。データ源を ccn に寄せること、�
 
 ## データの取り方
 
-2026-11-12 に、右パネルを本物の端末にする方針（`docs/design/terminal-panel.md` の A2）に切り替えた。claude は ccn のノードが PTY の中で対話モードのまま動かし、Claude Town は ccn の口だけを使う。ほかのターミナルアプリには依存しない。ccn の PTY の口は ccn-pty（別のセッション）が `~/Documents/claude-code-nodes.wt/pty-driver` で作っている。入るまでは、同じ口を持つモックのノード（`scripts/mock-ccn-pty.ts`）で画面を作る。
+2026-11-12 に、右パネルを本物の端末にする方針（`docs/design/terminal-panel.md` の A2）に切り替えた。claude は ccn のノードが PTY の中で対話モードのまま動かし、Claude Town は ccn の口だけを使う。ほかのターミナルアプリには依存しない。ccn の PTY の口は、2026-11-12 に ccn に入った。ccn を動かさずに画面を作るときは、同じ口を持つモックのノード（`scripts/mock-ccn-pty.ts`）を使う。
 
 | 知りたいこと | 取り方 |
 | --- | --- |
@@ -94,6 +114,7 @@ hook は本物の `claude -p` で試し、頼まれたこと、道具、最後�
 
 - キャラ: Ninja Adventure Asset Pack（Pixel-boy、AAA。https://pixel-boy.itch.io/ninja-adventure-asset-pack）。CC0 1.0 で、帰属表示は要らない。使うキャラの Walk.png、Idle.png、Faceset.png だけを `public/sprites/ninja/` に置いた。
 - 状態の印、幽霊、お手紙: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Source: https://googlefonts.github.io/noto-emoji-animation/ 。状態の印の3種（270b、1f97a、2705）、エラー用の1種（2049_fe0f）、閉じる演出の幽霊（1f47b）、お手紙の封筒（1f48c）の 512.webp を、改変せずに `public/sprites/noto/` に置いた。アプリの下の帯の「素材」にも同じ表示を出す。
+- 見本ページの Kenney のプレビュー画像（`docs/research/assets/kenney-toon-characters.png`）: Kenney（https://kenney.nl）。CC0 で、帰属表示は要らない。
 - 見本ページ（`docs/research/assets/`）は、比べたときの素材を全部参照している。絞った後の public には一部しか残っていないので、見本ページの画像は一部が出ない。
 
 ## 開発
