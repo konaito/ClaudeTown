@@ -169,7 +169,17 @@ scripts/rollback-stable.sh    # 今の版と1つ前の版を入れ替える。�
 両版で共有しているもの:
 
 - 状態 hook は、`~/.claude/settings.json` から本体の作業ツリーの `hooks/fc-report.py` を直接呼んでいる。hook を書き換えると、安定版に出る内容もすぐ変わる。
-- `~/.family-computing/` の状態ファイル（state、letters.jsonl、avatars.json、avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json、houses.json、send-disabled）は両版が同じものを読む。avatars で始まるファイルと houses.json は両版が書く。開発版でこれらの形を変えると、安定版の表示が崩れることがある。avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json の3つは、キャラの選び方の変更（feat/char-age）が入った版から使う。
+- hook が書くファイル（state/、letters.jsonl）と、送信の非常停止（send-disabled）は、両版が `~/.family-computing/` の同じものを読む。非常停止は1か所で両版を止めるために共有にしてある。
+- 世帯の名前は、エージェントが hook（`scripts/hook.py name`）で付けた分が `~/.family-computing/houses.json` に入り、両版が読む。
+
+両版で分けているもの:
+
+- アプリが書くファイル（avatars.json、avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json、houses.json）は、安定版は `~/.family-computing/` に、開発版は `~/.family-computing/dev/` に置く。開発版でキャラの割り当てや世帯の名前を変えても、安定版のファイルは変わらない。
+- どちらに置くかは、ビルドに入った identifier で決める。安定版の identifier なら今までの場所、それ以外（開発版）なら dev/ にする。環境変数を付け忘れても、開発版が安定版のファイルに書かない。
+- 開発版の世帯の名前は、共有の houses.json を下地に読み、開発版の houses.json を上に重ねる。本人が開発版の画面で付けた名前は開発版の分にだけ書く。開発版で名前を消しても、共有の分にある名前は残って見える。
+- 置き場所を決める関数は `src-tauri/src/lib.rs` の `fc_path` だけにしてある。`FC_APP_HOME` を付けると、アプリが書くファイルの置き場所だけを差し替えられる。`FC_AVATARS` と `FC_HOUSES` は今までどおり使える。
+- 置き場所は `src-tauri/target/debug/family-computing --paths` で確かめられる。identifier と、各ファイルの置き場所を出す。
+- 開発版の dev/ は、初めて起動したときは空なので、キャラは安定版と違う顔ぶれで振り直される。avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json の3つは、キャラの選び方の変更（feat/char-age）が入った版から使う。
 
 ## 開発
 
