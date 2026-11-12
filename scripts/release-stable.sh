@@ -84,6 +84,8 @@ if [ "$got_id" != "$STABLE_ID" ] || [ "$got_name" != "$APP_NAME" ]; then
 fi
 
 mkdir -p "$STATE/previous" "$STATE/staging"
+# 状態 hook は、安定版を止める前に取り出して確かめる。だめならここで中断し、安定版には触らない
+stage_hooks "$repo" "$tag" "$STATE"
 staged="$STATE/staging/$APP_NAME.app"
 rm -rf "$staged"
 ditto "$built" "$staged"
@@ -101,7 +103,7 @@ fi
 mkdir -p "$DEST_DIR"
 mv "$staged" "$DEST"
 echo "$tag $sha" > "$STATE/current.ref"
-install_hooks "$repo" "$tag" "$STATE"
+commit_hooks "$repo" "$tag" "$STATE" || echo "状態 hook を写せなかった。scripts/install-stable-hooks.sh $tag で写し直す" >&2
 echo "$(date '+%Y-%m-%d %H:%M:%S') release $tag $sha" >> "$STATE/releases.log"
 echo "入れた: $DEST ($tag $sha)"
 
