@@ -7,8 +7,9 @@ import { collectMail, type Mail } from "./mail";
 import { flightsOf, resolve, type Flight } from "./letters";
 import { withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
-import { isVisible, onVisibleChange, pollWhileVisible, shownAt } from "./visible";
+import { isVisible, onVisibleChange, pollBackoff, pollWhileVisible, shownAt } from "./visible";
 import { reuseAgents, reuseSnap } from "./snap";
+import { kickTown, watchTown } from "./town";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
@@ -24,7 +25,6 @@ import { layoutFamily, type LNode } from "./layout/layout";
 import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
 
-const POLL_MS = 2000;
 /** 新しい世帯の端末が開くまで、打ったキーをためておく上限の時間 */
 const BOOT_TIMEOUT_MS = 12000;
 /**
@@ -56,6 +56,8 @@ const TownCtx = createContext<Agent[]>([]);
 const LetterCtx = createContext<Set<string>>(new Set());
 const KillCtx = createContext<{ dying: Map<string, number>; ask: (a: Agent, instant: boolean) => void }>({ dying: new Map(), ask: () => {} });
 const CONV_POLL_MS = 2500;
+/** 会話に新しい発言が無い回が続いたときの間隔の上限（#5）。新しい発言が来るか、文を送ったら CONV_POLL_MS に戻す */
+const CONV_POLL_MAX_MS = 10000;
 
 type Toast = { id: number; text: string; bad?: boolean };
 
@@ -84,7 +86,6 @@ export default function App() {
   const [fail, setFail] = useState<{ n: number; since: number; msg: string } | null>(null);
   useEffect(() => {
     let alive = true;
-    let running = false;
     const want = peer || null;
     setFail(null);
     // 失敗したら、同じ町の前回の一覧があればそれを出し続ける。無いときだけ、失敗した一覧（空の町と赤い帯）を出す
@@ -93,26 +94,15 @@ export default function App() {
       setSnap((prev) => (prev?.ccn_ok && (prev.peer ?? null) === want ? prev : s ?? prev));
       if (!s) setErr((e) => e ?? msg);
     };
-    const load = async () => {
-      // 前の回の取得が終わるまで次を始めない（時間切れまで待つ回があると、要求が積み重なる）
-      if (running) return;
-      running = true;
-      try {
-        const s = await invoke<Snapshot>("snapshot", { peer: want });
-        if (!alive) return;
-        // 中身が前回と同じなら前回のオブジェクトのまま（描き直さない）。変わらないセッションも使い回す（#4）
-        if (s.ccn_ok) { setSnap((prev) => reuseSnap(prev, s)); setErr(null); setFail(null); }
-        else failed(s.ccn_error ?? "ccn につながらない", s);
-      } catch (e) {
-        if (alive) failed(String(e));
-      } finally {
-        running = false;
-      }
-    };
-    reload.current = load;
-    // ウィンドウが見えていない間は取得を止める。見えたらすぐ1回取り直す（#6）。
+    // 一覧は Rust の見張りが、変わったときだけ送ってくる（#5）。ウィンドウが見えていない間は止まる（#6）。
     // 経過時間の表示は Since が自分で時計を回すので、ここで町全体を毎秒描き直さない（#4）
-    const stop = pollWhileVisible(load, POLL_MS);
+    const stop = watchTown(want, (s) => {
+      if (!alive) return;
+      // 中身が前回と同じなら前回のオブジェクトのまま（描き直さない）。変わらないセッションも使い回す（#4）
+      if (s.ccn_ok) { setSnap((prev) => reuseSnap(prev, s)); setErr(null); setFail(null); }
+      else failed(s.ccn_error ?? "ccn につながらない", s);
+    }, (msg) => { if (alive) failed(msg); });
+    reload.current = kickTown;
     return () => { alive = false; stop(); };
   }, [peer]);
 
@@ -220,6 +210,8 @@ export default function App() {
       catch { failed.push(x); }
     }
     const ok = targets.filter((x) => !failed.includes(x));
+    // 一覧から消えたのをすぐ拾う。見張りは変化が無いと間隔を延ばしているため（#5）
+    kickTown();
     // 止まらなかった分は演出を戻す。止まった分は演出が終わったら隠す
     setDying((m) => { const n = new Map(m); for (const x of failed) n.delete(x.id); return n; });
     const last = (targets.length - 1) * KILL_STAGGER + KILL_MS;
@@ -399,7 +391,7 @@ export default function App() {
               node: (
                 <Group root={f.root} all={f.all} count={f.all.length} size={size}
                   onRename={async (name) => {
-                    try { await invoke("set_house_name", { sessionId: f.root.id, name }); toast(name ? `世帯の名前を「${name}」にした` : "世帯の名前を戻した"); }
+                    try { await invoke("set_house_name", { sessionId: f.root.id, name }); kickTown(); toast(name ? `世帯の名前を「${name}」にした` : "世帯の名前を戻した"); }
                     catch (e) { toast(`世帯の名前を変えられなかった: ${e}`, true); }
                   }}
                   hasNeeds={f.all.some((a) => NEEDS_YOU.includes(moodOf(a)))}>
@@ -428,7 +420,7 @@ export default function App() {
         <Separator className="split-handle" />
         <SplitPanel id="side" defaultSize={SIDE_DEFAULT} minSize={SIDE_MIN} maxSize="50%">
         <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} descendants={sel ? descOf(tree.childrenOf, sel.id) : []} termReq={termReq} chatReq={chatReq} peers={peers} takeEarly={takeEarly} booting={booting}
-          onSent={(a) => toast(`${a.name} に届けた`)} onSent2={(m) => toast(m)} onError={(m) => toast(m, true)}
+          onSent={(a) => { kickTown(); toast(`${a.name} に届けた`); }} onSent2={(m) => { kickTown(); toast(m); }} onError={(m) => toast(m, true)}
           needs={needs} onSelect={(a) => setSelected(a.id)} />
         </SplitPanel>
       </SplitGroup>
@@ -952,6 +944,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
   const [busy, setBusy] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // 会話をすぐ取り直させる口（文を送った直後に使う）
+  const convKick = useRef<() => void>(() => {});
   const id = agent?.id;
 
   // チャットを開いたとき（セッションを選んだ、タブを切り替えた）は、必ず一番下から始める。
@@ -966,17 +960,20 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
     const load = async () => {
       try {
         const d = await invoke<ConvDelta>("conversation", { sessionId: id, peer: peer || null, since });
-        if (!alive) return;
+        if (!alive) return false;
         since = Math.max(since ?? 0, d.total);
         if (d.reset) since = d.total;
         setConvErr(null);
         if (d.reset || d.items.length) setItems((prev) => mergeConv(prev, d));
+        return d.reset || d.items.length > 0;
       } catch (e) {
         if (alive) setConvErr(String(e));
+        return false;
       }
     };
-    const stop = pollWhileVisible(load, CONV_POLL_MS);
-    return () => { alive = false; stop(); };
+    const p = pollBackoff(load, CONV_POLL_MS, CONV_POLL_MAX_MS);
+    convKick.current = p.kick;
+    return () => { alive = false; p.stop(); convKick.current = () => {}; };
   }, [id, peer]);
 
   // 送ったばかりの文は、送り始めたあとに会話に出たら仮の項目を消す（前の同じ文、「はい」や選択肢では消さない）
@@ -1034,6 +1031,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
       setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
       setText("");
       stick.current = true;
+      // 返事が来るまでは間隔を縮めて取る（#5）
+      convKick.current();
       onSent(agent);
     } catch (e) {
       onError(`${agent.name} に届かなかった: ${e}`);
