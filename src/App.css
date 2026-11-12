@@ -227,6 +227,9 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .credits { position: relative; margin-left: 12px; }
 .credit-btn { font-size: 11px; color: var(--sub); text-decoration: underline; }
 .credit-pop { position: absolute; right: 0; bottom: 26px; width: 380px; background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; font-size: 11.5px; line-height: 1.6; color: var(--ink); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1); z-index: 40; user-select: text; }
+.skin-pick { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--line); font-weight: 600; }
+.skin-pick button { font: inherit; font-weight: 400; padding: 2px 10px; border: 1px solid var(--line); border-radius: 999px; background: #fff; color: var(--sub); cursor: pointer; }
+.skin-pick button.on { border-color: var(--ink); color: var(--ink); background: #f3f3f3; }
 
 /* 承認待ちに答える欄 */
 .approval { border: 1.5px solid #f3d995; background: #fffaf0; border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }

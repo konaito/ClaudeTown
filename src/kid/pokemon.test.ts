@@ -10,11 +10,20 @@ describe("ポケモンスキンの割り当て", () => {
       expect(names.length).toBe(3);
     }
   });
-  test("同じ世帯の親・子・孫は、同じ系統の1段目・2段目・3段目", () => {
+  test("同じ世帯の親・子・孫は、同じ系統の3段目・2段目・1段目", () => {
     for (const root of ["aaaa-1", "bbbb-2", "c"]) {
       const l = lineOf(root);
-      expect([pokemonOf(root, "parent").id, pokemonOf(root, "child").id, pokemonOf(root, "grandchild").id]).toEqual(l.ids);
+      expect([pokemonOf(root, "grandchild").id, pokemonOf(root, "child").id, pokemonOf(root, "parent").id]).toEqual(l.ids);
     }
+  });
+  test("リザードンの系統なら、親がリザードン、子がリザード、孫がヒトカゲ", () => {
+    const i = LINES.lines.findIndex(([, names]) => names[0] === "charmander");
+    expect(LINES.lines[i]).toEqual([[4, 5, 6], ["charmander", "charmeleon", "charizard"]]);
+    const root = Array.from({ length: 100000 }, (_, k) => `r${k}`).find((r) => lineOf(r).ids[0] === 4)!;
+    expect(root).toBeDefined();
+    expect(pokemonOf(root, "parent").name).toBe("charizard");
+    expect(pokemonOf(root, "child").name).toBe("charmeleon");
+    expect(pokemonOf(root, "grandchild").name).toBe("charmander");
   });
   test("同じ根なら何度引いても同じ系統", () => {
     expect(lineOf("root-x")).toEqual(lineOf("root-x"));
