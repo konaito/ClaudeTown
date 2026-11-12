@@ -178,7 +178,8 @@ export default function App() {
   const shape = useMemo(() => tree.families.map((f) => f.all.map((a) => `${a.id}<${a.parent ?? ""}`).join(",")).join(";"), [tree]);
   const skinCtx = useMemo(() => ({
     skin,
-    rootOf: (id: string) => { const t = treeRef.current; const a = t.byId.get(id); return a ? t.lineage(a)[0].id : id; },
+    // 根が転出のゴーストなら、相手の町にいる本物の ID で引く。親の町と子の町で系統をそろえるため
+    rootOf: (id: string) => { const t = treeRef.current; const a = t.byId.get(id); const r = a ? t.lineage(a)[0] : null; return r ? r.ghost?.realId ?? r.id : id; },
   }), [skin, shape]);
   /** ゴーストを押したら、本物がいる町に切り替えてその子を選ぶ */
   const pick = useCallback((a: Agent) => {
