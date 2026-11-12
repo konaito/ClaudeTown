@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { call as invoke, setFullscreen } from "./bridge";
+import { TerminalView } from "./term/TerminalView";
 import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
 import {
@@ -66,16 +67,9 @@ export default function App() {
   const done = useMemo(() => agents.filter((a) => moodOf(a) === "done"), [agents]);
 
   const local = !peer;
-  const focus = useCallback(async (a: Agent) => {
-    if (!local) { toast("別の機械のペインには移れない", true); return; }
-    try {
-      await invoke("focus_pane", { terminalId: a.terminalId ?? null, pid: a.pid ?? null });
-      toast(`${a.name} のペインへ移動した`);
-    } catch (e) {
-      toast(`${a.name} のペインへ移れなかった: ${e}`, true);
-    }
-  }, [toast, local]);
-
+  // 右クリックや「端末へ」で、その子を選んで右パネルの端末を開く（Specter のペインには移らない）
+  const [termReq, setTermReq] = useState(0);
+  const focus = useCallback((a: Agent) => { setSelected(a.id); setTermReq((n) => n + 1); }, []);
   const sel = selected ? tree.byId.get(selected) ?? null : null;
   const selfPeer = peers.find((p) => p.self);
 
@@ -112,6 +106,7 @@ export default function App() {
 
           <div className="fam-head">
             <span className="fam-title"><PeopleIcon /> {tree.families.length}世帯・{agents.length}人</span>
+            <NewHousehold disabled={!local} onCreated={(r) => { toast(`新しい世帯を作った（${r?.title ?? ""}）`); if (r?.id) setSelected(r.id); }} onError={(m) => toast(m, true)} />
             <span className="legend">
               {(["working", "reply", "approval", "done", "idle"] as Mood[]).map((m) => (
                 <span key={m} className={`lg lg-${m}`}><i />{MOOD_LABEL[m]}{counts[m] ? ` ${counts[m]}` : ""}</span>
@@ -120,7 +115,10 @@ export default function App() {
           </div>
 
           {snap && agents.length === 0 && snap.ccn_ok && (
-            <div className="empty">いまは誰もいない。Specter で Claude Code を開くと、ここに世帯がふえる。</div>
+            <div className="empty">
+              <p>町にはまだ誰もいない。最初の世帯を作る（親は ~/Documents/meta で起動する）。</p>
+              <NewHousehold big disabled={!local} onCreated={(r) => { toast("最初の世帯を作った"); if (r?.id) setSelected(r.id); }} onError={(m) => toast(m, true)} />
+            </div>
           )}
           <Stage zoom={zoom} deps={agents.map((a) => `${a.id}|${a.parent ?? ""}|${a.name}`).join(",")} onBlank={() => setSelected(null)}>
             {/* 並べ方は大きいグループから（一番大きいものを左、残りを右に詰める） */}
@@ -145,12 +143,13 @@ export default function App() {
               <button onClick={() => setZoom((z) => Math.min(1.6, +(((z === "fit" ? 1 : z) + 0.1).toFixed(2))))}>＋</button>
               <button className="fs" title="全画面" onClick={() => setFullscreen()}>⛶</button>
             </div>
-            <span className="hint">クリックで会話・右クリックでペインへ</span>
+            <span className="hint">クリックで会話・右クリックで端末</span>
             <Credits />
           </div>
         </div>
 
-        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} onFocus={focus} canFocus={local}
+        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} termReq={termReq} peers={peers}
+          onCreated={(r) => { toast(`子を足した（${r?.title ?? ""}）`); if (r?.id) setSelected(r.id); }}
           onSent={(a) => toast(`${a.name} に届けた`)} onSent2={(m) => toast(m)} onError={(m) => toast(m, true)}
           needs={needs} onSelect={(a) => setSelected(a.id)} />
       </div>
@@ -183,7 +182,7 @@ function NextRow({ needs, done, working, total, onSelect, onFocus }: {
           <button className="next-text" onClick={() => onSelect(first)}>
             {moodOf(first) === "approval" ? `${first.name}の承認待ちを確認する` : `${first.name}に返事する`}
           </button>
-          <button className="pane-btn" onClick={() => onFocus(first)}>ペインへ ↗</button>
+          <button className="pane-btn" onClick={() => onFocus(first)}>端末へ</button>
         </div>
       ) : (
         <div className="next-main nm-calm">
@@ -372,7 +371,7 @@ function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect:
         style={{ zoom: box.scale, width: box.w / box.scale, height: box.h / box.scale }}
         onClick={() => onSelect(agent)}
         onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
-        title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで広げて会話・右クリックでペインへ`}
+        title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで広げて会話・右クリックで端末`}
       >
         <Avatar seed={agent.name} mood={mood} role={roleOf(depth)} size={32} />
         <span className="mini-name"><i className={`dot st-${mood}`} />{agent.name}</span>
@@ -399,7 +398,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
       style={{ width: LAYOUT.card.w, height: LAYOUT.card.h }}
       onClick={() => onSelect(agent)}
       onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
-      title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで会話・右クリックでペインへ`}
+      title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで会話・右クリックで端末`}
     >
       <div className="card-top">
         <span className="role">{ROLE_LABEL[Math.min(depth, 4)]}</span>
@@ -418,11 +417,16 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
 
 // ---------- 右のパネル ----------
 
-function Panel({ agent, peer, lineage, onFocus, canFocus, onSent, onSent2, onError, needs, onSelect }: {
-  agent: Agent | null; peer: string; lineage: Agent[]; onFocus: (a: Agent) => void; canFocus: boolean;
+function Panel({ agent, peer, lineage, termReq, peers, onCreated, onSent, onSent2, onError, needs, onSelect }: {
+  agent: Agent | null; peer: string; lineage: Agent[]; termReq: number; peers: Peer[]; onCreated: (r: any) => void;
   onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
 }) {
-  const [tab, setTab] = useState<"talk" | "state">("talk");
+  const hasTerm = !!agent?.capabilities?.terminal;
+  const [tab, setTab] = useState<"term" | "talk" | "state">("talk");
+  const [sheet, setSheet] = useState<"child" | "teleport" | null>(null);
+  // 端末を持つセッションは端末を先に出す。右クリックや「端末へ」でも端末を開く
+  useEffect(() => { setTab(hasTerm ? "term" : "talk"); setSheet(null); }, [agent?.id, hasTerm]);
+  useEffect(() => { if (termReq && hasTerm) setTab("term"); }, [termReq]);
   const [items, setItems] = useState<ConvItem[]>([]);
   const [pending, setPending] = useState<ConvItem[]>([]);
   const [convErr, setConvErr] = useState<string | null>(null);
@@ -468,7 +472,7 @@ function Panel({ agent, peer, lineage, onFocus, canFocus, onSent, onSent2, onErr
           {needs[0] && (
             <button className="primary" onClick={() => onSelect(needs[0])}>{needs[0].name}をひらく</button>
           )}
-          <p className="hint">右クリックで、その子の Specter のペインへ移る</p>
+          <p className="hint">右クリックで、その子の端末を開く</p>
         </div>
       </aside>
     );
@@ -507,21 +511,32 @@ function Panel({ agent, peer, lineage, onFocus, canFocus, onSent, onSent2, onErr
           ))}</div>
           <div className="p-task"><DocIcon />{taskOf(agent, mood)}</div>
         </div>
-        <button className="pane-btn" disabled={!canFocus} onClick={() => onFocus(agent)}>ペインへ ↗</button>
+        <div className="p-actions">
+          <button className="pane-btn" disabled={!!peer} title={peer ? "別の機械のセッションには、ここからは足せない" : "この子の下に子を足す"} onClick={() => setSheet(sheet === "child" ? null : "child")}>＋ 子を足す</button>
+          <button className="pane-btn" disabled={!!peer} title={peer ? "別の機械のセッションの転出は、まだ出していない" : "別の機械へ移す"} onClick={() => setSheet(sheet === "teleport" ? null : "teleport")}>転出</button>
+        </div>
       </div>
+      {sheet === "child" && <AddChild parent={agent} onDone={(r) => { setSheet(null); onCreated(r); }} onError={onError} />}
+      {sheet === "teleport" && <Teleport agent={agent} peers={peers} onDone={(m) => { setSheet(null); onSent2(m); }} onError={onError} />}
       <div className="tabs">
+        {hasTerm && <button className={tab === "term" ? "on" : ""} onClick={() => setTab("term")}>端末</button>}
         <button className={tab === "talk" ? "on" : ""} onClick={() => setTab("talk")}>会話</button>
         <button className={tab === "state" ? "on" : ""} onClick={() => setTab("state")}>状態</button>
       </div>
+      {mood === "approval" && (tab === "term" || tab === "state") && (
+        <div className="ap-float"><Approval agent={agent} peer={peer} onDone={(m) => onSent2(m)} onError={onError} /></div>
+      )}
 
-      {tab === "talk" ? (
+      {tab === "term" ? (
+        <TerminalView sessionId={agent.id} peer={peer || null} onError={onError} />
+      ) : tab === "talk" ? (
         <div className="talk" ref={scroller}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
           {convErr && <div className="banner bad small">{convErr}</div>}
           {shown.length === 0 && !convErr && <p className="hint center">まだ会話が無い</p>}
           {shown.map((x, i) => <Bubble key={i} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "approval" && (
-            <Approval agent={agent} canAnswer={!peer} onFocus={onFocus} onDone={(m) => onSent2(m)} onError={onError} />
+            <Approval agent={agent} peer={peer} onDone={(m) => onSent2(m)} onError={onError} />
           )}
           {choices.length > 0 && (
             <div className="choices">
@@ -533,7 +548,7 @@ function Panel({ agent, peer, lineage, onFocus, canFocus, onSent, onSent2, onErr
         <StateTab agent={agent} mood={mood} />
       )}
 
-      <div className="composer">
+      {tab !== "term" && <div className="composer">
         <div className="to">送信先: {agent.name}</div>
         <div className="box">
           <textarea
@@ -548,30 +563,41 @@ function Panel({ agent, peer, lineage, onFocus, canFocus, onSent, onSent2, onErr
           </button>
         </div>
         <div className="hint">⌘ Enter で送信・ccn で届ける</div>
-      </div>
+      </div>}
     </aside>
   );
 }
 
 /**
- * 承認待ちに画面から答える。中身（道具と対象）は状態 hook が PreToolUse で控えたもの。
- * 押すと Rust が、今も同じ中身で承認待ちかを確かめてから、Specter のその端末に 1（許可）か Esc（拒否）を送る。
+ * 承認待ちに画面から答える。中身は ccn の pending（toolName、input、requestId）。
+ * 押すと Rust が、今も承認待ちで requestId が同じかを確かめてから、ccn の permissions の口で答える。
+ * 人が端末で開いたセッション（ccn から答えられない）は、その端末で答える。
  */
-function Approval({ agent, canAnswer, onFocus, onDone, onError }: {
-  agent: Agent; canAnswer: boolean; onFocus: (a: Agent) => void; onDone: (m: string) => void; onError: (m: string) => void;
+function Approval({ agent, peer, onDone, onError }: {
+  agent: Agent; peer: string; onDone: (m: string) => void; onError: (m: string) => void;
 }) {
   const [busy, setBusy] = useState<"allow" | "deny" | null>(null);
-  const p = agent.report?.pending;
+  const [pending, setPending] = useState<{ requestId: string; toolName: string; input: Record<string, unknown> }[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const canAnswer = !!agent.capabilities?.permissions;
+  useEffect(() => {
+    let alive = true;
+    const load = () => invoke<any>("session_detail", { sessionId: agent.id, peer: peer || null })
+      .then((d) => { if (alive) { setPending(Array.isArray(d?.pending) ? d.pending : []); setErr(null); } })
+      .catch((e) => { if (alive) setErr(String(e)); });
+    load();
+    const t = setInterval(load, 2000);
+    return () => { alive = false; clearInterval(t); };
+  }, [agent.id, peer]);
+  const p = pending?.[0];
   // 質問や計画の確認の待ちは道具の承認ではないので、許可のボタンを出さない（Rust 側でも断る）
-  const notTool = !!p && ["AskUserQuestion", "ExitPlanMode"].includes(p.tool);
-  const many = (agent.report?.pending_count ?? 0) > 1;
+  const notTool = !!p && ["AskUserQuestion", "ExitPlanMode"].includes(p.toolName);
+  const detail = p ? String((p.input as any)?.command ?? (p.input as any)?.file_path ?? (p.input as any)?.url ?? JSON.stringify(p.input)) : "";
   const answer = async (choice: "allow" | "deny") => {
     setBusy(choice);
     try {
-      const r = await invoke<string>("answer_permission", {
-        sessionId: agent.id, choice, expectId: p?.id ?? null, terminalId: agent.terminalId ?? null, pid: agent.pid ?? null,
-      });
-      onDone(`${agent.name}: ${choice === "allow" ? "許可した" : "拒否した"}。${r}`);
+      const r = await invoke<string>("answer_permission", { sessionId: agent.id, choice, expectId: p?.requestId ?? null, peer: peer || null });
+      onDone(`${agent.name}: ${r}`);
     } catch (e) {
       onError(`${agent.name} に答えられなかった: ${e}`);
     } finally {
@@ -581,24 +607,132 @@ function Approval({ agent, canAnswer, onFocus, onDone, onError }: {
   return (
     <div className="approval">
       <div className="ap-title">✋ {agent.name} が承認を待っている</div>
-      {p || many ? (
-        (agent.report?.perm_queue ?? (p ? [p] : [])).map((q, i) => (
-          <div key={q.id ?? i}>
-            <div className="ap-tool">{q.summary}</div>
-            {q.detail && <pre className="ap-detail">{q.detail}</pre>}
-          </div>
-        ))
+      {!canAnswer ? (
+        <div className="hint">このセッションは人が端末で開いたもので、ここからは答えられない。その端末で答える。</div>
+      ) : p ? (
+        <div>
+          <div className="ap-tool">{p.toolName}</div>
+          {detail && <pre className="ap-detail">{detail}</pre>}
+          {(pending?.length ?? 0) > 1 && <div className="hint">ほかに{pending!.length - 1}件の承認が待っている。1件ずつ答える。</div>}
+        </div>
       ) : (
-        <div className="hint">中身が分からない（状態 hook が控える前に始まった承認か、hook に PermissionRequest が登録されていない）。ペインで確かめて答える。</div>
+        <div className="hint">{err ?? "承認の中身を読んでいる…"}</div>
       )}
-      <div className="ap-btns">
-        {notTool && <div className="hint">これは質問か計画の確認の待ち。選択肢はペインで選ぶ。</div>}
-        {many && <div className="hint">承認が{agent.report?.pending_count}件並んでいる。どれが端末に出ているか分からないので、ペインで答える。</div>}
-        <button className="ap-allow" disabled={!canAnswer || !p || notTool || many || !!busy} onClick={() => answer("allow")}>{busy === "allow" ? "送っている…" : "許可する"}</button>
-        <button className="ap-deny" disabled={!canAnswer || !!busy} onClick={() => answer("deny")}>{busy === "deny" ? "送っている…" : "拒否する"}</button>
-        <button className="pane-btn" onClick={() => onFocus(agent)}>ペインへ ↗</button>
+      {canAnswer && (
+        <div className="ap-btns">
+          {notTool && <div className="hint">これは質問か計画の確認の待ち。選択肢は端末で選ぶ。</div>}
+          <button className="ap-allow" disabled={!p || notTool || !!busy} onClick={() => answer("allow")}>{busy === "allow" ? "送っている…" : "許可する"}</button>
+          <button className="ap-deny" disabled={!p || !!busy} onClick={() => answer("deny")}>{busy === "deny" ? "送っている…" : "拒否する"}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- 子を足す・新しい世帯・転出 ----------
+
+/** 選んだ子の下に、端末のセッションを1つ足す。作業場所は親と同じ。最初の依頼を付けて立てる（親子の記録が残るように） */
+function AddChild({ parent, onDone, onError }: { parent: Agent; onDone: (r: any) => void; onError: (m: string) => void }) {
+  const [prompt, setPrompt] = useState("");
+  const [busy, setBusy] = useState(false);
+  const go = async () => {
+    setBusy(true);
+    try {
+      const r = await invoke<any>("create_session", { cwd: parent.cwd, prompt, parent: parent.id, name: null, peer: null });
+      onDone(r);
+    } catch (e) { onError(`子を足せなかった: ${e}`); } finally { setBusy(false); }
+  };
+  return (
+    <div className="sheet">
+      <div className="sheet-title">{parent.name} の下に子を足す</div>
+      <textarea placeholder="最初の依頼（例: README を読んで、直すところを3つ挙げて）" value={prompt} onChange={(e) => setPrompt(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); go(); } }} />
+      <div className="sheet-foot">
+        <span className="hint">作業場所: {parent.cwd.replace(/^\/Users\/[^/]+/, "~")}・端末で起動する</span>
+        <button className="primary" disabled={busy || !prompt.trim()} onClick={go}>{busy ? "立てている…" : "足す"}</button>
       </div>
-      {!canAnswer && <div className="hint">別の機械のセッションには、ここからは答えられない。</div>}
+    </div>
+  );
+}
+
+/** 新しい世帯を作る。親は ~/Documents/meta で端末のセッションとして起動する（本人の指定） */
+function NewHousehold({ big, disabled, onCreated, onError }: { big?: boolean; disabled?: boolean; onCreated: (r: any) => void; onError: (m: string) => void }) {
+  const [open, setOpen] = useState(!!big);
+  const [prompt, setPrompt] = useState("");
+  const [busy, setBusy] = useState(false);
+  const go = async () => {
+    setBusy(true);
+    try {
+      const r = await invoke<any>("create_session", { cwd: null, prompt, parent: null, name: null, peer: null });
+      setPrompt(""); if (!big) setOpen(false);
+      onCreated(r);
+    } catch (e) { onError(`世帯を作れなかった: ${e}`); } finally { setBusy(false); }
+  };
+  if (!open) return <button className="pane-btn new-house" disabled={disabled} onClick={() => setOpen(true)}>＋ 新しい世帯</button>;
+  return (
+    <span className={`new-house-form ${big ? "big" : ""}`}>
+      <input autoFocus={!big} placeholder="最初の依頼（空でもよい）" value={prompt} onChange={(e) => setPrompt(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") go(); if (e.key === "Escape" && !big) setOpen(false); }} />
+      <button className="primary" disabled={busy || disabled} onClick={go}>{busy ? "作っている…" : big ? "最初の世帯を作る" : "作る"}</button>
+      {!big && <button className="lnk" onClick={() => setOpen(false)}>やめる</button>}
+    </span>
+  );
+}
+
+/**
+ * 転出（ccn の teleport）。行き先のノードと move / fork を選び、下見（移動元の説明）を見てから実行する。
+ * 実行は1回の要求で最大95秒かかる。行き先の下見（clone することがある）は実行の中で ccn が行う。
+ */
+function Teleport({ agent, peers, onDone, onError }: { agent: Agent; peers: Peer[]; onDone: (m: string) => void; onError: (m: string) => void }) {
+  const dests = peers.filter((p) => !p.self && p.status === "healthy");
+  const [to, setTo] = useState(dests[0]?.name ?? "");
+  const [fork, setFork] = useState(false);
+  const [info, setInfo] = useState<any>(null);
+  const [infoErr, setInfoErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  useEffect(() => {
+    invoke<any>("teleport_info", { sessionId: agent.id, peer: null }).then(setInfo).catch((e) => setInfoErr(String(e)));
+  }, [agent.id]);
+  const running = agent.state === "running" || agent.state === "waiting_permission";
+  const go = async () => {
+    setBusy(true);
+    try {
+      const r = await invoke<any>("teleport", { sessionId: agent.id, to, fork, peer: null });
+      setResult(r);
+      onDone(`${agent.name} を ${r?.node ?? to} へ${fork ? "複製" : "移動"}した（新しい id ${String(r?.id ?? "").slice(0, 8)}）`);
+    } catch (e) { onError(`${agent.name} を転出できなかった: ${e}`); } finally { setBusy(false); }
+  };
+  return (
+    <div className="sheet">
+      <div className="sheet-title">{agent.name} を別の機械へ転出する</div>
+      <div className="tp-row">
+        <label>行き先</label>
+        <select value={to} onChange={(e) => setTo(e.target.value)}>
+          {dests.length === 0 && <option value="">（つながっている機械が無い）</option>}
+          {dests.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
+        </select>
+        <label className="tp-radio"><input type="radio" checked={!fork} onChange={() => setFork(false)} />移す（ここは止める）</label>
+        <label className="tp-radio"><input type="radio" checked={fork} onChange={() => setFork(true)} />複製（ここも残す）</label>
+      </div>
+      <div className="tp-info">
+        {infoErr ? <span className="bad-text">下見できない: {infoErr}</span> : !info ? "下見している…" : (
+          <>
+            <div>状態: {info.state}{info.live ? "（動いている）" : ""}・作業場所: {String(info.from?.cwd ?? "").replace(/^\/Users\/[^/]+/, "~")}</div>
+            <div>git: {info.git ? `${info.git.repoName}（${info.git.branch}）` : "git のリポジトリではない"}</div>
+          </>
+        )}
+        {running && <div className="bad-text">作業中か承認待ちのセッションは転出できない。止めて（待機にして）から転出する。</div>}
+        <div className="hint">行き先に同じリポジトリが無ければ、ccn が行き先の ~/Documents に clone する。実行には最大95秒かかる。{agent.capabilities?.terminal ? "端末のセッションは、行き先ではまだ端末として再開しない（ccn 側の対応待ち）。" : ""}</div>
+      </div>
+      {result ? (
+        <div className="tp-result">行き先 {result.node} の新しい id: {result.id}{result.cloned ? "（clone した）" : ""}。画面上のノードを {result.node} に切り替えると見える。</div>
+      ) : (
+        <div className="sheet-foot">
+          <span className="hint">世帯ごとの転出は、まだ出していない（親子の記録が保たれないため）</span>
+          <button className="primary" disabled={busy || !to || running || !info} onClick={go}>{busy ? "転出している…（最大95秒）" : fork ? "複製する" : "移す"}</button>
+        </div>
+      )}
     </div>
   );
 }

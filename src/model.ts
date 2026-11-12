@@ -29,7 +29,7 @@ export type Agent = {
   parent: string | null;
   depth?: number | null;
   title?: string | null;
-  terminalId?: string | null;
+  capabilities?: { send?: boolean; permissions?: boolean; interrupt?: boolean; stop?: boolean; terminal?: boolean } | null;
   selfStatus?: { state: string; note: string; at: string } | null;
   report?: Report | null;
   closeCheck?: { status: "working" | "checking" | "ok" | "ng" | "error"; short?: string | null } | null;
@@ -173,5 +173,6 @@ export function houseNameOf(root: Agent, all: Agent[]): { name: string; by: "hum
   if (top) return { name: top, by: "guess" };
   const asked = root.report?.asked?.trim();
   if (asked) return { name: clip(asked, 12), by: "guess" };
-  return { name: rootDir, by: "guess" };
+  // 新しい世帯は meta で始まるので、まだ何も分からないときは「新しい世帯」と出す
+  return { name: rootDir === "meta" ? "新しい世帯" : rootDir, by: "guess" };
 }

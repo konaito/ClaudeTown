@@ -3,7 +3,8 @@
 // - peers: ccn につながっている機械の一覧
 // - conversation(session_id, peer): ccn の messages を差分で読み、画面に出す形（発言と道具の1行）に縮めて返す
 // - send_message(session_id, text, peer): ccn の POST /api/sessions/<id>/messages で文を届ける
-// - focus_pane(terminal_id, pid): Specter の AppleScript で、そのセッションのペインを前に出す
+// - create_session / stop_session / teleport / teleport_info / session_detail: ccn の口をそのまま呼ぶ
+// - term_open / term_close / term_input / term_resize: ccn の端末（PTY）の口を読み書きし、"fc-term" イベントで画面へ流す
 //
 // ccn は Origin 付きの要求を CSRF として断るので、HTTP は必ずこちら（webview ではなく Rust）から出す。
 // 別の機械（peer）は手元のノードの中継 /n/<peer>/api/... を通す。
@@ -13,11 +14,12 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
-use std::sync::Mutex;
+use std::io::{BufRead, BufReader};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use tauri::Emitter;
 use std::time::Duration;
 
-const SPECTER_BUNDLE_ID: &str = "jp.fybe.specter";
 /// 非常停止。~/.family-computing/send-disabled があると、アプリからの送信（注文と承認のキー）を全部断る。
 /// `touch ~/.family-computing/send-disabled` で止め、消せば戻る（アプリの再起動は要らない）
 fn send_disabled() -> bool {
@@ -122,7 +124,7 @@ fn snapshot(peer: Option<String>) -> Snapshot {
             .to_string();
         name_of.insert(id, name);
     }
-    // ccn の parent は from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）。Specter のツリーに無いときだけ使う
+    // ccn の parent は from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）
     let parent_from_ccn = |s: &Value| -> Option<String> {
         let p = s["parent"].as_str()?;
         let sid8 = p.strip_prefix("agent:")?.split('/').nth(1)?;
@@ -135,10 +137,9 @@ fn snapshot(peer: Option<String>) -> Snapshot {
         let id = s["id"].as_str().unwrap_or_default().to_string();
         let r = reg.get(&id).cloned().unwrap_or(Value::Null);
         // 親が生きていなければ根として扱う
-        let parent = r["parent"]
-            .as_str()
-            .map(String::from)
-            .or_else(|| parent_from_ccn(s))
+        // 親は ccn の parent（from 行の呼び手）から引く。人が Specter で開いた古いセッションのために、Specter の記録は予備として読むだけにする
+        let parent = parent_from_ccn(s)
+            .or_else(|| r["parent"].as_str().map(String::from))
             .filter(|p| live_ids.contains(p) && *p != id);
         let (report, close_check) = if peer.is_none() {
             (
@@ -160,7 +161,7 @@ fn snapshot(peer: Option<String>) -> Snapshot {
             "parent": parent,
             "depth": r["depth"],
             "title": r["title"],
-            "terminalId": r["terminalId"],
+            "capabilities": s["capabilities"],
             "selfStatus": r["selfStatus"],
             "house": houses.get(&id).cloned(),
             "report": report,
@@ -350,136 +351,234 @@ fn send_message(session_id: String, text: String, peer: Option<String>) -> Resul
 
 // ---------- 承認 ----------
 
-/// 承認待ちに答える。choice は "allow" か "deny"。
-/// 送る前に、そのセッションが今も承認待ちで、承認を求めている道具が画面で見せたもの（expect_id）と同じかを確かめ、ずれていたら送らない。
-/// 端末のセッションには Specter の send key（許可は 1、拒否は Esc。2026-11-12 に試験台で確かめた）を送る。
-/// ノードが立てたセッション（claude -p）には ccn の POST /api/sessions/<id>/permissions/<requestId> で答える。
+/// 承認待ちに答える。choice は "allow" か "deny"。ccn の pending と permissions の口で答える（PTY のセッションも同じ口）。
+/// 送る前に、今も承認待ちで、承認を求めている requestId が画面で見せたもの（expect_id）と同じかを確かめ、ずれていたら送らない。
+/// 質問（AskUserQuestion）と計画の確認（ExitPlanMode）の待ちには許可を送らない。
+/// 人が Specter などの端末で開いたセッション（kind=terminal）は ccn から答えられないので断る。
 #[tauri::command]
-fn answer_permission(
-    session_id: String,
-    choice: String,
-    expect_id: Option<String>,
-    terminal_id: Option<String>,
-    pid: Option<u64>,
-) -> Result<String, String> {
+fn answer_permission(session_id: String, choice: String, expect_id: Option<String>, peer: Option<String>) -> Result<String, String> {
     if send_disabled() {
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
     }
     if choice != "allow" && choice != "deny" {
         return Err("choice は allow か deny".into());
     }
-    let base = ccn_base();
-    let detail = get_json(&format!("{base}/api/sessions/{session_id}"))?;
+    let peer = peer.filter(|p| !p.is_empty());
+    let base = api(&peer);
+    let detail = get_json(&format!("{base}/sessions/{session_id}"))?;
     if detail["state"].as_str() != Some("waiting_permission") {
         return Err("もう承認待ちではない（ほかで答えたか、終わった）".into());
     }
-    if detail["kind"].as_str() == Some("node") {
-        let req = detail["pending"][0]["requestId"].as_str().ok_or("ccn に承認の要求が見当たらない")?;
-        let body = if choice == "allow" { json!({ "behavior": "allow" }) } else { json!({ "behavior": "deny", "message": "family-computing から拒否した" }) };
-        agent()
-            .post(&format!("{base}/api/sessions/{session_id}/permissions/{req}"))
-            .send_json(body)
-            .map_err(|e| format!("ccn に答えを届けられなかった: {e}"))?;
-    } else {
-        let state = read_json(&home().join(format!(".family-computing/state/{session_id}.json")));
-        let now_id = state.as_ref().and_then(|s| s["pending"]["id"].as_str().map(String::from));
-        // 質問（AskUserQuestion）や計画の確認（ExitPlanMode）の待ちも ccn では waiting_permission になる。
-        // そこへ 1 を送ると選択肢の1番目を選んでしまうので、許可は送らない（拒否の Esc は取り消しなので送ってよい）
-        let pending_tool = state.as_ref().and_then(|s| s["pending"]["tool"].as_str().map(String::from)).unwrap_or_default();
-        // 承認の並びが2件以上あると、端末に出ているのがどれか分からないので、許可は送らない
-        let count = state.as_ref().and_then(|s| s["pending_count"].as_u64()).unwrap_or(0);
-        if choice == "allow" && count > 1 {
-            return Err(format!("承認が{count}件並んでいる。どれが端末に出ているか分からないので、ペインで答えて"));
+    if detail["capabilities"]["permissions"].as_bool() != Some(true) {
+        return Err("このセッションは ccn から承認に答えられない（人が端末で開いたセッション）。その端末で答えて".into());
+    }
+    let pending = detail["pending"].as_array().cloned().unwrap_or_default();
+    let first = pending.first().ok_or("ccn に承認の要求が見当たらない")?;
+    let req = first["requestId"].as_str().ok_or("承認の要求に requestId が無い")?.to_string();
+    let tool = first["toolName"].as_str().unwrap_or_default();
+    if choice == "allow" {
+        if NOT_TOOL_APPROVAL.contains(&tool) {
+            return Err(format!("{tool} の待ちは道具の承認ではないので、ここからは許可しない。端末で答えて"));
         }
-        if choice == "allow" && NOT_TOOL_APPROVAL.contains(&pending_tool.as_str()) {
-            return Err(format!("{pending_tool} の待ちは道具の承認ではないので、ここからは許可しない。ペインで答えて"));
-        }
-        // 許可は、画面で見せた中身と今の中身が一致したときだけ送る。拒否は安全側なので、中身が分からなくても送ってよい
-        if choice == "allow" && (expect_id.is_none() || now_id != expect_id) {
-            return Err(if now_id.is_none() {
-                "承認を求めている中身がまだ分からない。少し待つか、ペインで確かめて".into()
-            } else if expect_id.is_none() {
-                "画面で中身を見てから答えて（見た中身の id が渡されていない）".into()
-            } else {
-                "承認を求めている中身が変わった。もう一度見てから答えて".into()
-            });
-        }
-        if choice == "deny" && expect_id.is_some() && now_id.is_some() && now_id != expect_id {
+        if expect_id.as_deref() != Some(req.as_str()) {
             return Err("承認を求めている中身が変わった。もう一度見てから答えて".into());
         }
-        let tid = terminal_id.or_else(|| pid.and_then(terminal_by_pid)).ok_or("このセッションのペインが見つからない")?;
-        let key = if choice == "allow" { "digit1" } else { "escape" };
-        osa(&format!(
-            "tell application id \"{SPECTER_BUNDLE_ID}\" to send key \"{key}\" to (first terminal whose id is {})",
-            as_str(&tid)
-        ))
-        .map_err(|e| format!("Specter にキーを送れなかった: {e}"))?;
     }
-    // 送ったあと、承認待ちから抜けたかを最大4秒見る
-    for _ in 0..8 {
-        std::thread::sleep(Duration::from_millis(500));
-        if let Ok(d) = get_json(&format!("{base}/api/sessions/{session_id}")) {
-            if d["state"].as_str() != Some("waiting_permission") {
-                return Ok(format!("答えた（いまの状態: {}）", d["state"].as_str().unwrap_or("?")));
-            }
-            // 同じセッションが次の承認を求めている場合は、道具の id が変わる
-            let st = read_json(&home().join(format!(".family-computing/state/{session_id}.json")));
-            let id_now = st.as_ref().and_then(|s| s["pending"]["id"].as_str().map(String::from));
-            if expect_id.is_some() && id_now != expect_id {
-                return Ok("答えた（次の承認を待っている）".into());
-            }
+    let body = if choice == "allow" { json!({ "behavior": "allow" }) } else { json!({ "behavior": "deny", "message": "Claude Town から拒否した" }) };
+    agent()
+        .post(&format!("{base}/sessions/{session_id}/permissions/{req}"))
+        .send_json(body)
+        .map_err(|e| format!("ccn に答えを届けられなかった: {e}"))?;
+    Ok(format!("{}した（{tool}）", if choice == "allow" { "許可" } else { "拒否" }))
+}
+
+// ---------- 作る・止める・転出 ----------
+
+/// この機械のノード名（~/.config/ccn/ccn.json の name）。親を名乗るヘッダに使う
+fn node_name() -> String {
+    for rel in [".config/ccn/ccn.json", ".config/cc/cc.json"] {
+        if let Some(n) = read_json(&home().join(rel)).and_then(|v| v["name"].as_str().map(String::from)) {
+            return n;
         }
     }
-    Err("キーは送ったが、4秒たっても承認待ちのまま。ペインで確かめて".into())
+    "local".into()
 }
 
-// ---------- Specter ----------
-
-fn osa(script: &str) -> Result<String, String> {
-    let out = Command::new("/usr/bin/osascript").arg("-e").arg(script).output().map_err(|e| e.to_string())?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+/// 端末（PTY）のセッションを立てる。parent を渡すと、その親の子として立てる（x-ccn-from で親を名乗る）。
+/// 渡さなければ新しい世帯（親なし）になる。cwd を省くと ~/Documents/meta（本人の指定）
+#[tauri::command]
+fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, peer: Option<String>) -> Result<Value, String> {
+    if send_disabled() {
+        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
+    }
+    let peer = peer.filter(|p| !p.is_empty());
+    let cwd = cwd.filter(|c| !c.is_empty()).unwrap_or_else(|| home().join("Documents/meta").to_string_lossy().to_string());
+    let mut body = json!({ "terminal": true, "cwd": cwd, "cols": 120, "rows": 40 });
+    if let Some(p) = prompt.filter(|p| !p.trim().is_empty()) { body["prompt"] = json!(p); }
+    if let Some(n) = name.filter(|n| !n.trim().is_empty()) { body["name"] = json!(n); }
+    let mut req = agent().post(&format!("{}/sessions", api(&peer)));
+    if let Some(pid) = parent.filter(|p| !p.is_empty()) {
+        // 親を名乗る。一覧の parent に agent:<ノード>/<親の sid 先頭8>/town が入り、木がつながる
+        req = req.set("x-ccn-from", &format!("agent:{}/{}/town", node_name(), &pid[..8.min(pid.len())]));
+    }
+    match req.send_json(body) {
+        Ok(r) => r.into_json::<Value>().map_err(|e| e.to_string()),
+        Err(ureq::Error::Status(code, r)) => Err(format!("ccn が {code} を返した: {}", r.into_string().unwrap_or_default())),
+        Err(e) => Err(format!("ccn に届かない: {e}")),
     }
 }
 
-fn as_str(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+/// セッションの詳細（承認の pending を含む）
+#[tauri::command]
+fn session_detail(session_id: String, peer: Option<String>) -> Result<Value, String> {
+    let peer = peer.filter(|p| !p.is_empty());
+    get_json(&format!("{}/sessions/{session_id}", api(&peer)))
 }
 
-/// tty から Specter のターミナルの id を引く（Specter のツリーに無い、人が開いたセッション用）
-fn terminal_by_pid(pid: u64) -> Option<String> {
-    let out = Command::new("/bin/ps").args(["-o", "tty=", "-p", &pid.to_string()]).output().ok()?;
-    let tty = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if tty.is_empty() || tty.starts_with('?') {
-        return None;
-    }
-    let tty = if tty.starts_with("/dev/") { tty } else { format!("/dev/{tty}") };
-    let list = osa(&format!(
-        "set TB to character id 9\nset LF to character id 10\ntell application id \"{SPECTER_BUNDLE_ID}\"\nset acc to \"\"\nrepeat with t in every terminal\nset acc to acc & (id of t) & TB & (tty of t) & LF\nend repeat\nreturn acc\nend tell"
-    ))
-    .ok()?;
-    list.lines().find_map(|l| {
-        let mut it = l.split('\t');
-        let id = it.next()?;
-        (it.next()? == tty).then(|| id.to_string())
-    })
+/// 転出の下見の1段目（移動元の説明）。副作用は無い。2段目の行き先の下見は clone することがあるので、画面からは呼ばない
+#[tauri::command]
+fn teleport_info(session_id: String, peer: Option<String>) -> Result<Value, String> {
+    let peer = peer.filter(|p| !p.is_empty());
+    get_json(&format!("{}/sessions/{session_id}/teleport", api(&peer)))
 }
 
 #[tauri::command]
-fn focus_pane(terminal_id: Option<String>, pid: Option<u64>) -> Result<String, String> {
-    if osa(&format!("application id \"{SPECTER_BUNDLE_ID}\" is running"))? != "true" {
-        return Err("Specter が起動していない".into());
+fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> {
+    let peer = peer.filter(|p| !p.is_empty());
+    agent().delete(&format!("{}/sessions/{session_id}", api(&peer))).call().map_err(|e| format!("止められなかった: {e}"))?;
+    Ok(())
+}
+
+/// 転出（ccn の teleport。PR #18）。移動元のノードが下見から取り込みまで1回の要求で進め、結果を返す（最大95秒）
+#[tauri::command]
+async fn teleport(session_id: String, to: String, fork: bool, peer: Option<String>) -> Result<Value, String> {
+    if send_disabled() {
+        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
     }
-    let tid = terminal_id.or_else(|| pid.and_then(terminal_by_pid)).ok_or("このセッションのペインが見つからない")?;
-    // 通知のクリックと同じく、窓を前に出してからペインにフォーカスする
-    osa(&format!(
-        "tell application id \"{SPECTER_BUNDLE_ID}\"\nactivate\nfocus (first terminal whose id is {})\nend tell",
-        as_str(&tid)
-    ))
-    .map_err(|e| format!("Specter の操作に失敗した: {e}"))?;
-    Ok(tid)
+    let peer = peer.filter(|p| !p.is_empty());
+    tauri::async_runtime::spawn_blocking(move || {
+        let a = ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).build();
+        match a.post(&format!("{}/sessions/{session_id}/teleport", api(&peer))).send_json(json!({ "to": to, "fork": fork })) {
+            Ok(r) => r.into_json::<Value>().map_err(|e| e.to_string()),
+            Err(ureq::Error::Status(code, r)) => Err(format!("転出できなかった（{code}）: {}", r.into_string().unwrap_or_default())),
+            Err(e) => Err(format!("ccn に届かない: {e}")),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------- 端末（PTY） ----------
+// ccn の GET /api/sessions/<id>/terminal（SSE）を Rust で読み、"fc-term" という Tauri のイベントで画面へ流す。
+// 画面は開いている端末の分だけ term_open を呼び、閉じたら term_close を呼ぶ（30本を同時に読まない）。
+// 切れたら、受け取った最後の位置（id:）から ?after= で読み直す。
+
+struct TermConn {
+    stop: Arc<AtomicBool>,
+}
+static TERMS: Mutex<Option<HashMap<String, TermConn>>> = Mutex::new(None);
+
+#[derive(Serialize, Clone)]
+struct TermEvent {
+    id: String,
+    ev: String,
+    data: Value,
+}
+
+#[tauri::command]
+fn term_open(app: tauri::AppHandle, session_id: String, peer: Option<String>) -> Result<(), String> {
+    let peer = peer.filter(|p| !p.is_empty());
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let mut g = TERMS.lock().map_err(|e| e.to_string())?;
+        let m = g.get_or_insert_with(HashMap::new);
+        if let Some(old) = m.insert(session_id.clone(), TermConn { stop: stop.clone() }) {
+            old.stop.store(true, Ordering::SeqCst);
+        }
+    }
+    let url = format!("{}/sessions/{session_id}/terminal", api(&peer));
+    std::thread::spawn(move || {
+        read_terminal(&url, &stop, |ev, data| {
+            let _ = app.emit("fc-term", TermEvent { id: session_id.clone(), ev: ev.into(), data });
+        });
+    });
+    Ok(())
+}
+
+/// 端末の SSE を読み、イベントごとに emit を呼ぶ。stop が立つか exit を受けたら終わる。
+/// 待機中は ping が15〜30秒ごとに来る約束なので、45秒何も来なければ切れたとみなし、最後の位置（id:）から ?after= で繋ぎ直す
+fn read_terminal(url: &str, stop: &AtomicBool, emit: impl Fn(&str, Value)) {
+    let mut after: Option<u64> = None;
+    let mut fails = 0;
+    while !stop.load(Ordering::SeqCst) {
+        let a = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(5)).timeout_read(Duration::from_secs(45)).build();
+        let u = match after { Some(p) => format!("{url}?after={p}"), None => url.to_string() };
+        let resp = match a.get(&u).call() {
+            Ok(r) => { fails = 0; r }
+            Err(e) => {
+                fails += 1;
+                emit("error", json!({ "message": format!("端末に繋がらない: {e}"), "retry": fails }));
+                if fails > 5 { return; }
+                std::thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+        };
+        let reader = BufReader::new(resp.into_reader());
+        let (mut ev, mut data, mut id) = (String::new(), String::new(), None::<u64>);
+        for line in reader.lines() {
+            if stop.load(Ordering::SeqCst) { return; }
+            let Ok(line) = line else { break };
+            if line.is_empty() {
+                if !ev.is_empty() || !data.is_empty() {
+                    let v: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
+                    if let Some(p) = id { after = Some(p); }
+                    if ev != "ping" { emit(&ev, v); }
+                    if ev == "exit" { return; }
+                }
+                ev.clear(); data.clear(); id = None;
+            } else if let Some(x) = line.strip_prefix("event:") {
+                ev = x.trim().to_string();
+            } else if let Some(x) = line.strip_prefix("data:") {
+                if !data.is_empty() { data.push('\n'); }
+                data.push_str(x.trim_start());
+            } else if let Some(x) = line.strip_prefix("id:") {
+                id = x.trim().parse().ok();
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+#[tauri::command]
+fn term_close(session_id: String) -> Result<(), String> {
+    let mut g = TERMS.lock().map_err(|e| e.to_string())?;
+    if let Some(c) = g.get_or_insert_with(HashMap::new).remove(&session_id) {
+        c.stop.store(true, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn term_input(session_id: String, text: String, peer: Option<String>) -> Result<(), String> {
+    if send_disabled() {
+        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
+    }
+    let peer = peer.filter(|p| !p.is_empty());
+    agent()
+        .post(&format!("{}/sessions/{session_id}/terminal/input", api(&peer)))
+        .send_json(json!({ "text": text }))
+        .map_err(|e| format!("端末に書けなかった: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn term_resize(session_id: String, cols: u16, rows: u16, peer: Option<String>) -> Result<(), String> {
+    let peer = peer.filter(|p| !p.is_empty());
+    agent()
+        .post(&format!("{}/sessions/{session_id}/terminal/resize", api(&peer)))
+        .send_json(json!({ "cols": cols, "rows": rows }))
+        .map_err(|e| format!("大きさを変えられなかった: {e}"))?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -487,7 +586,6 @@ pub fn run() {
     // 開発用: 画面に渡すのと同じ JSON を出して終わる（ブラウザでの見た目の確認に使う）
     //   family-computing --snapshot             一覧
     //   family-computing --conversation <id>    会話
-    //   family-computing --focus <terminalId>   ペインへ移る
     //   family-computing --answer <sessionId> <allow|deny> [expectId]
     let args: Vec<String> = std::env::args().collect();
     let arg_after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
@@ -499,13 +597,30 @@ pub fn run() {
         println!("{}", serde_json::to_string_pretty(&conversation(id, None)).unwrap_or_default());
         return;
     }
-    // family-computing --answer <sessionId> <allow|deny> [expectId]   承認待ちに答える（画面のボタンと同じ処理）
+    // family-computing --answer <sessionId> <allow|deny> [requestId]   承認待ちに答える（画面のボタンと同じ処理）
     if let Some(i) = args.iter().position(|a| a == "--answer") {
         let sid = args.get(i + 1).cloned().unwrap_or_default();
         let choice = args.get(i + 2).cloned().unwrap_or_default();
-        let expect = args.get(i + 3).cloned();
-        let tid = read_json(&home().join(".specter/agents.json")).and_then(|v| v["agents"][&sid]["terminalId"].as_str().map(String::from));
-        println!("{:?}", answer_permission(sid, choice, expect, tid, None));
+        println!("{:?}", answer_permission(sid, choice, args.get(i + 3).cloned(), None));
+        return;
+    }
+    // family-computing --term <sessionId> [秒]   端末の SSE を読んで、イベントを1行ずつ出す（画面の端末と同じ読み方）
+    if let Some(i) = args.iter().position(|a| a == "--term") {
+        let sid = args.get(i + 1).cloned().unwrap_or_default();
+        let secs: u64 = args.get(i + 2).and_then(|x| x.parse().ok()).unwrap_or(3);
+        let stop = Arc::new(AtomicBool::new(false));
+        let s2 = stop.clone();
+        std::thread::spawn(move || { std::thread::sleep(Duration::from_secs(secs)); s2.store(true, Ordering::SeqCst); });
+        let url = format!("{}/api/sessions/{sid}/terminal", ccn_base());
+        read_terminal(&url, &stop, |ev, data| {
+            let n = data["b64"].as_str().map(|b| b.len()).unwrap_or(0);
+            println!("{ev} {}", if n > 0 { format!("b64 {n}字") } else { data.to_string() });
+        });
+        return;
+    }
+    // family-computing --create [cwd] [prompt] [parentId]   端末のセッションを立てる（画面の「子を足す」「新しい世帯」と同じ処理）
+    if let Some(i) = args.iter().position(|a| a == "--create") {
+        println!("{:?}", create_session(args.get(i + 1).cloned(), args.get(i + 2).cloned(), args.get(i + 3).cloned(), None, None));
         return;
     }
     // family-computing --send <sessionId> <文>   注文を送る（画面の送信と同じ処理）
@@ -513,13 +628,12 @@ pub fn run() {
         println!("{:?}", send_message(args.get(i + 1).cloned().unwrap_or_default(), args.get(i + 2).cloned().unwrap_or_default(), None));
         return;
     }
-    if let Some(t) = arg_after("--focus") {
-        println!("{:?}", focus_pane(Some(t), None));
-        return;
-    }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![snapshot, peers, conversation, send_message, focus_pane, set_house_name, answer_permission])
+        .invoke_handler(tauri::generate_handler![
+            snapshot, peers, conversation, send_message, set_house_name, answer_permission,
+            create_session, stop_session, teleport, teleport_info, session_detail, term_open, term_close, term_input, term_resize
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
