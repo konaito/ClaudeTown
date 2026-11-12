@@ -2,7 +2,7 @@
 
 ## 使い方
 
-軽さを直した子は、直す前と直した後に、同じ worktree で `bun run scripts/bench.ts --label <名前>` を流して比べる。このコマンドは、開発版をモックの ccn に繋いで場面ごとに起動する。場面は、待機、窓を隠す、最小化、ターミナルの出力、長い会話、大きな町の6つある。各場面で、本体と WebKit のプロセス（WebContent、GPU、Networking）の CPU 時間の差と RSS を、ps で60秒ずつ測る。既定は各場面3回で、1回はおよそ1分半かかる。結果は `docs/perf/<日付>-<名前>.jsonl` に1回ずつ足し、場面ごとの中央値と範囲を同じ名前の `.md` に書く。場面を絞るときは `--scenes idle,town`、回数は `--runs 5` で指定する。ターミナルを DOM の描き方で比べるときは `--renderer dom` を付ける。1回ごとに `/tmp/ct-dev.lock`、`/tmp/claudetown-dev.lock` の順にロックを取り、取れるまで待つ。HOME は一時のディレクトリに向けるので、本物の `~/.family-computing/` と開発版の `~/.family-computing/dev/` には書かない。
+軽さを直した子は、直す前と直した後に、同じ worktree で `bun run scripts/bench.ts --label <名前>` を流して比べる。このコマンドは、開発版をモックの ccn に繋いで場面ごとに起動する。場面は、待機、窓を隠す、最小化、ターミナルの出力、長い会話、大きな町の6つある。各場面で、本体と WebKit のプロセス（WebContent、GPU、Networking）の CPU 時間の差と RSS を、ps で60秒ずつ測る。既定では、場面ごとに有効な回が3回たまるまで測る。1回はおよそ1分半かかる。結果は `docs/perf/<日付>-<名前>.jsonl` に1回ずつ足し、場面ごとの中央値と範囲を同じ名前の `.md` に書く。途中で止めても、同じ日付と名前でもう一度流せば続きから測る。場面を絞るときは `--scenes idle,town`、回数は `--runs 5` で指定する。ターミナルを DOM の描き方で比べるときは `--renderer dom` を付ける。1回ごとに `/tmp/ct-dev.lock`、`/tmp/claudetown-dev.lock` の順にロックを取り、測り終えたら外して、60秒空けてから次を取る。ほかの子と交互に回るので、全部で30分以上かかることがある。HOME は一時のディレクトリに向けるので、本物の `~/.family-computing/` と開発版の `~/.family-computing/dev/` には書かない。
 
 ## 決めてあること
 

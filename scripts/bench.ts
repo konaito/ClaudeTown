@@ -1,6 +1,6 @@
 // 軽さの計測（#2）。開発版を場面ごとに起動し、本体と WebKit のプロセスの CPU 時間とメモリを外から ps で測る。
 //
-//   bun run scripts/bench.ts [--scenes idle,hidden,minimized,terminal,talk,town] [--runs 3] [--secs 60] [--label before]
+//   bun run scripts/bench.ts [--scenes idle,hidden,minimized,terminal,talk,town] [--runs 3（場面ごとの有効な回の数）] [--secs 60] [--label before]
 //                            [--renderer webgl|dom] [--letters-kb 56] [--release] [--out docs/perf]
 //   bun run scripts/bench.ts --summarize docs/perf/<日付>-<名前>.jsonl   記録から表（.md）だけを作り直す
 //
@@ -14,7 +14,7 @@
 //
 // 1回の測り方
 //   1. /tmp/ct-dev.lock、/tmp/claudetown-dev.lock の順に mkdir で取る（取れるまで待つ。上限3時間。片方を持ったまま10分取れなければ
-//      両方外して取り直す）。1回ごとに取って、逆の順に放す
+//      両方外して取り直す）。1回ごとに取って、逆の順に放し、60秒空けてから次を取る
 //   2. HOME を一時のディレクトリにして開発版（bun tauri dev）を起動する。お手紙の記録（letters.jsonl）は決まった大きさで仕込む
 //   3. 画面が場面を用意して ready を書いたら、settle 秒待ってから secs 秒のあいだの CPU 時間の差を ps で測る
 //   4. 見えているはずの場面で窓が描かれていなかった回（fps が 20 未満、visibilityState が hidden）と、
@@ -47,6 +47,8 @@ const MOCK_ARGS: Record<Scene, string[]> = {
 const LOCKS = (process.env.FC_DEV_LOCKS || "/tmp/ct-dev.lock,/tmp/claudetown-dev.lock").split(",").map((x) => x.trim()).filter(Boolean);
 /** 一部を持ったまま、次が取れずにこれだけたったら、全部外して取り直す */
 const PARTIAL_HOLD_MS = 10 * 60_000;
+/** ロックを外してから次に取りに行くまでの間（ほかの子が先に取れるように）。FC_LOCK_GAP_S で変えられる */
+const LOCK_GAP_MS = Number(process.env.FC_LOCK_GAP_S ?? 60) * 1000;
 const LOCK_WAIT_MS = 3 * 3600_000;
 const RUN_DEADLINE_MS = 10 * 60_000;
 const READY_TIMEOUT_MS = 4 * 60_000;
@@ -374,9 +376,17 @@ const b = spawnSync("cargo", ["build", "--no-default-features", ...(o.release ? 
 });
 if (b.status !== 0) { console.error("Rust を組めなかった"); process.exit(1); }
 
-console.log(`場面 ${scenes.join("、")} を ${runs} 回ずつ。記録は ${path.relative(ROOT, file)}、作業の場所は ${o.work}`);
-for (let round = 1; round <= runs; round++) {
-  for (const scene of scenes) {
+// 場面ごとに、記録（同じ日付と label の .jsonl）にある有効な回が runs 回になるまで回す。途中で止めても、続きから再開できる。
+// 窓が隠れた回などで無効が続いても終わるように、1回の呼び出しで1場面に回すのは runs の2倍まで
+const done = (scene: Scene) => (fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Run) : [])
+  .filter((r) => r.scene === scene && r.valid).length;
+const tries: Record<string, number> = {};
+console.log(`場面 ${scenes.join("、")} で、有効な回が ${runs} 回ずつになるまで測る。記録は ${path.relative(ROOT, file)}、作業の場所は ${o.work}`);
+for (;;) {
+  const todo = scenes.filter((s) => done(s) < runs && (tries[s] ?? 0) < runs * 2);
+  if (!todo.length) break;
+  for (const scene of todo) {
+    const round = (tries[scene] = (tries[scene] ?? 0) + 1);
     await lock();
     let r: Run;
     try {
@@ -391,6 +401,8 @@ for (let round = 1; round <= runs; round++) {
     fs.appendFileSync(file, JSON.stringify(r) + "\n");
     const p = r.procs ?? {};
     console.log(`${scene} ${round}: ${r.valid ? "有効" : `無効（${r.reason}）`} 本体 ${p.app?.cpuPct ?? "−"}% WebContent ${p.WebContent?.cpuPct ?? "−"}% GPU ${p.GPU?.cpuPct ?? "−"}% 合計 ${r.totalCpuPct ?? "−"}% fps ${r.fps?.ready}/${r.fps?.post}`);
+    // 外した直後に自分が取り直すと、待っているほかの子が入れない。間を空けてから次を取る
+    if (scenes.some((s) => done(s) < runs && (tries[s] ?? 0) < runs * 2)) await sleep(LOCK_GAP_MS);
   }
 }
 const md = summarize(file);
