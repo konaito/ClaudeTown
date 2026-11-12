@@ -162,6 +162,8 @@ fn snapshot(peer: Option<String>) -> Snapshot {
             "lastActivityAt": s["lastActivityAt"],
             "canSend": s["capabilities"]["send"],
             "parent": parent,
+            // ccn の parent の生の値。別の町にいる親を引くのに使う（src/ghost.ts）
+            "parentRaw": s["parent"],
             "capabilities": s["capabilities"],
             "house": houses.get(&id).cloned(),
             "report": report,
@@ -519,7 +521,15 @@ async fn teleport(session_id: String, to: String, fork: bool, subtree: Option<bo
         let mut body = json!({ "to": to, "fork": fork });
         if subtree.unwrap_or(false) { body["subtree"] = json!(true); }
         if dry_run.unwrap_or(false) { body["dryRun"] = json!(true); }
-        match a.post(&format!("{}/sessions/{session_id}/teleport", api(&peer))).send_json(body) {
+        // 移った先でも親とつながるよう、元の parent（agent:<ノード>/<親の sid8>/<役割>）を from 行として付けて頼む。
+        // 付けないと、移った先の parent は local になる（2026-11-12、fc-teleport-test の試験ノードで確かめた）
+        let mut req = a.post(&format!("{}/sessions/{session_id}/teleport", api(&peer)));
+        if let Ok(d) = get_json(&format!("{}/sessions/{session_id}", api(&peer))) {
+            if let Some(p) = d["parent"].as_str().filter(|p| p.starts_with("agent:")) {
+                req = req.set("x-ccn-from", p);
+            }
+        }
+        match req.send_json(body) {
             Ok(r) => r.into_json::<Value>().map_err(|e| e.to_string()),
             Err(ureq::Error::Status(code, r)) => Err(format!("転出できなかった（{code}）: {}", r.into_string().unwrap_or_default())),
             Err(e) => Err(format!("ccn に届かない: {e}")),

@@ -3,6 +3,7 @@ import { call as invoke, setFullscreen } from "./bridge";
 import { TerminalView } from "./term/TerminalView";
 import { collectMail, type Mail } from "./mail";
 import { flightsOf, resolve, type Flight } from "./letters";
+import { withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import "./App.css";
@@ -102,12 +103,52 @@ export default function App() {
     setHidden((h) => { const n = new Map(h); for (const id of [...stuck, ...gone]) n.delete(id); return n; });
     if (stuck.length) toast(`止まらなかった: ${stuck.map((id) => snap.agents.find((a) => a.id === id)?.name ?? id.slice(0, 8)).join("、")}`, true);
   }, [snap]);
-  const tree = useMemo(() => buildTree(agents), [agents]);
+  // 別の町のお便り。町の表示はいま選んだノードだけで、お便りは全部の町から集める
+  const selfName = peers.find((p) => p.self)?.name ?? "このMac";
+  const curTown = peer || selfName;
+  const [others, setOthers] = useState<Map<string, { agents: Agent[] } | { error: string }>>(new Map());
+  useEffect(() => {
+    let alive = true;
+    let running = false;
+    const towns: { key: string; name: string; healthy: boolean }[] = [
+      { key: "", name: selfName, healthy: true },
+      ...peers.filter((p) => !p.self).map((p) => ({ key: p.name, name: p.name, healthy: p.status === "healthy" })),
+    ].filter((t) => t.key !== peer);
+    setOthers((m) => new Map([...m].filter(([name]) => towns.some((t) => t.name === name))));
+    const load = async () => {
+      if (running) return;
+      running = true;
+      for (const t of towns) {
+        let v: { agents: Agent[] } | { error: string };
+        if (!t.healthy) v = { error: "つながらない" };
+        else {
+          try { v = { agents: (await invoke<Snapshot>("snapshot", { peer: t.key || null })).agents }; }
+          catch (e) { v = { error: String(e) }; }
+        }
+        if (!alive) break;
+        setOthers((m) => new Map(m).set(t.name, v));
+      }
+      running = false;
+    };
+    load();
+    const timer = setInterval(load, OTHER_TOWNS_POLL_MS);
+    return () => { alive = false; clearInterval(timer); };
+  }, [peer, peers, selfName]);
+  // 木を作るときだけ、転出のゴースト（別の町にいる親子の影）を足す。お便りや数には入れない
+  const otherTowns = useMemo(() => [...others].flatMap(([town, v]) => ("agents" in v ? [{ town, agents: v.agents }] : [])), [others]);
+  const tree = useMemo(() => buildTree(withGhosts({ town: curTown, agents }, otherTowns)), [agents, otherTowns, curTown]);
+  /** ゴーストを押したら、本物がいる町に切り替えてその子を選ぶ */
+  const pick = useCallback((a: Agent) => {
+    if (!a.ghost) { setSelected(a.id); return; }
+    setPeer(a.ghost.town === selfName ? "" : a.ghost.town);
+    setSelected(a.ghost.realId);
+  }, [selfName]);
 
   /** a とその子孫を、葉から順に止める。倒れる演出も葉から少しずつずらして出す */
   const kill = useCallback(async (a: Agent) => {
     const order: Agent[] = [];
-    const walk = (x: Agent) => { for (const k of tree.childrenOf.get(x.id) ?? []) walk(k); order.push(x); };
+    // ゴースト（別の町にいる本物の影）は閉じない
+    const walk = (x: Agent) => { for (const k of tree.childrenOf.get(x.id) ?? []) if (!k.ghost) walk(k); order.push(x); };
     walk(a);
     const targets = order.filter((x) => x.capabilities?.stop);
     const skipped = order.filter((x) => !x.capabilities?.stop);
@@ -146,37 +187,6 @@ export default function App() {
     [agents],
   );
 
-  // 別の町のお便り。町の表示はいま選んだノードだけで、お便りは全部の町から集める
-  const selfName = peers.find((p) => p.self)?.name ?? "このMac";
-  const curTown = peer || selfName;
-  const [others, setOthers] = useState<Map<string, { agents: Agent[] } | { error: string }>>(new Map());
-  useEffect(() => {
-    let alive = true;
-    let running = false;
-    const towns: { key: string; name: string; healthy: boolean }[] = [
-      { key: "", name: selfName, healthy: true },
-      ...peers.filter((p) => !p.self).map((p) => ({ key: p.name, name: p.name, healthy: p.status === "healthy" })),
-    ].filter((t) => t.key !== peer);
-    setOthers((m) => new Map([...m].filter(([name]) => towns.some((t) => t.name === name))));
-    const load = async () => {
-      if (running) return;
-      running = true;
-      for (const t of towns) {
-        let v: { agents: Agent[] } | { error: string };
-        if (!t.healthy) v = { error: "つながらない" };
-        else {
-          try { v = { agents: (await invoke<Snapshot>("snapshot", { peer: t.key || null })).agents }; }
-          catch (e) { v = { error: String(e) }; }
-        }
-        if (!alive) break;
-        setOthers((m) => new Map(m).set(t.name, v));
-      }
-      running = false;
-    };
-    load();
-    const timer = setInterval(load, OTHER_TOWNS_POLL_MS);
-    return () => { alive = false; clearInterval(timer); };
-  }, [peer, peers, selfName]);
   const mails = useMemo(() => collectMail([
     { town: curTown, agents },
     ...[...others].flatMap(([town, v]) => ("agents" in v ? [{ town, agents: v.agents }] : [])),
@@ -316,7 +326,7 @@ export default function App() {
                     catch (e) { toast(`世帯の名前を変えられなかった: ${e}`, true); }
                   }}
                   hasNeeds={f.all.some((a) => NEEDS_YOU.includes(moodOf(a)))}>
-                  <FamilyCanvas all={f.all} result={r} selected={selected} onSelect={(a) => setSelected(a.id)} onFocus={focus} />
+                  <FamilyCanvas all={f.all} result={r} selected={selected} onSelect={pick} onFocus={focus} />
                 </Group>
               ),
             };
@@ -363,7 +373,7 @@ export default function App() {
 }
 
 function descOf(childrenOf: Map<string, Agent[]>, id: string): Agent[] {
-  return (childrenOf.get(id) ?? []).flatMap((k) => [k, ...descOf(childrenOf, k.id)]);
+  return (childrenOf.get(id) ?? []).filter((k) => !k.ghost).flatMap((k) => [k, ...descOf(childrenOf, k.id)]);
 }
 
 // ---------- お手紙 ----------
@@ -538,7 +548,7 @@ function Stage({ zoom, items, onBlank }: { zoom: number | "fit"; items: { id: st
   const at = new Map(packed.items.map((p) => [p.id, p]));
   return (
     <ScrollEdgeGradient className="stage" wrapClassName="seg-fill stage-bg" strength="town" ref={outer}
-      onClick={(e) => { if (!(e.target as HTMLElement).closest(".card, .mini, .pop, .g-head")) onBlank(); }}>
+      onClick={(e) => { if (!(e.target as HTMLElement).closest(".card, .mini, .pop, .g-head, .ghost-card, .kill-x, .letter-mark")) onBlank(); }}>
       <div className="stage-inner" style={{ zoom: scale, width, height: packed.height + 20 }}>
         {items.map((b) => {
           const p = at.get(b.id)!;
@@ -661,7 +671,9 @@ function FamilyCanvas({ all, result, selected, onSelect, onFocus }: {
       <svg className="edges" width={W} height={H}>
         {result.nodes.filter((n) => n.parent).map((n) => {
           const p = pos.get(n.parent!)!;
-          return <line key={n.id} x1={p.x + ox} y1={p.y + oy} x2={n.x + ox} y2={n.y + oy} />;
+          // ゴーストへの線は点線
+          const ghostEdge = !!(byId.get(n.id)?.ghost || byId.get(n.parent!)?.ghost);
+          return <line key={n.id} className={ghostEdge ? "ghost-edge" : undefined} x1={p.x + ox} y1={p.y + oy} x2={n.x + ox} y2={n.y + oy} />;
         })}
       </svg>
       {result.nodes.map((n) => {
@@ -674,7 +686,7 @@ function FamilyCanvas({ all, result, selected, onSelect, onFocus }: {
             {/* × はカード（札）の角を基準に置くので、カードと同じ大きさの包みに入れる（カードは overflow: hidden） */}
             <div className={`fnode-body ${n.depth >= 2 ? "k-mini" : "k-card"}`} data-aid={n.id}
               style={n.depth >= 2 ? { ["--kx-k" as string]: boxOf(n.depth, a.name).scale } : undefined}>
-              <Card agent={a} depth={n.depth} selected={selected === n.id} onSelect={onSelect} onFocus={onFocus} />
+              {a.ghost ? <GhostCard agent={a} depth={n.depth} onSelect={onSelect} /> : <Card agent={a} depth={n.depth} selected={selected === n.id} onSelect={onSelect} onFocus={onFocus} />}
               {letters.has(n.id) && <img className="letter-mark" src={LETTER_IMG} alt="お手紙が届いた" title="お手紙が届いた" />}
               {a.capabilities?.stop && delay === undefined && (
                 <button className="kill-x" title="閉じる（⌘ を押しながらで確認なし）" aria-label={`${a.name} を閉じる`}
@@ -744,6 +756,31 @@ function KillFx({ w, h }: { w: number; h: number }) {
       <img className="kill-ghost" src="/sprites/noto/1f47b/512.webp" alt="" draggable={false} />
     </div>
   );
+}
+
+/**
+ * 転出のゴースト（src/ghost.ts）。別の町にいる親か子の影。半透明、点線の枠、旅行かばんの印で、閉じる演出の 👻 と分ける。
+ * 押すと本物がいる町に切り替えて、その子を選ぶ。× は出さない（ここからは閉じない）。
+ */
+function GhostCard({ agent, depth, onSelect }: { agent: Agent; depth: number; onSelect: (a: Agent) => void }) {
+  const g = agent.ghost!;
+  const mini = depth >= 2;
+  const box = mini ? boxOf(depth, agent.name) : { w: LAYOUT.card.w, h: LAYOUT.card.h, scale: 1 };
+  const label = g.role === "parent" ? `親は ${g.town}` : `${g.town} へ転出`;
+  return (
+    <button className={`ghost-card ${mini ? "is-mini" : ""}`} style={{ width: box.w, height: box.h }}
+      onClick={() => onSelect(agent)} title={`${agent.name}（${label}）\nクリックで ${g.town} の町に切り替える`}>
+      <span className="ghost-tag"><SuitcaseIcon />{label}</span>
+      <span className="ghost-body">
+        <span className="ghost-av"><Avatar pick={agent.avatar} seed={agent.name} mood="idle" role={roleOf(depth)} size={mini ? 26 : 40} /></span>
+        <span className="ghost-name">{agent.name}</span>
+      </span>
+    </button>
+  );
+}
+
+function SuitcaseIcon() {
+  return (<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" aria-hidden><rect x="3" y="7" width="18" height="13" rx="2.5" /><path d="M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2M8 7v13M16 7v13" /></svg>);
 }
 
 function FullCard({ agent, depth, selected, onSelect, onFocus }: {
@@ -1073,7 +1110,7 @@ function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent
         )}
         {subtree && (
           <div className="tp-plan">
-            <div><b>子孫 {descendants.length} 人も一緒に移す</b>（親子の関係は行き先でも保つ）</div>
+            <div><b>子孫 {descendants.length} 人も一緒に移る</b>（親子の関係は行き先でも保つ）</div>
             {plan?.error ? <div className="bad-text">計画を出せない: {plan.error}</div> : !plan ? <div className="hint">計画を出している…</div> : (
               <ul>{(plan.plan ?? []).map((m: any) => <li key={m.sourceId}>{m.title ?? m.sourceId.slice(0, 8)} → {String(m.cwd ?? "").replace(/^\/Users\/[^/]+/, "~")}</li>)}
                 {(plan.skipped ?? []).map((m: any) => <li key={m.sourceId} className="bad-text">{m.sourceId.slice(0, 8)}: 対象外（{m.reason}）</li>)}</ul>

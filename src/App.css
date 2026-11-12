@@ -378,3 +378,21 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .sent-letter .sl-to { display: inline-flex; align-items: center; gap: 4px; }
 .sent-letter .sl-to b { color: #5a4532; }
 .sent-letter .sl-sum { color: #2f2d36; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+
+/* 転出のゴースト。別の町にいる親か子の影。半透明と点線で、閉じる演出の 👻 と分ける */
+.ghost-card {
+  flex: none; display: flex; flex-direction: column; justify-content: space-between; gap: 2px; padding: 7px 9px 6px; box-sizing: border-box;
+  border-radius: 14px; border: 1.5px dashed #b9b4c4; background: #fbfaf8; text-align: left; overflow: hidden;
+  transition: border-color 0.12s;
+}
+/* 地は不透明にして裏のつなぎ線を隠し、中身だけを薄くする */
+.ghost-card > * { opacity: 0.68; transition: opacity 0.12s; }
+.ghost-card:hover > * { opacity: 1; }
+.ghost-card:hover { border-color: #8f88a3; }
+.ghost-card.is-mini { border-radius: 10px; padding: 4px 6px; }
+.ghost-tag { display: inline-flex; align-items: center; gap: 4px; align-self: flex-start; font-size: 11px; color: #5f5873; background: #f1eff6; border-radius: 99px; padding: 1px 8px; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.ghost-body { display: flex; align-items: flex-end; gap: 6px; min-width: 0; }
+.ghost-av { filter: grayscale(0.6); opacity: 0.85; flex: none; }
+.ghost-name { font-size: 13px; font-weight: 700; color: #5f5873; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-bottom: 6px; }
+.ghost-card.is-mini .ghost-name { font-size: 10.5px; padding-bottom: 2px; }
+.edges line.ghost-edge { stroke-dasharray: 5 5; }

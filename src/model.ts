@@ -29,6 +29,10 @@ export type Agent = {
   lastActivityAt?: number;
   canSend: boolean;
   parent: string | null;
+  /** ccn の parent の生の値（agent:<ノード>/<親の sid8>/<役割> か local） */
+  parentRaw?: string | null;
+  /** 転出のゴースト（src/ghost.ts）。相手の町にいる本物の ID と、親か子か */
+  ghost?: { town: string; realId: string; role: "parent" | "child" } | null;
   capabilities?: { send?: boolean; permissions?: boolean; interrupt?: boolean; stop?: boolean; terminal?: boolean } | null;
   report?: Report | null;
   closeCheck?: { status: "working" | "checking" | "ok" | "ng" | "error"; short?: string | null } | null;
