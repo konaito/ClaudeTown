@@ -69,6 +69,12 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
 
 export async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (inTauri) return invoke<T>(cmd, args);
+  // 別の町の一覧（#14）。ブラウザ表示では snapshot の agents で代える
+  if (cmd === "town_agents") {
+    const s = await call<{ ccn_ok: boolean; ccn_error: string | null; agents: unknown[] }>("snapshot", args);
+    if (!s.ccn_ok) throw new Error(s.ccn_error ?? "つながらない");
+    return s.agents as T;
+  }
   if (MOCK) return mockCall<T>(cmd, args);
   if (cmd === "snapshot") {
     // 別の町は public/dev-snapshot-<町>.json（`--snapshot --peer <町>` で作る）。無ければ届かない町として扱う
