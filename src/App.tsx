@@ -473,6 +473,8 @@ const MARK_OFFSET = { x: -9 + MARK_SIZE / 2, y: -11 + MARK_SIZE / 2 };
 /** つなぎ線の上を進む割合。残りで印の位置へ寄せる */
 const LETTER_ALONG = 0.8;
 const MARK_MAX_MS = 30000;
+/** 飛ばした封筒の記録を覚える数。Rust の LETTERS_MAX（300）より十分多くする */
+const SEEN_MAX = 2000;
 
 /**
  * 新しいお手紙が来たら、送り手のカードから受け手のカードへ封筒を飛ばし、受け手の頭に印を残す。
@@ -491,8 +493,11 @@ function useLetterMarks(flights: Flight[]) {
     }
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     const fresh = flights.filter((f) => !seen.current!.has(f.id));
+    // 見た記録は古い順に捨て、SEEN_MAX 件までにする（#15）。Rust が渡すのは最近10分の最大300件なので、
+    // 捨てた記録が一覧に戻ることはない。いまの一覧で捨てると、一覧の取得が一度欠けただけで同じ封筒を二度飛ばす
+    for (const f of fresh) seen.current.add(f.id);
+    for (const id of seen.current) { if (seen.current.size <= SEEN_MAX) break; seen.current.delete(id); }
     fresh.forEach((f, i) => {
-      seen.current!.add(f.id);
       const land = () => setMarks((m) => new Map(m).set(f.to, { flight: f.id, until: Date.now() + (f.readAt ? MARK_READ_MS : MARK_MAX_MS) }));
       const a = document.querySelector(`[data-aid="${f.from}"]`)?.getBoundingClientRect();
       const toEl = document.querySelector<HTMLElement>(`[data-aid="${f.to}"]`);
@@ -714,6 +719,8 @@ const ROLE_LABEL = ["親", "子", "孫", "ひ孫", "玄孫"];
  * 状態や会話の更新では動かさない。前に選んだ候補は引き継がず、顔ぶれだけで決める。
  */
 const layoutCache = new Map<string, { sig: string; result: ReturnType<typeof layoutFamily> }>();
+/** 覚えておく世帯の数。町に一度に出る世帯より十分多くする */
+const LAYOUT_CACHE_MAX = 64;
 function layoutOf(all: Agent[]) {
   const rootId = all[0].id;
   const sig = all.map((a) => `${a.id}|${a.parent ?? ""}|${a.name}|${a.startedAt ?? 0}`).join(",");
@@ -735,7 +742,10 @@ function layoutOf(all: Agent[]) {
   // 前に選んだ候補は引き継がない。引き継ぐと、子が増えるのを見ていた町と後から開いた町で形が変わる（docs/design/geometric-layout.md）
   const r = layoutFamily(nodes);
   if (!r.valid) console.warn("Claude Town: 配置の検査に通る候補が無かった", rootId, r.metrics, r.candidates);
+  layoutCache.delete(rootId);
   layoutCache.set(rootId, { sig, result: r });
+  // 閉じた世帯の分を捨てる（#15）。Map は入れた順なので、計算し直していない古い世帯から消す
+  while (layoutCache.size > LAYOUT_CACHE_MAX) layoutCache.delete(layoutCache.keys().next().value!);
   return r;
 }
 
