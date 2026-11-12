@@ -23,6 +23,8 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
     term.loadAddon(fit);
     term.open(box.current);
     let pendingReset = false;
+    // replay を書いている間に xterm.js が返す自動応答（カーソル位置の報告など）は PTY に送らない（claude の入力に混ざるため）
+    let replaying = 0;
     let closed = false;
     let lastSize = "";
     const pushSize = () => {
@@ -33,6 +35,7 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
       call("term_resize", { sessionId, cols: term.cols, rows: term.rows, peer }).catch((e) => onError(`端末の大きさを変えられなかった: ${e}`));
     };
     const disposeInput = term.onData((text) => {
+      if (replaying > 0) return;
       call("term_input", { sessionId, text, peer }).catch((e) => onError(`端末に書けなかった: ${e}`));
     });
     let close = () => {};
@@ -46,7 +49,8 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
           break;
         case "replay":
           if (pendingReset) { term.reset(); pendingReset = false; }
-          term.write(b64ToBytes(e.data?.b64 ?? ""));
+          replaying++;
+          term.write(b64ToBytes(e.data?.b64 ?? ""), () => { replaying--; });
           break;
         case "data":
           pendingReset = false;

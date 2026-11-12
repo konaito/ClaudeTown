@@ -33,7 +33,7 @@ export type Role = "parent" | "child" | "grandchild";
  * size は体の一辺の px。16px の絵の整数倍（32、48、64）にすると、ドット絵がにじまない。
  * 箱の高さは size に吹き出しの余白を足した分で、印の有無で変わらない。
  */
-export function Avatar({ seed, mood, role, size, pick }: { seed: string; mood: Mood; role: Role; size: number; pick?: { char: string; hue: number } | null }) {
+export function Avatar({ seed, mood, role, size, pick, dead }: { seed: string; mood: Mood; role: Role; size: number; pick?: { char: string; hue: number } | null; dead?: boolean }) {
   const list = role === "parent" ? ADULTS : KIDS;
   // 絵は Rust が町の中で被らないように割り当てたもの（pick）を使う。無いとき（ブラウザ表示など）は名前の hash で選ぶ
   const char = pick?.char ?? list[hash(`${role}:${seed}`) % list.length];
@@ -41,10 +41,13 @@ export function Avatar({ seed, mood, role, size, pick }: { seed: string; mood: M
   const walking = mood === "working";
   const mark = MARK[mood];
   return (
-    <span className={`fc-avatar fc-${mood}`} style={{ ["--fc-size" as string]: `${size}px` }} aria-hidden>
+    <span className={`fc-avatar fc-${mood} ${dead ? "fc-dead" : ""}`} style={{ ["--fc-size" as string]: `${size}px` }} aria-hidden>
       <span className="fc-body">
         <img src={`/sprites/ninja/characters/${char}/SeparateAnim/${walking ? "Walk" : "Idle"}.png`} alt="" draggable={false}
           style={hue ? { filter: `hue-rotate(${hue}deg)` } : undefined} />
+        {/* 倒れた姿（Ninja Adventure の Dead.png。無いキャラは元の絵を傾けて代わりにする） */}
+        {dead && <img className="fc-deadimg" src={`/sprites/ninja/characters/${char}/SeparateAnim/Dead.png`} alt="" draggable={false}
+          onError={(e) => { (e.currentTarget as HTMLImageElement).src = `/sprites/ninja/characters/${char}/SeparateAnim/Idle.png`; e.currentTarget.classList.add("fallback"); }} />}
       </span>
       {mark && (
         <span className="fc-bubble"><img src={`/sprites/noto/${mark}/512.webp`} alt="" draggable={false} /></span>

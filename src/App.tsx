@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { call as invoke, setFullscreen } from "./bridge";
 import { TerminalView } from "./term/TerminalView";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
@@ -14,6 +14,13 @@ import { LAYOUT, boxOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
 
 const POLL_MS = 2000;
+/** 閉じる演出の長さ（ms）。CSS の kill-* と合わせる */
+const KILL_MS = 1150;
+/** 子孫を葉から順に倒すときのずらし（ms） */
+const KILL_STAGGER = 140;
+
+/** 閉じる操作と演出の状態。カードの × と、倒れる演出が読む */
+const KillCtx = createContext<{ dying: Map<string, number>; ask: (a: Agent, instant: boolean) => void }>({ dying: new Map(), ask: () => {} });
 const CONV_POLL_MS = 2500;
 
 type Toast = { id: number; text: string; bad?: boolean };
@@ -54,8 +61,51 @@ export default function App() {
     return () => { alive = false; clearInterval(t); clearInterval(c); };
   }, [peer]);
 
-  const agents = snap?.agents ?? [];
+  // 閉じたセッション。演出が終わったら隠し、ccn の一覧から消えたら忘れる（10秒たっても消えなければ戻して失敗を出す）
+  const [dying, setDying] = useState<Map<string, number>>(new Map());
+  const [hidden, setHidden] = useState<Map<string, number>>(new Map());
+  const [killAsk, setKillAsk] = useState<Agent | null>(null);
+  const agents = useMemo(() => (snap?.agents ?? []).filter((a) => !hidden.has(a.id)), [snap, hidden]);
+  useEffect(() => {
+    if (!snap || hidden.size === 0) return;
+    const present = new Set(snap.agents.map((a) => a.id));
+    const now = Date.now();
+    const stuck = [...hidden].filter(([id, at]) => present.has(id) && now - at > 10000).map(([id]) => id);
+    const gone = [...hidden.keys()].filter((id) => !present.has(id));
+    if (!stuck.length && !gone.length) return;
+    setHidden((h) => { const n = new Map(h); for (const id of [...stuck, ...gone]) n.delete(id); return n; });
+    if (stuck.length) toast(`止まらなかった: ${stuck.map((id) => snap.agents.find((a) => a.id === id)?.name ?? id.slice(0, 8)).join("、")}`, true);
+  }, [snap]);
   const tree = useMemo(() => buildTree(agents), [agents]);
+
+  /** a とその子孫を、葉から順に止める。倒れる演出も葉から少しずつずらして出す */
+  const kill = useCallback(async (a: Agent) => {
+    const order: Agent[] = [];
+    const walk = (x: Agent) => { for (const k of tree.childrenOf.get(x.id) ?? []) walk(k); order.push(x); };
+    walk(a);
+    const targets = order.filter((x) => x.capabilities?.stop);
+    const skipped = order.filter((x) => !x.capabilities?.stop);
+    setDying((m) => { const n = new Map(m); targets.forEach((x, i) => n.set(x.id, i * KILL_STAGGER)); return n; });
+    if (selected && targets.some((x) => x.id === selected)) setSelected(null);
+    const failed: Agent[] = [];
+    for (const x of targets) {
+      try { await invoke("stop_session", { sessionId: x.id, peer: peer || null }); }
+      catch { failed.push(x); }
+    }
+    const ok = targets.filter((x) => !failed.includes(x));
+    // 止まらなかった分は演出を戻す。止まった分は演出が終わったら隠す
+    setDying((m) => { const n = new Map(m); for (const x of failed) n.delete(x.id); return n; });
+    const last = (targets.length - 1) * KILL_STAGGER + KILL_MS;
+    setTimeout(() => {
+      setHidden((h) => { const n = new Map(h); for (const x of ok) n.set(x.id, Date.now()); return n; });
+      setDying((m) => { const n = new Map(m); for (const x of ok) n.delete(x.id); return n; });
+    }, last);
+    if (failed.length) toast(`止められなかった: ${failed.map((x) => x.name).join("、")}`, true);
+    else toast(`${a.name}${order.length > 1 ? ` と子孫 ${order.length - 1} 人` : ""}を閉じた`);
+    if (skipped.length) toast(`ccn から止められないので残した: ${skipped.map((x) => x.name).join("、")}`, true);
+  }, [tree, selected, peer, toast]);
+  const askKill = useCallback((a: Agent, instant: boolean) => { if (instant) kill(a); else setKillAsk(a); }, [kill]);
+  const killCtx = useMemo(() => ({ dying, ask: askKill }), [dying, askKill]);
   const counts = useMemo(() => {
     const c: Record<Mood, number> = { approval: 0, reply: 0, working: 0, done: 0, idle: 0 };
     for (const a of agents) c[moodOf(a)]++;
@@ -76,6 +126,7 @@ export default function App() {
   const selfPeer = peers.find((p) => p.self);
 
   return (
+    <KillCtx.Provider value={killCtx}>
     <div className="app" onContextMenu={(e) => e.preventDefault()}>
       <header className="top">
         <div className="brand">
@@ -159,8 +210,42 @@ export default function App() {
           needs={needs} onSelect={(a) => setSelected(a.id)} />
       </div>
 
+      {killAsk && (
+        <KillConfirm agent={killAsk} descendants={countDesc(tree.childrenOf, killAsk.id)}
+          onCancel={() => setKillAsk(null)} onConfirm={() => { const a = killAsk; setKillAsk(null); kill(a); }} />
+      )}
+
       <div className="toasts">
         {toasts.map((t) => <div key={t.id} className={`toast ${t.bad ? "bad" : ""}`}>{t.text}</div>)}
+      </div>
+    </div>
+    </KillCtx.Provider>
+  );
+}
+
+function countDesc(childrenOf: Map<string, Agent[]>, id: string): number {
+  return (childrenOf.get(id) ?? []).reduce((n, k) => n + 1 + countDesc(childrenOf, k.id), 0);
+}
+
+/** 閉じる前の確認。Enter で閉じる、Esc でやめる */
+function KillConfirm({ agent, descendants, onCancel, onConfirm }: { agent: Agent; descendants: number; onCancel: () => void; onConfirm: () => void }) {
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); onCancel(); }
+      if (e.key === "Enter") { e.preventDefault(); onConfirm(); }
+    };
+    window.addEventListener("keydown", k);
+    return () => window.removeEventListener("keydown", k);
+  }, [onCancel, onConfirm]);
+  return (
+    <div className="modal-scrim" onMouseDown={onCancel}>
+      <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-title">{agent.name}{descendants ? ` と子孫 ${descendants} 人` : ""}を閉じる？</div>
+        <p className="hint">ccn でセッションを止める。{descendants ? "子孫は孫から順に止める。" : ""}止まらなかった分は画面に残る。⌘ を押しながら × を押すと、確認なしで閉じる。</p>
+        <div className="modal-btns">
+          <button className="pane-btn" onClick={onCancel}>やめる（Esc）</button>
+          <button className="danger" autoFocus onClick={onConfirm}>閉じる（Enter）</button>
+        </div>
       </div>
     </div>
   );
@@ -180,7 +265,7 @@ function NextRow({ needs, done, working, total, onSelect, onFocus }: {
   const hidden = needs.length + done.length - 1 - rest.length;
   return (
     <div className="next-row">
-      <span className="next-label">次の一手</span>
+      <span className="next-label">お便り</span>
       {first ? (
         <div className={`next-main nm-${moodOf(first)}`}>
           <span className="next-icon">{moodOf(first) === "approval" ? "✋" : "💬"}</span>
@@ -344,6 +429,7 @@ function FamilyCanvas({ all, result, selected, onSelect, onFocus }: {
   const ox = pad - minX, oy = pad - minY;
   const byId = new Map(all.map((a) => [a.id, a]));
   const pos = new Map(result.nodes.map((n) => [n.id, n]));
+  const kill = useContext(KillCtx);
   return (
     <div className="canvas" style={{ width: W, height: H }} data-valid={result.valid} data-arc={result.arcIndex}
       data-metrics={JSON.stringify({ o: result.metrics.overlaps, c: result.metrics.crossings, t: result.metrics.edgeThroughNode, i: result.metrics.interleave, s: Number(result.metrics.s.toFixed(3)) })}>
@@ -357,10 +443,17 @@ function FamilyCanvas({ all, result, selected, onSelect, onFocus }: {
       {result.nodes.map((n) => {
         const a = byId.get(n.id);
         if (!a) return null;
+        const delay = kill.dying.get(n.id);
         return (
-          <div key={n.id} className={`fnode ${selected === n.id ? "open" : ""}`}
-            style={{ left: n.x - n.w / 2 + ox, top: n.y - n.h / 2 + oy, width: n.w, height: n.h, transition: `left ${LAYOUT.moveMs}ms ease, top ${LAYOUT.moveMs}ms ease` }}>
+          <div key={n.id} className={`fnode ${selected === n.id ? "open" : ""} ${delay !== undefined ? "dying" : ""} ${n.depth >= 2 ? "is-mini" : ""}`}
+            style={{ left: n.x - n.w / 2 + ox, top: n.y - n.h / 2 + oy, width: n.w, height: n.h, transition: `left ${LAYOUT.moveMs}ms ease, top ${LAYOUT.moveMs}ms ease`, ["--kd" as string]: `${delay ?? 0}ms` }}>
             <Card agent={a} depth={n.depth} selected={selected === n.id} onSelect={onSelect} onFocus={onFocus} />
+            {delay !== undefined && <KillFx />}
+            {a.capabilities?.stop && delay === undefined && (
+              <button className="kill-x" title="閉じる（⌘ を押しながらで確認なし）" aria-label={`${a.name} を閉じる`}
+                onClick={(e) => { e.stopPropagation(); kill.ask(a, e.metaKey); }}
+                onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}>×</button>
+            )}
           </div>
         );
       })}
@@ -370,6 +463,7 @@ function FamilyCanvas({ all, result, selected, onSelect, onFocus }: {
 
 function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void }) {
   const { agent, depth, selected, onSelect, onFocus } = props;
+  const { dying } = useContext(KillCtx);
   if (depth <= 1) return <FullCard {...props} />;
   // 孫より下は小さい札。選んだときだけ、親や子と同じ大きさのカードを上に重ねる（周りは動かさない）
   const mood = moodOf(agent);
@@ -384,7 +478,7 @@ function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect:
         onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
         title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで広げて会話・右クリックで端末`}
       >
-        <Avatar pick={agent.avatar} seed={agent.name} mood={mood} role={roleOf(depth)} size={32} />
+        <Avatar pick={agent.avatar} seed={agent.name} mood={mood} role={roleOf(depth)} size={32} dead={dying.has(agent.id)} />
         <span className="mini-name"><i className={`dot st-${mood}`} />{agent.name}</span>
       </button>
       {selected && (
@@ -396,9 +490,21 @@ function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect:
   );
 }
 
+/** 人狼の「夜に襲われる」風の演出。暗くなる → 爪痕の3本線 → 倒れて灰色 → 幽霊が昇って消える（血は描かない） */
+function KillFx() {
+  return (
+    <div className="kill-fx" aria-hidden>
+      <div className="kill-night" />
+      <div className="kill-claws"><i /><i /><i /></div>
+      <img className="kill-ghost" src="/sprites/noto/1f47b/512.webp" alt="" draggable={false} />
+    </div>
+  );
+}
+
 function FullCard({ agent, depth, selected, onSelect, onFocus }: {
   agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;
 }) {
+  const { dying } = useContext(KillCtx);
   const mood = moodOf(agent);
   const task = taskOf(agent, mood);
   const now = nowOf(agent, mood);
@@ -416,7 +522,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
         <span className="task">{task}</span>
       </div>
       <div className="card-main">
-        <Avatar pick={agent.avatar} seed={agent.name} mood={mood} role={roleOf(depth)} size={48} />
+        <Avatar pick={agent.avatar} seed={agent.name} mood={mood} role={roleOf(depth)} size={48} dead={dying.has(agent.id)} />
         <div className="card-info">
           <span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}{since && <em>{since}</em>}</span>
           <span className="cname">{agent.name}</span>
