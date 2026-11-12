@@ -85,7 +85,19 @@ Bun.serve({
     if (!p[3] && req.method === "GET") return json({ ...summary(s), pending: [] });
     if (!p[3] && req.method === "DELETE") { s.proc.kill(9); return new Response(null, { status: 204, headers: CORS }); }
     if (p[3] === "teleport" && req.method === "GET") return json({ id: s.id, kind: "pty", state: "idle", live: true, title: s.name, from: { node: "mock", cwd: s.cwd, lobby: false }, git: null });
-    if (p[3] === "teleport" && req.method === "POST") { await Bun.sleep(1500); return json({ id: crypto.randomUUID(), cwd: s.cwd, cloned: false, node: "vm", sourceNode: "mock", sourceId: s.id, fork: false }); }
+    if (p[3] === "teleport" && req.method === "POST") {
+      const b = (await req.json()) as { to: string; fork?: boolean; subtree?: boolean; dryRun?: boolean };
+      if (!b.subtree) { await Bun.sleep(1500); return json({ id: crypto.randomUUID(), cwd: s.cwd, cloned: false, node: b.to, sourceNode: "mock", sourceId: s.id, fork: !!b.fork }); }
+      // 部分木: 根と子孫（x-ccn-from の sid8 で結ぶ）
+      const all = [...sessions.values()].filter((x) => x.exited === undefined);
+      const tree: Sess[] = [];
+      const walk = (x: Sess) => { tree.push(x); for (const k of all) if (k.parent?.split("/")[1] === x.id.slice(0, 8)) walk(k); };
+      walk(s);
+      const plan = tree.map((x) => ({ sourceId: x.id, title: x.name, cwd: x.cwd, parent: x.parent ?? "local" }));
+      if (b.dryRun) return json({ ok: true, dryRun: true, to: b.to, plan, skipped: [] });
+      await Bun.sleep(1500);
+      return json({ ok: true, moved: plan.map((m) => ({ sourceId: m.sourceId, id: crypto.randomUUID(), cwd: m.cwd, parent: m.parent, kind: "pty" })), failed: [], skipped: [] });
+    }
     if (p[3] === "terminal" && !p[4] && req.method === "GET") {
       let ctl!: ReadableStreamDefaultController<Uint8Array>;
       const enc = new TextEncoder();

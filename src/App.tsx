@@ -258,7 +258,7 @@ export default function App() {
         {/* 町と右パネルの境目。ドラッグで右パネルを 380px からウィンドウ幅の半分まで広げられる。ダブルクリックで既定の幅に戻る */}
         <Separator className="split-handle" />
         <SplitPanel id="side" defaultSize={SIDE_DEFAULT} minSize={SIDE_MIN} maxSize="50%">
-        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} termReq={termReq} peers={peers} takeEarly={takeEarly} booting={booting}
+        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} descendants={sel ? descOf(tree.childrenOf, sel.id) : []} termReq={termReq} peers={peers} takeEarly={takeEarly} booting={booting}
           onSent={(a) => toast(`${a.name} に届けた`)} onSent2={(m) => toast(m)} onError={(m) => toast(m, true)}
           needs={needs} onSelect={(a) => setSelected(a.id)} />
         </SplitPanel>
@@ -275,6 +275,10 @@ export default function App() {
     </div>
     </KillCtx.Provider>
   );
+}
+
+function descOf(childrenOf: Map<string, Agent[]>, id: string): Agent[] {
+  return (childrenOf.get(id) ?? []).flatMap((k) => [k, ...descOf(childrenOf, k.id)]);
 }
 
 function countDesc(childrenOf: Map<string, Agent[]>, id: string): number {
@@ -368,7 +372,7 @@ function Stage({ zoom, items, onBlank }: { zoom: number | "fit"; items: { id: st
   const packed = packHouseholds(items.map(({ id, w, h }) => ({ id, w, h })), width, LAYOUT.group.gap);
   const at = new Map(packed.items.map((p) => [p.id, p]));
   return (
-    <ScrollEdgeGradient className="stage" wrapClassName="seg-fill" strength="town" ref={outer}
+    <ScrollEdgeGradient className="stage" wrapClassName="seg-fill stage-bg" strength="town" ref={outer}
       onClick={(e) => { if (!(e.target as HTMLElement).closest(".card, .mini, .pop, .g-head")) onBlank(); }}>
       <div className="stage-inner" style={{ zoom: scale, width, height: packed.height + 20 }}>
         {items.map((b) => {
@@ -588,8 +592,8 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
 
 // ---------- 右のパネル ----------
 
-function Panel({ agent, peer, lineage, termReq, peers, takeEarly, booting, onSent, onSent2, onError, needs, onSelect }: {
-  agent: Agent | null; peer: string; lineage: Agent[]; termReq: number; peers: Peer[]; takeEarly: (id: string) => string; booting: string | null;
+function Panel({ agent, peer, lineage, descendants, termReq, peers, takeEarly, booting, onSent, onSent2, onError, needs, onSelect }: {
+  agent: Agent | null; peer: string; lineage: Agent[]; descendants: Agent[]; termReq: number; peers: Peer[]; takeEarly: (id: string) => string; booting: string | null;
   onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
 }) {
   const hasTerm = !!agent?.capabilities?.terminal;
@@ -689,7 +693,7 @@ function Panel({ agent, peer, lineage, termReq, peers, takeEarly, booting, onSen
           <button className="pane-btn" disabled={!!peer} title={peer ? "別の機械のセッションの転出は、まだ出していない" : "別の機械へ移す"} onClick={() => setSheet(sheet === "teleport" ? null : "teleport")}>転出</button>
         </div>
       </div>
-      {sheet === "teleport" && <Teleport agent={agent} peers={peers} onDone={(m) => { setSheet(null); onSent2(m); }} onError={onError} />}
+      {sheet === "teleport" && <Teleport agent={agent} descendants={descendants} peers={peers} onDone={(m) => { setSheet(null); onSent2(m); }} onError={onError} />}
       <div className="tabs">
         {hasTerm && <button className={tab === "term" ? "on" : ""} onClick={() => setTab("term")}>端末</button>}
         <button className={tab === "talk" ? "on" : ""} onClick={() => setTab("talk")}>会話</button>
@@ -826,7 +830,10 @@ function NewHousehold({ big, disabled, onStart, onCreated, onError }: { big?: bo
  * 転出（ccn の teleport）。行き先のノードと move / fork を選び、下見（移動元の説明）を見てから実行する。
  * 実行は1回の要求で最大95秒かかる。行き先の下見（clone することがある）は実行の中で ccn が行う。
  */
-function Teleport({ agent, peers, onDone, onError }: { agent: Agent; peers: Peer[]; onDone: (m: string) => void; onError: (m: string) => void }) {
+function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent; descendants: Agent[]; peers: Peer[]; onDone: (m: string) => void; onError: (m: string) => void }) {
+  // 子孫がいれば、子孫ごと移す（2026-11-12 本人の判断）。ccn の部分木の口（subtree）を使い、先に計画（dryRun）を見せる
+  const subtree = descendants.length > 0;
+  const [plan, setPlan] = useState<any>(null);
   const dests = peers.filter((p) => !p.self && p.status === "healthy");
   const [to, setTo] = useState(dests[0]?.name ?? "");
   const [fork, setFork] = useState(false);
@@ -837,13 +844,25 @@ function Teleport({ agent, peers, onDone, onError }: { agent: Agent; peers: Peer
   useEffect(() => {
     invoke<any>("teleport_info", { sessionId: agent.id, peer: null }).then(setInfo).catch((e) => setInfoErr(String(e)));
   }, [agent.id]);
-  const running = agent.state === "running" || agent.state === "waiting_permission";
+  useEffect(() => {
+    if (!subtree || !to) { setPlan(null); return; }
+    invoke<any>("teleport", { sessionId: agent.id, to, fork, subtree: true, dryRun: true, peer: null })
+      .then(setPlan).catch((e) => setPlan({ error: String(e) }));
+  }, [agent.id, to, fork, subtree]);
+  // 作業中か承認待ちの人が1人でもいたら押せなくする。ccn は動いているセッションを移さず、全員が止まるまで待つと終わりが読めないため
+  const busyOnes = [agent, ...descendants].filter((x) => x.state === "running" || x.state === "waiting_permission");
+  const running = busyOnes.length > 0;
   const go = async () => {
     setBusy(true);
     try {
-      const r = await invoke<any>("teleport", { sessionId: agent.id, to, fork, peer: null });
+      const r = await invoke<any>("teleport", { sessionId: agent.id, to, fork, subtree, dryRun: false, peer: null });
       setResult(r);
-      onDone(`${agent.name} を ${r?.node ?? to} へ${fork ? "複製" : "移動"}した（新しい id ${String(r?.id ?? "").slice(0, 8)}）`);
+      if (subtree) {
+        const moved = r?.moved?.length ?? 0, failed = r?.failed?.length ?? 0;
+        onDone(`${agent.name} の世帯を ${to} へ${fork ? "複製" : "移動"}した（${moved}人${failed ? `、失敗 ${failed}人` : ""}）`);
+      } else {
+        onDone(`${agent.name} を ${r?.node ?? to} へ${fork ? "複製" : "移動"}した（新しい id ${String(r?.id ?? "").slice(0, 8)}）`);
+      }
     } catch (e) { onError(`${agent.name} を転出できなかった: ${e}`); } finally { setBusy(false); }
   };
   return (
@@ -865,14 +884,31 @@ function Teleport({ agent, peers, onDone, onError }: { agent: Agent; peers: Peer
             <div>git: {info.git ? `${info.git.repoName}（${info.git.branch}）` : "git のリポジトリではない"}</div>
           </>
         )}
-        {running && <div className="bad-text">作業中か承認待ちのセッションは転出できない。止めて（待機にして）から転出する。</div>}
+        {subtree && (
+          <div className="tp-plan">
+            <div><b>子孫 {descendants.length} 人も一緒に移す</b>（親子の関係は行き先でも保つ）</div>
+            {plan?.error ? <div className="bad-text">計画を出せない: {plan.error}</div> : !plan ? <div className="hint">計画を出している…</div> : (
+              <ul>{(plan.plan ?? []).map((m: any) => <li key={m.sourceId}>{m.title ?? m.sourceId.slice(0, 8)} → {String(m.cwd ?? "").replace(/^\/Users\/[^/]+/, "~")}</li>)}
+                {(plan.skipped ?? []).map((m: any) => <li key={m.sourceId} className="bad-text">{m.sourceId.slice(0, 8)}: 対象外（{m.reason}）</li>)}</ul>
+            )}
+          </div>
+        )}
+        {running && <div className="bad-text">作業中か承認待ちの人がいるので転出できない（{busyOnes.map((x) => x.name).join("、")}）。全員が待機になってから転出する。</div>}
         <div className="hint">行き先に同じリポジトリが無ければ、ccn が行き先の ~/Documents に clone する。実行には最大95秒かかる。{agent.capabilities?.terminal ? "端末のセッションは、行き先ではまだ端末として再開しない（ccn 側の対応待ち）。" : ""}</div>
       </div>
       {result ? (
-        <div className="tp-result">行き先 {result.node} の新しい id: {result.id}{result.cloned ? "（clone した）" : ""}。画面上のノードを {result.node} に切り替えると見える。</div>
+        subtree ? (
+          <div className="tp-result">
+            {to} へ移した: {(result.moved ?? []).length}人。
+            {(result.failed ?? []).length > 0 && <span className="bad-text"> 失敗: {(result.failed ?? []).map((f: any) => `${f.sourceId.slice(0, 8)}（${f.error}）`).join("、")}</span>}
+            画面上のノードを {to} に切り替えると見える。
+          </div>
+        ) : (
+          <div className="tp-result">行き先 {result.node} の新しい id: {result.id}{result.cloned ? "（clone した）" : ""}。画面上のノードを {result.node} に切り替えると見える。</div>
+        )
       ) : (
         <div className="sheet-foot">
-          <span className="hint">世帯ごとの転出は、まだ出していない（親子の記録が保たれないため）</span>
+          <span className="hint">{subtree ? "全員を下見してから止めるので、下見で落ちたら何も変わらない" : ""}</span>
           <button className="primary" disabled={busy || !to || running || !info} onClick={go}>{busy ? "転出している…（最大95秒）" : fork ? "複製する" : "移す"}</button>
         </div>
       )}

@@ -18,14 +18,14 @@
 }
 
 * { box-sizing: border-box; }
-html, body, #root { height: 100%; margin: 0; }
+html, body, #root { height: 100%; margin: 0; overflow: hidden; }
 button { font: inherit; color: inherit; cursor: pointer; background: none; border: none; padding: 0; }
 button:disabled { opacity: 0.4; cursor: default; }
 code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding: 1px 5px; border-radius: 4px; font-size: 0.92em; }
 .hint { color: var(--sub); font-size: 12px; }
 .center { text-align: center; }
 
-.app { height: 100vh; display: flex; flex-direction: column; user-select: none; }
+.app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; user-select: none; }
 
 /* 上の帯 */
 .top { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 10px 18px; border-bottom: 1px solid var(--line); }
@@ -38,8 +38,12 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .conn.bad i { background: #e5574a; }
 
 .body { flex: 1; min-height: 0; }
-.body > [data-panel] { min-height: 0; display: flex; flex-direction: column; }
-.body > [data-panel] > .left, .body > [data-panel] > .panel { flex: 1; min-height: 0; }
+/* react-resizable-panels は中身を overflow: auto の div で包む。そこをスクロールさせず、高さを固定して中身の flex に任せる
+   （包みがスクロールすると、右パネルの見出しや入力欄まで一緒に動く。2026-11-12 に直した） */
+.body > [data-panel] { min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.body > [data-panel] > div { flex: 1; min-height: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden !important; }
+.body [data-panel] .left, .body [data-panel] .panel { flex: 1; min-height: 0; overflow: hidden; }
+.talk, .stage, .state-scroll, .ap-detail { overscroll-behavior: contain; }
 /* 境目のつまみ。ふだんは細い線、ホバーとドラッグ中は太く青く */
 .split-handle { position: relative; flex: none; width: 6px; margin: 0 -3px; z-index: 10; cursor: col-resize; background: transparent; }
 .split-handle::after { content: ""; position: absolute; top: 0; bottom: 0; left: 2.5px; width: 1px; background: var(--line); transition: background 0.12s, width 0.12s, left 0.12s; }
@@ -83,7 +87,6 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 
 .stage {
   flex: 1; min-height: 0; overflow: auto; padding: 6px 18px 24px;
-  background-image: radial-gradient(#eceae5 1px, transparent 1px); background-size: 18px 18px;
 }
 .stage-inner { position: relative; margin: 10px auto 0; }
 .slot { position: absolute; }
@@ -273,15 +276,16 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .empty p { margin: 0; }
 .sheet-foot .primary, .new-house-form .primary { white-space: nowrap; flex: none; }
 
-/* スクロールの端のグラデーション（src/ScrollEdgeGradient.tsx）。中身の裏、地の上に sticky で置く */
+/* スクロールの端のグラデーション（src/ScrollEdgeGradient.tsx）。外側に地とグラデーションを置き、透明なスクロールの容れ物を上に重ねる */
 .seg-wrap { position: relative; display: flex; flex-direction: column; min-height: 0; }
-.seg-wrap > .seg-scroll { flex: 1; min-height: 0; }
+.seg-wrap > .seg-scroll { position: relative; z-index: 1; flex: 1; min-height: 0; background: transparent; }
 .seg-fill { flex: 1; min-height: 0; }
-.seg-scroll > :not(.seg) { position: relative; z-index: 1; }
-.seg { position: sticky; left: 0; right: 0; flex: none; height: var(--seg-h, 14px); pointer-events: none; opacity: 0; transition: opacity 0.18s ease; z-index: 0; }
-.seg-top { top: 0; margin-bottom: calc(-1 * var(--seg-h, 14px)); background: linear-gradient(to bottom, rgb(208 217 232 / var(--seg-a, 0.22)), rgb(208 217 232 / 0)); }
-.seg-bottom { bottom: 0; margin-top: calc(-1 * var(--seg-h, 14px)); background: linear-gradient(to top, rgb(208 217 232 / var(--seg-a, 0.22)), rgb(208 217 232 / 0)); }
+.seg { position: absolute; left: 0; right: 0; height: var(--seg-h, 26px); pointer-events: none; opacity: 0; transition: opacity 0.18s ease; z-index: 0; }
+.seg-top { top: 0; background: linear-gradient(to bottom, rgb(196 207 226 / var(--seg-a, 0.45)), rgb(196 207 226 / 0)); }
+.seg-bottom { bottom: 0; background: linear-gradient(to top, rgb(196 207 226 / var(--seg-a, 0.45)), rgb(196 207 226 / 0)); }
 .seg.on { opacity: 1; }
+/* 町の地（点線）はスクロールの容れ物ではなく外側に描く（グラデーションを地と中身の間に挟むため） */
+.stage-bg { background-image: radial-gradient(#eceae5 1px, transparent 1px); background-size: 18px 18px; }
 .ap-detail { font-family: ui-monospace, Menlo, monospace; }
 
 /* ノードの右上の小さい ×。枠線の上に半分乗せる。ふだんは薄く、ホバーで濃く。押せる範囲は 24px */
@@ -339,3 +343,5 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .fam-title, .fam-count, .new-house { white-space: nowrap; }
 .legend { flex-wrap: wrap; justify-content: flex-end; row-gap: 2px; }
 .lg { white-space: nowrap; }
+.tp-plan { display: flex; flex-direction: column; gap: 2px; }
+.tp-plan ul { margin: 2px 0 0; padding-left: 18px; }

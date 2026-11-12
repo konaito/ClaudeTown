@@ -467,6 +467,9 @@ fn teleport_info(session_id: String, peer: Option<String>) -> Result<Value, Stri
 
 #[tauri::command]
 fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> {
+    if send_disabled() {
+        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
+    }
     let peer = peer.filter(|p| !p.is_empty());
     agent().delete(&format!("{}/sessions/{session_id}", api(&peer))).call().map_err(|e| format!("止められなかった: {e}"))?;
     Ok(())
@@ -474,14 +477,18 @@ fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> 
 
 /// 転出（ccn の teleport。PR #18）。移動元のノードが下見から取り込みまで1回の要求で進め、結果を返す（最大95秒）
 #[tauri::command]
-async fn teleport(session_id: String, to: String, fork: bool, peer: Option<String>) -> Result<Value, String> {
+async fn teleport(session_id: String, to: String, fork: bool, subtree: Option<bool>, dry_run: Option<bool>, peer: Option<String>) -> Result<Value, String> {
     if send_disabled() {
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
     }
     let peer = peer.filter(|p| !p.is_empty());
     tauri::async_runtime::spawn_blocking(move || {
         let a = ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).build();
-        match a.post(&format!("{}/sessions/{session_id}/teleport", api(&peer))).send_json(json!({ "to": to, "fork": fork })) {
+        // subtree は子孫ごと移す口（ccn-pty が作る別 PR）。dry_run は計画だけを返す
+        let mut body = json!({ "to": to, "fork": fork });
+        if subtree.unwrap_or(false) { body["subtree"] = json!(true); }
+        if dry_run.unwrap_or(false) { body["dryRun"] = json!(true); }
+        match a.post(&format!("{}/sessions/{session_id}/teleport", api(&peer))).send_json(body) {
             Ok(r) => r.into_json::<Value>().map_err(|e| e.to_string()),
             Err(ureq::Error::Status(code, r)) => Err(format!("転出できなかった（{code}）: {}", r.into_string().unwrap_or_default())),
             Err(e) => Err(format!("ccn に届かない: {e}")),
@@ -532,10 +539,16 @@ fn term_open(app: tauri::AppHandle, session_id: String, peer: Option<String>) ->
 /// 待機中は ping が15〜30秒ごとに来る約束なので、45秒何も来なければ切れたとみなし、最後の位置（id:）から ?after= で繋ぎ直す
 fn read_terminal(url: &str, stop: &AtomicBool, emit: impl Fn(&str, Value)) {
     let mut after: Option<u64> = None;
+    // バイト位置は claude のプロセスごとに0から数えるので、size の epoch と組で続きを指す（ccn PR #19）
+    let mut epoch: Option<String> = None;
     let mut fails = 0;
     while !stop.load(Ordering::SeqCst) {
         let a = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(5)).timeout_read(Duration::from_secs(45)).build();
-        let u = match after { Some(p) => format!("{url}?after={p}"), None => url.to_string() };
+        let u = match (after, &epoch) {
+            (Some(p), Some(e)) => format!("{url}?after={p}&epoch={e}"),
+            (Some(p), None) => format!("{url}?after={p}"),
+            _ => url.to_string(),
+        };
         let resp = match a.get(&u).call() {
             Ok(r) => { fails = 0; r }
             Err(e) => {
@@ -555,6 +568,11 @@ fn read_terminal(url: &str, stop: &AtomicBool, emit: impl Fn(&str, Value)) {
                 if !ev.is_empty() || !data.is_empty() {
                     let v: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
                     if let Some(p) = id { after = Some(p); }
+                    if ev == "size" {
+                        if let Some(e) = v.get("epoch").filter(|e| !e.is_null()) {
+                            epoch = Some(e.as_str().map(String::from).unwrap_or_else(|| e.to_string()));
+                        }
+                    }
                     if ev != "ping" { emit(&ev, v); }
                     if ev == "exit" { return; }
                 }

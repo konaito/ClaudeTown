@@ -58,13 +58,18 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
       if (closed) return;
       switch (e.ev) {
         case "size":
-          // 繋いだ直後か、ほかの画面が大きさを変えた。続けて replay が来たら、その前に画面を消す
+          // 繋いだ直後か、ほかの画面が大きさを変えた。続けて replay が来たら、その前に画面を消す。
+          // replay はノードの cols と rows で作った画面のスナップショットなので、まず xterm をその大きさにする（ccn PR #19）
           pendingReset = true;
+          if (e.data?.cols && e.data?.rows && (e.data.cols !== term.cols || e.data.rows !== term.rows)) {
+            try { term.resize(e.data.cols, e.data.rows); } catch { /* 大きさを変えられなくても書くのは続ける */ }
+          }
           break;
         case "replay":
           if (pendingReset) { term.reset(); pendingReset = false; }
           replaying++;
-          term.write(b64ToBytes(e.data?.b64 ?? ""), () => { replaying--; });
+          // 書き終えたら、右パネルの大きさに合わせ直して PTY にも伝える
+          term.write(b64ToBytes(e.data?.b64 ?? ""), () => { replaying--; lastSize = ""; pushSize(); });
           if (e.data?.b64) onFirstOutput();
           break;
         case "data":

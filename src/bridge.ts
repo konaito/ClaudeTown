@@ -44,7 +44,7 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     case "term_resize": return post(`/sessions/${a.sessionId}/terminal/resize`, { cols: a.cols, rows: a.rows }) as T;
     case "session_detail": return j(`/sessions/${a.sessionId}`) as T;
     case "teleport_info": return j(`/sessions/${a.sessionId}/teleport`) as T;
-    case "teleport": return post(`/sessions/${a.sessionId}/teleport`, { to: a.to, fork: a.fork }) as T;
+    case "teleport": return post(`/sessions/${a.sessionId}/teleport`, { to: a.to, fork: a.fork, subtree: a.subtree, dryRun: a.dryRun }) as T;
     case "stop_session": return j(`/sessions/${a.sessionId}`, { method: "DELETE" }) as T;
     case "conversation": return [] as T;
     default: console.info("[モックでは実行しない]", cmd, a); return null as T;
