@@ -13,8 +13,6 @@ export function lastTermSize(): { cols: number; rows: number } | null {
   try { const v = JSON.parse(localStorage.getItem(SIZE_KEY) ?? "null"); return v?.cols && v?.rows ? v : null; } catch { return null; }
 }
 
-const b64ToBytes = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-
 export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionId: string; peer: string | null; onError: (m: string) => void; takeEarly?: (id: string) => string }) {
   const box = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<string>("起動中…");
@@ -90,12 +88,12 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
           if (pendingReset) { term.reset(); pendingReset = false; }
           replaying++;
           // 書き終えたら、右パネルの大きさに合わせ直して PTY にも伝える
-          term.write(b64ToBytes(e.data?.b64 ?? ""), () => { replaying--; lastSize = ""; pushSize(); afterWrite(); });
-          if (e.data?.b64) onFirstOutput();
+          term.write(e.data?.s ?? "", () => { replaying--; lastSize = ""; pushSize(); afterWrite(); });
+          if (e.data?.s) onFirstOutput();
           break;
         case "data":
           pendingReset = false;
-          term.write(b64ToBytes(e.data?.b64 ?? ""), afterWrite);
+          term.write(e.data?.s ?? "", afterWrite);
           onFirstOutput();
           break;
         case "exit":

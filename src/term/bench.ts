@@ -3,10 +3,11 @@
 // - new: 「＋ 新しい世帯」のボタンを押し、入力欄（❯）が出るまでを測る。測り終えたら、作ったセッションだけを止める
 // - open: 自分で作ったセッション1つを、選び直して右クリックと同じ操作で開き直し、❯ が見えるまでを測る
 // - all: new を n 回、続けて最後に作ったセッションで open を n 回
+// - cpu: ?sid=<セッション> のターミナルを開いたまま30秒、IPC の回数を数える（#8、#9。scripts/mock-ccn-flood.ts と使う）
 // 結果は perf.ts が1回ごとに perf_log に書く。作るセッションには name に bench-ct-term を付ける。
 import { useEffect, useRef } from "react";
 import { call } from "../bridge";
-import { perfNext } from "./perf";
+import { perfCounters, perfNext } from "./perf";
 
 const params = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
 const mode = import.meta.env.DEV ? params.get("bench") : null;
@@ -33,6 +34,23 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
   const log = (o: object) => call("perf_log", { line: JSON.stringify({ bench: mode, ...o }) });
   await sleep(3000);
   try {
+    // cpu: ?sid=<セッション> のターミナルを開いたまま、5秒置いてから30秒、IPC の回数を数える。CPU 時間は外から ps で測る。
+    // 窓が裏にあると WebKit が描画を止めるので、FC_BENCH_TOP=1 で起動して最前面に出す（lib.rs の setup）
+    if (mode === "cpu") {
+      const sid = params.get("sid") ?? "";
+      h().focusId(sid);
+      await sleep(5000);
+      const a = { ...perfCounters };
+      // 描画の回数も数える。窓が隠れていると WebKit が描画を止め、描画の負荷が CPU に出ないので、その回は使わない
+      let frames = 0, on = true;
+      const raf = () => { if (!on) return; frames++; requestAnimationFrame(raf); };
+      requestAnimationFrame(raf);
+      await log({ cpu_start: true });
+      await sleep(30000);
+      on = false;
+      await log({ cpu_end: true, ipcPerSec: +((perfCounters.ipc - a.ipc) / 30).toFixed(1), charsPerSec: Math.round((perfCounters.bytes - a.bytes) / 30), fps: +(frames / 30).toFixed(1) });
+      return;
+    }
     let last: string | null = null;
     if (mode === "new" || mode === "all" || mode === "open") {
       const rounds = mode === "open" ? 1 : n;

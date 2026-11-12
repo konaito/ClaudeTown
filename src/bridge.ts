@@ -1,9 +1,9 @@
 // Tauri の命令を呼ぶ口。
 // ブラウザで開いたとき（開発中の見た目の確認）は、URL に ?mock があればモックのノード（scripts/mock-ccn-pty.ts、127.0.0.1:4399）に直接繋ぐ。
 // ?mock が無ければ public/dev-*.json を読み、送信はしない。
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { perfCounters } from "./term/perf";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 // ?mockport=<ポート> で、モック以外の口（本番のノードの前に置いた試験用の中継など）にも繋げる
@@ -86,20 +86,34 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   return "ブラウザ表示" as T;
 }
 
-/** 端末のイベント。ev は size / replay / data / exit / error。data は ccn の JSON のまま（replay と data は { b64 }） */
+/**
+ * 端末のイベント。ev は size / replay / data / exit / error / input_error。
+ * replay と data は { s }（出力を UTF-8 の文字列に戻したもの）。Tauri では Rust が base64 を外し、16ms ごとにまとめて送る（#9）
+ */
 export type TermEvent = { id: string; ev: string; data: any };
 
 /** 1つのセッションの端末を開き、イベントを受ける。戻り値で閉じる */
 export async function openTerminal(sessionId: string, peer: string | null, on: (e: TermEvent) => void): Promise<() => void> {
   if (inTauri) {
-    const un = await listen<TermEvent>("fc-term", (m) => { if (m.payload.id === sessionId) on(m.payload); });
-    await invoke("term_open", { sessionId, peer });
-    return () => { un(); invoke("term_close", { sessionId }).catch(() => {}); };
+    // このターミナルだけに送る口（Channel）。前は全部のウィンドウへの emit を受けて、セッションの ID で選んでいた
+    let open = true;
+    const ch = new Channel<{ ev: string; data: any }>((m) => {
+      perfCounters.ipc++;
+      perfCounters.bytes += m.data?.s?.length ?? 0;
+      if (open) on({ id: sessionId, ev: m.ev, data: m.data });
+    });
+    const generation = await invoke<number>("term_open", { sessionId, peer, onEvent: ch });
+    return () => { open = false; invoke("term_close", { sessionId, generation }).catch(() => {}); };
   }
   if (MOCK) {
     const es = new EventSource(`${MOCK}/sessions/${sessionId}/terminal`);
+    // Tauri と同じ形（{ s }）に直す。文字の途中で切れた分は TextDecoder が次に回す
+    const dec = new TextDecoder();
     for (const ev of ["size", "replay", "data", "exit"]) {
-      es.addEventListener(ev, (m) => on({ id: sessionId, ev, data: JSON.parse((m as MessageEvent).data) }));
+      es.addEventListener(ev, (m) => {
+        const d = JSON.parse((m as MessageEvent).data);
+        on({ id: sessionId, ev, data: typeof d?.b64 === "string" ? { s: dec.decode(Uint8Array.from(atob(d.b64), (c) => c.charCodeAt(0)), { stream: true }) } : d });
+      });
     }
     es.onerror = () => on({ id: sessionId, ev: "error", data: { message: "モックに繋がらない" } });
     return () => es.close();
