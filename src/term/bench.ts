@@ -100,9 +100,12 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       h().select(params.get("sid"));
       const secs = Number(params.get("secs") ?? 60);
       const text = (sel: string) => document.querySelector(sel)?.textContent ?? null;
+      // 会話の欄とグラデーションの上端（印が出ても位置が変わらないか）
+      const top = (sel: string) => { const e = document.querySelector(sel); return e ? Math.round(e.getBoundingClientRect().top) : null; };
       for (let i = 0; i < secs; i++) {
         await log({ t: i, at: new Date().toISOString().slice(11, 23), town: text(".fam-title"), conn: text(".conn"), banner: text(".banner.bad"),
-          note: text(".offline-note"), msgs: document.querySelectorAll(".talk .msg, .talk .tool-line").length, empty: !!document.querySelector(".talk .hint.center") });
+          note: text(".offline-note"), msgs: document.querySelectorAll(".talk .msg, .talk .tool-line").length, empty: !!document.querySelector(".talk .hint.center"),
+          tabs: document.querySelectorAll(".panel .tabs button").length, segTop: top(".panel .seg-top"), scrollTop: top(".panel .seg-scroll"), noteTop: top(".offline-note") });
         await sleep(1000);
       }
       return;

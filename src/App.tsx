@@ -1027,12 +1027,13 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
 
       {tab === "term" ? (
         <TerminalView sessionId={agent.id} peer={peer || null} onError={onError} takeEarly={takeEarly} />
-      ) : tab === "talk" ? (<>
+      ) : tab === "talk" ? (<div className="talk-box">
+        {/* 保存した履歴を出しているときの印。会話の欄の流れに入れると欄とグラデーションの始まりがずれ、タブの行は端末のタブがあると幅が足りない。
+            そのため、欄の上端の中央に重ねる（position: absolute）。中身の失敗は title に入れる */}
         {convErr && shown.length > 0 ? (
-          // 読めないが、保存分か前に読めた分を出している。中身の失敗は title に入れる
-          <div className="offline-note" title={convErr}><i />つながらない・{cachedAt ? `${savedLabel(cachedAt)} に保存した履歴` : "最後に読めた履歴"}を表示中</div>
+          <span className="offline-note" title={convErr}><i /><span>つながらない・{cachedAt ? `${savedLabel(cachedAt)} 時点の履歴` : "最後に読めた履歴"}</span></span>
         ) : !convErr && cachedAt ? (
-          <div className="offline-note wait"><i />{savedLabel(cachedAt)} に保存した履歴・最新を読み込み中</div>
+          <span className="offline-note wait" title="最新を読み込んでいる"><i /><span>{savedLabel(cachedAt)} 時点の履歴・更新中</span></span>
         ) : null}
         <ScrollEdgeGradient className="talk" wrapClassName="seg-fill" ref={scroller}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
@@ -1048,7 +1049,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
             </div>
           )}
         </ScrollEdgeGradient>
-      </>) : (
+      </div>) : (
         <StateTab agent={agent} mood={mood} />
       )}
 
