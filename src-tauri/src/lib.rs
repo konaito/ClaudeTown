@@ -157,6 +157,14 @@ fn peers() -> Result<Value, String> {
     get_json_t(&format!("{}/api/peers", ccn_base()), LIST_TIMEOUT)
 }
 
+/// カードの名前。セッションの cwd の最後の名前。cwd が無いときだけ ccn の title、それも無ければ ID の先頭8字
+fn display_name(cwd: Option<&str>, title: Option<&str>, id: &str) -> String {
+    if let Some(d) = cwd.and_then(|c| c.split('/').filter(|p| !p.is_empty()).last()) {
+        return d.to_string();
+    }
+    title.filter(|t| !t.is_empty()).map(String::from).unwrap_or_else(|| id[..8.min(id.len())].to_string())
+}
+
 fn snapshot(peer: Option<String>) -> Snapshot {
     let peer = peer.filter(|p| !p.is_empty());
     let (sessions, ccn_error) = match get_json_t(&format!("{}/sessions", api(&peer)), LIST_TIMEOUT) {
@@ -173,7 +181,7 @@ fn snapshot(peer: Option<String>) -> Snapshot {
     let mut name_of: HashMap<String, String> = HashMap::new();
     for s in &live {
         let id = s["id"].as_str().unwrap_or_default().to_string();
-        let name = s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(&id[..8.min(id.len())]).to_string();
+        let name = display_name(s["cwd"].as_str(), s["title"].as_str(), &id);
         name_of.insert(id, name);
     }
     // ccn の parent は from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）
@@ -973,6 +981,15 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn display_name_is_cwd_basename() {
+        use super::display_name;
+        assert_eq!(display_name(Some("/Users/x/Documents/meta"), Some("[Image #5] 安定"), "abcdef0123"), "meta");
+        assert_eq!(display_name(Some("/a/b/"), None, "abcdef0123"), "b");
+        assert_eq!(display_name(None, Some("題"), "abcdef0123"), "題");
+        assert_eq!(display_name(Some(""), None, "abcdef0123"), "abcdef01");
+    }
+
     use super::*;
 
     #[test]
