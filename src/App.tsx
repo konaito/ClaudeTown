@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { call as invoke, setFullscreen } from "./bridge";
 import { TerminalView, lastTermSize } from "./term/TerminalView";
 import { perfMark, perfSetId, perfStart } from "./term/perf";
@@ -15,6 +15,8 @@ import {
   MOOD_LABEL, NEEDS_YOU, buildTree, choicesOf, houseNameOf, moodOf, nowOf, sinceText, taskOf,
 } from "./model";
 import { Markdown } from "./Markdown";
+import { chatPerf } from "./chatPerf";
+import { mergeConv, type ConvDelta } from "./conv";
 import { layoutFamily, type LNode } from "./layout/layout";
 import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
@@ -898,13 +900,15 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
     setItems([]); setPending([]); setConvErr(null); stick.current = true;
     if (!id) return;
     let alive = true;
+    // 画面が持っている数。Rust は、これより後の発言だけを返す（#10）。増えていなければ items を変えず、描き直さない
+    let since: number | null = null;
     const load = async () => {
       try {
-        const r = await invoke<ConvItem[]>("conversation", { sessionId: id, peer: peer || null });
+        const d = await invoke<ConvDelta>("conversation", { sessionId: id, peer: peer || null, since });
         if (!alive) return;
-        setItems(r);
+        since = d.total;
         setConvErr(null);
-        setPending((p) => p.filter((x) => !r.some((y) => y.role === "user" && y.text.trim() === x.text.trim())));
+        if (d.reset || d.items.length) setItems((prev) => mergeConv(prev, d));
       } catch (e) {
         if (alive) setConvErr(String(e));
       }
@@ -913,6 +917,23 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
     const t = setInterval(load, CONV_POLL_MS);
     return () => { alive = false; clearInterval(t); };
   }, [id, peer]);
+
+  // 送ったばかりの文は、会話に出たら仮の項目を消す。届いた発言の差分ではなく、持っている全部と比べる（送る前に届いていた回も拾う）
+  useEffect(() => {
+    setPending((p) => {
+      if (!p.length) return p;
+      const q = p.filter((x) => !items.some((y) => y.role === "user" && y.text.trim() === x.text.trim()));
+      return q.length === p.length ? p : q;
+    });
+  }, [items, pending.length]);
+
+  // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
+  const shown = useMemo(() => collapseTools([...items, ...pending]), [items, pending]);
+  const lastChoices = useMemo(() => {
+    const lastAssistant = [...items].reverse().find((x) => x.role === "assistant");
+    const lastIsAssistant = items.filter((x) => x.role !== "tool").slice(-1)[0]?.role === "assistant";
+    return lastAssistant && lastIsAssistant ? choicesOf(lastAssistant.text) : [];
+  }, [items]);
 
   useLayoutEffect(() => {
     const el = scroller.current;
@@ -957,10 +978,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
     }
   };
 
-  const shown = collapseTools([...items, ...pending]);
-  const lastAssistant = [...items].reverse().find((x) => x.role === "assistant");
-  const lastIsAssistant = items.filter((x) => x.role !== "tool").slice(-1)[0]?.role === "assistant";
-  const choices = lastAssistant && lastIsAssistant && mood !== "working" ? choicesOf(lastAssistant.text) : [];
+  const choices = mood !== "working" ? lastChoices : [];
 
   return (
     <aside className={`panel pm-${mood}`}>
@@ -994,7 +1012,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
           {convErr && <div className="banner bad small">{convErr}</div>}
           {shown.length === 0 && !convErr && <p className="hint center">まだチャットが無い</p>}
-          {shown.map((x, i) => <Bubble key={i} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
+          {shown.map((x, i) => <Bubble key={x.n ?? `p${i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "approval" && (
             <Approval agent={agent} peer={peer} onDone={(m) => onSent2(m)} onError={onError} />
           )}
@@ -1205,26 +1223,42 @@ function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent
   );
 }
 
-/** 道具の行が続いたら1行にまとめる */
+/** 道具の行が続いたら1行にまとめる。まとめた行の n は最初の行の n にする（後ろに道具が増えても key が変わらない） */
 function collapseTools(items: ConvItem[]): (ConvItem & { more?: number })[] {
   const out: (ConvItem & { more?: number })[] = [];
   for (const x of items) {
     const last = out[out.length - 1];
     if (x.role === "tool" && last?.role === "tool") {
-      out[out.length - 1] = { ...x, more: (last.more ?? 0) + 1 };
+      out[out.length - 1] = { ...x, n: last.n, more: (last.more ?? 0) + 1 };
     } else out.push(x);
   }
   return out;
 }
 
+/** 時刻の書式。toLocaleTimeString は呼ぶたびに ICU の書式を作り直すので、1つを使い回す（#10） */
+const HM = new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" });
 /** at は node のセッションなら ISO の文字列、pty のセッションなら ms の数 */
 function timeOf(at?: string | number | null): string {
+  chatPerf.time++;
   if (!at) return "";
   const d = new Date(at);
-  return isNaN(+d) ? "" : d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+  return isNaN(+d) ? "" : HM.format(d);
 }
 
-function Bubble({ item, agent, lineageDepth }: { item: ConvItem & { more?: number }; agent: Agent; lineageDepth: number }) {
+type BubbleProps = { item: ConvItem & { more?: number }; agent: Agent; lineageDepth: number };
+/**
+ * 吹き出しは、中身か見た目に使う値が変わったときだけ描き直す（#10）。
+ * agent は一覧を取るたびに別の物になるので、使う値（id、名前、絵）だけを比べる。
+ * まとめた道具の行は毎回作り直すので、n と件数と文で比べる
+ */
+const Bubble = memo(BubbleView, (a: BubbleProps, b: BubbleProps) =>
+  (a.item === b.item || (a.item.n != null && a.item.n === b.item.n && a.item.more === b.item.more && a.item.text === b.item.text && a.item.pending === b.item.pending))
+  && a.lineageDepth === b.lineageDepth
+  && a.agent.id === b.agent.id && a.agent.name === b.agent.name
+  && a.agent.avatar?.char === b.agent.avatar?.char && a.agent.avatar?.hue === b.agent.avatar?.hue);
+
+function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
+  chatPerf.bubble++;
   if (item.role === "tool" && item.sent) return <SentLetter item={item} agent={agent} lineageDepth={lineageDepth} />;
   if (item.role === "tool") {
     return <div className="tool-line">🔧 {item.text}{item.more ? ` ほか${item.more}件` : ""}</div>;

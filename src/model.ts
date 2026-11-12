@@ -57,6 +57,8 @@ export type Peer = { name: string; url: string; status: string; self: boolean };
 
 export type ConvItem = {
   role: "user" | "assistant" | "tool"; text: string; from?: string | null; at?: string | number | null; pending?: boolean;
+  /** 通し番号（このセッションで何件目か。Rust の conversation が付ける）。吹き出しの key に使う。送ったばかりの仮の項目には無い */
+  n?: number;
   /** 別のセッションからのお手紙なら、送り手（from-name と、uds のソケットか agent:<ノード>/<sid8>/<役割>） */
   letter?: { fromName?: string | null; fromRaw?: string | null } | null;
   /** 送ったお手紙（role が tool のとき）。宛先は生のまま。create は子を作って最初の文を渡したもの */

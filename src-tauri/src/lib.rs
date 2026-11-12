@@ -1,7 +1,7 @@
 // family-computing の裏側。画面から呼ばれる命令:
 // - snapshot(peer): ccn の一覧（状態、送信先、親子）、hook の報告、close-check の判定を1つにまとめる
 // - peers: ccn につながっている機械の一覧
-// - conversation(session_id, peer): ccn の messages を差分で読み、画面に出す形（発言と道具の1行）に縮めて返す
+// - conversation(session_id, peer, since): ccn の messages を差分で読み、画面に出す形（発言と道具の1行）に縮め、画面がまだ持っていない分だけ返す
 // - send_message(session_id, text, peer): ccn の POST /api/sessions/<id>/messages で文を届ける
 // - create_session / stop_session / teleport / teleport_info / session_detail: ccn の口をそのまま呼ぶ
 // - term_open / term_close / term_input / term_resize: ccn の端末（PTY）の口を読み書きし、開いた画面の Channel へ流す
@@ -331,8 +331,49 @@ fn set_house_name(session_id: String, name: String) -> Result<(), String> {
 
 #[derive(Default)]
 struct Conv {
+    /// ccn の messages の次の読み出し位置（after=）
     next: u64,
+    /// これまでに縮めた項目の数。項目の通し番号 n は 0 から数える
+    total: u64,
+    /// 最後の KEEP_MESSAGES 件
     items: Vec<Value>,
+}
+
+/// 画面へ渡す差分（#10）。items の各項目には通し番号 n を付ける。
+/// reset=true のとき、画面は持っている分を捨てて items に置き換える。total は次の呼び出しの since に渡す
+#[derive(Serialize, Debug, PartialEq)]
+struct ConvDelta {
+    items: Vec<Value>,
+    total: u64,
+    reset: bool,
+}
+
+impl Conv {
+    fn push(&mut self, fresh: Vec<Value>) {
+        for mut v in fresh {
+            if let Value::Object(o) = &mut v {
+                o.insert("n".into(), json!(self.total));
+            }
+            self.total += 1;
+            self.items.push(v);
+        }
+        if self.items.len() > KEEP_MESSAGES {
+            let cut = self.items.len() - KEEP_MESSAGES;
+            self.items.drain(..cut);
+        }
+    }
+
+    /// 画面が total=since まで持っているときの差分。持っている分が古すぎる（捨てた分より前）、
+    /// 先に進みすぎている（キャッシュを作り直した）、since が無いときは、全部を reset で返す
+    fn since(&self, since: Option<u64>) -> ConvDelta {
+        let base = self.total - self.items.len() as u64;
+        match since {
+            Some(s) if s >= base && s <= self.total => {
+                ConvDelta { items: self.items[(s - base) as usize..].to_vec(), total: self.total, reset: false }
+            }
+            _ => ConvDelta { items: self.items.clone(), total: self.total, reset: true },
+        }
+    }
 }
 
 static CONVS: Mutex<Option<HashMap<String, Conv>>> = Mutex::new(None);
@@ -457,7 +498,7 @@ fn simplify(m: &Value) -> Vec<Value> {
     out
 }
 
-fn conversation(session_id: String, peer: Option<String>) -> Result<Vec<Value>, String> {
+fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<ConvDelta, String> {
     let peer = peer.filter(|p| !p.is_empty());
     let key = format!("{}|{session_id}", peer.clone().unwrap_or_default());
     let mut next = {
@@ -484,12 +525,8 @@ fn conversation(session_id: String, peer: Option<String>) -> Result<Vec<Value>, 
     let map = g.get_or_insert_with(HashMap::new);
     let c = map.entry(key).or_insert_with(Conv::default);
     c.next = next;
-    c.items.extend(fresh);
-    if c.items.len() > KEEP_MESSAGES {
-        let cut = c.items.len() - KEEP_MESSAGES;
-        c.items.drain(..cut);
-    }
-    Ok(c.items.clone())
+    c.push(fresh);
+    Ok(c.since(since))
 }
 
 fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
@@ -946,8 +983,8 @@ mod cmd {
     #[tauri::command]
     pub async fn snapshot(peer: Option<String>) -> Result<Snapshot, String> { blocking(move || Ok(super::snapshot(peer))).await }
     #[tauri::command]
-    pub async fn conversation(session_id: String, peer: Option<String>) -> Result<Vec<Value>, String> {
-        blocking(move || super::conversation(session_id, peer)).await
+    pub async fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<super::ConvDelta, String> {
+        blocking(move || super::conversation(session_id, peer, since)).await
     }
     #[tauri::command]
     pub async fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
@@ -1031,7 +1068,8 @@ pub fn run() {
         return;
     }
     if let Some(id) = arg_after("--conversation") {
-        println!("{}", serde_json::to_string_pretty(&conversation(id, None)).unwrap_or_default());
+        // 出力の形は前と同じ（Ok に項目の配列）。public/dev-conversation.json に使う
+        println!("{}", serde_json::to_string_pretty(&conversation(id, None, None).map(|d| d.items)).unwrap_or_default());
         return;
     }
     // family-computing --answer <sessionId> <allow|deny> [requestId]   承認待ちに答える（画面のボタンと同じ処理）
@@ -1089,6 +1127,37 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn conversation_returns_only_what_the_screen_lacks() {
+        use super::{Conv, KEEP_MESSAGES};
+        use serde_json::json;
+        let mut c = Conv::default();
+        let item = |i: usize| json!({ "role": "assistant", "text": format!("t{i}") });
+        c.push((0..3).map(item).collect());
+        // 初めて開いたときは全部
+        let d = c.since(None);
+        assert!(d.reset);
+        assert_eq!(d.total, 3);
+        assert_eq!(d.items.iter().map(|v| v["n"].as_u64().unwrap()).collect::<Vec<_>>(), vec![0, 1, 2]);
+        // 増えていなければ空
+        let d = c.since(Some(3));
+        assert!(!d.reset && d.items.is_empty() && d.total == 3);
+        // 増えた分だけ
+        c.push(vec![item(3)]);
+        let d = c.since(Some(3));
+        assert!(!d.reset);
+        assert_eq!(d.items, vec![json!({ "role": "assistant", "text": "t3", "n": 3 })]);
+        // 一度に KEEP_MESSAGES を超えて増え、画面の持つ分が捨てた分より前になったら、全部を reset で
+        c.push((4..4 + KEEP_MESSAGES + 5).map(item).collect());
+        let d = c.since(Some(4));
+        assert!(d.reset);
+        assert_eq!(d.items.len(), KEEP_MESSAGES);
+        assert_eq!(d.items[0]["n"], json!(9));
+        assert_eq!(d.total, 4 + KEEP_MESSAGES as u64 + 5);
+        // 画面のほうが先に進んでいる（キャッシュを作り直した）ときも reset
+        assert!(c.since(Some(d.total + 1)).reset);
+    }
+
     #[test]
     fn display_name_is_cwd_basename() {
         use super::display_name;

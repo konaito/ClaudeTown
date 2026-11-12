@@ -1,7 +1,8 @@
 // 返事の文を出す小さい Markdown 表示。段落、見出し、箇条書き、太字、インラインのコードだけを扱う。
 // 「できたこと」「やったこと」などの見出しの下の箇条書きと、✓ で始まる行は、チェックの付いた一覧にする。
 // HTML は解釈しない（文字列のまま出す）。
-import type { ReactNode } from "react";
+import { memo, type ReactNode } from "react";
+import { chatPerf } from "./chatPerf";
 
 const DONE_HEAD = /(できたこと|やったこと|終わったこと|完了|直したこと|分かったこと|確認済み)/;
 const CHECK = /^(✓|✅|☑|\[x\])\s*/i;
@@ -24,6 +25,7 @@ function inline(s: string): ReactNode[] {
 type Block = { kind: "p" | "h" | "ul" | "ol" | "code"; lines: string[]; check?: boolean };
 
 function blocks(text: string): Block[] {
+  chatPerf.md++;
   const out: Block[] = [];
   const lines = text.replace(/\r/g, "").split("\n");
   let inCode = false;
@@ -58,7 +60,8 @@ function blocks(text: string): Block[] {
   return out.filter((b) => b.lines.length);
 }
 
-export function Markdown({ text }: { text: string }) {
+/** 同じ文は解析し直さない（#10）。吹き出しが描き直されても、文が同じなら前の結果を使う */
+export const Markdown = memo(function Markdown({ text }: { text: string }) {
   const bs = blocks(text);
   return (
     <div className="md">
@@ -80,4 +83,4 @@ export function Markdown({ text }: { text: string }) {
       })}
     </div>
   );
-}
+});
