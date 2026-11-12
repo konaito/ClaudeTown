@@ -396,3 +396,6 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .ghost-name { font-size: 13px; font-weight: 700; color: #5f5873; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-bottom: 6px; }
 .ghost-card.is-mini .ghost-name { font-size: 10.5px; padding-bottom: 2px; }
 .edges line.ghost-edge { stroke-dasharray: 5 5; }
+
+/* ウィンドウが見えていない間は、CSS のアニメを全部止める（#6、src/visible.ts が data-hidden を付ける） */
+:root[data-hidden] *, :root[data-hidden] *::before, :root[data-hidden] *::after { animation-play-state: paused !important; }

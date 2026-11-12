@@ -7,6 +7,7 @@ import { collectMail, type Mail } from "./mail";
 import { flightsOf, resolve, type Flight } from "./letters";
 import { withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
+import { pollWhileVisible, shownAt } from "./visible";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
@@ -108,10 +109,10 @@ export default function App() {
       }
     };
     reload.current = load;
-    load();
-    const t = setInterval(load, POLL_MS);
-    const c = setInterval(() => tick((x) => x + 1), 1000);
-    return () => { alive = false; clearInterval(t); clearInterval(c); };
+    // ウィンドウが見えていない間は、取得も時計も止める。見えたらすぐ1回取り直す（#6）
+    const stopLoad = pollWhileVisible(load, POLL_MS);
+    const stopTick = pollWhileVisible(() => tick((x) => x + 1), 1000);
+    return () => { alive = false; stopLoad(); stopTick(); };
   }, [peer]);
 
   // 閉じたセッション。演出が終わったら隠し、ccn の一覧から消えたら忘れる（10秒たっても消えなければ戻して失敗を出す）
@@ -163,9 +164,8 @@ export default function App() {
       }
       running = false;
     };
-    load();
-    const timer = setInterval(load, OTHER_TOWNS_POLL_MS);
-    return () => { alive = false; clearInterval(timer); };
+    const stop = pollWhileVisible(load, OTHER_TOWNS_POLL_MS);
+    return () => { alive = false; stop(); };
   }, [peer, peers, selfName]);
   // 木を作るときだけ、転出のゴースト（別の町にいる親子の影）を足す。お便りや数には入れない
   const otherTowns = useMemo(() => [...others].flatMap(([town, v]) => ("agents" in v ? [{ town, agents: v.agents }] : [])), [others]);
@@ -475,7 +475,8 @@ function useLetterMarks(flights: Flight[]) {
       const a = document.querySelector(`[data-aid="${f.from}"]`)?.getBoundingClientRect();
       const toEl = document.querySelector<HTMLElement>(`[data-aid="${f.to}"]`);
       const b = toEl?.getBoundingClientRect();
-      if (reduce || !a || !b || !layer.current) { land(); return; }
+      // ウィンドウが隠れている間に来たお手紙は、見えた後にまとめて飛ばさず、印だけ出す（#6）
+      if (reduce || f.at < shownAt() || !a || !b || !layer.current) { land(); return; }
       const img = document.createElement("img");
       img.src = LETTER_IMG;
       img.className = "letter-fly";
@@ -930,9 +931,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
         if (alive) setConvErr(String(e));
       }
     };
-    load();
-    const t = setInterval(load, CONV_POLL_MS);
-    return () => { alive = false; clearInterval(t); };
+    const stop = pollWhileVisible(load, CONV_POLL_MS);
+    return () => { alive = false; stop(); };
   }, [id, peer]);
 
   // 送ったばかりの文は、送り始めたあとに会話に出たら仮の項目を消す（前の同じ文、「はい」や選択肢では消さない）
@@ -1083,9 +1083,8 @@ function Approval({ agent, peer, onDone, onError }: {
     const load = () => invoke<any>("session_detail", { sessionId: agent.id, peer: peer || null })
       .then((d) => { if (alive) { setPending(Array.isArray(d?.pending) ? d.pending : []); setErr(null); } })
       .catch((e) => { if (alive) setErr(String(e)); });
-    load();
-    const t = setInterval(load, 2000);
-    return () => { alive = false; clearInterval(t); };
+    const stop = pollWhileVisible(load, 2000);
+    return () => { alive = false; stop(); };
   }, [agent.id, peer]);
   const p = pending?.[0];
   // 質問や計画の確認の待ちは道具の承認ではないので、許可のボタンを出さない（Rust 側でも断る）
