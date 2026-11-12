@@ -1,6 +1,7 @@
 // 長時間の記録（#15、scripts/soak.ts）で、画面を人の代わりに動かす。VITE_FC_SOAK を付けてビルドしたときだけ入る。
 //   town    町を出したまま、SWITCH_MS ごとに次のセッションを選んでチャットを開く（会話の取得と切り替えを続ける）
 //   reopen  1つのセッションを選び、1分待ってから、ターミナルのタブを REOPEN 回開いて閉じる
+//   misroute #36 の再現。名前が同じ2世帯を交互に選び、SENDS 回送る。送る直前の選択と送信先の表示を残す（届いた先は外で mock に聞く）
 //   check10 #10 の確かめ。モックの長い会話（FC_MOCK_CONV）で、吹き出しの並び、増えた分、送った文の仮の表示、選択肢、切り替えを見る
 // 進み具合は perf_log（FC_PERF_LOG のファイル）に1行の JSON で書く。外の scripts/soak.ts がそれを読む
 import { call } from "./bridge";
@@ -110,4 +111,27 @@ async function check10() {
   log({ ev: "check10", ...r });
 }
 
-(MODE === "reopen" ? reopen() : MODE === "check10" ? check10() : town()).catch((e) => log({ ev: "error", message: String(e) }));
+async function misroute() {
+  const n = Number(import.meta.env.VITE_FC_SOAK_SENDS ?? 20);
+  await until(() => cards().length >= 2);
+  for (let i = 0; i < n; i++) {
+    const c = cards()[i % 2];
+    c.click();
+    // 切り替えてすぐ送る回と、会話が出てから送る回を混ぜる
+    if (i % 4 < 2) await until(() => nums().length > 0 && talkName() !== null, 15_000).catch(() => null);
+    await sleep(i % 3 === 0 ? 50 : 1500);
+    const text = `誤配の試し ${i} ${Date.now()}`;
+    const shown = { clicked: c.aid, selected: (document.querySelector(".fnode.open [data-aid]") as HTMLElement | null)?.dataset.aid, to: document.querySelector(".composer .to")?.textContent, talk: talkName() };
+    const ta = document.querySelector<HTMLTextAreaElement>(".composer textarea")!;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(ta, text);
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    await sleep(100);
+    document.querySelector<HTMLButtonElement>(".composer .send")!.click();
+    await sleep(300);
+    log({ ev: "send", i, text, ...shown, after: (document.querySelector(".fnode.open [data-aid]") as HTMLElement | null)?.dataset.aid });
+    await sleep(1500);
+  }
+  log({ ev: "done" });
+}
+
+(MODE === "reopen" ? reopen() : MODE === "check10" ? check10() : MODE === "misroute" ? misroute() : town()).catch((e) => log({ ev: "error", message: String(e) }));
