@@ -16,7 +16,7 @@ import {
 } from "./model";
 import { Markdown } from "./Markdown";
 import { layoutFamily, type LNode } from "./layout/layout";
-import { LAYOUT, boxOf } from "./layout/params";
+import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
 
 const POLL_MS = 2000;
@@ -331,7 +331,7 @@ export default function App() {
           )}
           <Stage zoom={zoom} onBlank={() => setSelected(null)} items={tree.families.map((f) => {
             const r = layoutOf(f.all);
-            const size = groupSize(r);
+            const size = groupSizeOf(r.metrics);
             return {
               id: f.root.id, ...size,
               node: (
@@ -634,9 +634,6 @@ function roleOf(depth: number): Role {
 }
 const ROLE_LABEL = ["親", "子", "孫", "ひ孫", "玄孫"];
 
-/** 家族ごとに前回選んだ配置の候補（更新のたびに形が変わらないよう引き継ぐ） */
-const prevArc = new Map<string, number>();
-
 /**
  * 家族の木を、配置計算（src/layout）が決めた座標に置いて描く。
  * 配置を計算し直すのは、家族の顔ぶれ（id、親、名前）が変わったときだけ。状態や会話の更新では動かさない。
@@ -644,7 +641,7 @@ const prevArc = new Map<string, number>();
  */
 /**
  * 世帯の中の配置を計算する（src/layout/layout.ts）。顔ぶれ（id、親、名前、開始時刻）が変わったときだけ計算し直し、
- * 状態や会話の更新では動かさない。前に選んだ候補を世帯ごとに引き継ぐ。
+ * 状態や会話の更新では動かさない。前に選んだ候補は引き継がず、顔ぶれだけで決める。
  */
 const layoutCache = new Map<string, { sig: string; result: ReturnType<typeof layoutFamily> }>();
 function layoutOf(all: Agent[]) {
@@ -665,18 +662,11 @@ function layoutOf(all: Agent[]) {
     const b = boxOf(d(a), a.name);
     return { id: a.id, parent: a.parent && inFam.has(a.parent) ? a.parent : null, order: a.startedAt ?? 0, w: b.w, h: b.h };
   });
-  const r = layoutFamily(nodes, { prevArcIndex: prevArc.get(rootId) });
-  prevArc.set(rootId, r.arcIndex);
+  // 前に選んだ候補は引き継がない。引き継ぐと、子が増えるのを見ていた町と後から開いた町で形が変わる（docs/design/geometric-layout.md）
+  const r = layoutFamily(nodes);
   if (!r.valid) console.warn("Claude Town: 配置の検査に通る候補が無かった", rootId, r.metrics, r.candidates);
   layoutCache.set(rootId, { sig, result: r });
   return r;
-}
-
-/** 世帯モジュールの外寸（並べ方に渡す大きさ）。描くときもこの大きさにする */
-function groupSize(r: ReturnType<typeof layoutFamily>) {
-  const G = LAYOUT.group;
-  const cw = r.metrics.width + LAYOUT.framePad * 2, ch = r.metrics.height + LAYOUT.framePad * 2;
-  return { w: Math.ceil(Math.max(G.minW, cw + G.padX * 2 + G.border * 2)), h: Math.ceil(G.head + ch + G.padTop + G.padBottom + G.border * 2) };
 }
 
 /**
