@@ -213,8 +213,11 @@ static AVATARS_LOCK: Mutex<()> = Mutex::new(());
 
 /// キャラの割り当ての保存先。FC_AVATARS で差し替えられる（モックの ccn で試すとき、本物の割り当てを消さないため）。
 /// 別の機械の町は、同じ場所の avatars-peer-<機械>.json に分けて置く
+/// FC_CCN_URL で別のノード（モックなど）に向けたのに FC_AVATARS が無いときは、avatars-custom-ccn.json に分ける。
+/// 本物の avatars.json を使うと、モックにいない本物のセッションの割り当てが全部消える（乱数なので元に戻らない）
 fn avatars_path(peer: &Option<String>) -> PathBuf {
-    let base = std::env::var("FC_AVATARS").map(PathBuf::from).unwrap_or_else(|_| home().join(".family-computing/avatars.json"));
+    let default = if std::env::var("FC_CCN_URL").is_ok() { "avatars-custom-ccn.json" } else { "avatars.json" };
+    let base = std::env::var("FC_AVATARS").map(PathBuf::from).unwrap_or_else(|_| home().join(".family-computing").join(default));
     match peer {
         None => base,
         Some(p) => {
