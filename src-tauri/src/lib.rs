@@ -433,6 +433,17 @@ struct Conv {
     total: u64,
     /// 最後の KEEP_MESSAGES 件
     items: Vec<Value>,
+    /// 最後に読まれた時刻（ms）
+    used: u128,
+}
+
+/// 会話のキャッシュを残す時間（#15）。画面は開いている会話だけを 2.5 秒ごとに読むので、
+/// これより長く読まれていない会話（閉じたセッション、ほかのセッションに切り替えた後）は捨てる。
+/// 捨てた後に開き直したら、ccn の after=0 から読み直し、画面は reset で受け取る
+const CONV_IDLE_MS: u128 = 10 * 60 * 1000;
+
+fn forget_idle_convs(map: &mut HashMap<String, Conv>, keep: &str, now: u128) {
+    map.retain(|k, c| k == keep || now.saturating_sub(c.used) < CONV_IDLE_MS);
 }
 
 /// 画面へ渡す差分（#10）。items の各項目には通し番号 n を付ける。
@@ -630,7 +641,10 @@ fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) ->
     }
     let mut g = CONVS.lock().map_err(|e| e.to_string())?;
     let map = g.get_or_insert_with(HashMap::new);
+    let now = now_ms();
+    forget_idle_convs(map, &key, now);
     let c = map.entry(key).or_insert_with(Conv::default);
+    c.used = now;
     c.absorb(from, next, fresh);
     Ok(c.since(since))
 }
@@ -1368,6 +1382,22 @@ mod tests {
         assert_eq!(c.next, 5);
         c.absorb(5, 6, fresh());
         assert_eq!(c.total, 2);
+    }
+
+    #[test]
+    fn idle_conversations_are_forgotten() {
+        use super::{forget_idle_convs, Conv, CONV_IDLE_MS};
+        use std::collections::HashMap;
+        let mut m: HashMap<String, Conv> = HashMap::new();
+        let now = 100 * CONV_IDLE_MS;
+        m.insert("|open".into(), Conv { used: now - 2500, ..Default::default() });
+        m.insert("|closed".into(), Conv { used: now - CONV_IDLE_MS - 1, ..Default::default() });
+        m.insert("|asked".into(), Conv { used: 0, ..Default::default() });
+        forget_idle_convs(&mut m, "|asked", now);
+        let mut keys: Vec<_> = m.keys().cloned().collect();
+        keys.sort();
+        // 読んでいる会話と、いま読もうとしている会話は残し、長く読まれていない会話は捨てる
+        assert_eq!(keys, vec!["|asked", "|open"]);
     }
 
     #[test]

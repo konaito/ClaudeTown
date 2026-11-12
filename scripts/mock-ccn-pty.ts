@@ -14,6 +14,7 @@
 //   DELETE /api/sessions/<id>                  止める
 //   GET  /api/peers                            自分だけ
 //   GET  /api/sessions/<id>/messages?after=<n> FC_MOCK_CONV=<件数> のとき、長い仮の会話（pty の形、200件ずつ）。無ければ空
+//   POST /api/sessions/<id>/messages           FC_MOCK_CONV のときは、送った文と、選択肢つきの返事を会話に足す（1秒後）
 //
 // 長い会話の試し（#10、#15）: FC_MOCK_CONV=1000 FC_MOCK_CONV_GROW_MS=5000 で、各セッションに 1000 件の会話があり、5秒ごとに1件増える
 
@@ -24,20 +25,28 @@ const CONV = Number(process.env.FC_MOCK_CONV ?? 0);
 const CONV_GROW_MS = Number(process.env.FC_MOCK_CONV_GROW_MS ?? 0);
 
 /** 仮の会話の i 件目（pty のセッションの形 {at, type, data, seq}）。注文、返事、道具、お手紙を順に並べる */
-function convMsg(i: number, t0: number) {
-  const head = `（仮の会話 ${i + 1}）`;
+/** 仮の会話を、いまの時刻の分まで伸ばす */
+function growConv(s: { name: string; startedAt: number; conv: ReturnType<typeof convMsg>[]; gen: number }) {
+  const want = CONV + (CONV_GROW_MS ? Math.floor((Date.now() - s.startedAt) / CONV_GROW_MS) : 0);
+  while (s.gen < want) { s.conv.push(convMsg(s.gen, s.startedAt - CONV * 1000, s.conv.length, s.name)); s.gen++; }
+}
+
+function convMsg(i: number, t0: number, seq = i, name = "") {
+  const head = `（${name ? `${name}の` : ""}仮の会話 ${i + 1}）`;
   const data = [
     { type: "user", message: { content: `${head}長い会話の注文。` } },
     { type: "assistant", message: { content: [{ type: "text", text: `${head}**返事**と \`コード\`。\n\n- 箇条 1\n- 箇条 2` }] } },
     { type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: `/tmp/mock/src/file${i}.ts` } }] } },
     { type: "user", message: { content: `<cross-session-message from="uds:/tmp/cc-socks/1.sock" from-name="別の子">${head}お手紙</cross-session-message>` } },
   ][i % 4];
-  return { at: t0 + i * 1000, type: "message", data, seq: i + 1 };
+  return { at: t0 + i * 1000, type: "message", data: data as Record<string, unknown>, seq: seq + 1 };
 }
 
 type Sess = {
   id: string; name: string; cwd: string; parent: string | null; startedAt: number; cols: number; rows: number;
   proc: ReturnType<typeof Bun.spawn>; buf: Uint8Array[]; bufLen: number; total: number; subs: Set<(ev: string, data: string, id?: number) => void>; exited?: number;
+  /** 仮の会話（FC_MOCK_CONV のとき）。gen は作った仮の発言の数 */
+  conv: ReturnType<typeof convMsg>[]; gen: number;
 };
 const sessions = new Map<string, Sess>();
 const b64 = (u: Uint8Array) => Buffer.from(u).toString("base64");
@@ -50,7 +59,7 @@ function start(o: { cwd: string; prompt?: string; parent?: string | null; name?:
   const cmd = CMD[0] === "claude" ? ["claude", "--session-id", id, ...(o.prompt ? [o.prompt] : [])] : CMD;
   const s: Sess = {
     id, name: o.name ?? `mock-${id.slice(0, 4)}`, cwd: o.cwd, parent: o.parent ?? null, startedAt: Date.now(),
-    cols: o.cols ?? 120, rows: o.rows ?? 40, buf: [], bufLen: 0, total: 0, subs: new Set(), proc: undefined as never,
+    cols: o.cols ?? 120, rows: o.rows ?? 40, buf: [], bufLen: 0, total: 0, subs: new Set(), proc: undefined as never, conv: [], gen: 0,
   };
   s.proc = Bun.spawn(cmd, {
     cwd: o.cwd, env,
@@ -158,14 +167,24 @@ Bun.serve({
     if (p[3] === "messages" && req.method === "POST") {
       const b = (await req.json()) as { text: string };
       s.proc.terminal?.write(b.text + "\r");
+      if (CONV) {
+        growConv(s);
+        const at = Date.now();
+        s.conv.push({ at, type: "message", data: { type: "user", message: { content: `from local via mock\n${b.text}` } }, seq: s.conv.length + 1 });
+        setTimeout(() => {
+          growConv(s);
+          const text = `受け取った: ${b.text}\n\nどちらにする？\n1. はい\n2. いいえ`;
+          s.conv.push({ at: Date.now(), type: "message", data: { type: "assistant", message: { content: [{ type: "text", text }] } }, seq: s.conv.length + 1 });
+        }, 1000);
+      }
       return json({ delivered: "pty" });
     }
     if (p[3] === "messages" && req.method === "GET") {
       if (!CONV) return json({ messages: [] });
-      const total = CONV + (CONV_GROW_MS ? Math.floor((Date.now() - s.startedAt) / CONV_GROW_MS) : 0);
+      growConv(s);
       const after = Number(url.searchParams.get("after") ?? 0);
-      const end = Math.min(total, after + 200);
-      return json({ messages: Array.from({ length: Math.max(0, end - after) }, (_, k) => convMsg(after + k, s.startedAt - CONV * 1000)), next: end });
+      const end = Math.min(s.conv.length, after + 200);
+      return json({ messages: s.conv.slice(after, end), next: end });
     }
     return json({ error: "not found" }, 404);
   },
