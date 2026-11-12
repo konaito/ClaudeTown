@@ -88,10 +88,32 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
+/// project_from_git と同じ答えを返す。`.git` のファイルの更新時刻、大きさ、inode が前に読んだときと同じなら、読まずに前の答えを返す（#11）。
+/// snapshot は一覧を取るたびに、セッションごとに `.git` と commondir を読んでいた。
+/// worktree を作り直すと `.git` も書き直されるので、commondir だけが変わる場合は考えない
+fn project_from_git_cached(cwd: &str) -> Option<String> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (super::FileStamp, Option<String>)>>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    // .git がファイルでなければ（無い、本体のディレクトリ）、project_from_git も読まずに None を返す
+    let Some(meta) = fs::metadata(Path::new(cwd).join(".git")).ok().filter(|m| m.is_file()) else {
+        cache.lock().unwrap_or_else(|e| e.into_inner()).remove(cwd);
+        return None;
+    };
+    let st = super::stamp_of(&meta);
+    if let Some((s, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(cwd) {
+        if *s == st && st.modified.is_some() {
+            return v.clone();
+        }
+    }
+    let v = project_from_git(cwd);
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(cwd.to_string(), (st, v.clone()));
+    v
+}
+
 /// cwd のプロジェクトの名前。local（この機械の cwd）なら .git を読み、別の機械の町ならパスの形だけで決める
 pub fn project_of(cwd: &str, local: bool) -> Option<String> {
     if local {
-        if let Some(p) = project_from_git(cwd) {
+        if let Some(p) = project_from_git_cached(cwd) {
             return Some(p);
         }
     }
@@ -239,6 +261,28 @@ mod tests {
         // .git がディレクトリ（本体）なら読まずにパスの形で決める
         assert_eq!(project_from_git(base.join("proj").to_str().unwrap()), None);
         assert_eq!(project_of(base.join("proj").to_str().unwrap(), true).as_deref(), Some("proj"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn project_from_git_is_read_again_only_when_dot_git_changes() {
+        let base = std::env::temp_dir().join(format!("ct-naming-cache-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        for p in ["a/.git/worktrees/w", "b/.git/worktrees/w", "elsewhere/w"] {
+            fs::create_dir_all(base.join(p)).unwrap();
+        }
+        let wt = base.join("elsewhere/w");
+        let cwd = wt.to_str().unwrap();
+        fs::write(wt.join(".git"), format!("gitdir: {}\n", base.join("a/.git/worktrees/w").display())).unwrap();
+        assert_eq!(project_from_git_cached(cwd).as_deref(), Some("a"));
+        // .git を書き直したら（別の本体を指す）、読み直す。書き直しは別のファイルからの付け替えで、inode が変わる
+        let tmp = base.join("elsewhere/git.tmp");
+        fs::write(&tmp, format!("gitdir: {}\n", base.join("b/.git/worktrees/w").display())).unwrap();
+        fs::rename(&tmp, wt.join(".git")).unwrap();
+        assert_eq!(project_from_git_cached(cwd).as_deref(), Some("b"));
+        // .git が消えたら None
+        fs::remove_file(wt.join(".git")).unwrap();
+        assert_eq!(project_from_git_cached(cwd), None);
         let _ = fs::remove_dir_all(&base);
     }
 }
