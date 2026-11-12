@@ -13,8 +13,7 @@
 //   town       30世帯・100人。作業中20、承認待ち5。何も選ばない
 //
 // 1回の測り方
-//   1. /tmp/ct-dev.lock、/tmp/claudetown-dev.lock の順に mkdir で取る（取れるまで待つ。上限3時間。片方を持ったまま10分取れなければ
-//      両方外して取り直す）。1回ごとに取って、逆の順に放し、60秒空けてから次を取る
+//   1. ~/.local/bin/ct-lock の列に並んでロックを取る（来た順。上限3時間）。1回ごとに取って放し、次の回はまた列の後ろに並ぶ
 //   2. HOME を一時のディレクトリにして開発版（bun tauri dev）を起動する。お手紙の記録（letters.jsonl）は決まった大きさで仕込む
 //   3. 画面が場面を用意して ready を書いたら、settle 秒待ってから secs 秒のあいだの CPU 時間の差を ps で測る
 //   4. 見えているはずの場面で窓が描かれていなかった回（fps が 20 未満、visibilityState が hidden）と、
@@ -42,13 +41,10 @@ const MOCK_ARGS: Record<Scene, string[]> = {
   town: ["--households", "30", "--sessions", "100", "--running", "20", "--approval", "5"],
 };
 
-// 開発版（vite の 1420）と CPU の計測を、ほかのエージェントと分け合うロック。全員この順に mkdir で取り、逆の順に rmdir する。
-// FC_DEV_LOCKS（カンマ区切り）で差し替えられる（1つに戻すとき）
-const LOCKS = (process.env.FC_DEV_LOCKS || "/tmp/ct-dev.lock,/tmp/claudetown-dev.lock").split(",").map((x) => x.trim()).filter(Boolean);
-/** 一部を持ったまま、次が取れずにこれだけたったら、全部外して取り直す */
-const PARTIAL_HOLD_MS = 10 * 60_000;
-/** ロックを外してから次に取りに行くまでの間（ほかの子が先に取れるように）。FC_LOCK_GAP_S で変えられる */
-const LOCK_GAP_MS = Number(process.env.FC_LOCK_GAP_S ?? 60) * 1000;
+// 開発版（vite の 1420）と CPU の計測を、ほかのエージェントと分け合うロック。来た順に渡す ~/.local/bin/ct-lock を通す
+// （中で /tmp/ct-dev.lock → /tmp/claudetown-dev.lock の順に mkdir する）。FC_CT_LOCK で道具の場所を変えられる
+const CT_LOCK = process.env.FC_CT_LOCK || path.join(os.homedir(), ".local/bin/ct-lock");
+const LOCK_NAME = "ct-bench";
 const LOCK_WAIT_MS = 3 * 3600_000;
 const RUN_DEADLINE_MS = 10 * 60_000;
 const READY_TIMEOUT_MS = 4 * 60_000;
@@ -62,7 +58,7 @@ type Run = {
   build: "debug" | "release"; renderer: string; secs: number; lettersKB: number; town: string;
   procs: Record<string, { cpuSec: number; cpuPct: number; rssMB: number } | null>; totalCpuPct: number | null;
   httpPerMin: Record<string, number>; fps: { ready: number | null; post: number | null }; vis: { ready: string | null; post: string | null; events: unknown[] };
-  startupMs: number | null; ipcPerSec: number | null; recompiled: boolean;
+  startupMs: number | null; ipcPerSec: number | null; recompiled: boolean; front: string[];
 };
 
 // ---------- プロセス ----------
@@ -86,6 +82,8 @@ function tree(root: number): number[] {
   for (let i = 0; i < all.length; i++) for (const k of sh("/usr/bin/pgrep", ["-P", String(all[i])]).split("\n").filter(Boolean)) all.push(Number(k));
   return all;
 }
+/** 前面のアプリの名前（窓が隠れた回の原因を見るため） */
+const frontApp = () => sh("/usr/bin/lsappinfo", ["info", "-only", "name", sh("/usr/bin/lsappinfo", ["front"])]).match(/"([^"]*)"/)?.[1] ?? "?";
 const webkitPids = () => sh("/usr/bin/pgrep", ["-f", "com.apple.WebKit.(WebContent|GPU|Networking)"]).split("\n").filter(Boolean).map(Number);
 const listener = (port: number) => sh("/usr/sbin/lsof", ["-t", `-iTCP:${port}`, "-sTCP:LISTEN"]).split("\n").filter(Boolean).map(Number);
 /** 自分が起動したプロセスの木を、子から順に止める。3秒たって残っていれば SIGKILL */
@@ -98,40 +96,30 @@ async function killTree(root: number) {
 
 // ---------- ロック ----------
 
-const held: string[] = [];
-const OWNER = `ct-bench ${process.pid}`;
-const tryLock = (l: string) => {
-  try { fs.mkdirSync(l); } catch (e: any) { if (e.code !== "EEXIST") throw e; return false; }
-  fs.writeFileSync(path.join(l, "owner"), `${OWNER} ${new Date().toTimeString().slice(0, 8)}\n`);
-  held.push(l);
-  return true;
-};
+let held = false;
+let waiting: ChildProcess | null = null;
+/** ct-lock の列に並び、取れるまで待つ（上限3時間） */
 async function lock() {
+  if (!fs.existsSync(CT_LOCK)) throw new Error(`${CT_LOCK} が無い`);
   const t0 = Date.now();
-  let told = 0, partialSince = 0;
-  for (;;) {
-    while (held.length < LOCKS.length && tryLock(LOCKS[held.length])) partialSince = Date.now();
-    if (held.length === LOCKS.length) return;
-    if (held.length && Date.now() - partialSince > PARTIAL_HOLD_MS) { console.log(`  ${LOCKS[held.length]} が10分取れないので、持っている分を外して取り直す`); unlock(); }
-    if (Date.now() - t0 > LOCK_WAIT_MS) { unlock(); throw new Error(`${LOCKS.join("、")} が3時間取れなかった`); }
-    if (Date.now() - told > 300_000) {
-      const who = LOCKS.map((l) => { try { return fs.readFileSync(path.join(l, "owner"), "utf8").trim(); } catch { return fs.existsSync(l) ? "?" : "空き"; } });
-      console.log(`  ロックを待っている（${Math.round((Date.now() - t0) / 60000)} 分、${LOCKS.map((l, i) => `${path.basename(l)}: ${who[i]}`).join("、")}）`);
-      told = Date.now();
-    }
-    await sleep(15_000);
+  const tick = setInterval(() => console.log(`  ロックの列で待っている（${Math.round((Date.now() - t0) / 60000)} 分）`), 300_000);
+  try {
+    const code = await new Promise<number | null>((ok) => {
+      waiting = spawn(CT_LOCK, ["acquire", LOCK_NAME, String(LOCK_WAIT_MS / 1000)], { stdio: ["ignore", "inherit", "inherit"] });
+      waiting.on("exit", (c) => ok(c));
+    });
+    if (code !== 0) throw new Error(`ct-lock で取れなかった（${code}）`);
+    held = true;
+  } finally {
+    clearInterval(tick);
+    waiting = null;
   }
 }
-/** 持っているロックを逆の順に外す。owner が自分のものでなければ触らない */
 function unlock() {
-  while (held.length) {
-    const l = held.pop()!;
-    try {
-      const o = path.join(l, "owner");
-      if (fs.readFileSync(o, "utf8").startsWith(OWNER + " ")) { fs.unlinkSync(o); fs.rmdirSync(l); }
-      else console.error(`  ${l} の owner が自分ではないので外さない`);
-    } catch (e) { console.error(`  ${l} を外せなかった: ${e}`); }
-  }
+  if (waiting) { try { waiting.kill("SIGTERM"); } catch {} }
+  if (!held) return;
+  spawnSync(CT_LOCK, ["release", LOCK_NAME], { stdio: "inherit" });
+  held = false;
 }
 
 // 止められたら、自分のプロセスとロックだけを片付ける
@@ -198,7 +186,7 @@ async function runOnce(scene: Scene, round: number, o: Opts): Promise<Run> {
     label: o.label, scene, round, at: new Date().toISOString(), valid: false, reason: null,
     build: o.release ? "release" : "debug", renderer: o.renderer, secs: o.secs, lettersKB: o.lettersKB, town: MOCK_ARGS[scene].join(" "),
     procs: {}, totalCpuPct: null, httpPerMin: {}, fps: { ready: null, post: null }, vis: { ready: null, post: null, events: [] },
-    startupMs: null, ipcPerSec: null, recompiled: false,
+    startupMs: null, ipcPerSec: null, recompiled: false, front: [],
   };
 
   // モックの ccn
@@ -233,6 +221,7 @@ async function runOnce(scene: Scene, round: number, o: Opts): Promise<Run> {
     const proc = readLog(perf).find((x) => x.bench === "proc");
     if (proc && ready.paintedAt) run.startupMs = ready.paintedAt - proc.procStartMs;
     run.fps.ready = ready.fps; run.vis.ready = ready.vis; run.renderer = ready.renderer ?? o.renderer;
+    run.front.push(frontApp());
 
     // 本体は自分が起動した木の中の family-computing。WebKit は前後の差で、本体の起動から15秒以内に始まったもの
     const app = tree(dev.pid!).find((p) => /family-computing$/.test(comm(p)));
@@ -253,7 +242,9 @@ async function runOnce(scene: Scene, round: number, o: Opts): Promise<Run> {
     const c0: Record<string, number | null> = {};
     for (const [k, p] of Object.entries(watch)) c0[k] = cpuSec(p);
     const t0 = performance.now();
+    run.front.push(frontApp());
     await sleep(o.secs * 1000);
+    run.front.push(frontApp());
     const c1: Record<string, number | null> = {};
     for (const [k, p] of Object.entries(watch)) c1[k] = cpuSec(p);
     const dt = (performance.now() - t0) / 1000;
@@ -337,7 +328,7 @@ function summarize(file: string) {
   const bad = runs.filter((r) => !r.valid);
   if (bad.length) {
     out.push("", "## 無効にした回", "");
-    for (const r of bad) out.push(`- ${r.scene} ${r.round} 回目（${r.at}）: ${r.reason}`);
+    for (const r of bad) out.push(`- ${r.scene} ${r.round} 回目（${r.at}）: ${r.reason}${r.front?.length ? `。前面のアプリ: ${[...new Set(r.front)].join("、")}` : ""}`);
   }
   const re = runs.filter((r) => r.recompiled).length;
   if (re) out.push("", `Rust を組み直した回が ${re} 回あった（起動の時間が長くなる。CPU の区間には入らない）。`);
@@ -376,6 +367,13 @@ const b = spawnSync("cargo", ["build", "--no-default-features", ...(o.release ? 
 });
 if (b.status !== 0) { console.error("Rust を組めなかった"); process.exit(1); }
 
+// 同じ記録に、条件（描き方、ビルド、秒数、お手紙の大きさ）の違う回を混ぜない。違えば label を変えてもらう
+const SAME = { renderer: o.renderer, build: o.release ? "release" : "debug", secs: o.secs, lettersKB: o.lettersKB } as const;
+const cond = (r: Partial<Run>) => `${r.renderer}/${r.build}/${r.secs}/${r.lettersKB}`;
+if (fs.existsSync(file)) {
+  const other = fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Run).find((r) => r.valid && cond(r) !== cond(SAME));
+  if (other) { console.error(`${path.relative(ROOT, file)} には条件の違う回（${cond(other)}、今回は ${cond(SAME)}）がある。--label を変えて測る`); process.exit(2); }
+}
 // 場面ごとに、記録（同じ日付と label の .jsonl）にある有効な回が runs 回になるまで回す。途中で止めても、続きから再開できる。
 // 窓が隠れた回などで無効が続いても終わるように、1回の呼び出しで1場面に回すのは runs の2倍まで
 const done = (scene: Scene) => (fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Run) : [])
@@ -390,20 +388,21 @@ for (;;) {
     await lock();
     let r: Run;
     try {
-      const deadline = sleep(RUN_DEADLINE_MS).then(() => { throw new Error("1回10分の締切を過ぎた"); });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<never>((_, ng) => { timer = setTimeout(() => ng(new Error("1回10分の締切を過ぎた")), RUN_DEADLINE_MS); });
       r = await Promise.race([runOnce(scene, round, o), deadline]).catch(async (e) => {
         await cleanup();
-        return { scene, round, valid: false, reason: String(e.message ?? e) } as Run;
+        return { ...SAME, scene, round, valid: false, reason: String(e.message ?? e) } as Run;
       });
+      clearTimeout(timer);
     } finally {
       unlock();
     }
     fs.appendFileSync(file, JSON.stringify(r) + "\n");
     const p = r.procs ?? {};
     console.log(`${scene} ${round}: ${r.valid ? "有効" : `無効（${r.reason}）`} 本体 ${p.app?.cpuPct ?? "−"}% WebContent ${p.WebContent?.cpuPct ?? "−"}% GPU ${p.GPU?.cpuPct ?? "−"}% 合計 ${r.totalCpuPct ?? "−"}% fps ${r.fps?.ready}/${r.fps?.post}`);
-    // 外した直後に自分が取り直すと、待っているほかの子が入れない。間を空けてから次を取る
-    if (scenes.some((s) => done(s) < runs && (tries[s] ?? 0) < runs * 2)) await sleep(LOCK_GAP_MS);
   }
 }
 const md = summarize(file);
 console.log(`\n表: ${path.relative(ROOT, md)}`);
+process.exit(0);

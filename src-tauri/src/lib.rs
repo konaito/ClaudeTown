@@ -1459,12 +1459,17 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            // 開発の計測用（src/term/bench.ts）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、最前面に出す
+            // 開発の計測用（src/term/bench.ts、scripts/bench.ts）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、
+            // 最前面に出し、どのデスクトップにも出す（本人が別のデスクトップに移っても隠れないように）。
+            // 前面は奪わない（FC_BENCH_FOCUS=1 のときだけ奪う）。起動のたびに前面を奪うと、本人の作業の邪魔になる
             if std::env::var("FC_BENCH_TOP").is_ok() {
                 use tauri::Manager;
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.set_always_on_top(true);
-                    let _ = w.set_focus();
+                    let _ = w.set_visible_on_all_workspaces(true);
+                    if std::env::var("FC_BENCH_FOCUS").is_ok() {
+                        let _ = w.set_focus();
+                    }
                 }
             }
             Ok(())
