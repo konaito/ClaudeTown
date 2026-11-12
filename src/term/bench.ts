@@ -48,7 +48,7 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       await log({ cpu_start: true });
       await sleep(30000);
       on = false;
-      await log({ cpu_end: true, ipcPerSec: +((perfCounters.ipc - a.ipc) / 30).toFixed(1), charsPerSec: Math.round((perfCounters.bytes - a.bytes) / 30), fps: +(frames / 30).toFixed(1) });
+      await log({ cpu_end: true, ipcPerSec: +((perfCounters.ipc - a.ipc) / 30).toFixed(1), charsPerSec: Math.round((perfCounters.bytes - a.bytes) / 30), fps: +(frames / 30).toFixed(1), renderer: perfCounters.renderer || "dom" });
       return;
     }
     let last: string | null = null;
