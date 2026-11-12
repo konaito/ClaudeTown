@@ -248,25 +248,59 @@ fn peers() -> Result<Value, String> {
     }
 }
 
-/// 町の一覧を保存する間隔。一覧は2秒ごとに読むので、世帯の顔ぶれが変わったときと、この間隔ごとにだけ書く
-const TOWN_SAVE_EVERY_MS: u128 = 30_000;
-static TOWN_SAVED: Mutex<Option<HashMap<String, (u128, Vec<String>)>>> = Mutex::new(None);
+/// 顔ぶれが同じまま中身だけ変わったときに、前の書き込みから空ける時間。
+/// 動いているセッションがあると report の doing などが取るたびに変わるので、毎回は書かない
+const TOWN_SAVE_GAP_MS: u128 = 30_000;
+
+/// 町ごとの、前回保存した一覧の鍵と顔ぶれと時刻
+struct TownSaved {
+    key: u64,
+    ids: Vec<String>,
+    at: u128,
+}
+static TOWN_SAVED: Mutex<Option<HashMap<String, Option<TownSaved>>>> = Mutex::new(None);
+
+/// 保存した一覧と同じかを比べる鍵。agents を JSON にしたもののハッシュ（保存した時刻の savedAt は agents の外にあるので入らない）
+fn town_key(agents: &[Value]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(agents).unwrap_or_default().hash(&mut h);
+    h.finish()
+}
+
+fn town_ids(agents: &[Value]) -> Vec<String> {
+    agents.iter().filter_map(|a| a["id"].as_str().map(String::from)).collect()
+}
 
 fn save_town(peer: &Option<String>, agents: &[Value]) {
-    let ids: Vec<String> = agents.iter().filter_map(|a| a["id"].as_str().map(String::from)).collect();
-    let key = offline::town(peer);
-    let now = now_ms();
-    {
-        let mut g = TOWN_SAVED.lock().unwrap_or_else(|e| e.into_inner());
-        let m = g.get_or_insert_with(HashMap::new);
-        if let Some((at, prev)) = m.get(&key) {
-            if *prev == ids && now - at < TOWN_SAVE_EVERY_MS {
-                return;
-            }
-        }
-        m.insert(key, (now, ids));
+    let mut g = TOWN_SAVED.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = g.get_or_insert_with(HashMap::new).entry(offline::town(peer)).or_insert(None);
+    save_town_to(&offline::town_file(&cache_dir(), peer), agents, now_ms(), prev);
+}
+
+/// save_town の中身（試験のために置き場所、時刻、前回の記録を受け取る）。書いたら true。
+/// 中身が前回保存と同じなら書かない。顔ぶれが同じで中身だけ変わったときは、前の書き込みから TOWN_SAVE_GAP_MS 空ける
+/// （空けている間に変わった分は、間隔が過ぎた後の回で書く）。前回の記録が無い（起動直後）ときは、保存してあるファイルと比べる
+fn save_town_to(file: &std::path::Path, agents: &[Value], now: u128, prev: &mut Option<TownSaved>) -> bool {
+    if prev.is_none() {
+        *prev = offline::read(file).map(|c| {
+            let saved = c["agents"].as_array().cloned().unwrap_or_default();
+            TownSaved { key: town_key(&saved), ids: town_ids(&saved), at: c["savedAt"].as_u64().unwrap_or(0) as u128 }
+        });
     }
-    let _ = offline::write(&offline::town_file(&cache_dir(), peer), json!({ "agents": agents }));
+    let key = town_key(agents);
+    let ids = town_ids(agents);
+    if let Some(p) = prev.as_ref() {
+        if p.key == key || (p.ids == ids && now.saturating_sub(p.at) < TOWN_SAVE_GAP_MS) {
+            return false;
+        }
+    }
+    // 書けたときだけ覚える（書けなかったら、次の回にまた書く）
+    if offline::write(file, json!({ "agents": agents })).is_err() {
+        return false;
+    }
+    *prev = Some(TownSaved { key, ids, at: now });
+    true
 }
 
 /// ccn の一覧を、画面に渡すセッションの形に直す。読めなければ（空の一覧, 理由）。
@@ -1603,6 +1637,47 @@ mod tests {
         let mk = |at: u128, n: usize| Snapshot { ccn: "x".into(), peer: None, ccn_ok: true, ccn_error: None, agents: vec![json!({"id": n})], letters: vec![], fetched_at: at, cached_at: None };
         assert_eq!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(2, 1)));
         assert_ne!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(1, 2)));
+    }
+
+    #[test]
+    fn town_is_saved_only_when_it_changes() {
+        let dir = std::env::temp_dir().join(format!("fc-town-{}-{}", std::process::id(), fastrand::u64(..)));
+        let file = dir.join("towns").join("_local.json");
+        let saved_at = || offline::read(&file).and_then(|c| c["savedAt"].as_u64());
+        let a = json!({ "id": "a", "state": "idle", "report": { "doing": "x" } });
+        let b = json!({ "id": "b", "state": "idle" });
+        let t0 = now_ms();
+        let mut prev = None;
+
+        // 初めては書く
+        assert!(save_town_to(&file, &[a.clone()], t0, &mut prev));
+        let first = saved_at().expect("書いた");
+        // 同じ中身は、どれだけ時間が経っても書かない（前は30秒ごとに書いていた）
+        assert!(!save_town_to(&file, &[a.clone()], t0 + 60_000, &mut prev));
+        assert!(!save_town_to(&file, &[a.clone()], t0 + 3_600_000, &mut prev));
+        assert_eq!(saved_at(), Some(first));
+
+        // 顔ぶれが変わったら、間隔を待たずに書く
+        assert!(save_town_to(&file, &[a.clone(), b.clone()], t0 + 3_600_001, &mut prev));
+        assert_eq!(offline::read(&file).unwrap()["agents"], json!([a, b]));
+
+        // 顔ぶれが同じで中身だけ変わったら、前の書き込みから TOWN_SAVE_GAP_MS 空けて書く
+        let a2 = json!({ "id": "a", "state": "running", "report": { "doing": "y" } });
+        let t1 = t0 + 3_600_001;
+        assert!(!save_town_to(&file, &[a2.clone(), b.clone()], t1 + 1_000, &mut prev));
+        assert!(save_town_to(&file, &[a2.clone(), b.clone()], t1 + TOWN_SAVE_GAP_MS, &mut prev));
+        assert_eq!(offline::read(&file).unwrap()["agents"], json!([a2, b]));
+
+        // 起動し直した（前回の記録が無い）ときは、保存してあるファイルと比べ、同じなら書かない
+        let before = saved_at();
+        let mut fresh = None;
+        assert!(!save_town_to(&file, &[a2.clone(), b.clone()], t0 + 7_200_000, &mut fresh));
+        assert_eq!(saved_at(), before);
+        // 違えば書く
+        let mut fresh = None;
+        assert!(save_town_to(&file, &[a.clone()], t0 + 7_200_000, &mut fresh));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     use super::*;
