@@ -5,6 +5,7 @@
 // - send_message(session_id, text, peer): ccn の POST /api/sessions/<id>/messages で文を届ける
 // - create_session / stop_session / teleport / teleport_info / session_detail: ccn の口をそのまま呼ぶ
 // - term_open / term_close / term_input / term_resize: ccn の端末（PTY）の口を読み書きし、"fc-term" イベントで画面へ流す
+// HTTP を待つ命令は spawn_blocking で動かし、メインスレッドを止めない（下の「画面から呼ぶ命令」）
 //
 // ccn は Origin 付きの要求を CSRF として断るので、HTTP は必ずこちら（webview ではなく Rust）から出す。
 // 別の機械（peer）は手元のノードの中継 /n/<peer>/api/... を通す。
@@ -60,12 +61,22 @@ fn api(peer: &Option<String>) -> String {
     }
 }
 
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout(Duration::from_secs(8)).build()
+/// ccn への HTTP。接続を使い回すため、1つの Agent を全部の命令で共有する（呼ぶたびに作ると、毎回つなぎ直す）
+fn agent() -> &'static ureq::Agent {
+    static A: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    A.get_or_init(|| ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(3)).timeout(Duration::from_secs(8)).build())
 }
 
+/// 一覧（snapshot、peers）の時間切れ。別の機械への中継は実測 0.42〜0.46 秒（2026-11-12）。
+/// 命令は非同期なので、時間切れまで待っても画面は止まらない。止まった町の一覧を長く待たないために短くする（#3）
+const LIST_TIMEOUT: Duration = Duration::from_secs(3);
+
 fn get_json(url: &str) -> Result<Value, String> {
-    match agent().get(url).call() {
+    get_json_t(url, Duration::from_secs(8))
+}
+
+fn get_json_t(url: &str, timeout: Duration) -> Result<Value, String> {
+    match agent().get(url).timeout(timeout).call() {
         Ok(r) => r.into_json::<Value>().map_err(|e| format!("応答を読めなかった: {e}")),
         Err(ureq::Error::Status(code, r)) => Err(format!("ccn が {code} を返した: {}", r.into_string().unwrap_or_default())),
         Err(e) => Err(format!("ccn につながらない（{url}）: {e}")),
@@ -105,15 +116,13 @@ fn recent_letters() -> Vec<Value> {
     out
 }
 
-#[tauri::command]
 fn peers() -> Result<Value, String> {
-    get_json(&format!("{}/api/peers", ccn_base()))
+    get_json_t(&format!("{}/api/peers", ccn_base()), LIST_TIMEOUT)
 }
 
-#[tauri::command]
 fn snapshot(peer: Option<String>) -> Snapshot {
     let peer = peer.filter(|p| !p.is_empty());
-    let (sessions, ccn_error) = match get_json(&format!("{}/sessions", api(&peer))) {
+    let (sessions, ccn_error) = match get_json_t(&format!("{}/sessions", api(&peer)), LIST_TIMEOUT) {
         Ok(Value::Array(v)) => (v, None),
         Ok(_) => (vec![], Some("一覧の形が想定と違う".into())),
         Err(e) => (vec![], Some(e)),
@@ -266,9 +275,14 @@ fn tool_line(name: &str, input: &Value) -> String {
 }
 
 /// SDK の1件を、画面に出す0件以上の項目に縮める。考えた中身と道具の結果は捨てる
+/// ccn の messages は、セッションの種類で形が違う。node はトランスクリプトの行そのまま（type、message、timestamp）。
+/// pty は {at, type, data: {type, message, …}, seq} で、中身は data に入り、時刻は at（ms）にある。
 fn simplify(m: &Value) -> Vec<Value> {
+    let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
+        Some(d) => (d, m["at"].clone()),
+        None => (m, m["timestamp"].clone()),
+    };
     let ty = m["type"].as_str().unwrap_or("");
-    let at = m["timestamp"].clone();
     let content = &m["message"]["content"];
     let mut out = vec![];
     match ty {
@@ -350,7 +364,6 @@ fn simplify(m: &Value) -> Vec<Value> {
     out
 }
 
-#[tauri::command]
 fn conversation(session_id: String, peer: Option<String>) -> Result<Vec<Value>, String> {
     let peer = peer.filter(|p| !p.is_empty());
     let key = format!("{}|{session_id}", peer.clone().unwrap_or_default());
@@ -386,7 +399,6 @@ fn conversation(session_id: String, peer: Option<String>) -> Result<Vec<Value>, 
     Ok(c.items.clone())
 }
 
-#[tauri::command]
 fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
     if send_disabled() {
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
@@ -411,7 +423,6 @@ fn send_message(session_id: String, text: String, peer: Option<String>) -> Resul
 /// 送る前に、今も承認待ちで、承認を求めている requestId が画面で見せたもの（expect_id）と同じかを確かめ、ずれていたら送らない。
 /// 質問（AskUserQuestion）と計画の確認（ExitPlanMode）の待ちには許可を送らない。
 /// 人が端末で開いたセッション（kind=terminal）は ccn から答えられないので断る。
-#[tauri::command]
 fn answer_permission(session_id: String, choice: String, expect_id: Option<String>, peer: Option<String>) -> Result<String, String> {
     if send_disabled() {
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
@@ -462,14 +473,16 @@ fn node_name() -> String {
 
 /// 端末（PTY）のセッションを立てる。parent を渡すと、その親の子として立てる（x-ccn-from で親を名乗る）。
 /// 渡さなければ新しい世帯（親なし）になる。cwd を省くと ~/Documents/meta（本人の指定）
-#[tauri::command]
-fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, peer: Option<String>) -> Result<Value, String> {
+/// cols と rows は、画面のターミナルの今の大きさ。渡せば claude を最初からその大きさで起動し、開いた直後の描き直しを省く（#18）
+fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, peer: Option<String>) -> Result<Value, String> {
     if send_disabled() {
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
     }
     let peer = peer.filter(|p| !p.is_empty());
     let cwd = cwd.filter(|c| !c.is_empty()).unwrap_or_else(|| home().join("Documents/meta").to_string_lossy().to_string());
-    let mut body = json!({ "terminal": true, "cwd": cwd, "cols": 120, "rows": 40 });
+    // ccn は 10〜1000 だけを受ける
+    let ok = |v: Option<u16>| v.filter(|n| (10..=1000).contains(n));
+    let mut body = json!({ "terminal": true, "cwd": cwd, "cols": ok(cols).unwrap_or(120), "rows": ok(rows).unwrap_or(40) });
     if let Some(p) = prompt.filter(|p| !p.trim().is_empty()) { body["prompt"] = json!(p); }
     if let Some(n) = name.filter(|n| !n.trim().is_empty()) { body["name"] = json!(n); }
     let mut req = agent().post(&format!("{}/sessions", api(&peer)));
@@ -485,20 +498,17 @@ fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<St
 }
 
 /// セッションの詳細（承認の pending を含む）
-#[tauri::command]
 fn session_detail(session_id: String, peer: Option<String>) -> Result<Value, String> {
     let peer = peer.filter(|p| !p.is_empty());
     get_json(&format!("{}/sessions/{session_id}", api(&peer)))
 }
 
 /// 転出の下見の1段目（移動元の説明）。副作用は無い。2段目の行き先の下見は clone することがあるので、画面からは呼ばない
-#[tauri::command]
 fn teleport_info(session_id: String, peer: Option<String>) -> Result<Value, String> {
     let peer = peer.filter(|p| !p.is_empty());
     get_json(&format!("{}/sessions/{session_id}/teleport", api(&peer)))
 }
 
-#[tauri::command]
 fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> {
     if send_disabled() {
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
@@ -637,31 +647,163 @@ fn term_close(session_id: String) -> Result<(), String> {
     if let Some(c) = g.get_or_insert_with(HashMap::new).remove(&session_id) {
         c.stop.store(true, Ordering::SeqCst);
     }
+    drop(g);
+    // 書き手の送り口を落とす。たまっている分を送り切ってからスレッドが終わる
+    if let Ok(mut w) = WRITERS.lock() {
+        if let Some(m) = w.as_mut() { m.retain(|k, _| !k.ends_with(&format!("|{session_id}"))); }
+    }
     Ok(())
 }
 
+/// 打ったキーと大きさの変更。送るのはセッションごとの書き手のスレッド（term_send）で、命令はすぐ返る
 #[tauri::command]
-fn term_input(session_id: String, text: String, peer: Option<String>) -> Result<(), String> {
+fn term_input(app: tauri::AppHandle, session_id: String, text: String, peer: Option<String>) -> Result<(), String> {
     if send_disabled() {
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
     }
-    let peer = peer.filter(|p| !p.is_empty());
-    agent()
-        .post(&format!("{}/sessions/{session_id}/terminal/input", api(&peer)))
-        .send_json(json!({ "text": text }))
-        .map_err(|e| format!("ターミナルに書けなかった: {e}"))?;
-    Ok(())
+    term_send(&app, &session_id, peer.filter(|p| !p.is_empty()), TermCmd::Input(text))
 }
 
 #[tauri::command]
-fn term_resize(session_id: String, cols: u16, rows: u16, peer: Option<String>) -> Result<(), String> {
-    let peer = peer.filter(|p| !p.is_empty());
-    agent()
-        .post(&format!("{}/sessions/{session_id}/terminal/resize", api(&peer)))
-        .send_json(json!({ "cols": cols, "rows": rows }))
-        .map_err(|e| format!("大きさを変えられなかった: {e}"))?;
-    Ok(())
+fn term_resize(app: tauri::AppHandle, session_id: String, cols: u16, rows: u16, peer: Option<String>) -> Result<(), String> {
+    term_send(&app, &session_id, peer.filter(|p| !p.is_empty()), TermCmd::Resize(cols, rows))
 }
+
+enum TermCmd {
+    Input(String),
+    Resize(u16, u16),
+}
+static WRITERS: Mutex<Option<HashMap<String, std::sync::mpsc::Sender<TermCmd>>>> = Mutex::new(None);
+
+fn writer_key(session_id: &str, peer: &Option<String>) -> String {
+    format!("{}|{session_id}", peer.clone().unwrap_or_default())
+}
+
+/// キーと大きさの変更を、セッションごとに1本のスレッドで、受けた順に ccn へ送る。
+/// 要求ごとに別のスレッドで送ると、打った順と届く順が入れ替わりうるため（#3）。
+/// 書き手は term_close で片付ける（送り口を落とすと、残りを送り切ってからスレッドが終わる）。
+fn term_send(app: &tauri::AppHandle, session_id: &str, peer: Option<String>, cmd: TermCmd) -> Result<(), String> {
+    let key = writer_key(session_id, &peer);
+    let mut cmd = cmd;
+    for _ in 0..2 {
+        let tx = {
+            let mut g = WRITERS.lock().map_err(|e| e.to_string())?;
+            g.get_or_insert_with(HashMap::new)
+                .entry(key.clone())
+                .or_insert_with(|| spawn_writer(app.clone(), session_id.to_string(), peer.clone()))
+                .clone()
+        };
+        match tx.send(cmd) {
+            Ok(()) => return Ok(()),
+            Err(std::sync::mpsc::SendError(c)) => {
+                // 書き手が終わっていた。作り直してもう1回
+                cmd = c;
+                if let Ok(mut g) = WRITERS.lock() {
+                    if let Some(m) = g.as_mut() { m.remove(&key); }
+                }
+            }
+        }
+    }
+    Err("ターミナルに書けなかった（書き手を作れなかった）".into())
+}
+
+fn spawn_writer(app: tauri::AppHandle, session_id: String, peer: Option<String>) -> std::sync::mpsc::Sender<TermCmd> {
+    let (tx, rx) = std::sync::mpsc::channel::<TermCmd>();
+    std::thread::spawn(move || {
+        let base = format!("{}/sessions/{session_id}/terminal", api(&peer));
+        while let Ok(first) = rx.recv() {
+            // 送っている間にたまった分をまとめる。続けて打った文字は1回で送り、大きさは続いたら最後だけ送る
+            let mut merged: Vec<TermCmd> = vec![first];
+            while let Ok(c) = rx.try_recv() {
+                let joined = match (merged.last_mut(), &c) {
+                    (Some(TermCmd::Input(a)), TermCmd::Input(b)) => { a.push_str(b); true }
+                    (Some(TermCmd::Resize(c0, r0)), TermCmd::Resize(c1, r1)) => { *c0 = *c1; *r0 = *r1; true }
+                    _ => false,
+                };
+                if !joined { merged.push(c); }
+            }
+            for c in merged {
+                let (path, body, what) = match &c {
+                    TermCmd::Input(t) => ("input", json!({ "text": t }), "ターミナルに書けなかった"),
+                    TermCmd::Resize(cols, rows) => ("resize", json!({ "cols": cols, "rows": rows }), "ターミナルの大きさを変えられなかった"),
+                };
+                if let Err(e) = agent().post(&format!("{base}/{path}")).timeout(Duration::from_secs(5)).send_json(body) {
+                    let _ = app.emit("fc-term", TermEvent { id: session_id.clone(), ev: "input_error".into(), data: json!({ "message": format!("{what}: {e}") }) });
+                }
+            }
+        }
+    });
+    tx
+}
+
+// ---------- 画面から呼ぶ命令（#3） ----------
+// async の付かない命令は Tauri のメインスレッドで動く（Tauri 2 の説明「Calling Rust from the Frontend」:
+// "Commands without the async keyword are executed on the main thread unless defined with #[tauri::command(async)]"）。
+// メインスレッドで ccn の HTTP を待つと、その間は画面の描画と入力が止まる（2026-11-12 の実測: ccn を3秒遅らせると、
+// 何もしない命令の往復が 12.5 秒、描画の間隔が 9.5 秒になった）。HTTP を待つ命令は、ここで spawn_blocking に移す。
+// 中身の関数は同期のまま残し、開発用の --snapshot などからも呼ぶ。
+
+/// 待ってよいスレッドで f を動かし、結果を待つ。ureq は同期なので、async の中で直接待たない
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
+}
+
+mod cmd {
+    use super::*;
+
+    #[tauri::command]
+    pub async fn peers() -> Result<Value, String> { blocking(super::peers).await }
+    #[tauri::command]
+    pub async fn snapshot(peer: Option<String>) -> Result<Snapshot, String> { blocking(move || Ok(super::snapshot(peer))).await }
+    #[tauri::command]
+    pub async fn conversation(session_id: String, peer: Option<String>) -> Result<Vec<Value>, String> {
+        blocking(move || super::conversation(session_id, peer)).await
+    }
+    #[tauri::command]
+    pub async fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
+        blocking(move || super::send_message(session_id, text, peer)).await
+    }
+    #[tauri::command]
+    pub async fn answer_permission(session_id: String, choice: String, expect_id: Option<String>, peer: Option<String>) -> Result<String, String> {
+        blocking(move || super::answer_permission(session_id, choice, expect_id, peer)).await
+    }
+    #[tauri::command]
+    pub async fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, peer: Option<String>) -> Result<Value, String> {
+        blocking(move || super::create_session(cwd, prompt, parent, name, cols, rows, peer)).await
+    }
+    #[tauri::command]
+    pub async fn session_detail(session_id: String, peer: Option<String>) -> Result<Value, String> {
+        blocking(move || super::session_detail(session_id, peer)).await
+    }
+    #[tauri::command]
+    pub async fn teleport_info(session_id: String, peer: Option<String>) -> Result<Value, String> {
+        blocking(move || super::teleport_info(session_id, peer)).await
+    }
+    #[tauri::command]
+    pub async fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> {
+        blocking(move || super::stop_session(session_id, peer)).await
+    }
+}
+
+// ---------- 計測（#18） ----------
+
+/// 画面の計測（src/term/perf.ts）の1行を書く。FC_PERF_LOG があればそのファイルに足し、無ければ標準エラーに出す
+#[tauri::command]
+fn perf_log(line: String) {
+    match std::env::var("FC_PERF_LOG") {
+        Ok(p) if !p.is_empty() => {
+            use std::io::Write;
+            if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(p) {
+                let _ = writeln!(f, "{line}");
+            }
+        }
+        _ => eprintln!("[perf] {line}"),
+    }
+}
+
+/// 何もしない命令。async を付けないので、メインスレッドで動く。往復が長ければ、メインスレッドが止まっている
+#[tauri::command]
+fn perf_ping() {}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -702,7 +844,7 @@ pub fn run() {
     }
     // family-computing --create [cwd] [prompt] [parentId]   端末のセッションを立てる（画面の「子を足す」「新しい世帯」と同じ処理）
     if let Some(i) = args.iter().position(|a| a == "--create") {
-        println!("{:?}", create_session(args.get(i + 1).cloned(), args.get(i + 2).cloned(), args.get(i + 3).cloned(), None, None));
+        println!("{:?}", create_session(args.get(i + 1).cloned(), args.get(i + 2).cloned(), args.get(i + 3).cloned(), None, None, None, None));
         return;
     }
     // family-computing --send <sessionId> <文>   注文を送る（画面の送信と同じ処理）
@@ -713,9 +855,50 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            snapshot, peers, conversation, send_message, set_house_name, answer_permission,
-            create_session, stop_session, teleport, teleport_info, session_detail, term_open, term_close, term_input, term_resize
+            cmd::snapshot, cmd::peers, cmd::conversation, cmd::send_message, set_house_name, cmd::answer_permission,
+            cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, term_open, term_close, term_input, term_resize,
+            perf_log, perf_ping
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 2026-11-12 に本番のノードの pty のセッションから読んだ messages の形
+    #[test]
+    fn pty_messages_are_read_from_data() {
+        let user = json!({"at": 1794490104245u64, "type": "user", "seq": 1,
+            "data": {"type": "user", "message": {"role": "user", "content": "from local via konaito-pro\n\nちゃんと動くのかテスト"}}});
+        let out = simplify(&user);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[0]["text"], "ちゃんと動くのかテスト");
+        assert_eq!(out[0]["from"], "from local via konaito-pro");
+        assert_eq!(out[0]["at"], 1794490104245u64);
+
+        let asst = json!({"at": 1794490107988u64, "type": "assistant", "seq": 2,
+            "data": {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "届いてる"}]}}});
+        let out = simplify(&asst);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "assistant");
+        assert_eq!(out[0]["text"], "届いてる");
+
+        let result = json!({"at": 1794490107988u64, "type": "result", "seq": 3, "data": {"type": "result", "result": "届いてる"}});
+        assert!(simplify(&result).is_empty());
+    }
+
+    #[test]
+    fn node_messages_keep_the_transcript_shape() {
+        let asst = json!({"type": "assistant", "timestamp": "2026-11-12T13:00:00Z",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "はい"}]}});
+        let out = simplify(&asst);
+        assert_eq!(out[0]["text"], "はい");
+        assert_eq!(out[0]["at"], "2026-11-12T13:00:00Z");
+        // トランスクリプトの行に data が付いていても、message があればそちらを読む
+        let with_data = json!({"type": "user", "timestamp": "t", "data": {"type": "hook_progress"}, "message": {"role": "user", "content": "やあ"}});
+        assert_eq!(simplify(&with_data)[0]["text"], "やあ");
+    }
 }

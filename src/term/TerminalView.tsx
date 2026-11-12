@@ -5,6 +5,13 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { call, openTerminal } from "../bridge";
+import { perfMark, perfEnd, perfWaitingPrompt } from "./perf";
+
+const SIZE_KEY = "claude-town.term-size";
+/** 最後に開いたターミナルの大きさ。新しい世帯をこの大きさで起動する */
+export function lastTermSize(): { cols: number; rows: number } | null {
+  try { const v = JSON.parse(localStorage.getItem(SIZE_KEY) ?? "null"); return v?.cols && v?.rows ? v : null; } catch { return null; }
+}
 
 const b64ToBytes = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
@@ -14,6 +21,7 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
 
   useEffect(() => {
     if (!box.current) return;
+    perfMark("mount", sessionId);
     const term = new Terminal({
       fontFamily: '"SF Mono", Menlo, "Hiragino Sans", monospace', fontSize: 12.5, lineHeight: 1.15,
       cursorBlink: true, scrollback: 5000, allowProposedApi: false,
@@ -28,8 +36,19 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
     let closed = false;
     // 最初の出力が来たら、フォーカスを当て直し、起動前に打たれたキーを流す
     let gotOutput = false;
+    // 計測（#18）: 書き終えたら、最初の描画と入力欄（❯）が見えたかを印にする
+    const afterWrite = () => {
+      if (!gotOutput) return;
+      perfMark("drawn", sessionId);
+      if (!perfWaitingPrompt(sessionId)) return;
+      const b = term.buffer.active;
+      for (let y = 0; y < term.rows; y++) {
+        if (b.getLine(b.viewportY + y)?.translateToString(true).includes("❯")) { perfMark("prompt", sessionId); perfEnd(); return; }
+      }
+    };
     const onFirstOutput = () => {
       if (gotOutput) return;
+      perfMark("first_output", sessionId);
       gotOutput = true;
       setStatus("");
       term.focus();
@@ -43,6 +62,7 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
       const key = `${term.cols}x${term.rows}`;
       if (key === lastSize) return;
       lastSize = key;
+      try { localStorage.setItem(SIZE_KEY, JSON.stringify({ cols: term.cols, rows: term.rows })); } catch { /* 残せなくても動きは変えない */ }
       // 境目のドラッグ中は大きさが続けて変わるので、PTY への通知は止まってから 150ms 後に1回だけ送る（画面の fit はすぐ）
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
@@ -58,6 +78,7 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
       if (closed) return;
       switch (e.ev) {
         case "size":
+          perfMark("size", sessionId);
           // 繋いだ直後か、ほかの画面が大きさを変えた。続けて replay が来たら、その前に画面を消す。
           // replay はノードの cols と rows で作った画面のスナップショットなので、まず xterm をその大きさにする（ccn PR #19）
           pendingReset = true;
@@ -69,16 +90,19 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
           if (pendingReset) { term.reset(); pendingReset = false; }
           replaying++;
           // 書き終えたら、右パネルの大きさに合わせ直して PTY にも伝える
-          term.write(b64ToBytes(e.data?.b64 ?? ""), () => { replaying--; lastSize = ""; pushSize(); });
+          term.write(b64ToBytes(e.data?.b64 ?? ""), () => { replaying--; lastSize = ""; pushSize(); afterWrite(); });
           if (e.data?.b64) onFirstOutput();
           break;
         case "data":
           pendingReset = false;
-          term.write(b64ToBytes(e.data?.b64 ?? ""));
+          term.write(b64ToBytes(e.data?.b64 ?? ""), afterWrite);
           onFirstOutput();
           break;
         case "exit":
           setStatus(`終わった（${e.data?.reason ?? ""}${e.data?.code != null ? `、終了コード ${e.data.code}` : ""}）`);
+          break;
+        case "input_error":
+          onError(e.data?.message ?? "ターミナルに書けなかった");
           break;
         case "error":
           setStatus(e.data?.message ?? "ターミナルに繋がらない");
@@ -87,6 +111,7 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
           break;
       }
     }).then((c) => {
+      perfMark("term_open", sessionId);
       if (closed) c(); else { close = c; pushSize(); term.focus(); }
     });
     const ro = new ResizeObserver(() => pushSize());

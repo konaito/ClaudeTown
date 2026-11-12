@@ -1,6 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { call as invoke, setFullscreen } from "./bridge";
-import { TerminalView } from "./term/TerminalView";
+import { TerminalView, lastTermSize } from "./term/TerminalView";
+import { perfMark, perfSetId, perfStart } from "./term/perf";
+import { benchName, useBench } from "./term/bench";
 import { collectMail, type Mail } from "./mail";
 import { flightsOf, resolve, type Flight } from "./letters";
 import { withGhosts } from "./ghost";
@@ -233,9 +235,16 @@ export default function App() {
   }, [booting, release]);
   // 押した瞬間からキーをためる（作り終わるのを待つと、その間に打ったキーが落ちる）
   const startHousehold = useCallback(() => { early.current = { id: "pending", text: "" }; setBooting("pending"); }, []);
+  // 作った直後のセッション。一覧（snapshot）に載るまでは、create の応答から作った仮の姿で右パネルとターミナルを出す（#18）。
+  // 一覧の取り直しを待つと、ccn が遅いときにその分だけターミナルが開かない
+  const [fresh, setFresh] = useState<Agent | null>(null);
   const newHousehold = useCallback((r: any) => {
     if (!r?.id) { early.current = { id: null, text: "" }; setBooting(null); return; }
     early.current = { id: r.id, text: early.current.id === "pending" ? early.current.text : "" };
+    setFresh({
+      id: r.id, name: r.id.slice(0, 8), kind: "terminal", state: "running", cwd: r.cwd ?? "", canSend: true, parent: null,
+      startedAt: Date.now(), capabilities: { terminal: true, send: true, stop: true },
+    });
     setBooting(r.id);
     setSelected(r.id);
     setTermReq((n) => n + 1);
@@ -260,8 +269,12 @@ export default function App() {
 
   // 右クリックや「端末へ」で、その子を選んで右パネルの端末を開く
   const [termReq, setTermReq] = useState(0);
-  const focus = useCallback((a: Agent) => { setSelected(a.id); setTermReq((n) => n + 1); }, []);
-  const sel = selected ? tree.byId.get(selected) ?? null : null;
+  const focus = useCallback((a: Agent) => { perfStart("open", a.id); setSelected(a.id); setTermReq((n) => n + 1); }, []);
+  const sel = selected ? tree.byId.get(selected) ?? (fresh?.id === selected ? fresh : null) : null;
+  // 一覧に載ったら仮の姿を捨てる
+  useEffect(() => { if (fresh && tree.byId.has(fresh.id)) setFresh(null); }, [tree, fresh]);
+  useEffect(() => { if (sel) perfMark("listed", sel.id); }, [sel?.id]);
+  useBench({ ready: !!snap, select: setSelected, focusId: (id) => { const a = tree.byId.get(id); if (a) focus(a); } });
   const selfPeer = peers.find((p) => p.self);
 
   return (
@@ -1052,10 +1065,15 @@ function Approval({ agent, peer, onDone, onError }: {
 function NewHousehold({ big, disabled, onStart, onCreated, onError }: { big?: boolean; disabled?: boolean; onStart: () => void; onCreated: (r: any) => void; onError: (m: string) => void }) {
   const [busy, setBusy] = useState(false);
   const go = async () => {
+    perfStart("new");
     setBusy(true);
     onStart();
     try {
-      const r = await invoke<any>("create_session", { cwd: null, prompt: null, parent: null, name: null, peer: null });
+      // 前に開いたターミナルの大きさで起動する。開いた直後に大きさを変えて、claude が全部描き直すのを省く
+      const { cols, rows } = lastTermSize() ?? { cols: null, rows: null };
+      const r = await invoke<any>("create_session", { cwd: null, prompt: null, parent: null, name: benchName(), cols, rows, peer: null });
+      perfMark("create");
+      if (r?.id) perfSetId(r.id);
       onCreated(r);
     } catch (e) { onCreated(null); onError(`世帯を作れなかった: ${e}`); } finally { setBusy(false); }
   };
@@ -1168,7 +1186,8 @@ function collapseTools(items: ConvItem[]): (ConvItem & { more?: number })[] {
   return out;
 }
 
-function timeOf(at?: string | null): string {
+/** at は node のセッションなら ISO の文字列、pty のセッションなら ms の数 */
+function timeOf(at?: string | number | null): string {
   if (!at) return "";
   const d = new Date(at);
   return isNaN(+d) ? "" : d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });

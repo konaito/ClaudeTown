@@ -44,7 +44,7 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     case "create_session": {
       const headers: Record<string, string> = a.parent ? { "x-ccn-from": `agent:mock/${String(a.parent).slice(0, 8)}/town` } : {};
       // Rust の create_session と同じく、空の prompt と name は送らない（本番のノードは name: null を 400 で断る）
-      const body: Record<string, unknown> = { terminal: true, cwd: a.cwd || (new URLSearchParams(location.search).get("cwd") ?? "/tmp"), cols: 120, rows: 40 };
+      const body: Record<string, unknown> = { terminal: true, cwd: a.cwd || (new URLSearchParams(location.search).get("cwd") ?? "/tmp"), cols: a.cols ?? 120, rows: a.rows ?? 40 };
       if (typeof a.prompt === "string" && a.prompt.trim()) body.prompt = a.prompt;
       if (typeof a.name === "string" && a.name.trim()) body.name = a.name;
       return post("/sessions", body, headers) as T;
