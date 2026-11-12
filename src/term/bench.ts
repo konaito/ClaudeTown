@@ -58,18 +58,32 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       await re;
       await sleep(800);
       await log({ reopen: true, cols: perfTerm.current?.cols, rules: rules() });
-      // ほかの画面が大きさを変えた（ここでは自分の書き手で送って真似る）。こちらは合わせるだけで、送り返さない
+      // ほかの画面が大きさを変えた（ここでは自分の書き手で送って真似る）。こちらは合わせるだけで、送り返さない。
+      // 狭い相手（50×20）と、右パネルより広い相手（200×50）の2通り
       const t = perfTerm.current!;
-      const mine0 = { cols: t.cols, rows: t.rows };
-      const r0 = perfCounters.resizes;
-      await call("term_resize", { sessionId: r.id, cols: 50, rows: 20, peer: null });
-      await sleep(3000);
-      await log({ foreign: true, xterm: `${t.cols}x${t.rows}`, sentBack: perfCounters.resizes - r0, rules: rules() });
-      // 本人がここで打つと、こちらの大きさに戻す
-      t.input(" ");
-      await sleep(3000);
-      await log({ typed: true, xterm: `${t.cols}x${t.rows}`, mine: `${mine0.cols}x${mine0.rows}`, sent: perfCounters.resizes - r0, rules: rules() });
-      t.input("\x7f");
+      const mine0 = `${t.cols}x${t.rows}`;
+      for (const [cols, rows] of [[50, 20], [200, 50]]) {
+        const r0 = perfCounters.resizes;
+        await call("term_resize", { sessionId: r.id, cols, rows, peer: null });
+        await sleep(3000);
+        // 窓から離れて戻る（claude はフォーカスの報告を有効にしているので、ESC[O と ESC[I が onData に流れる）
+        t.blur();
+        await sleep(300);
+        t.focus();
+        await sleep(1500);
+        const box = document.querySelector(".term")?.getBoundingClientRect();
+        const screen = document.querySelector(".term .xterm-screen")?.getBoundingClientRect();
+        await log({ foreign: `${cols}x${rows}`, xterm: `${t.cols}x${t.rows}`, sentBackAfterBlur: perfCounters.resizes - r0, rules: rules(),
+          // 相手が広いと、xterm の画面が欄からはみ出す（はみ出した分は見えない）
+          overflowPx: box && screen ? Math.round(screen.width - box.width) : null });
+        // 本人がここで打つと、こちらの大きさに戻す
+        t.textarea?.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+        t.input(" ");
+        await sleep(3000);
+        await log({ typed: true, xterm: `${t.cols}x${t.rows}`, mine: mine0, sent: perfCounters.resizes - r0, rules: rules() });
+        t.input("\x7f");
+        await sleep(1000);
+      }
       return;
     }
     // watch: 40秒、1秒ごとに町の人数と接続の表示を記録する（一覧の取得が失敗しても町が消えないかを見る）

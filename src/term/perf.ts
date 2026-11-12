@@ -12,6 +12,8 @@ type Flow = {
 };
 export type PerfResult = { kind: FlowKind; id: string | null; marks: Record<string, number>; ping: { n: number; p50: number; max: number }; rafMax: number };
 
+/** 計測は開発版だけで動かす。製品版では印も probe も何もしない（右クリックのたびに perf_ping を回さない） */
+const ACTIVE = import.meta.env.DEV;
 let cur: Flow | null = null;
 /** ターミナルの出力が画面に届いた回数（Rust から webview への IPC の回数）。bench.ts の cpu が1秒あたりに直す */
 export const perfCounters = { ipc: 0, bytes: 0, renderer: "", resizes: 0, lastResizeAt: 0 };
@@ -24,6 +26,7 @@ const TIMEOUT_MS = 20000;
 
 /** 流れを始める。前の流れが終わっていなければ、時間切れとして書き出してから始める */
 export function perfStart(kind: FlowKind, id: string | null = null): Promise<PerfResult> {
+  if (!ACTIVE) return new Promise(() => {});
   if (cur && !cur.done) perfEnd("superseded");
   let resolve!: (r: PerfResult) => void;
   const done = new Promise<PerfResult>((r) => { resolve = r; });

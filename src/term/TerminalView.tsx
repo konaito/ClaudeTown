@@ -9,6 +9,8 @@ import { call, openTerminal } from "../bridge";
 import { perfCounters, perfMark, perfEnd, perfTerm, perfWaitingPrompt } from "./perf";
 
 const SIZE_KEY = "claude-town.term-size";
+/** ほかの画面の大きさが右パネルに収まらないとき、こちらの大きさを送り返す間隔の下限 */
+const FOREIGN_RECLAIM_MS = 5000;
 /** 最後に開いたターミナルの大きさ。新しい世帯をこの大きさで起動する */
 export function lastTermSize(): { cols: number; rows: number } | null {
   try { const v = JSON.parse(localStorage.getItem(SIZE_KEY) ?? "null"); return v?.cols && v?.rows ? v : null; } catch { return null; }
@@ -72,8 +74,11 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
     // PTY に最後に送った大きさ。届いた size がこれと違えば、ほかの画面（ccn.fybe.jp など）が大きさを変えた
     let sentSize = "";
     // ほかの画面の大きさに合わせている間は、replay のたびに自分の大きさを送り返さない（相手も送り返すと取り合いが続く）。
-    // 本人がここで打つか、右パネルの大きさが変わったら、こちらの大きさに戻す（後から操作した画面の大きさになる。#19）
+    // 本人がここで打つか、右パネルの大きさが変わったら、こちらの大きさに戻す（後から操作した画面の大きさになる。#19）。
+    // ただし相手の大きさが右パネルに収まらないとき（右や下が切れて見えない）は、合わせずにこちらの大きさを送り返す。
+    // 相手も送り返す作りでも取り合いが速く回らないよう、送り返しは FOREIGN_RECLAIM_MS に1回までにする
     let following = false;
+    let reclaimedAt = 0;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const pushSize = () => {
       try { fit.fit(); } catch { return; }
@@ -90,9 +95,13 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
         call("term_resize", { sessionId, cols: term.cols, rows: term.rows, peer }).catch((e) => onError(`ターミナルの大きさを変えられなかった: ${e}`));
       }, 150);
     };
+    // 本人がここで打ったら（キー、貼り付け、IME の確定）、こちらの大きさに戻す。onData では見ない。
+    // claude はフォーカスの報告（ESC[?1004h）を有効にするので、窓から離れただけでも onData に ESC[O が流れる
+    const reclaim = () => { if (following) { following = false; lastSize = ""; pushSize(); } };
+    const ta = term.textarea;
+    for (const ev of ["keydown", "paste", "compositionend"]) ta?.addEventListener(ev, reclaim);
     const disposeInput = term.onData((text) => {
       if (replaying > 0) return;
-      if (following) { following = false; lastSize = ""; pushSize(); }
       call("term_input", { sessionId, text, peer }).catch((e) => onError(`ターミナルに書けなかった: ${e}`));
     });
     let close = () => {};
@@ -104,10 +113,18 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
           // 繋いだ直後か、ほかの画面が大きさを変えた。続けて replay が来たら、その前に画面を消す。
           // replay はノードの cols と rows で作った画面のスナップショットなので、まず xterm をその大きさにする（ccn PR #19）
           pendingReset = true;
-          if (sentSize && e.data?.cols && `${e.data.cols}x${e.data.rows}` !== sentSize) following = true;
+          let reclaimNow = false;
+          if (sentSize && e.data?.cols && `${e.data.cols}x${e.data.rows}` !== sentSize) {
+            const fits = fit.proposeDimensions();
+            const tooBig = !!fits && (e.data.cols > fits.cols || e.data.rows > fits.rows);
+            if (tooBig && Date.now() - reclaimedAt > FOREIGN_RECLAIM_MS) { following = false; reclaimedAt = Date.now(); reclaimNow = true; }
+            else following = true;
+          }
           if (e.data?.cols && e.data?.rows && (e.data.cols !== term.cols || e.data.rows !== term.rows)) {
             try { term.resize(e.data.cols, e.data.rows); } catch { /* 大きさを変えられなくても書くのは続ける */ }
           }
+          // 大きさが変わった後に replay が来るとは限らないので、送り返しはここで始める
+          if (reclaimNow) { lastSize = ""; pushSize(); }
           break;
         case "replay":
           if (pendingReset) { term.reset(); pendingReset = false; }
@@ -150,6 +167,7 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
     return () => {
       closed = true;
       ro.disconnect();
+      for (const ev of ["keydown", "paste", "compositionend"]) ta?.removeEventListener(ev, reclaim);
       disposeInput.dispose();
       close();
       term.dispose();
