@@ -364,9 +364,8 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .letters-layer { position: fixed; inset: 0; pointer-events: none; z-index: 60; }
 .letter-fly { position: absolute; left: 0; top: 0; width: 30px; height: 30px; will-change: transform, opacity; filter: drop-shadow(0 3px 6px rgba(47, 45, 54, 0.18)); }
 /* 受け手の頭（カードの左上の角）に残る印 */
-.letter-mark { position: absolute; left: -9px; top: -11px; width: 24px; height: 24px; z-index: 9; pointer-events: auto; filter: drop-shadow(0 2px 3px rgba(47, 45, 54, 0.15)); animation: letter-pop 0.35s ease-out; }
-@keyframes letter-pop { from { transform: scale(0.4); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .letter-mark { animation: none; } }
+/* 飛んできた封筒がそのまま止まって印になるので、印そのものには出る動きを付けない。影も .letter-fly と同じにする */
+.letter-mark { position: absolute; left: -9px; top: -11px; width: 24px; height: 24px; z-index: 9; pointer-events: auto; filter: drop-shadow(0 3px 6px rgba(47, 45, 54, 0.18)); }
 /* 会話の中のお手紙。並びは普通の発言と同じで、吹き出しの色だけ肌色にする。
    文字 #2f2d36 と地 #f6e7d6 の明暗差は 11.18:1（WCAG AA の 4.5:1 を満たす） */
 .msg.letter .b { background: #f6e7d6; border-color: #ecd6bd; }

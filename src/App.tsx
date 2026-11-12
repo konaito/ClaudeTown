@@ -381,6 +381,13 @@ function descOf(childrenOf: Map<string, Agent[]>, id: string): Agent[] {
 const LETTER_IMG = "/sprites/noto/1f48c/512.webp";
 /** 封筒の印を残す長さ。読まれたら短く、読まれないままなら長くても MARK_MAX_MS で消す */
 const MARK_READ_MS = 2500;
+/** 飛ぶ封筒と、頭に残る印の大きさ（px）。App.css の .letter-fly と .letter-mark に合わせる */
+const FLY_SIZE = 30;
+const MARK_SIZE = 24;
+/** 印の中心の、カード（.fnode-body）の左上からの位置。.letter-mark の left: -9px、top: -11px と大きさから */
+const MARK_OFFSET = { x: -9 + MARK_SIZE / 2, y: -11 + MARK_SIZE / 2 };
+/** つなぎ線の上を進む割合。残りで印の位置へ寄せる */
+const LETTER_ALONG = 0.8;
 const MARK_MAX_MS = 30000;
 
 /**
@@ -404,22 +411,31 @@ function useLetterMarks(flights: Flight[]) {
       seen.current!.add(f.id);
       const land = () => setMarks((m) => new Map(m).set(f.to, { flight: f.id, until: Date.now() + (f.readAt ? MARK_READ_MS : MARK_MAX_MS) }));
       const a = document.querySelector(`[data-aid="${f.from}"]`)?.getBoundingClientRect();
-      const b = document.querySelector(`[data-aid="${f.to}"]`)?.getBoundingClientRect();
+      const toEl = document.querySelector<HTMLElement>(`[data-aid="${f.to}"]`);
+      const b = toEl?.getBoundingClientRect();
       if (reduce || !a || !b || !layer.current) { land(); return; }
       const img = document.createElement("img");
       img.src = LETTER_IMG;
       img.className = "letter-fly";
       layer.current.appendChild(img);
-      const ax = a.left + a.width / 2, ay = a.top + a.height / 2, bx = b.left + b.width / 2, by = b.top + b.height / 2;
-      const dist = Math.hypot(bx - ax, by - ay);
-      const ms = Math.min(1400, Math.max(650, dist * 1.6));
+      // 始点は送り手のカードの中心。つなぎ線（中心どうしを結ぶ線）の上を受け手の手前 LETTER_ALONG まで進み、
+      // 最後の区間で、届いた後に印が残る位置（受け手のカードの左上、.letter-mark と同じ中心）へ寄せ、印と同じ大きさで止まる
+      const ax = a.left + a.width / 2, ay = a.top + a.height / 2, cx = b.left + b.width / 2, cy = b.top + b.height / 2;
+      // 町は拡大縮小されるので、印の位置と大きさも同じ倍率にする
+      const k = toEl && toEl.offsetWidth ? b.width / toEl.offsetWidth : 1;
+      const mx = b.left + MARK_OFFSET.x * k, my = b.top + MARK_OFFSET.y * k;
+      const vx = ax + (cx - ax) * LETTER_ALONG, vy = ay + (cy - ay) * LETTER_ALONG;
+      const dist = Math.hypot(vx - ax, vy - ay) + Math.hypot(mx - vx, my - vy);
+      const ms = Math.min(1500, Math.max(700, dist * 1.6));
+      const at = (x: number, y: number, k: number) => `translate(${x}px, ${y}px) translate(-50%, -50%) scale(${k})`;
       const anim = img.animate([
-        { transform: `translate(${ax}px, ${ay}px) translate(-50%, -50%) scale(0.6)`, opacity: 0 },
-        { transform: `translate(${ax}px, ${ay}px) translate(-50%, -50%) scale(1)`, opacity: 1, offset: 0.12 },
-        { transform: `translate(${bx}px, ${by}px) translate(-50%, -50%) scale(1)`, opacity: 1, offset: 0.9 },
-        { transform: `translate(${bx}px, ${by}px) translate(-50%, -50%) scale(0.7)`, opacity: 0 },
+        { transform: at(ax, ay, 0.6), opacity: 0 },
+        { transform: at(ax, ay, 1), opacity: 1, offset: 0.1 },
+        { transform: at(vx, vy, 1), opacity: 1, offset: 0.78 },
+        { transform: at(mx, my, (MARK_SIZE * k) / FLY_SIZE), opacity: 1 },
       ], { duration: ms, delay: i * 180, easing: "cubic-bezier(.4,.1,.3,1)", fill: "both" });
-      anim.onfinish = () => { img.remove(); land(); };
+      // 印を出してから飛んできた封筒を消す（入れ替わりの継ぎ目を見せない）
+      anim.onfinish = () => { land(); requestAnimationFrame(() => requestAnimationFrame(() => img.remove())); };
     });
   }, [flights]);
   // 読まれたら印を短くする。時間が来たら消す
