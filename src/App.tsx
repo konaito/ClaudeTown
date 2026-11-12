@@ -118,7 +118,7 @@ export default function App() {
             </span>
           </div>
 
-          <Stage zoom={zoom} deps={agents.length}>
+          <Stage zoom={zoom} deps={agents.length} onBlank={() => setSelected(null)}>
             {tree.families.map((f) => (
               <House key={f.root.id} root={f.root} count={f.all.length}
                 hasNeeds={f.all.some((a) => NEEDS_YOU.includes(moodOf(a)))}>
@@ -197,19 +197,25 @@ function NextRow({ needs, done, working, total, onSelect, onFocus }: {
 
 // ---------- 家と木 ----------
 
-/** 家族の木を並べる場所。zoom が fit のときは横幅に収まるまで縮める */
-function Stage({ zoom, deps, children }: { zoom: number | "fit"; deps: number; children: React.ReactNode }) {
+/**
+ * 家族の家を並べる場所。家は横に並べ、幅が足りなければ次の段に折り返す（街並み）。
+ * zoom が fit のときは、一番広い家が横幅に収まるまで縮める（最小 0.4。それでも入らなければ横にスクロールする）。
+ */
+function Stage({ zoom, deps, onBlank, children }: { zoom: number | "fit"; deps: number; onBlank: () => void; children: React.ReactNode }) {
   const outer = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
   const [fit, setFit] = useState(1);
+  const [avail, setAvail] = useState(1000);
   const applied = useRef(1);
   useLayoutEffect(() => {
     const measure = () => {
       if (!outer.current || !inner.current) return;
-      const avail = outer.current.clientWidth - 40;
+      const w = outer.current.clientWidth - 36;
       // 画面上の幅は zoom をかけた後の値なので、かけている倍率で割って元の幅に戻す
-      const need = inner.current.getBoundingClientRect().width / applied.current;
-      setFit(Math.max(0.75, Math.min(1, avail / need)));
+      const widest = Math.max(1, ...Array.from(inner.current.querySelectorAll<HTMLElement>(".house"))
+        .map((h) => h.getBoundingClientRect().width / applied.current));
+      setAvail(w);
+      setFit(Math.max(0.4, Math.min(1, w / (widest + 40))));
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -219,45 +225,62 @@ function Stage({ zoom, deps, children }: { zoom: number | "fit"; deps: number; c
   const scale = zoom === "fit" ? fit : zoom;
   applied.current = scale;
   return (
-    <div className="stage" ref={outer}>
-      <div className="stage-inner" ref={inner} style={{ zoom: scale }}>{children}</div>
+    <div className="stage" ref={outer}
+      onClick={(e) => { if (!(e.target as HTMLElement).closest(".card, .mini, .pop")) onBlank(); }}>
+      <div className="stage-inner" ref={inner} style={{ zoom: scale, width: Math.floor(avail / scale) }}>{children}</div>
     </div>
   );
 }
 
+const ROOFS = ["red", "orange"] as const;
+
 function House({ root, count, hasNeeds, children }: { root: Agent; count: number; hasNeeds: boolean; children: React.ReactNode }) {
+  const roof = ROOFS[hashOf(projectOf(root)) % ROOFS.length];
   return (
-    <section className={`house ${hasNeeds ? "has-needs" : ""}`}>
-      <svg className="roof" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden>
-        <path d="M0.4 10 L50 0.6 L99.6 10" vectorEffect="non-scaling-stroke" />
-      </svg>
-      <div className="house-title">
-        <LaptopIcon />
-        <span className="ht-name">{projectOf(root)}</span>
-        <span className="ht-sub">{root.name}・{count}人</span>
+    <section className={`house roof-${roof} ${hasNeeds ? "has-needs" : ""}`}>
+      <div className="h-roof">
+        <div className="h-sign">
+          <span className="ht-name">{projectOf(root)}</span>
+          <span className="ht-sub">{root.name}の家・{count}人</span>
+        </div>
       </div>
-      {children}
+      <div className="h-wall">
+        {children}
+        <img className="h-door" src="/sprites/ninja/tiles/door.png" alt="" draggable={false} />
+      </div>
+      <div className="h-ground" />
     </section>
   );
+}
+
+function hashOf(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return h >>> 0;
 }
 
 function roleOf(depth: number): Role {
   return depth === 0 ? "parent" : depth === 1 ? "child" : "grandchild";
 }
-const ROLE_LABEL = ["親", "子", "孫", "ひ孫"];
+const ROLE_LABEL = ["親", "子", "孫", "ひ孫", "玄孫"];
+const SHRINK = 0.86;
+const MIN_SCALE = 0.6;
+/** この深さから下は小さい札で描く（0=親、1=子、2=孫） */
+const COMPACT_FROM = 2;
 
 function Tree({ agent, depth, childrenOf, selected, onSelect, onFocus }: {
   agent: Agent; depth: number; childrenOf: Map<string, Agent[]>; selected: string | null;
   onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;
 }) {
   const kids = childrenOf.get(agent.id) ?? [];
-  // 孫より下で人数が多いときは、横に広がりすぎないよう2列の格子にする
-  const grid = depth >= 1 && kids.length > 2 && kids.every((k) => !(childrenOf.get(k.id)?.length));
+  // どの深さでも同じ規則（カードの下に子を横に並べ、上から線でつなぐ）で描く。
+  // 子の段は kidsZoomAt の倍率で縮め、入れ子で掛け合わさって自己相似になる。孫より下は小さい札にする
+  const kidsZoom = kidsZoomAt(depth);
   return (
-    <div className={`branch d${Math.min(depth, 3)}`}>
+    <div className="branch">
       <Card agent={agent} depth={depth} selected={selected === agent.id} onSelect={onSelect} onFocus={onFocus} />
       {kids.length > 0 && (
-        <div className={`kids ${grid ? "grid" : "chart"}`}>
+        <div className="kids" style={{ zoom: kidsZoom }}>
           {kids.map((k) => (
             <Tree key={k.id} agent={k} depth={depth + 1} childrenOf={childrenOf} selected={selected} onSelect={onSelect} onFocus={onFocus} />
           ))}
@@ -267,27 +290,66 @@ function Tree({ agent, depth, childrenOf, selected, onSelect, onFocus }: {
   );
 }
 
-function Card({ agent, depth, selected, onSelect, onFocus }: {
+function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void }) {
+  const { agent, depth, selected, onSelect, onFocus } = props;
+  if (depth < COMPACT_FROM) return <FullCard {...props} />;
+  // 孫より下は小さい札。選んだときだけ、親や子と同じ見た目の大きさのカードを上に重ねる（周りは動かさない）
+  const mood = moodOf(agent);
+  const now = nowOf(agent, mood);
+  return (
+    <div className={`mini-wrap ${selected ? "open" : ""}`}>
+      <button
+        className={`mini m-${mood} ${selected ? "sel" : ""}`}
+        onClick={() => onSelect(agent)}
+        onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
+        title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで広げて会話・右クリックでペインへ`}
+      >
+        <Kid seed={agent.name} mood={mood} role={roleOf(depth)} size={40} />
+        <span className="mini-name"><i className={`dot st-${mood}`} />{agent.name}</span>
+      </button>
+      {selected && (
+        <div className="pop" style={{ zoom: 1 / scaleAt(depth) }}>
+          <FullCard {...props} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** その深さのカードに、入れ子の zoom が掛け合わさった倍率 */
+function scaleAt(depth: number): number {
+  let s = 1;
+  for (let d = 1; d <= depth; d++) s *= kidsZoomAt(d - 1);
+  return s;
+}
+/** 深さ depth のノードの子の段にかける zoom。孫の段（札になる段）で大きく縮め、その下は SHRINK ずつ、MIN_SCALE で止める */
+function kidsZoomAt(depth: number): number {
+  const z = depth + 1 === COMPACT_FROM ? 1 : SHRINK;
+  let here = 1;
+  for (let d = 0; d < depth; d++) here *= d + 1 === COMPACT_FROM ? 1 : SHRINK;
+  return here * z >= MIN_SCALE ? z : 1;
+}
+
+function FullCard({ agent, depth, selected, onSelect, onFocus }: {
   agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;
 }) {
   const mood = moodOf(agent);
   const task = taskOf(agent, mood);
   const now = nowOf(agent, mood);
   const since = mood === "working" ? sinceText(agent.report?.turn_started_at) : "";
-  const big = depth === 0;
   return (
     <button
-      className={`card m-${mood} ${selected ? "sel" : ""} ${big ? "big" : ""} dc${Math.min(depth, 3)}`}
+      className={`card m-${mood} ${selected ? "sel" : ""}`}
       onClick={() => onSelect(agent)}
       onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
       title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで会話・右クリックでペインへ`}
     >
       <div className="card-top">
-        <span className="role">{ROLE_LABEL[Math.min(depth, 3)]}</span>
-        <span className="task">{clip(task, big ? 18 : 12)}</span>
+        <span className="role">{ROLE_LABEL[Math.min(depth, 4)]}</span>
+        <span className="task">{clip(task, 14)}</span>
       </div>
       <div className="card-main">
-        <Kid seed={agent.name} mood={mood} role={roleOf(depth)} size={big ? 58 : depth === 1 ? 50 : 42} />
+        <Kid seed={agent.name} mood={mood} role={roleOf(depth)} size={54} />
         <div className="card-info">
           <span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}{since && <em>{since}</em>}</span>
           <span className="cname">{agent.name}</span>
@@ -511,9 +573,6 @@ function HouseIcon() {
 }
 function PeopleIcon() {
   return (<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="9" cy="8" r="3.2" /><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6" /><circle cx="17" cy="9" r="2.6" /><path d="M16 14.2c2.8.3 5 2.6 5 5.8" /></svg>);
-}
-function LaptopIcon() {
-  return (<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round"><rect x="4" y="5" width="16" height="11" rx="1.5" /><path d="M2 19h20" /></svg>);
 }
 function DocIcon() {
   return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M6 3h8l4 4v14H6z" /><path d="M9 12h6M9 16h6" /></svg>);
