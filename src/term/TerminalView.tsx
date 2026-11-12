@@ -3,17 +3,16 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { call, openTerminal } from "../bridge";
-import { perfMark, perfEnd, perfWaitingPrompt } from "./perf";
+import { perfCounters, perfMark, perfEnd, perfWaitingPrompt } from "./perf";
 
 const SIZE_KEY = "claude-town.term-size";
 /** 最後に開いたターミナルの大きさ。新しい世帯をこの大きさで起動する */
 export function lastTermSize(): { cols: number; rows: number } | null {
   try { const v = JSON.parse(localStorage.getItem(SIZE_KEY) ?? "null"); return v?.cols && v?.rows ? v : null; } catch { return null; }
 }
-
-const b64ToBytes = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
 export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionId: string; peer: string | null; onError: (m: string) => void; takeEarly?: (id: string) => string }) {
   const box = useRef<HTMLDivElement>(null);
@@ -24,12 +23,25 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
     perfMark("mount", sessionId);
     const term = new Terminal({
       fontFamily: '"SF Mono", Menlo, "Hiragino Sans", monospace', fontSize: 12.5, lineHeight: 1.15,
-      cursorBlink: true, scrollback: 5000, allowProposedApi: false,
+      cursorBlink: true,
+      // claude は入力欄から上を描き直し続けるので、遡る行はそれほど要らない。5000 から減らしてメモリと再描画の量を抑える（#8）
+      scrollback: 1000, allowProposedApi: false,
       theme: { background: "#ffffff", foreground: "#2f2d36", cursor: "#2f2d36", selectionBackground: "#cfe0ff", black: "#2f2d36", brightBlack: "#8a8794" },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(box.current);
+    // GPU で描く（#8）。何も指定しないと xterm.js は DOM で描き、claude の書き換えのたびに WebContent の負荷になる。
+    // WebGL が使えないときと、文脈を失ったときは、アドオンを外して DOM の描き方に戻す
+    let gl: WebglAddon | null = null;
+    // 開発の計測用: ?renderer=dom で DOM の描き方のまま比べる
+    if (import.meta.env.DEV && new URLSearchParams(location.search).get("renderer") === "dom") perfCounters.renderer = "dom";
+    else try {
+      gl = new WebglAddon();
+      gl.onContextLoss(() => { gl?.dispose(); gl = null; perfCounters.renderer = "dom（文脈を失った）"; });
+      term.loadAddon(gl);
+      perfCounters.renderer = "webgl";
+    } catch { gl = null; perfCounters.renderer = "dom"; }
     let pendingReset = false;
     // replay を書いている間に xterm.js が返す自動応答（カーソル位置の報告など）は PTY に送らない（claude の入力に混ざるため）
     let replaying = 0;
@@ -90,12 +102,12 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
           if (pendingReset) { term.reset(); pendingReset = false; }
           replaying++;
           // 書き終えたら、右パネルの大きさに合わせ直して PTY にも伝える
-          term.write(b64ToBytes(e.data?.b64 ?? ""), () => { replaying--; lastSize = ""; pushSize(); afterWrite(); });
-          if (e.data?.b64) onFirstOutput();
+          term.write(e.data?.s ?? "", () => { replaying--; lastSize = ""; pushSize(); afterWrite(); });
+          if (e.data?.s) onFirstOutput();
           break;
         case "data":
           pendingReset = false;
-          term.write(b64ToBytes(e.data?.b64 ?? ""), afterWrite);
+          term.write(e.data?.s ?? "", afterWrite);
           onFirstOutput();
           break;
         case "exit":
