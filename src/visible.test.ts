@@ -63,3 +63,37 @@ describe("shownAt（#6）", () => {
     expect(v.shownAt()).toBeGreaterThanOrEqual(before);
   });
 });
+
+describe("pollBackoff（#5）", () => {
+  test("変わらない回が続くと間隔が延び、変わったら戻る。kick ですぐ取り直す", async () => {
+    const v = createVisibility(true);
+    const at: number[] = [];
+    let changed = false;
+    const t0 = Date.now();
+    const p = v.backoff(() => { at.push(Date.now() - t0); return changed; }, 30, 120);
+    await wait(250);
+    // 0, 60, 180 に呼ぶ（間隔が 60→120 と延びる。次は 300）
+    expect(at.length).toBe(3);
+    changed = true;
+    p.kick();
+    expect(at.length).toBe(4);
+    await wait(75);
+    // 変わったので 30 ごとに戻る
+    expect(at.length).toBeGreaterThanOrEqual(5);
+    p.stop();
+  });
+
+  test("隠れている間は呼ばない", async () => {
+    const v = createVisibility(false);
+    let n = 0;
+    const p = v.backoff(() => { n++; return false; }, 10, 10);
+    await wait(40);
+    expect(n).toBe(0);
+    v.set(true);
+    expect(n).toBe(1);
+    v.set(false);
+    await wait(40);
+    expect(n).toBe(1);
+    p.stop();
+  });
+});

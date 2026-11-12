@@ -29,7 +29,36 @@ export function createVisibility(initial: boolean) {
     const off = subscribe((v) => (v ? start() : stop()));
     return () => { off(); stop(); };
   };
-  return { isVisible: () => visible, shownAt: () => shownAt, set, subscribe, poll };
+  /**
+   * 見えている間だけ load を呼ぶ。load が「変わった」（true）を返したら次は min 後、変わらなければ間隔を倍にする（max で止める）（#5）。
+   * 前の回が終わるまで次を始めない。kick で、すぐ取り直して間隔を min に戻す（取っている最中なら、終わった直後にもう1回取る）
+   */
+  const backoff = (load: () => Promise<boolean> | boolean, min: number, max: number) => {
+    let t: ReturnType<typeof setTimeout> | null = null;
+    let on = false, busy = false, again = false, wait = min;
+    const run = async () => {
+      t = null;
+      if (busy) { again = true; return; }
+      busy = true;
+      let changed = false;
+      try { changed = await load(); } catch { /* 失敗は load の中で扱う */ }
+      busy = false;
+      if (!on) return;
+      if (again) { again = false; wait = min; run(); return; }
+      wait = changed ? min : Math.min(wait * 2, max);
+      t = setTimeout(run, wait);
+    };
+    const clear = () => { if (t !== null) { clearTimeout(t); t = null; } };
+    const start = () => { if (on) return; on = true; wait = min; run(); };
+    const stop = () => { on = false; again = false; clear(); };
+    const off = subscribe((v) => (v ? start() : stop()));
+    if (visible) start();
+    return {
+      stop: () => { off(); stop(); },
+      kick: () => { if (!on) return; clear(); wait = min; run(); },
+    };
+  };
+  return { isVisible: () => visible, shownAt: () => shownAt, set, subscribe, poll, backoff };
 }
 
 const hasDoc = typeof document !== "undefined";
@@ -50,3 +79,4 @@ export const isVisible = vis.isVisible;
 export const shownAt = vis.shownAt;
 export const onVisibleChange = vis.subscribe;
 export const pollWhileVisible = vis.poll;
+export const pollBackoff = vis.backoff;

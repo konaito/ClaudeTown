@@ -1030,6 +1030,91 @@ mod cmd {
     }
 }
 
+// ---------- 町の一覧の見張り（#5） ----------
+//
+// 画面が決まった間隔で snapshot を呼ぶのをやめ、Rust のスレッドが一覧を取り、前回と変わったときだけ Channel で画面へ送る。
+// 変化が無ければ画面（JS）は一度も起きない。ccn に変化を流す口（SSE）が町の全部を覆うまでのつなぎ。
+// ccn の GET /api/events は、コードを読んだ範囲では hook の状態ファイル（state/、close-check）とお手紙の変化を含まないので、まだ使わない。
+// 間隔は、変化が無い回が続くと 2秒→4秒→8秒→16秒→30秒と延ばし、変わったら2秒に戻す。つながらない回は毎回送り、2秒で取り直す。
+// 画面が見えていない間は、画面が town_unwatch で止める（#6）。
+
+/// 変化が無い回が続いたときの間隔の下限と上限
+const WATCH_MIN: Duration = Duration::from_secs(2);
+const WATCH_MAX: Duration = Duration::from_secs(30);
+
+enum WatchCmd { Kick, Stop }
+/// いま動いている見張り（窓は1つなので1本だけ）。世代と、止めるための口
+static WATCH: Mutex<Option<(u64, std::sync::mpsc::Sender<WatchCmd>)>> = Mutex::new(None);
+static WATCH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// 前回と同じかを比べる鍵。取得した時刻（fetched_at）は毎回変わるので除く
+fn snapshot_key(s: &Snapshot) -> String {
+    let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
+    if let Some(o) = v.as_object_mut() {
+        o.remove("fetched_at");
+    }
+    v.to_string()
+}
+
+/// 次に取るまでの間隔。変わったら下限に戻し、変わらなければ倍にする（上限で止める）
+fn next_wait(cur: Duration, changed: bool) -> Duration {
+    if changed { WATCH_MIN } else { (cur * 2).min(WATCH_MAX) }
+}
+
+/// 町の一覧の見張りを始める。前の見張りがあれば止める。戻り値の世代を town_unwatch に渡す
+#[tauri::command]
+fn town_watch(peer: Option<String>, on_event: tauri::ipc::Channel<Value>) -> u64 {
+    let (tx, rx) = std::sync::mpsc::channel::<WatchCmd>();
+    let generation = WATCH_GEN.fetch_add(1, Ordering::SeqCst);
+    if let Some((_, old)) = WATCH.lock().unwrap_or_else(|e| e.into_inner()).replace((generation, tx)) {
+        let _ = old.send(WatchCmd::Stop);
+    }
+    std::thread::spawn(move || {
+        use std::sync::mpsc::RecvTimeoutError;
+        let mut last: Option<String> = None;
+        let mut wait = WATCH_MIN;
+        loop {
+            let s = snapshot(peer.clone());
+            let key = snapshot_key(&s);
+            let changed = last.as_deref() != Some(key.as_str());
+            // つながらない回は、同じ中身でも毎回送る（画面が続けて失敗した回数を数え、「つながりにくい」を出す）
+            if changed || !s.ccn_ok {
+                if on_event.send(serde_json::to_value(&s).unwrap_or(Value::Null)).is_err() {
+                    break;
+                }
+            }
+            wait = if s.ccn_ok { next_wait(wait, changed) } else { WATCH_MIN };
+            last = Some(key);
+            match rx.recv_timeout(wait) {
+                // すぐ取り直す（新しい世帯を作った直後など）。間隔も下限に戻す
+                Ok(WatchCmd::Kick) => wait = WATCH_MIN,
+                Ok(WatchCmd::Stop) | Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+    });
+    generation
+}
+
+/// 見張りを止める。世代が今の見張りと違えば何もしない（後から始めた見張りを止めない）
+#[tauri::command]
+fn town_unwatch(generation: u64) {
+    let mut w = WATCH.lock().unwrap_or_else(|e| e.into_inner());
+    if w.as_ref().map(|(g, _)| *g) == Some(generation) {
+        if let Some((_, tx)) = w.take() {
+            let _ = tx.send(WatchCmd::Stop);
+        }
+    }
+}
+
+/// 見張りに、すぐ取り直させる
+#[tauri::command]
+fn town_kick() {
+    if let Some((_, tx)) = WATCH.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        let _ = tx.send(WatchCmd::Kick);
+    }
+}
+
 // ---------- 計測（#18） ----------
 
 /// 画面の計測（src/term/perf.ts）の1行を書く。FC_PERF_LOG があればそのファイルに足し、無ければ標準エラーに出す
@@ -1137,7 +1222,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             cmd::snapshot, cmd::peers, cmd::conversation, cmd::send_message, set_house_name, cmd::answer_permission,
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, term_open, term_close, term_input, term_resize,
-            perf_log, perf_ping
+            perf_log, perf_ping, town_watch, town_unwatch, town_kick
         ])
         .run(context)
         .expect("error while running tauri application");
@@ -1197,6 +1282,22 @@ mod tests {
         use serde_json::json;
         let d = ConvDelta { items: vec![json!({ "role": "user", "text": "a", "n": 0 })], total: 1, reset: true };
         assert_eq!(serde_json::to_value(&d).unwrap(), json!({ "items": [{ "role": "user", "text": "a", "n": 0 }], "total": 1, "reset": true }));
+    }
+
+    #[test]
+    fn watch_wait_backs_off_and_resets() {
+        let mut w = WATCH_MIN;
+        let mut seen = vec![];
+        for _ in 0..6 { w = next_wait(w, false); seen.push(w.as_secs()); }
+        assert_eq!(seen, vec![4, 8, 16, 30, 30, 30]);
+        assert_eq!(next_wait(WATCH_MAX, true), WATCH_MIN);
+    }
+
+    #[test]
+    fn snapshot_key_ignores_fetched_at() {
+        let mk = |at: u128, n: usize| Snapshot { ccn: "x".into(), peer: None, ccn_ok: true, ccn_error: None, agents: vec![json!({"id": n})], letters: vec![], fetched_at: at };
+        assert_eq!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(2, 1)));
+        assert_ne!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(1, 2)));
     }
 
     use super::*;
