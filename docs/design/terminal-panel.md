@@ -38,7 +38,7 @@ ccn に足すもの（claude-code-nodes は別プロジェクトなので、本�
 
 Claude Town で変えるもの:
 - 右パネルを xterm.js（MIT、addon-fit）の端末にする。開いたときだけ ccn の端末の口に繋ぎ、閉じたら切る（30本を同時に描かない）。
-- 新しいセッションは「この世帯に子を足す」「新しい世帯を作る」のボタンから、ccn の create_session（terminal: true）で立てる。
+- 新しいセッションは「新しい世帯を作る」のボタンから、ccn の create_session（terminal: true）で立てる。子は親のセッション自身が create_session で作る（2026-11-12、画面から子を足す操作はやめた）。
 - Specter の send key、AppleScript の focus、`~/.specter/agents.json` への依存を外す。親子は ccn の parent から作る。いま Specter で動いているセッションは、端末のセッションとして一覧と送信だけを出す（画面は出せない）。
 - 状態 hook と承認の欄は、PTY の Driver が出す承認に寄せる。
 

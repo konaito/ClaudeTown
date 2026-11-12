@@ -154,7 +154,6 @@ export default function App() {
         </div>
 
         <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} termReq={termReq} peers={peers}
-          onCreated={(r) => { toast(`子を足した（${r?.title ?? ""}）`); if (r?.id) setSelected(r.id); }}
           onSent={(a) => toast(`${a.name} に届けた`)} onSent2={(m) => toast(m)} onError={(m) => toast(m, true)}
           needs={needs} onSelect={(a) => setSelected(a.id)} />
       </div>
@@ -428,13 +427,13 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
 
 // ---------- 右のパネル ----------
 
-function Panel({ agent, peer, lineage, termReq, peers, onCreated, onSent, onSent2, onError, needs, onSelect }: {
-  agent: Agent | null; peer: string; lineage: Agent[]; termReq: number; peers: Peer[]; onCreated: (r: any) => void;
+function Panel({ agent, peer, lineage, termReq, peers, onSent, onSent2, onError, needs, onSelect }: {
+  agent: Agent | null; peer: string; lineage: Agent[]; termReq: number; peers: Peer[];
   onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
 }) {
   const hasTerm = !!agent?.capabilities?.terminal;
   const [tab, setTab] = useState<"term" | "talk" | "state">("talk");
-  const [sheet, setSheet] = useState<"child" | "teleport" | null>(null);
+  const [sheet, setSheet] = useState<"teleport" | null>(null);
   // 端末を持つセッションは端末を先に出す。右クリックや「端末へ」でも端末を開く
   useEffect(() => { setTab(hasTerm ? "term" : "talk"); setSheet(null); }, [agent?.id, hasTerm]);
   useEffect(() => { if (termReq && hasTerm) setTab("term"); }, [termReq]);
@@ -523,11 +522,9 @@ function Panel({ agent, peer, lineage, termReq, peers, onCreated, onSent, onSent
           <div className="p-task"><DocIcon />{taskOf(agent, mood)}</div>
         </div>
         <div className="p-actions">
-          <button className="pane-btn" disabled={!!peer} title={peer ? "別の機械のセッションには、ここからは足せない" : "この子の下に子を足す"} onClick={() => setSheet(sheet === "child" ? null : "child")}>＋ 子を足す</button>
           <button className="pane-btn" disabled={!!peer} title={peer ? "別の機械のセッションの転出は、まだ出していない" : "別の機械へ移す"} onClick={() => setSheet(sheet === "teleport" ? null : "teleport")}>転出</button>
         </div>
       </div>
-      {sheet === "child" && <AddChild parent={agent} onDone={(r) => { setSheet(null); onCreated(r); }} onError={onError} />}
       {sheet === "teleport" && <Teleport agent={agent} peers={peers} onDone={(m) => { setSheet(null); onSent2(m); }} onError={onError} />}
       <div className="tabs">
         {hasTerm && <button className={tab === "term" ? "on" : ""} onClick={() => setTab("term")}>端末</button>}
@@ -640,31 +637,7 @@ function Approval({ agent, peer, onDone, onError }: {
   );
 }
 
-// ---------- 子を足す・新しい世帯・転出 ----------
-
-/** 選んだ子の下に、端末のセッションを1つ足す。作業場所は親と同じ。最初の依頼を付けて立てる（親子の記録が残るように） */
-function AddChild({ parent, onDone, onError }: { parent: Agent; onDone: (r: any) => void; onError: (m: string) => void }) {
-  const [prompt, setPrompt] = useState("");
-  const [busy, setBusy] = useState(false);
-  const go = async () => {
-    setBusy(true);
-    try {
-      const r = await invoke<any>("create_session", { cwd: parent.cwd, prompt, parent: parent.id, name: null, peer: null });
-      onDone(r);
-    } catch (e) { onError(`子を足せなかった: ${e}`); } finally { setBusy(false); }
-  };
-  return (
-    <div className="sheet">
-      <div className="sheet-title">{parent.name} の下に子を足す</div>
-      <textarea placeholder="最初の依頼（例: README を読んで、直すところを3つ挙げて）" value={prompt} onChange={(e) => setPrompt(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); go(); } }} />
-      <div className="sheet-foot">
-        <span className="hint">作業場所: {parent.cwd.replace(/^\/Users\/[^/]+/, "~")}・端末で起動する</span>
-        <button className="primary" disabled={busy || !prompt.trim()} onClick={go}>{busy ? "立てている…" : "足す"}</button>
-      </div>
-    </div>
-  );
-}
+// ---------- 新しい世帯・転出 ----------
 
 /** 新しい世帯を作る。親は ~/Documents/meta で端末のセッションとして起動する（本人の指定） */
 function NewHousehold({ big, disabled, onCreated, onError }: { big?: boolean; disabled?: boolean; onCreated: (r: any) => void; onError: (m: string) => void }) {
