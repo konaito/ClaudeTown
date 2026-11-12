@@ -14,7 +14,7 @@ export function lastTermSize(): { cols: number; rows: number } | null {
   try { const v = JSON.parse(localStorage.getItem(SIZE_KEY) ?? "null"); return v?.cols && v?.rows ? v : null; } catch { return null; }
 }
 
-export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionId: string; peer: string | null; onError: (m: string) => void; takeEarly?: (id: string) => string }) {
+export function TerminalView({ sessionId, peer, onError }: { sessionId: string; peer: string | null; onError: (m: string) => void }) {
   const box = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<string>("起動中…");
 
@@ -46,7 +46,7 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
     // replay を書いている間に xterm.js が返す自動応答（カーソル位置の報告など）は PTY に送らない（claude の入力に混ざるため）
     let replaying = 0;
     let closed = false;
-    // 最初の出力が来たら、フォーカスを当て直し、起動前に打たれたキーを流す
+    // 最初の出力が来たら、フォーカスを当て直す
     let gotOutput = false;
     // 計測（#18）: 書き終えたら、最初の描画と入力欄（❯）が見えたかを印にする
     const afterWrite = () => {
@@ -64,8 +64,6 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
       gotOutput = true;
       setStatus("");
       term.focus();
-      const t = takeEarly?.(sessionId) ?? "";
-      if (t) setTimeout(() => call("term_input", { sessionId, text: t, peer }).catch((e) => onError(`ターミナルに書けなかった: ${e}`)), 300);
     };
     let lastSize = "";
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -118,8 +116,6 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
           break;
         case "error":
           setStatus(e.data?.message ?? "ターミナルに繋がらない");
-          // 端末が開かないなら、起動待ちでためた文字を捨てて横取りをやめる
-          takeEarly?.(sessionId);
           break;
       }
     }).then((c) => {
