@@ -222,3 +222,19 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .ap-deny { background: #fff; color: #b4473a; border: 1.5px solid #efc3bd; border-radius: 10px; padding: 7px 16px; font-weight: 600; }
 
 .layout-warn { position: absolute; right: 0; top: -22px; font-size: 11px; color: #b4473a; background: #fdeeee; border-radius: 99px; padding: 1px 8px; }
+
+/* 承認待ちの枠: 凡例と同じ黄色で、1.4秒周期にゆっくり強弱を付ける。選択中（青）と重なったときは、青の枠の外側に黄色の光を出す */
+@keyframes approval-pulse {
+  0%, 100% { border-color: #f2c14e; box-shadow: 0 0 0 2px rgba(242, 165, 22, 0.18); }
+  50% { border-color: var(--approval); box-shadow: 0 0 0 5px rgba(242, 165, 22, 0.32); }
+}
+@keyframes approval-pulse-sel {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(75, 139, 245, 0.18), 0 0 0 5px rgba(242, 165, 22, 0.25); }
+  50% { box-shadow: 0 0 0 3px rgba(75, 139, 245, 0.18), 0 0 0 8px rgba(242, 165, 22, 0.45); }
+}
+.card.m-approval, .mini.m-approval { border-width: 2px; animation: approval-pulse 1.4s ease-in-out infinite; }
+.card.m-approval.sel, .mini.m-approval.sel { border-color: var(--sel); animation: approval-pulse-sel 1.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .card.m-approval, .mini.m-approval { animation: none; border: 3px solid var(--approval); box-shadow: none; }
+  .card.m-approval.sel, .mini.m-approval.sel { border-color: var(--sel); box-shadow: 0 0 0 4px var(--approval); }
+}
