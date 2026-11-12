@@ -4,7 +4,7 @@ import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
 import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
-  MOOD_LABEL, NEEDS_YOU, buildTree, choicesOf, clip, houseNameOf, moodOf, nowOf, sinceText, taskOf,
+  MOOD_LABEL, NEEDS_YOU, buildTree, choicesOf, houseNameOf, moodOf, nowOf, sinceText, taskOf,
 } from "./model";
 import { Markdown } from "./Markdown";
 import { layoutFamily, type LNode } from "./layout/layout";
@@ -123,7 +123,7 @@ export default function App() {
           {snap && agents.length === 0 && snap.ccn_ok && (
             <div className="empty">いまは誰もいない。Specter で Claude Code を開くと、ここに家族がふえる。</div>
           )}
-          <Stage zoom={zoom} deps={agents.length} onBlank={() => setSelected(null)}>
+          <Stage zoom={zoom} deps={agents.map((a) => `${a.id}|${a.parent ?? ""}|${a.name}`).join(",")} onBlank={() => setSelected(null)}>
             {/* 並べ方は大きいグループから（一番大きいものを左、残りを右に詰める） */}
             {[...tree.families].sort((x, y) => y.all.length - x.all.length).map((f) => (
               <Group key={f.root.id} root={f.root} all={f.all} count={f.all.length}
@@ -209,7 +209,7 @@ function NextRow({ needs, done, working, total, onSelect, onFocus }: {
  * 右に一番広い小さいグループが入る倍率が 0.6 を下回るときは、残りを下に回して大きいグループだけで幅を合わせる。
  * zoom が fit のときはこの倍率を使う（最小 0.4。それでも入らなければ横にスクロールする）。
  */
-function Stage({ zoom, deps, onBlank, children }: { zoom: number | "fit"; deps: number; onBlank: () => void; children: React.ReactNode[] }) {
+function Stage({ zoom, deps, onBlank, children }: { zoom: number | "fit"; deps: string; onBlank: () => void; children: React.ReactNode[] }) {
   const outer = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
   const [fit, setFit] = useState(1);
@@ -324,6 +324,7 @@ function FamilyCanvas({ all, selected, onSelect, onFocus }: {
     });
     const r = layoutFamily(nodes, { prevArcIndex: prevArc.get(rootId) });
     prevArc.set(rootId, r.arcIndex);
+    if (!r.valid) console.warn("family-computing: 配置の検査に通る候補が無かった", rootId, r.metrics, r.candidates);
     return r;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sig]);
@@ -335,7 +336,9 @@ function FamilyCanvas({ all, selected, onSelect, onFocus }: {
   const byId = new Map(all.map((a) => [a.id, a]));
   const pos = new Map(result.nodes.map((n) => [n.id, n]));
   return (
-    <div className="canvas" style={{ width: W, height: H }} data-overlaps={result.metrics.overlaps} data-crossings={result.metrics.crossings}>
+    <div className="canvas" style={{ width: W, height: H }} data-valid={result.valid} data-arc={result.arcIndex}
+      data-metrics={JSON.stringify({ o: result.metrics.overlaps, c: result.metrics.crossings, t: result.metrics.edgeThroughNode, i: result.metrics.interleave, s: Number(result.metrics.s.toFixed(3)) })}>
+      {!result.valid && <span className="layout-warn" title={JSON.stringify(result.metrics)}>配置が重なっている</span>}
       <svg className="edges" width={W} height={H}>
         {result.nodes.filter((n) => n.parent).map((n) => {
           const p = pos.get(n.parent!)!;
@@ -401,7 +404,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
     >
       <div className="card-top">
         <span className="role">{ROLE_LABEL[Math.min(depth, 4)]}</span>
-        <span className="task">{clip(task, 14)}</span>
+        <span className="task">{task}</span>
       </div>
       <div className="card-main">
         <Avatar seed={agent.name} mood={mood} role={roleOf(depth)} size={48} />
@@ -559,6 +562,7 @@ function Approval({ agent, canAnswer, onFocus, onDone, onError }: {
   const p = agent.report?.pending;
   // 質問や計画の確認の待ちは道具の承認ではないので、許可のボタンを出さない（Rust 側でも断る）
   const notTool = !!p && ["AskUserQuestion", "ExitPlanMode"].includes(p.tool);
+  const many = (agent.report?.pending_count ?? 0) > 1;
   const answer = async (choice: "allow" | "deny") => {
     setBusy(choice);
     try {
@@ -575,17 +579,20 @@ function Approval({ agent, canAnswer, onFocus, onDone, onError }: {
   return (
     <div className="approval">
       <div className="ap-title">✋ {agent.name} が承認を待っている</div>
-      {p ? (
-        <>
-          <div className="ap-tool">{p.summary}</div>
-          {p.detail && <pre className="ap-detail">{p.detail}</pre>}
-        </>
+      {p || many ? (
+        (agent.report?.perm_queue ?? (p ? [p] : [])).map((q, i) => (
+          <div key={q.id ?? i}>
+            <div className="ap-tool">{q.summary}</div>
+            {q.detail && <pre className="ap-detail">{q.detail}</pre>}
+          </div>
+        ))
       ) : (
-        <div className="hint">中身が分からない（状態 hook が控える前に始まった承認）。ペインで確かめて答える。</div>
+        <div className="hint">中身が分からない（状態 hook が控える前に始まった承認か、hook に PermissionRequest が登録されていない）。ペインで確かめて答える。</div>
       )}
       <div className="ap-btns">
         {notTool && <div className="hint">これは質問か計画の確認の待ち。選択肢はペインで選ぶ。</div>}
-        <button className="ap-allow" disabled={!canAnswer || !p || notTool || !!busy} onClick={() => answer("allow")}>{busy === "allow" ? "送っている…" : "許可する"}</button>
+        {many && <div className="hint">承認が{agent.report?.pending_count}件並んでいる。どれが端末に出ているか分からないので、ペインで答える。</div>}
+        <button className="ap-allow" disabled={!canAnswer || !p || notTool || many || !!busy} onClick={() => answer("allow")}>{busy === "allow" ? "送っている…" : "許可する"}</button>
         <button className="ap-deny" disabled={!canAnswer || !!busy} onClick={() => answer("deny")}>{busy === "deny" ? "送っている…" : "拒否する"}</button>
         <button className="pane-btn" onClick={() => onFocus(agent)}>ペインへ ↗</button>
       </div>

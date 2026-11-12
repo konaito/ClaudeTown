@@ -20,7 +20,7 @@ SETTINGS = Path(os.environ.get("FC_SETTINGS", Path.home() / ".claude" / "setting
 MARK = "# family-computing"
 SCRIPT = Path(__file__).resolve().parent.parent / "hooks" / "fc-report.py"
 HOUSES = Path(os.environ.get("FC_HOUSES", Path.home() / ".family-computing" / "houses.json"))
-EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Notification", "Stop", "SessionEnd"]
+EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "PostToolUseFailure", "Notification", "Stop", "SessionEnd"]
 
 
 def command():

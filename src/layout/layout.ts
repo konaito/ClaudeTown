@@ -33,7 +33,7 @@ export type Metrics = {
   adjustments: number;
 };
 
-export type LayoutResult = { nodes: Placed[]; metrics: Metrics; arcIndex: number };
+export type LayoutResult = { nodes: Placed[]; metrics: Metrics; arcIndex: number; valid: boolean; candidates: { arcIndex: number; valid: boolean; s: number }[] };
 
 export type LayoutOptions = {
   gap?: number;
@@ -163,9 +163,9 @@ function segCross(p1: Placed, p2: Placed, p3: Placed, p4: Placed): boolean {
   return d1 * d2 < 0 && d3 * d4 < 0;
 }
 
-/** 線分が箱を通るか（Liang-Barsky）。箱は少し縮めて、角をかすめる程度は数えない */
-function segHitsRect(a: Placed, b: Placed, r: Placed): boolean {
-  const hw = r.w / 2 - 2, hh = r.h / 2 - 2;
+/** 線分が箱を通るか（Liang-Barsky）。箱は余白の半分だけ膨らませ、角をかすめる線も数える（どの親の子か読めなくなるため） */
+function segHitsRect(a: Placed, b: Placed, r: Placed, margin: number): boolean {
+  const hw = r.w / 2 + margin, hh = r.h / 2 + margin;
   const x0 = r.x - hw, x1 = r.x + hw, y0 = r.y - hh, y1 = r.y + hh;
   let t0 = 0, t1 = 1;
   const dx = b.x - a.x, dy = b.y - a.y;
@@ -179,7 +179,7 @@ function segHitsRect(a: Placed, b: Placed, r: Placed): boolean {
   return clip(-dx, a.x - x0) && clip(dx, x1 - a.x) && clip(-dy, a.y - y0) && clip(dy, y1 - a.y) && t0 < t1;
 }
 
-export function measure(nodes: Placed[], view = LAYOUT.view): Metrics {
+export function measure(nodes: Placed[], view = LAYOUT.view, margin = LAYOUT.gap / 2): Metrics {
   let overlaps = 0, crossings = 0, through = 0, interleave = 0;
   for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) if (rectOverlap(nodes[i], nodes[j])) overlaps++;
   const byId = new Map(nodes.map((n) => [n.id, n]));
@@ -191,7 +191,7 @@ export function measure(nodes: Placed[], view = LAYOUT.view): Metrics {
   }
   for (const [a, b] of edges) for (const n of nodes) {
     if (n === a || n === b) continue;
-    if (segHitsRect(a, b, n)) through++;
+    if (segHitsRect(a, b, n, margin)) through++;
   }
   // 枝の混ざり: 同じ世代を角度順に並べたとき、同じ親の子がひと続きになっていない回数
   const depths = new Set(nodes.map((n) => n.depth));
@@ -216,7 +216,7 @@ function solve(t: Tree, arcLimit: number, gap: number, radialGap: number, view: 
   const pad = Array(maxDepth + 1).fill(1);
   const extraR = Array(maxDepth + 1).fill(0);
   let nodes = place(t, arcLimit, gap, radialGap, pad, extraR);
-  let m = measure(nodes, view);
+  let m = measure(nodes, view, gap / 2);
   let n = 0;
   while ((m.overlaps || m.crossings || m.edgeThroughNode) && n < LAYOUT.maxAdjust) {
     n++;
@@ -234,7 +234,7 @@ function solve(t: Tree, arcLimit: number, gap: number, radialGap: number, view: 
     // 重なりは無いが線が箱を通るか交差するときは、いちばん外の世代の半径を広げる
     if (!fixed) extraR[maxDepth] += LAYOUT.radiusStep;
     nodes = place(t, arcLimit, gap, radialGap, pad, extraR);
-    m = measure(nodes, view);
+    m = measure(nodes, view, gap / 2);
   }
   m.adjustments = n;
   return { nodes, m };
@@ -252,6 +252,7 @@ export function layoutFamily(input: LNode[], opt: LayoutOptions = {}): LayoutRes
   let best = pool.reduce((a, b) => (b.m.s < a.m.s ? b : a));
   // 前回の候補が今も検査を通り、s が大きく悪くなければ使い続ける（更新のたびに形が変わらないように）
   const prev = cands.find((c) => c.i === opt.prevArcIndex);
-  if (prev && ok(prev) && best.m.s >= prev.m.s * LAYOUT.keepMargin) best = prev;
-  return { nodes: best.nodes, metrics: best.m, arcIndex: best.i };
+  // 使っている間は位置を保つほうを優先する。前の候補が検査を通り、画面に収まる（s ≤ 1）か、新しい候補より大きく悪くなければ使い続ける
+  if (prev && ok(prev) && (prev.m.s <= 1 || best.m.s >= prev.m.s * LAYOUT.keepMargin)) best = prev;
+  return { nodes: best.nodes, metrics: best.m, arcIndex: best.i, valid: ok(best), candidates: cands.map((c) => ({ arcIndex: c.i, valid: ok(c), s: Number(c.m.s.toFixed(3)) })) };
 }

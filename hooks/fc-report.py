@@ -10,12 +10,14 @@ ccn から取れる状態は running / waiting_permission / idle の3つだけ�
   UserPromptSubmit  phase=working、asked=頼まれた文の1行目
   PreToolUse        phase=working、doing=道具の種類と対象（例「コマンド: bun test」）
   PostToolUse       phase=working（承認待ちを解く）
+  PermissionRequest 承認の画面が出る道具を perm_queue に足す（画面の「許可する」は1件のときだけ使える）
   Notification      承認や質問の通知なら phase=needs_you、needs=理由
   Stop              phase=resting か needs_you、said=最後の返事の1行目、next=次の一手
   SessionEnd        状態ファイルを消す
 
 LLM は呼ばない。速さを優先し、どんな失敗でも何も出さずに 0 で終わる（本体の動きを止めない）。
 """
+import hashlib
 import json
 import os
 import re
@@ -177,6 +179,29 @@ def house_nudge(sid):
     )
 
 
+def perm_item(name, inp):
+    """承認の中身。id は道具の名前と引数から作る（PermissionRequest には tool_use_id が無いため）"""
+    inp = inp if isinstance(inp, dict) else {}
+    detail = inp.get("command") or inp.get("file_path") or inp.get("url") or inp.get("pattern") or inp.get("query") or ""
+    if not detail and inp:
+        detail = json.dumps(inp, ensure_ascii=False)
+    key = json.dumps({"t": name, "i": inp}, ensure_ascii=False, sort_keys=True)
+    return {"tool": name, "summary": describe_tool(name, inp), "detail": str(detail)[:400], "id": "h:" + hashlib.sha1(key.encode()).hexdigest()[:16]}
+
+
+def read_queue(sid):
+    try:
+        return json.loads((STATE_DIR / f"{sid}.json").read_text()).get("perm_queue") or []
+    except Exception:
+        return []
+
+
+def write_queue(sid, q, data, phase, needs):
+    # pending は並びがちょうど1件のときの中身。2件以上なら None にして、画面からの許可を止める
+    write(sid, {"perm_queue": q, "pending_count": len(q), "pending": q[0] if len(q) == 1 else None,
+                "phase": phase if q or phase != "needs_you" else "working", "needs": needs if q else None}, data)
+
+
 def emit_context(event, text):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=False))
 
@@ -207,7 +232,7 @@ def main():
         body = re.sub(r"</?cross-session-message[^>]*>", "", prompt).strip()
         body = re.sub(r"^from \S+ via \S+\s*\n", "", body)
         write(sid, {"phase": "working", "asked": clip(first_line(body)), "doing": "考え中", "needs": None, "tools": 0,
-                    "turn_started_at": int(time.time() * 1000)}, data)
+                    "turn_started_at": int(time.time() * 1000), "perm_queue": [], "pending": None, "pending_count": 0}, data)
         nudge = house_nudge(sid)
         if nudge:
             emit_context("UserPromptSubmit", nudge)
@@ -219,12 +244,19 @@ def main():
             n = 1
         name = data.get("tool_name", "")
         inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-        # 承認を求められたときに画面で中身を見せるため、これから使う道具を控える（PostToolUse で消す）
-        detail = inp.get("command") or inp.get("file_path") or inp.get("url") or inp.get("pattern") or inp.get("query") or ""
-        pending = {"tool": name, "summary": describe_tool(name, inp), "detail": str(detail)[:400], "id": data.get("tool_use_id")}
-        write(sid, {"phase": "working", "doing": describe_tool(name, inp), "needs": None, "tools": n, "pending": pending}, data)
+        write(sid, {"phase": "working", "doing": describe_tool(name, inp), "needs": None, "tools": n}, data)
+    elif ev == "PermissionRequest":
+        # 承認の画面が出る道具を、並びの末尾に足す。画面からの許可は、並びがちょうど1件のときだけにする
+        q = read_queue(sid)
+        item = perm_item(data.get("tool_name", ""), data.get("tool_input"))
+        if not any(x["id"] == item["id"] for x in q):
+            q.append(item)
+        write_queue(sid, q, data, phase="needs_you", needs=f"承認待ち: {item['summary']}")
     elif ev in ("PostToolUse", "PostToolUseFailure"):
-        write(sid, {"phase": "working", "needs": None, "pending": None}, data)
+        # 終わった道具を承認の並びから外す
+        done_id = perm_item(data.get("tool_name", ""), data.get("tool_input"))["id"]
+        q = [x for x in read_queue(sid) if x["id"] != done_id]
+        write_queue(sid, q, data, phase="working", needs=None)
         # 初めて子を作った直後にも促す（その会話の中で名前を付けられるように）
         if ev == "PostToolUse" and "spawn_child" in (data.get("tool_name") or ""):
             nudge = house_nudge(sid)
@@ -245,6 +277,8 @@ def main():
             "needs": "質問に答えてほしい" if asking else None,
             "doing": None,
             "pending": None,
+            "perm_queue": [],
+            "pending_count": 0,
         }, data)
     elif ev == "SessionStart":
         sweep()

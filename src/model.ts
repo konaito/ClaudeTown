@@ -12,6 +12,9 @@ export type Report = {
   updated_at?: number;
   /** これから使う道具（承認を求められたら、これが中身） */
   pending?: { tool: string; summary: string; detail: string; id?: string | null } | null;
+  /** 承認の画面が出ている（出る予定の）道具の数。2件以上なら画面からは許可しない */
+  pending_count?: number;
+  perm_queue?: { tool: string; summary: string; detail: string; id: string }[];
 };
 
 export type Agent = {

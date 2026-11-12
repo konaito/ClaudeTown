@@ -58,17 +58,17 @@ ccn は Origin 付きの要求を CSRF として断る。このため、HTTP の
 - 子の返事の最後が問いで、短い選択肢の行が並んでいれば、選択肢をボタンにする。押すとその文を送る。
 - 上の帯のノードの切り替えで、ccn につながる別の機械のセッションも出せる。別の機械には Specter のツリーが無いので、親子は ccn の from 行から導き、ペインへの移動はできない。
 - 子供を右クリックすると、Specter のその子のペインへ移る。Specter の通知をクリックしたときと同じく、窓を前に出してペインにフォーカスする。使うのは Specter の AppleScript の `focus` 命令で、specter-agents の focus_agent と同じ方法である。
-- 承認待ちの子は、右のパネルに承認の中身（道具と、コマンドやファイル）を出し、「許可する」「拒否する」で答えられる。中身は状態 hook が PreToolUse で控えたもの。押すと、今も承認待ちで中身が同じかを確かめてから、Specter のその端末に `send key`（許可は `digit1`、拒否は `escape`）を送る。許可は中身が一致したときだけ送る。ノードが立てたセッション（claude -p）には ccn の permissions で答える。「今後も許可」はその子の設定を書き換えるので、まだ入れていない。迷ったときのために「ペインへ」も残す。
-- 2026-11-12 に権限モード default の試験台で、許可（ファイルができた）、拒否（できなかった）、中身の id がずれたときと承認待ちでないときに送らないこと、id が無いときに許可を送らないことを確かめた。
+- 承認待ちの子は、右のパネルに承認の中身（道具と、コマンドやファイル）を出し、「許可する」「拒否する」で答えられる。中身は状態 hook が PermissionRequest で並びとして控えたもの。並びが2件以上あるときと、質問（AskUserQuestion）や計画の確認（ExitPlanMode）の待ちには、画面からは許可しない。押すと、今も承認待ちで中身が同じかを確かめてから、Specter のその端末に `send key`（許可は `digit1`、拒否は `escape`）を送る。許可は中身が一致したときだけ送る。ノードが立てたセッション（claude -p）には ccn の permissions で答える。「今後も許可」はその子の設定を書き換えるので、まだ入れていない。迷ったときのために「ペインへ」も残す。
+- 2026-11-12 に権限モード default の試験台で、許可（ファイルができた）、拒否（できなかった）、中身の id がずれたときと承認待ちでないときに送らないこと、id が無いときに許可を送らないこと、質問の待ちに許可を送らないことを確かめた。1ターンに承認が2つ並ぶ試験では、PermissionRequest は1つ目に答えてから2つ目が来て、画面の中身と端末の承認がそろった。
 
 ## hook
 
 本人の依頼は「このプロダクトのために再度整理させるための hook」だった。2つの読み方を出して本人に聞き、A に決まった。
 
-- A（採用）: 各セッションに、いまの様子を書き出させる hook。UserPromptSubmit、PreToolUse、PostToolUse、Notification、Stop、SessionStart、SessionEnd で、頼まれたこと、いまやっていること、最後の報告、次の一手、人を待っているかを状態ファイルに書く。LLM は呼ばない。
+- A（採用）: 各セッションに、いまの様子を書き出させる hook。UserPromptSubmit、PreToolUse、PermissionRequest、PostToolUse、Notification、Stop、SessionStart、SessionEnd で、頼まれたこと、いまやっていること、最後の報告、次の一手、人を待っているかを状態ファイルに書く。LLM は呼ばない。
 - B（不採用）: 各エージェントに、終わった子を閉じさせ、ツリーを浅く保たせる hook。
 
-hook の本体は `hooks/fc-report.py` に置く。`~/.claude/settings.json` への登録は設定の変更なので、本人に確かめてから行う。登録と解除は `python3 scripts/hook.py install` と `python3 scripts/hook.py uninstall` で行う。書く前に settings.json の控えを残す。cam の各プロファイルの settings.json は `~/.claude/settings.json` へのリンクなので、1か所で全部に効く。
+hook の本体は `hooks/fc-report.py` に置く。2026-11-12 に本人に確かめて `~/.claude/settings.json` に登録した（同じ日に PermissionRequest も足した）。登録と解除は `python3 scripts/hook.py install` と `python3 scripts/hook.py uninstall` で行う。書く前に settings.json の控えを残す。cam の各プロファイルの settings.json は `~/.claude/settings.json` へのリンクなので、1か所で全部に効く。
 
 hook は本物の `claude -p` で試し、頼まれたこと、道具、最後の報告、次の一手が状態ファイルに入ることを確かめた。
 
@@ -84,8 +84,6 @@ hook は本物の `claude -p` で試し、頼まれたこと、道具、最後�
 
 ## 決まっていないこと
 
-- hook を `~/.claude/settings.json` に登録するか。本人の承認待ち。
-- ほかの機械（ccn の別のノード）のセッションを出すか。いまは手元のノードだけを出す。
 - 状態ファイルの「次の一手」は、返事の中の「次:」で始まる行と、最後の行が問いかどうかで決めている。この決め方で足りるかは、使ってみるまで分からない。
 
 ## 素材のクレジット

@@ -70,7 +70,7 @@ describe("家族の木の配置", () => {
     const few = layoutFamily(family([["p", null], ["c0", "p"]]));
     const r = layoutFamily(family(rows));
     const R1 = Math.hypot(get(r.nodes, "c0").x, get(r.nodes, "c0").y), R1few = Math.hypot(get(few.nodes, "c0").x, get(few.nodes, "c0").y);
-    report.push({ ケース: 4, 子1人の半径: R1few.toFixed(0), 子14人の半径: R1.toFixed(0), ...r.metrics });
+    report.push({ ケース: 4, 子1人の半径: R1few.toFixed(0), 子14人の半径: R1.toFixed(0), 候補ごと: JSON.stringify(r.candidates), ...r.metrics });
     expect(R1).toBeGreaterThan(R1few);
     expect(ok(r.metrics)).toBe(true);
   });
@@ -98,7 +98,7 @@ describe("家族の木の配置", () => {
     }
     rows.push(["deep-1", "miner-2.1"], ["deep-2", "miner-2.1"], ["reviewer", "meta-0a"]);
     const r = layoutFamily(family(rows));
-    report.push({ ケース: 6, 体数: rows.length, 最大の深さ: Math.max(...r.nodes.map((n) => n.depth)), 候補: r.arcIndex, ...r.metrics });
+    report.push({ ケース: 6, 体数: rows.length, 最大の深さ: Math.max(...r.nodes.map((n) => n.depth)), 候補: r.arcIndex, 候補ごと: JSON.stringify(r.candidates), ...r.metrics });
     expect(rows.length).toBe(25);
     expect(ok(r.metrics)).toBe(true);
   });
@@ -112,7 +112,7 @@ describe("家族の木の配置", () => {
     const moved = (ns: Placed[]) => Math.max(...r0.nodes.filter((n) => ns.some((m) => m.id === n.id)).map((n) => { const m = get(ns, n.id); return Math.hypot(m.x - n.x, m.y - n.y); }));
     const flipped = (ns: Placed[]) => r0.nodes.filter((n) => n.depth > 0 && ns.some((m) => m.id === n.id)).some((n) => Math.sign(Math.round(get(ns, n.id).x)) === -Math.sign(Math.round(n.x)) && Math.abs(n.x) > 20);
     report.push({
-      ケース: 7,
+      ケース: 7, 候補: `${r0.arcIndex}→追加${added.arcIndex}・削除${removed.arcIndex}`,
       追加後の最大移動px: moved(added.nodes).toFixed(1), 追加後の順: order(added.nodes, ["a", "b", "c", "d"]), 追加後に左右反転: flipped(added.nodes),
       削除後の最大移動px: moved(removed.nodes).toFixed(1), 削除後の順: order(removed.nodes, ["a", "b", "c"]), 削除後に左右反転: flipped(removed.nodes),
       ...added.metrics,

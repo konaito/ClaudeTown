@@ -375,6 +375,11 @@ fn answer_permission(
         // 質問（AskUserQuestion）や計画の確認（ExitPlanMode）の待ちも ccn では waiting_permission になる。
         // そこへ 1 を送ると選択肢の1番目を選んでしまうので、許可は送らない（拒否の Esc は取り消しなので送ってよい）
         let pending_tool = state.as_ref().and_then(|s| s["pending"]["tool"].as_str().map(String::from)).unwrap_or_default();
+        // 承認の並びが2件以上あると、端末に出ているのがどれか分からないので、許可は送らない
+        let count = state.as_ref().and_then(|s| s["pending_count"].as_u64()).unwrap_or(0);
+        if choice == "allow" && count > 1 {
+            return Err(format!("承認が{count}件並んでいる。どれが端末に出ているか分からないので、ペインで答えて"));
+        }
         if choice == "allow" && NOT_TOOL_APPROVAL.contains(&pending_tool.as_str()) {
             return Err(format!("{pending_tool} の待ちは道具の承認ではないので、ここからは許可しない。ペインで答えて"));
         }
