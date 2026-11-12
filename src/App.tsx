@@ -1035,7 +1035,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
         ) : !convErr && cachedAt ? (
           <span className="offline-note wait" title="最新を読み込んでいる"><i /><span>{savedLabel(cachedAt)} 時点の履歴・更新中</span></span>
         ) : null}
-        <ScrollEdgeGradient className="talk" wrapClassName="seg-fill" ref={scroller}
+        {/* 印が出ている間は、中身の上に印の高さぶんの余白を足す（上端まで送ったとき、いちばん古い行が印の下に入らない）。外枠とグラデーションの位置は変えない */}
+        <ScrollEdgeGradient className={`talk ${shown.length > 0 && (convErr || cachedAt) ? "has-note" : ""}`} wrapClassName="seg-fill" ref={scroller}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
           {convErr && shown.length === 0 && <div className="banner bad small">{convErr}</div>}
           {shown.length === 0 && !convErr && <p className="hint center">まだチャットが無い</p>}

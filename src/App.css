@@ -80,6 +80,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .talk-box { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .offline-note { position: absolute; z-index: 2; top: 8px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 24px); display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: rgb(247 246 243 / 0.96); color: var(--sub); font-size: 11.5px; white-space: nowrap; pointer-events: auto; }
 .offline-note > span { overflow: hidden; text-overflow: ellipsis; }
+.talk.has-note { padding-top: 42px; }
 .offline-note i { width: 7px; height: 7px; border-radius: 50%; background: #c9a227; flex: none; }
 .offline-note.wait i { background: #b9b4ad; }
 
