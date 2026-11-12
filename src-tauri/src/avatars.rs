@@ -27,11 +27,11 @@ pub const AGES: [(&str, u8); 55] = [
     ("Villager3", 25), ("Villager4", 15), ("Villager5", 35), ("Villager6", 35), ("Woman", 40),
 ];
 /// 重みの広がり。w = exp(-((点数 - 目標) / SIGMA)^2 / 2)
-pub const SIGMA: f64 = 15.0;
-/// 世代の候補とみなす重みの下限（目標から約 2.45σ 以内）。この候補が町で使い切られたら、次の色相へ進む
+pub const SIGMA: f64 = 12.0;
+/// 世代の候補とみなす重みの下限（目標から約 2.45σ、σ=12 で約29点以内）。この候補が町で使い切られたら、次の色相へ進む
 pub const POOL_FLOOR: f64 = 0.05;
-/// 同じ世代で直近に出たキャラを何回分覚えるか
-pub const RECENT_N: usize = 3;
+/// 同じ世代で直近に出たキャラを何回分覚えるか。根1・子3・孫6 の町を作り直したとき、1つ前の町の孫を全員覚えていられる長さにした
+pub const RECENT_N: usize = 6;
 /// 直近に出たキャラの重みに掛ける値
 pub const RECENT_PENALTY: f64 = 0.2;
 /// 候補を使い切ったときに使う色相のずらし（度）。0 は元の色
@@ -292,7 +292,7 @@ mod tests {
             let over60 = count.iter().filter(|(c, _)| score(c) >= 60).map(|(_, k)| *k).sum::<usize>() as f64 / N as f64;
             println!("{g:?}: 平均 {mean:.1}（理論 {expect:.1}、目標 {}）上位1体 {:.1}% 60点以上 {:.1}% 出た種類 {}", g.target(), top * 100.0, over60 * 100.0, count.len());
             assert!((mean - expect).abs() < 1.0, "{g:?} の平均 {mean} が理論値 {expect} から外れた");
-            // 表の端（85点以上は4体、15点以下は7体）に寄るぶん、平均は目標より内側にずれる。σ=15 で約9点
+            // 表の端（85点以上は4体、15点以下は7体）に寄るぶん、平均は目標より内側にずれる。σ=12 で約6点
             assert!((mean - g.target()).abs() < 10.0, "{g:?} の平均 {mean} が目標 {} から遠い", g.target());
             assert!(top < 0.25, "{g:?} の上位1体が {top}");
             if g == Gen::Grand {
@@ -338,6 +338,44 @@ mod tests {
         });
         assert!(count < 2000 / 4, "減点した3体が {count}/2000 回出た");
         recent.clear();
+    }
+
+    /// 根1・子3・孫6 の町を作っては全員消す。深さごとに、1つ前の町と同じ顔が出た割合を返す。
+    /// remember が false なら、町ごとに直近の記録を消す（減点が効かない）
+    fn rebuild_towns(remember: bool) -> HashMap<u32, f64> {
+        let mut r = rng();
+        let mut recent = Recent::new();
+        let mut prev_round: HashMap<u32, Vec<String>> = HashMap::new();
+        let (mut hit, mut total) = (HashMap::<u32, usize>::new(), HashMap::<u32, usize>::new());
+        for t in 0..2000 {
+            if !remember {
+                recent.clear();
+            }
+            let live: Vec<(String, u32)> = (0..10).map(|i| (format!("t{t}-{i}"), if i == 0 { 0 } else if i < 4 { 1 } else { 2 })).collect();
+            let a = assign(&Assigns::new(), &mut recent, &live, &mut r);
+            let mut this_round: HashMap<u32, Vec<String>> = HashMap::new();
+            for (id, d) in &live {
+                let c = a[id].char.clone();
+                *total.entry(*d).or_default() += 1;
+                if prev_round.get(d).is_some_and(|p| p.contains(&c)) {
+                    *hit.entry(*d).or_default() += 1;
+                }
+                this_round.entry(*d).or_default().push(c);
+            }
+            prev_round = this_round;
+        }
+        total.iter().map(|(d, n)| (*d, *hit.get(d).unwrap_or(&0) as f64 / *n as f64)).collect()
+    }
+
+    #[test]
+    fn 町を作り直すと前の町の顔ぶれが続けて出にくい() {
+        // 子と孫は一度に何人も立つので、1つ前の町の顔ぶれを全部覚えていないと減点が効かない
+        let with = rebuild_towns(true);
+        let without = rebuild_towns(false);
+        for d in [0u32, 1, 2] {
+            println!("深さ{d}: 1つ前の町と同じ顔 {:.1}%（減点なし {:.1}%）", with[&d] * 100.0, without[&d] * 100.0);
+            assert!(with[&d] < without[&d] * 0.7, "深さ{d} で減点が効いていない");
+        }
     }
 
     #[test]

@@ -57,7 +57,7 @@
     "Villager6": 35,
     "Woman": 40
   },
-  "sigma": 15.0,
+  "sigma": 12.0,
   "targets": {
     "child": 45.0,
     "grandchild": 15.0,
