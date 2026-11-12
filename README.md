@@ -112,6 +112,8 @@ hook は本物の `claude -p` で試し、頼まれたこと、道具、最後�
 
 ## 素材のクレジット
 
+コードは MIT ライセンスです（`LICENSE`）。以下の素材は、それぞれのライセンスのままです。
+
 - キャラ: Ninja Adventure Asset Pack（Pixel-boy、AAA。https://pixel-boy.itch.io/ninja-adventure-asset-pack）。CC0 1.0 で、帰属表示は要らない。使うキャラの Walk.png、Idle.png、Faceset.png だけを `public/sprites/ninja/` に置いた。
 - 状態の印、幽霊、お手紙: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Source: https://googlefonts.github.io/noto-emoji-animation/ 。状態の印の3種（270b、1f97a、2705）、エラー用の1種（2049_fe0f）、閉じる演出の幽霊（1f47b）、お手紙の封筒（1f48c）の 512.webp を、改変せずに `public/sprites/noto/` に置いた。アプリの下の帯の「素材」にも同じ表示を出す。
 - 見本ページの Kenney のプレビュー画像（`docs/research/assets/kenney-toon-characters.png`）: Kenney（https://kenney.nl）。CC0 で、帰属表示は要らない。
