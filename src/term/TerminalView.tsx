@@ -8,9 +8,9 @@ import { call, openTerminal } from "../bridge";
 
 const b64ToBytes = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 
-export function TerminalView({ sessionId, peer, onError }: { sessionId: string; peer: string | null; onError: (m: string) => void }) {
+export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionId: string; peer: string | null; onError: (m: string) => void; takeEarly?: (id: string) => string }) {
   const box = useRef<HTMLDivElement>(null);
-  const [status, setStatus] = useState<string>("繋いでいる…");
+  const [status, setStatus] = useState<string>("起動中…");
 
   useEffect(() => {
     if (!box.current) return;
@@ -26,6 +26,16 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
     // replay を書いている間に xterm.js が返す自動応答（カーソル位置の報告など）は PTY に送らない（claude の入力に混ざるため）
     let replaying = 0;
     let closed = false;
+    // 最初の出力が来たら、フォーカスを当て直し、起動前に打たれたキーを流す
+    let gotOutput = false;
+    const onFirstOutput = () => {
+      if (gotOutput) return;
+      gotOutput = true;
+      setStatus("");
+      term.focus();
+      const t = takeEarly?.(sessionId) ?? "";
+      if (t) setTimeout(() => call("term_input", { sessionId, text: t, peer }).catch((e) => onError(`端末に書けなかった: ${e}`)), 300);
+    };
     let lastSize = "";
     const pushSize = () => {
       try { fit.fit(); } catch { return; }
@@ -45,16 +55,17 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
         case "size":
           // 繋いだ直後か、ほかの画面が大きさを変えた。続けて replay が来たら、その前に画面を消す
           pendingReset = true;
-          setStatus("");
           break;
         case "replay":
           if (pendingReset) { term.reset(); pendingReset = false; }
           replaying++;
           term.write(b64ToBytes(e.data?.b64 ?? ""), () => { replaying--; });
+          if (e.data?.b64) onFirstOutput();
           break;
         case "data":
           pendingReset = false;
           term.write(b64ToBytes(e.data?.b64 ?? ""));
+          onFirstOutput();
           break;
         case "exit":
           setStatus(`終わった（${e.data?.reason ?? ""}${e.data?.code != null ? `、終了コード ${e.data.code}` : ""}）`);

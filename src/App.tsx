@@ -45,6 +45,7 @@ export default function App() {
     invoke<Peer[]>("peers").then((p) => setPeers(Array.isArray(p) ? p : [])).catch(() => {});
   }, []);
 
+  const reload = useRef<() => void>(() => {});
   useEffect(() => {
     let alive = true;
     const load = async () => {
@@ -55,6 +56,7 @@ export default function App() {
         if (alive) setErr(String(e));
       }
     };
+    reload.current = load;
     load();
     const t = setInterval(load, POLL_MS);
     const c = setInterval(() => tick((x) => x + 1), 1000);
@@ -119,6 +121,42 @@ export default function App() {
   const done = useMemo(() => agents.filter((a) => moodOf(a) === "done"), [agents]);
 
   const local = !peer;
+  // 新しい世帯を作った直後、端末が開くまでに打ったキーをためておく（端末が最初の出力を受けたら流す）
+  const early = useRef<{ id: string | null; text: string }>({ id: null, text: "" });
+  const [booting, setBooting] = useState<string | null>(null);
+  useEffect(() => {
+    if (!booting) return;
+    const k = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // 端末（xterm）にフォーカスが移った後は、xterm が自分で受ける
+      if ((document.activeElement as HTMLElement | null)?.closest?.(".term")) return;
+      const map: Record<string, string> = { Enter: "\r", Backspace: "\x7f", Tab: "\t", Escape: "\x1b" };
+      const t = e.key.length === 1 ? e.key : map[e.key];
+      if (!t) return;
+      e.preventDefault();
+      early.current.text += t;
+    };
+    window.addEventListener("keydown", k, true);
+    return () => window.removeEventListener("keydown", k, true);
+  }, [booting]);
+  // 押した瞬間からキーをためる（作り終わるのを待つと、その間に打ったキーが落ちる）
+  const startHousehold = useCallback(() => { early.current = { id: "pending", text: "" }; setBooting("pending"); }, []);
+  const newHousehold = useCallback((r: any) => {
+    if (!r?.id) { early.current = { id: null, text: "" }; setBooting(null); return; }
+    early.current = { id: r.id, text: early.current.id === "pending" ? early.current.text : "" };
+    setBooting(r.id);
+    setSelected(r.id);
+    setTermReq((n) => n + 1);
+    reload.current();
+  }, []);
+  const takeEarly = useCallback((id: string) => {
+    if (early.current.id !== id) return "";
+    const t = early.current.text;
+    early.current = { id: null, text: "" };
+    setBooting(null);
+    return t;
+  }, []);
+
   // 右クリックや「端末へ」で、その子を選んで右パネルの端末を開く（Specter のペインには移らない）
   const [termReq, setTermReq] = useState(0);
   const focus = useCallback((a: Agent) => { setSelected(a.id); setTermReq((n) => n + 1); }, []);
@@ -159,7 +197,7 @@ export default function App() {
 
           <div className="fam-head">
             <span className="fam-title"><PeopleIcon /> {tree.families.length}世帯・{agents.length}人</span>
-            <NewHousehold disabled={!local} onCreated={(r) => { toast(`新しい世帯を作った（${r?.title ?? ""}）`); if (r?.id) setSelected(r.id); }} onError={(m) => toast(m, true)} />
+            <NewHousehold disabled={!local} onStart={startHousehold} onCreated={newHousehold} onError={(m) => toast(m, true)} />
             <span className="legend">
               {(["working", "reply", "approval", "done", "idle"] as Mood[]).map((m) => (
                 <span key={m} className={`lg lg-${m}`}><i />{MOOD_LABEL[m]}{counts[m] ? ` ${counts[m]}` : ""}</span>
@@ -169,8 +207,8 @@ export default function App() {
 
           {snap && agents.length === 0 && snap.ccn_ok && (
             <div className="empty">
-              <p>町にはまだ誰もいない。最初の世帯を作る（親は ~/Documents/meta で起動する）。</p>
-              <NewHousehold big disabled={!local} onCreated={(r) => { toast("最初の世帯を作った"); if (r?.id) setSelected(r.id); }} onError={(m) => toast(m, true)} />
+              <p>町にはまだ誰もいない。最初の世帯を作ると、右に端末が開いてすぐ打てる（親は ~/Documents/meta で起動する）。</p>
+              <NewHousehold big disabled={!local} onStart={startHousehold} onCreated={newHousehold} onError={(m) => toast(m, true)} />
             </div>
           )}
           <Stage zoom={zoom} onBlank={() => setSelected(null)} items={tree.families.map((f) => {
@@ -205,7 +243,7 @@ export default function App() {
           </div>
         </div>
 
-        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} termReq={termReq} peers={peers}
+        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} termReq={termReq} peers={peers} takeEarly={takeEarly} booting={booting}
           onSent={(a) => toast(`${a.name} に届けた`)} onSent2={(m) => toast(m)} onError={(m) => toast(m, true)}
           needs={needs} onSelect={(a) => setSelected(a.id)} />
       </div>
@@ -534,8 +572,8 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
 
 // ---------- 右のパネル ----------
 
-function Panel({ agent, peer, lineage, termReq, peers, onSent, onSent2, onError, needs, onSelect }: {
-  agent: Agent | null; peer: string; lineage: Agent[]; termReq: number; peers: Peer[];
+function Panel({ agent, peer, lineage, termReq, peers, takeEarly, booting, onSent, onSent2, onError, needs, onSelect }: {
+  agent: Agent | null; peer: string; lineage: Agent[]; termReq: number; peers: Peer[]; takeEarly: (id: string) => string; booting: string | null;
   onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
 }) {
   const hasTerm = !!agent?.capabilities?.terminal;
@@ -581,6 +619,9 @@ function Panel({ agent, peer, lineage, termReq, peers, onSent, onSent2, onError,
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [items, pending]);
 
+  if (!agent && booting) {
+    return <aside className="panel empty-panel"><div className="ep"><p className="ep-title">新しい世帯を立てている…</p><p className="hint">打ったキーはためておき、端末が開いたら流す</p></div></aside>;
+  }
   if (!agent) {
     return (
       <aside className="panel empty-panel">
@@ -643,7 +684,7 @@ function Panel({ agent, peer, lineage, termReq, peers, onSent, onSent2, onError,
       )}
 
       {tab === "term" ? (
-        <TerminalView sessionId={agent.id} peer={peer || null} onError={onError} />
+        <TerminalView sessionId={agent.id} peer={peer || null} onError={onError} takeEarly={takeEarly} />
       ) : tab === "talk" ? (
         <ScrollEdgeGradient className="talk" wrapClassName="seg-fill" ref={scroller}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
@@ -747,26 +788,21 @@ function Approval({ agent, peer, onDone, onError }: {
 // ---------- 新しい世帯・転出 ----------
 
 /** 新しい世帯を作る。親は ~/Documents/meta で端末のセッションとして起動する（本人の指定） */
-function NewHousehold({ big, disabled, onCreated, onError }: { big?: boolean; disabled?: boolean; onCreated: (r: any) => void; onError: (m: string) => void }) {
-  const [open, setOpen] = useState(!!big);
-  const [prompt, setPrompt] = useState("");
+/** 新しい世帯を作る。最初の依頼の欄は出さず、すぐ ~/Documents/meta で親（端末のセッション）を立て、右の端末を開く */
+function NewHousehold({ big, disabled, onStart, onCreated, onError }: { big?: boolean; disabled?: boolean; onStart: () => void; onCreated: (r: any) => void; onError: (m: string) => void }) {
   const [busy, setBusy] = useState(false);
   const go = async () => {
     setBusy(true);
+    onStart();
     try {
-      const r = await invoke<any>("create_session", { cwd: null, prompt, parent: null, name: null, peer: null });
-      setPrompt(""); if (!big) setOpen(false);
+      const r = await invoke<any>("create_session", { cwd: null, prompt: null, parent: null, name: null, peer: null });
       onCreated(r);
-    } catch (e) { onError(`世帯を作れなかった: ${e}`); } finally { setBusy(false); }
+    } catch (e) { onCreated(null); onError(`世帯を作れなかった: ${e}`); } finally { setBusy(false); }
   };
-  if (!open) return <button className="pane-btn new-house" disabled={disabled} onClick={() => setOpen(true)}>＋ 新しい世帯</button>;
   return (
-    <span className={`new-house-form ${big ? "big" : ""}`}>
-      <input autoFocus={!big} placeholder="最初の依頼（空でもよい）" value={prompt} onChange={(e) => setPrompt(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter") go(); if (e.key === "Escape" && !big) setOpen(false); }} />
-      <button className="primary" disabled={busy || disabled} onClick={go}>{busy ? "作っている…" : big ? "最初の世帯を作る" : "作る"}</button>
-      {!big && <button className="lnk" onClick={() => setOpen(false)}>やめる</button>}
-    </span>
+    <button className={big ? "primary new-house big" : "pane-btn new-house"} disabled={disabled || busy} onClick={go}>
+      {busy ? "立てている…" : big ? "最初の世帯を作る" : "＋ 新しい世帯"}
+    </button>
   );
 }
 
