@@ -506,7 +506,7 @@ function FamilyCanvas({ all, result, selected, onSelect, onFocus }: {
           <div key={n.id} className={`fnode ${selected === n.id ? "open" : ""} ${delay !== undefined ? "dying" : ""} ${n.depth >= 2 ? "is-mini" : ""}`}
             style={{ left: n.x - n.w / 2 + ox, top: n.y - n.h / 2 + oy, width: n.w, height: n.h, transition: `left ${LAYOUT.moveMs}ms ease, top ${LAYOUT.moveMs}ms ease`, ["--kd" as string]: `${delay ?? 0}ms` }}>
             <Card agent={a} depth={n.depth} selected={selected === n.id} onSelect={onSelect} onFocus={onFocus} />
-            {delay !== undefined && <KillFx />}
+            {delay !== undefined && <KillFx w={n.w} h={n.h} />}
             {a.capabilities?.stop && delay === undefined && (
               <button className="kill-x" title="閉じる（⌘ を押しながらで確認なし）" aria-label={`${a.name} を閉じる`}
                 onClick={(e) => { e.stopPropagation(); kill.ask(a, e.metaKey); }}
@@ -548,12 +548,27 @@ function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect:
   );
 }
 
-/** 人狼の「夜に襲われる」風の演出。暗くなる → 爪痕の3本線 → 倒れて灰色 → 幽霊が昇って消える（血は描かない） */
-function KillFx() {
+/**
+ * 人狼の「夜に襲われる」風の演出。暗くなる → 赤い爪痕の3本線が順に走る → 倒れて灰色 → 幽霊が昇って消える。
+ * 爪痕は本人の見本（/tmp/fc-claw-ref.png）どおり、左下から右上へ約55度の太い赤線を3本、等間隔に引く。
+ * 太さはノードの高さの 5.5%。ノードの角丸の内側で切れる（.kill-fx の overflow: hidden）。
+ */
+const CLAW = { color: "#E8352B", angleDeg: 55, width: 0.055, starts: [0.11, 0.37, 0.63] };
+function KillFx({ w, h }: { w: number; h: number }) {
+  const dx = h / Math.tan((CLAW.angleDeg * Math.PI) / 180);
   return (
     <div className="kill-fx" aria-hidden>
       <div className="kill-night" />
-      <div className="kill-claws"><i /><i /><i /></div>
+      <svg className="kill-claws" width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+        {CLAW.starts.map((s, i) => {
+          const x1 = s * w, y1 = h + 2, x2 = x1 + dx, y2 = -2;
+          const len = Math.hypot(x2 - x1, y2 - y1);
+          return (
+            <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke={CLAW.color} strokeWidth={Math.max(2, h * CLAW.width)} strokeLinecap="butt"
+              style={{ strokeDasharray: len, strokeDashoffset: len, ["--cl" as string]: `${len}`, ["--cd" as string]: `${i * 70}ms` }} />
+          );
+        })}
+      </svg>
       <img className="kill-ghost" src="/sprites/noto/1f47b/512.webp" alt="" draggable={false} />
     </div>
   );

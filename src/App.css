@@ -309,16 +309,11 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .kill-fx { position: absolute; inset: 0; z-index: 7; pointer-events: none; border-radius: 14px; overflow: hidden; }
 .is-mini .kill-fx { border-radius: 10px; }
 .kill-night { position: absolute; inset: 0; background: rgb(32 36 58); opacity: 0; animation: kill-night 1.15s var(--kd) ease forwards; }
-@keyframes kill-night { 0% { opacity: 0; } 18% { opacity: 0.55; } 60% { opacity: 0.42; } 100% { opacity: 0.12; } }
-.kill-claws i {
-  position: absolute; left: -10%; width: 120%; height: 3px; border-radius: 2px; background: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 0 4px rgba(255, 255, 255, 0.6); transform-origin: left center; transform: rotate(-32deg) scaleX(0); opacity: 0;
-  animation: kill-claw 1.15s calc(var(--kd) + var(--cd, 0ms)) ease-out forwards;
-}
-.kill-claws i:nth-child(1) { top: 62%; --cd: 0ms; }
-.kill-claws i:nth-child(2) { top: 78%; --cd: 45ms; }
-.kill-claws i:nth-child(3) { top: 94%; --cd: 90ms; }
-@keyframes kill-claw { 0%, 15% { transform: rotate(-32deg) scaleX(0); opacity: 1; } 36% { transform: rotate(-32deg) scaleX(1); opacity: 1; } 62%, 100% { transform: rotate(-32deg) scaleX(1); opacity: 0; } }
+@keyframes kill-night { 0% { opacity: 0; } 18% { opacity: 0.32; } 60% { opacity: 0.28; } 100% { opacity: 0.1; } }
+/* 赤い爪痕。線を左下から右上へ順に引き（stroke-dashoffset）、最後まで残す */
+.kill-claws { position: absolute; inset: 0; overflow: visible; }
+.kill-claws line { animation: kill-claw 1.15s calc(var(--kd) + var(--cd, 0ms)) ease-out forwards; }
+@keyframes kill-claw { 0%, 12% { stroke-dashoffset: var(--cl); } 32%, 100% { stroke-dashoffset: 0; } }
 .kill-ghost { position: absolute; left: 50%; top: 32%; width: 30px; height: 30px; margin-left: -15px; opacity: 0; animation: kill-ghost 1.15s var(--kd) ease-out forwards; }
 .is-mini .kill-ghost { width: 22px; height: 22px; margin-left: -11px; top: 18%; }
 @keyframes kill-ghost { 0%, 58% { opacity: 0; transform: translateY(6px); } 72% { opacity: 1; transform: translateY(-4px); } 100% { opacity: 0; transform: translateY(-26px); } }
