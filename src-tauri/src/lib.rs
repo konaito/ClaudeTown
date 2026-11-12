@@ -183,22 +183,32 @@ fn snapshot(peer: Option<String>) -> Snapshot {
             })),
         }));
     }
-    // キャラの絵の割り当て。この機械のセッションは保存して以後変えない。別の機械は毎回同じ規則で決める
+    // キャラの絵の割り当て。世代（親をたどった深さ）に合う見た目を重み付きの乱数で選び、保存して以後変えない。
+    // 別の機械の町も、機械ごとのファイルに保存する（乱数なので、保存しないと読むたびに顔が変わる）
     let mut order: Vec<&Value> = agents.iter().collect();
     order.sort_by(|a, b| a["startedAt"].as_u64().unwrap_or(0).cmp(&b["startedAt"].as_u64().unwrap_or(0)).then(a["id"].as_str().cmp(&b["id"].as_str())));
-    let live: Vec<(String, bool)> = order.iter().map(|a| (a["id"].as_str().unwrap_or_default().to_string(), a["parent"].is_null())).collect();
-    let path = home().join(".family-computing/avatars.json");
-    let prev: std::collections::BTreeMap<String, avatars::Assign> = if peer.is_none() {
-        fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
-    } else {
-        Default::default()
+    let parent_of: HashMap<String, Option<String>> = agents.iter()
+        .map(|a| (a["id"].as_str().unwrap_or_default().to_string(), a["parent"].as_str().map(String::from)))
+        .collect();
+    let depth = avatars::depths(&parent_of);
+    let live: Vec<(String, u32)> = order.iter().map(|a| {
+        let id = a["id"].as_str().unwrap_or_default().to_string();
+        let d = depth.get(&id).copied().unwrap_or(0);
+        (id, d)
+    }).collect();
+    let path = avatars_path(&peer);
+    let next = {
+        // 読む、決める、書くの間に、同じアプリの別の snapshot が割り込まないようにする
+        let _guard = AVATARS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (prev, mut recent) = avatars::load(&path);
+        let before = recent.clone();
+        let next = avatars::assign(&prev, &mut recent, &live, &mut fastrand::Rng::new());
+        // 一覧を読めなかったときは、全員がいなくなったように見えるので書かない
+        if ccn_error.is_none() && (next != prev || recent != before) {
+            avatars::save(&path, &next, &recent);
+        }
+        next
     };
-    let next = avatars::assign(&prev, &live);
-    if peer.is_none() && ccn_error.is_none() && next != prev {
-        if let Some(dir) = path.parent() { let _ = fs::create_dir_all(dir); }
-        let tmp = path.with_extension("tmp");
-        if fs::write(&tmp, serde_json::to_string_pretty(&next).unwrap_or_default()).is_ok() { let _ = fs::rename(&tmp, &path); }
-    }
     for a in agents.iter_mut() {
         if let Some(v) = a["id"].as_str().and_then(|id| next.get(id)) {
             a["avatar"] = json!({ "char": v.char, "hue": v.hue });
@@ -206,6 +216,24 @@ fn snapshot(peer: Option<String>) -> Snapshot {
     }
     let letters = if peer.is_none() { recent_letters() } else { vec![] };
     Snapshot { ccn: ccn_base(), peer, ccn_ok: ccn_error.is_none(), ccn_error, agents, letters, fetched_at: now_ms() }
+}
+
+static AVATARS_LOCK: Mutex<()> = Mutex::new(());
+
+/// キャラの割り当ての保存先。FC_AVATARS で差し替えられる（モックの ccn で試すとき、本物の割り当てを消さないため）。
+/// 別の機械の町は、同じ場所の avatars-peer-<機械>.json に分けて置く
+/// FC_CCN_URL で別のノード（モックなど）に向けたのに FC_AVATARS が無いときは、avatars-custom-ccn.json に分ける。
+/// 本物の avatars.json を使うと、モックにいない本物のセッションの割り当てが全部消える（乱数なので元に戻らない）
+fn avatars_path(peer: &Option<String>) -> PathBuf {
+    let default = if std::env::var("FC_CCN_URL").is_ok() { "avatars-custom-ccn.json" } else { "avatars.json" };
+    let base = std::env::var("FC_AVATARS").map(PathBuf::from).unwrap_or_else(|_| home().join(".family-computing").join(default));
+    match peer {
+        None => base,
+        Some(p) => {
+            let safe: String = p.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+            base.with_file_name(format!("avatars-peer-{safe}.json"))
+        }
+    }
 }
 
 // ---------- 家の名前 ----------
