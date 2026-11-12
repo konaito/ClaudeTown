@@ -1061,6 +1061,30 @@ fn next_wait(cur: Duration, changed: bool) -> Duration {
     if changed { WATCH_MIN } else { (cur * 2).min(WATCH_MAX) }
 }
 
+/// 見張りの本体。一覧を取り、前回と変わったとき（つながらない回は毎回）だけ send に渡す。send が false を返すか Stop で終わる
+fn watch_loop(peer: Option<String>, rx: std::sync::mpsc::Receiver<WatchCmd>, mut send: impl FnMut(Value) -> bool) {
+    use std::sync::mpsc::RecvTimeoutError;
+    let mut last: Option<String> = None;
+    let mut wait = WATCH_MIN;
+    loop {
+        let s = snapshot(peer.clone());
+        let key = snapshot_key(&s);
+        let changed = last.as_deref() != Some(key.as_str());
+        // つながらない回は、同じ中身でも毎回送る（画面が続けて失敗した回数を数え、「つながりにくい」を出す）
+        if (changed || !s.ccn_ok) && !send(serde_json::to_value(&s).unwrap_or(Value::Null)) {
+            break;
+        }
+        wait = if s.ccn_ok { next_wait(wait, changed) } else { WATCH_MIN };
+        last = Some(key);
+        match rx.recv_timeout(wait) {
+            // すぐ取り直す（新しい世帯を作った直後など）。間隔も下限に戻す
+            Ok(WatchCmd::Kick) => wait = WATCH_MIN,
+            Ok(WatchCmd::Stop) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
 /// 町の一覧の見張りを始める。前の見張りがあれば止める。戻り値の世代を town_unwatch に渡す
 #[tauri::command]
 fn town_watch(peer: Option<String>, on_event: tauri::ipc::Channel<Value>) -> u64 {
@@ -1070,28 +1094,7 @@ fn town_watch(peer: Option<String>, on_event: tauri::ipc::Channel<Value>) -> u64
         let _ = old.send(WatchCmd::Stop);
     }
     std::thread::spawn(move || {
-        use std::sync::mpsc::RecvTimeoutError;
-        let mut last: Option<String> = None;
-        let mut wait = WATCH_MIN;
-        loop {
-            let s = snapshot(peer.clone());
-            let key = snapshot_key(&s);
-            let changed = last.as_deref() != Some(key.as_str());
-            // つながらない回は、同じ中身でも毎回送る（画面が続けて失敗した回数を数え、「つながりにくい」を出す）
-            if changed || !s.ccn_ok {
-                if on_event.send(serde_json::to_value(&s).unwrap_or(Value::Null)).is_err() {
-                    break;
-                }
-            }
-            wait = if s.ccn_ok { next_wait(wait, changed) } else { WATCH_MIN };
-            last = Some(key);
-            match rx.recv_timeout(wait) {
-                // すぐ取り直す（新しい世帯を作った直後など）。間隔も下限に戻す
-                Ok(WatchCmd::Kick) => wait = WATCH_MIN,
-                Ok(WatchCmd::Stop) | Err(RecvTimeoutError::Disconnected) => break,
-                Err(RecvTimeoutError::Timeout) => {}
-            }
-        }
+        watch_loop(peer, rx, |v| on_event.send(v).is_ok());
     });
     generation
 }
@@ -1284,8 +1287,25 @@ mod tests {
         assert_eq!(serde_json::to_value(&d).unwrap(), json!({ "items": [{ "role": "user", "text": "a", "n": 0 }], "total": 1, "reset": true }));
     }
 
+    /// 見張りを、モックの町（FC_CCN_URL）につないで決まった秒数だけ回し、画面へ送った回数を数える（#5）。
+    /// ccn への要求の回数は、モックの /__bench/stats で数える。
+    /// FC_CCN_URL=http://127.0.0.1:<ポート> FC_AVATARS=/tmp/x/avatars.json FC_WATCH_SECS=60 cargo test --release --lib watch_against_mock -- --ignored --nocapture
     #[test]
-    fn watch_wait_backs_off_and_resets() {
+    #[ignore]
+    fn watch_against_mock() {
+        let secs: u64 = std::env::var("FC_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+        let (tx, rx) = std::sync::mpsc::channel::<WatchCmd>();
+        let sent = Arc::new(Mutex::new(0u32));
+        let s2 = sent.clone();
+        let t = std::thread::spawn(move || watch_loop(None, rx, |_| { *s2.lock().unwrap() += 1; true }));
+        std::thread::sleep(Duration::from_secs(secs));
+        let _ = tx.send(WatchCmd::Stop);
+        let _ = t.join();
+        println!("見張りを {secs} 秒回して、画面へ送ったのは {} 回", sent.lock().unwrap());
+    }
+
+    #[test]
+        fn watch_wait_backs_off_and_resets() {
         let mut w = WATCH_MIN;
         let mut seen = vec![];
         for _ in 0..6 { w = next_wait(w, false); seen.push(w.as_secs()); }
