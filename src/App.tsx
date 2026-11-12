@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { call as invoke, setFullscreen } from "./bridge";
 import { TerminalView } from "./term/TerminalView";
+import { collectMail, type Mail } from "./mail";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import "./App.css";
@@ -15,6 +16,12 @@ import { LAYOUT, boxOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
 
 const POLL_MS = 2000;
+/**
+ * 別の町（いま見ていない ccn のノード）のお便りを取りに行く間隔。町を1つずつ順に取り、前の回が終わるまで次の回を始めない。
+ * 1回は町1つにつき手元のノード経由の GET /api/sessions 1本（中継先の ccn には 15 秒に1本）。peers が healthy でない町には取りに行かない。
+ * 実測（2026-11-12）: 中継で incertotech 0.42 秒、vm 0.46 秒
+ */
+const OTHER_TOWNS_POLL_MS = 15000;
 /** 右パネルの幅（px）。最小と既定。最大はウィンドウ幅の半分（maxSize="50%"） */
 const SIDE_MIN = 380;
 const SIDE_DEFAULT = 380;
@@ -128,7 +135,48 @@ export default function App() {
       .sort((a, b) => Number(moodOf(a) !== "approval") - Number(moodOf(b) !== "approval")),
     [agents],
   );
-  const done = useMemo(() => agents.filter((a) => moodOf(a) === "done"), [agents]);
+
+  // 別の町のお便り。町の表示はいま選んだノードだけで、お便りは全部の町から集める
+  const selfName = peers.find((p) => p.self)?.name ?? "このMac";
+  const curTown = peer || selfName;
+  const [others, setOthers] = useState<Map<string, { agents: Agent[] } | { error: string }>>(new Map());
+  useEffect(() => {
+    let alive = true;
+    let running = false;
+    const towns: { key: string; name: string; healthy: boolean }[] = [
+      { key: "", name: selfName, healthy: true },
+      ...peers.filter((p) => !p.self).map((p) => ({ key: p.name, name: p.name, healthy: p.status === "healthy" })),
+    ].filter((t) => t.key !== peer);
+    setOthers((m) => new Map([...m].filter(([name]) => towns.some((t) => t.name === name))));
+    const load = async () => {
+      if (running) return;
+      running = true;
+      for (const t of towns) {
+        let v: { agents: Agent[] } | { error: string };
+        if (!t.healthy) v = { error: "つながらない" };
+        else {
+          try { v = { agents: (await invoke<Snapshot>("snapshot", { peer: t.key || null })).agents }; }
+          catch (e) { v = { error: String(e) }; }
+        }
+        if (!alive) break;
+        setOthers((m) => new Map(m).set(t.name, v));
+      }
+      running = false;
+    };
+    load();
+    const timer = setInterval(load, OTHER_TOWNS_POLL_MS);
+    return () => { alive = false; clearInterval(timer); };
+  }, [peer, peers, selfName]);
+  const mails = useMemo(() => collectMail([
+    { town: curTown, agents },
+    ...[...others].flatMap(([town, v]) => ("agents" in v ? [{ town, agents: v.agents }] : [])),
+  ]), [agents, others, curTown]);
+  const unreachable = useMemo(() => [...others].filter(([, v]) => "error" in v).map(([t]) => t), [others]);
+  const openMail = useCallback((m: Mail, term = false) => {
+    if (m.town !== curTown) setPeer(m.town === selfName ? "" : m.town);
+    setSelected(m.agent.id);
+    if (term) setTermReq((n) => n + 1);
+  }, [curTown, selfName]);
 
   const local = !peer;
   // 新しい世帯を作った直後、端末が開くまでに打ったキーをためておく（端末が最初の出力を受けたら流す）
@@ -196,8 +244,7 @@ export default function App() {
       <SplitGroup className="body" orientation="horizontal" defaultLayout={savedSplit()} onLayoutChanged={saveSplit}>
         <SplitPanel id="town" minSize="50%">
         <div className="left">
-          <NextRow needs={needs} done={done} working={counts.working} total={agents.length}
-            onSelect={(a) => setSelected(a.id)} onFocus={focus} />
+          <NextRow mails={mails} curTown={curTown} unreachable={unreachable} working={counts.working} total={agents.length} onOpen={openMail} />
 
           {(err || (snap && !snap.ccn_ok)) && (
             <div className="banner bad">
@@ -311,26 +358,32 @@ function KillConfirm({ agent, descendants, onCancel, onConfirm }: { agent: Agent
 
 // ---------- 上の段 ----------
 
-function NextRow({ needs, done, working, total, onSelect, onFocus }: {
-  needs: Agent[]; done: Agent[]; working: number; total: number;
-  onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;
+function NextRow({ mails, curTown, unreachable, working, total, onOpen }: {
+  mails: Mail[]; curTown: string; unreachable: string[]; working: number; total: number;
+  onOpen: (m: Mail, term?: boolean) => void;
 }) {
-  const first = needs[0];
-  const rest = [
-    ...needs.slice(1).map((a) => ({ a, text: moodOf(a) === "approval" ? `${a.name}の承認待ち` : `${a.name}から返事待ち`, icon: moodOf(a) === "approval" ? "✋" : "💬" })),
-    ...done.map((a) => ({ a, text: `${a.name}の報告を確認`, icon: "✓" })),
-  ].slice(0, 2);
-  const hidden = needs.length + done.length - 1 - rest.length;
+  // 先頭が大きい1枚、続く2件が小さいチップ、残りは「ほか N 件」。並びは src/mail.ts（親が先、その中は待ちが古い順）
+  const first = mails[0];
+  const rest = mails.slice(1, 3);
+  const hidden = mails.length - 1 - rest.length;
+  const icon = (k: Mail["kind"]) => (k === "approval" ? "✋" : k === "reply" ? "💬" : "✓");
+  const away = (m: Mail) => m.town !== curTown;
+  const mainText = (m: Mail) => {
+    const n = m.agent.name;
+    if (away(m)) return m.kind === "approval" ? `${n}が承認待ち` : m.kind === "reply" ? `${n}が返事待ち` : `${n}の報告を確認`;
+    return m.kind === "approval" ? `${n}の承認待ちを確認する` : m.kind === "reply" ? `${n}に返事する` : `${n}の報告を確認する`;
+  };
+  const chipText = (m: Mail) => (m.kind === "approval" ? `${m.agent.name}の承認待ち` : m.kind === "reply" ? `${m.agent.name}から返事待ち` : `${m.agent.name}の報告を確認`);
+  const stamp = (m: Mail) => away(m) && <span className="postmark" title={`${m.town} の町から`}>{m.town}</span>;
   return (
     <div className="next-row">
       <span className="next-label">お便り</span>
       {first ? (
-        <div className={`next-main nm-${moodOf(first)}`}>
-          <span className="next-icon">{moodOf(first) === "approval" ? "✋" : "💬"}</span>
-          <button className="next-text" onClick={() => onSelect(first)}>
-            {moodOf(first) === "approval" ? `${first.name}の承認待ちを確認する` : `${first.name}に返事する`}
-          </button>
-          <button className="pane-btn" onClick={() => onFocus(first)}>端末へ</button>
+        <div className={`next-main nm-${first.kind} ${away(first) ? "away" : ""}`}>
+          <span className="next-icon">{icon(first.kind)}</span>
+          {stamp(first)}
+          <button className="next-text" onClick={() => onOpen(first)}>{mainText(first)}</button>
+          <button className="pane-btn" onClick={() => onOpen(first, true)}>端末へ</button>
         </div>
       ) : (
         <div className="next-main nm-calm">
@@ -340,10 +393,13 @@ function NextRow({ needs, done, working, total, onSelect, onFocus }: {
         </div>
       )}
       {rest.length > 0 && <span className="next-sep" />}
-      {rest.map(({ a, text, icon }) => (
-        <button key={a.id} className="next-chip" onClick={() => onSelect(a)}><span>{icon}</span>{text}</button>
+      {rest.map((m) => (
+        <button key={`${m.town}/${m.agent.id}`} className={`next-chip ${away(m) ? "away" : ""}`} onClick={() => onOpen(m)}>
+          <span>{icon(m.kind)}</span>{stamp(m)}{chipText(m)}
+        </button>
       ))}
       {hidden > 0 && <span className="next-more">ほか{hidden}件</span>}
+      {unreachable.length > 0 && <span className="next-unreach" title="この町のお便りは取れていない">{unreachable.join("、")}に届かない</span>}
     </div>
   );
 }

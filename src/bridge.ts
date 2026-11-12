@@ -55,7 +55,10 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   if (inTauri) return invoke<T>(cmd, args);
   if (MOCK) return mockCall<T>(cmd, args);
   if (cmd === "snapshot") {
-    const r = await fetch("/dev-snapshot.json", { cache: "no-store" });
+    // 別の町は public/dev-snapshot-<町>.json（`--snapshot --peer <町>` で作る）。無ければ届かない町として扱う
+    const town = args?.peer ? `-${args.peer}` : "";
+    const r = await fetch(`/dev-snapshot${town}.json`, { cache: "no-store" });
+    if (town && (!r.ok || !(r.headers.get("content-type") ?? "").includes("json"))) throw new Error(`dev-snapshot${town}.json が無い`);
     if (!r.ok) throw new Error("dev-snapshot.json が無い。`src-tauri/target/debug/family-computing --snapshot > public/dev-snapshot.json` で作る");
     return (await r.json()) as T;
   }

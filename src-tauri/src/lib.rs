@@ -140,6 +140,7 @@ fn snapshot(peer: Option<String>) -> Snapshot {
             "cwd": s["cwd"],
             "pid": s["pid"],
             "startedAt": s["startedAt"],
+            "lastActivityAt": s["lastActivityAt"],
             "canSend": s["capabilities"]["send"],
             "parent": parent,
             "capabilities": s["capabilities"],

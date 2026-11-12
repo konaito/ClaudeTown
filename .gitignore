@@ -28,3 +28,4 @@ public/dev-snapshot.json
 public/dev-conversation.json
 public/dev-peers.json
 __pycache__/
+public/dev-snapshot-*.json

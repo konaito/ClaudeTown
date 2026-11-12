@@ -25,6 +25,8 @@ export type Agent = {
   cwd: string;
   pid?: number;
   startedAt?: number;
+  /** ccn が最後に動きを見た時刻（ms） */
+  lastActivityAt?: number;
   canSend: boolean;
   parent: string | null;
   capabilities?: { send?: boolean; permissions?: boolean; interrupt?: boolean; stop?: boolean; terminal?: boolean } | null;
