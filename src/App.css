@@ -242,20 +242,23 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 
 .layout-warn { position: absolute; right: 0; top: -22px; font-size: 11px; color: #b4473a; background: #fdeeee; border-radius: 99px; padding: 1px 8px; }
 
-/* 承認待ちの枠: 凡例と同じ黄色で、1.4秒周期にゆっくり強弱を付ける。選択中（青）と重なったときは、青の枠の外側に黄色の光を出す */
-@keyframes approval-pulse {
-  0%, 100% { border-color: #f2c14e; box-shadow: 0 0 0 2px rgba(242, 165, 22, 0.18); }
-  50% { border-color: var(--approval); box-shadow: 0 0 0 5px rgba(242, 165, 22, 0.32); }
+/* 承認待ちの枠: 凡例と同じ黄色で、1.4秒周期にゆっくり強弱を付ける。選択中（青）と重なったときは、青の枠の外側に黄色の光を出す。
+   枠線は黄色で止め、外側の光だけを別の層（包みの ::before）に描いて、その層の opacity を動かす（#12）。
+   前は枠の box-shadow と border-color を動かしていて、毎コマ描き直しになっていた。opacity は合成だけで済む。
+   カードは overflow: hidden なので、光の層はカードの外側（.fnode-body と .pop）に置く。角丸は包みの --kx-r に合わせる */
+@keyframes approval-glow { 0%, 100% { opacity: 0.2; } 50% { opacity: 1; } }
+.card.m-approval, .mini.m-approval { border-width: 2px; border-color: var(--approval); }
+.card.m-approval.sel, .mini.m-approval.sel { border-color: var(--sel); box-shadow: 0 0 0 3px rgba(75, 139, 245, 0.18); }
+.fnode-body:has(> .m-approval)::before, .pop:has(> .card.m-approval)::before {
+  content: ""; position: absolute; inset: 0; border-radius: var(--kx-r, 14px); pointer-events: none;
+  box-shadow: 0 0 0 5px rgba(242, 165, 22, 0.32);
+  animation: approval-glow 1.4s ease-in-out infinite;
 }
-@keyframes approval-pulse-sel {
-  0%, 100% { box-shadow: 0 0 0 3px rgba(75, 139, 245, 0.18), 0 0 0 5px rgba(242, 165, 22, 0.25); }
-  50% { box-shadow: 0 0 0 3px rgba(75, 139, 245, 0.18), 0 0 0 8px rgba(242, 165, 22, 0.45); }
-}
-.card.m-approval, .mini.m-approval { border-width: 2px; animation: approval-pulse 1.4s ease-in-out infinite; }
-.card.m-approval.sel, .mini.m-approval.sel { border-color: var(--sel); animation: approval-pulse-sel 1.4s ease-in-out infinite; }
+.fnode-body:has(> .m-approval.sel)::before, .pop:has(> .card.m-approval.sel)::before { box-shadow: 0 0 0 8px rgba(242, 165, 22, 0.45); }
 @media (prefers-reduced-motion: reduce) {
-  .card.m-approval, .mini.m-approval { animation: none; border: 3px solid var(--approval); box-shadow: none; }
+  .card.m-approval, .mini.m-approval { border: 3px solid var(--approval); box-shadow: none; }
   .card.m-approval.sel, .mini.m-approval.sel { border-color: var(--sel); box-shadow: 0 0 0 4px var(--approval); }
+  .fnode-body:has(> .m-approval)::before, .pop:has(> .card.m-approval)::before { display: none; }
 }
 
 /* 右パネルの端末 */
