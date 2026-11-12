@@ -172,10 +172,14 @@ export default function App() {
   const tree = useMemo(() => buildTree(withGhosts({ town: curTown, agents }, otherTowns)), [agents, otherTowns, curTown]);
   // キャラの見た目（いつもの / ポケモン）。ポケモンでは世帯の根で進化の系統を決めるので、ID から根を引けるようにして渡す
   const [skin, setSkin] = useState<Skin>(savedSkin);
+  // 値を作り直すのは、見た目か親子の形が変わったときだけにする。snapshot のたびに作り直すと、全員の Avatar が描き直される
+  const treeRef = useRef(tree);
+  treeRef.current = tree;
+  const shape = useMemo(() => tree.families.map((f) => f.all.map((a) => `${a.id}<${a.parent ?? ""}`).join(",")).join(";"), [tree]);
   const skinCtx = useMemo(() => ({
     skin,
-    rootOf: (id: string) => { const a = tree.byId.get(id); return a ? tree.lineage(a)[0].id : id; },
-  }), [skin, tree]);
+    rootOf: (id: string) => { const t = treeRef.current; const a = t.byId.get(id); return a ? t.lineage(a)[0].id : id; },
+  }), [skin, shape]);
   /** ゴーストを押したら、本物がいる町に切り替えてその子を選ぶ */
   const pick = useCallback((a: Agent) => {
     if (!a.ghost) { setSelected(a.id); return; }
