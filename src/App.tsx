@@ -10,6 +10,7 @@ import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
+import { SkinCtx, saveSkin, savedSkin, useSkin, type Skin } from "./kid/pokemon";
 import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
   MOOD_LABEL, NEEDS_YOU, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, targetLabel, taskOf,
@@ -169,6 +170,17 @@ export default function App() {
   // 木を作るときだけ、転出のゴースト（別の町にいる親子の影）を足す。お便りや数には入れない
   const otherTowns = useMemo(() => [...others].flatMap(([town, v]) => ("agents" in v ? [{ town, agents: v.agents }] : [])), [others]);
   const tree = useMemo(() => buildTree(withGhosts({ town: curTown, agents }, otherTowns)), [agents, otherTowns, curTown]);
+  // キャラの見た目（いつもの / ポケモン）。ポケモンでは世帯の根で進化の系統を決めるので、ID から根を引けるようにして渡す
+  const [skin, setSkin] = useState<Skin>(savedSkin);
+  // 値を作り直すのは、見た目か親子の形が変わったときだけにする。snapshot のたびに作り直すと、全員の Avatar が描き直される
+  const treeRef = useRef(tree);
+  treeRef.current = tree;
+  const shape = useMemo(() => tree.families.map((f) => f.all.map((a) => `${a.id}<${a.parent ?? ""}`).join(",")).join(";"), [tree]);
+  const skinCtx = useMemo(() => ({
+    skin,
+    // 根が転出のゴーストなら、相手の町にいる本物の ID で引く。親の町と子の町で系統をそろえるため
+    rootOf: (id: string) => { const t = treeRef.current; const a = t.byId.get(id); const r = a ? t.lineage(a)[0] : null; return r ? r.ghost?.realId ?? r.id : id; },
+  }), [skin, shape]);
   /** ゴーストを押したら、本物がいる町に切り替えてその子を選ぶ */
   const pick = useCallback((a: Agent) => {
     if (!a.ghost) { setSelected(a.id); return; }
@@ -313,6 +325,7 @@ export default function App() {
   const selfPeer = peers.find((p) => p.self);
 
   return (
+    <SkinCtx.Provider value={skinCtx}>
     <KillCtx.Provider value={killCtx}>
     <LetterCtx.Provider value={letterMarks.marks}>
     <TownCtx.Provider value={agents}>
@@ -331,7 +344,13 @@ export default function App() {
           </select>
           <span className={`conn ${!snap?.ccn_ok ? "bad" : slow ? "slow" : "ok"}`} title={fail?.msg ?? ""}><i />{snap ? (!snap.ccn_ok ? "つながらない" : slow ? "つながりにくい" : "接続中") : "よみこみ中"}</span>
         </div>
-        <div className="top-right" />
+        <div className="top-right">
+          <select className="node skin" value={skin} title="キャラの見た目。ポケモンでは親・子・孫を3段進化で描く"
+            onChange={(e) => { const v = e.target.value as Skin; setSkin(v); saveSkin(v); }}>
+            <option value="default">キャラ: いつもの</option>
+            <option value="pokemon">キャラ: ポケモン</option>
+          </select>
+        </div>
       </header>
 
       <SplitGroup className="body" orientation="horizontal" defaultLayout={savedSplit()} onLayoutChanged={saveSplit}>
@@ -417,6 +436,7 @@ export default function App() {
     </TownCtx.Provider>
     </LetterCtx.Provider>
     </KillCtx.Provider>
+    </SkinCtx.Provider>
   );
 }
 
@@ -1369,6 +1389,7 @@ function StateTab({ agent, mood }: { agent: Agent; mood: Mood }) {
 
 function Credits() {
   const [open, setOpen] = useState(false);
+  const { skin } = useSkin();
   return (
     <span className="credits">
       <button className="credit-btn" onClick={() => setOpen((o) => !o)}>素材</button>
@@ -1378,6 +1399,10 @@ function Credits() {
           <br /><b>状態の印、幽霊、お手紙</b>: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0
           （creativecommons.org/licenses/by/4.0）。Source: googlefonts.github.io/noto-emoji-animation
           <br />どちらも配布元のファイルを改変せずに使い、表示のときに縮めている。
+          {skin === "pokemon" && (<>
+            <br /><b>ポケモン（キャラの見た目で選んだとき）</b>: Pokémon Showdown のアニメ GIF を、PokeAPI/sprites（github.com/PokeAPI/sprites）の配布から
+            {"表示中のキャラの分だけ実行時に読む。このアプリには画像を含めない。Pokémon © Nintendo / Creatures Inc. / GAME FREAK inc."}
+          </>)}
         </span>
       )}
     </span>
