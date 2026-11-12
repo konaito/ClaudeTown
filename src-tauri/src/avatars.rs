@@ -178,10 +178,10 @@ pub fn recent_path(path: &Path) -> PathBuf {
     path.with_file_name(format!("{stem}-recent.json"))
 }
 
+/// 読むのは、前に読んだときからファイルが変わったときだけ（#11、super::read_json_cached）
 pub fn load(path: &Path) -> (Assigns, Recent) {
-    let read = |p: &Path| fs::read_to_string(p).ok();
-    let a = read(path).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-    let r = read(&recent_path(path)).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let a = super::read_json_cached(path).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
+    let r = super::read_json_cached(&recent_path(path)).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
     (a, r)
 }
 

@@ -77,13 +77,42 @@ fn read_json(p: &PathBuf) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(p).ok()?).ok()
 }
 
+/// ファイルが前に読んだときと同じか（#11）。更新時刻、大きさ、inode で見る。読む前に stat だけする
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct FileStamp { modified: Option<std::time::SystemTime>, len: u64, ino: u64 }
+fn stamp_of(meta: &fs::Metadata) -> FileStamp {
+    use std::os::unix::fs::MetadataExt;
+    FileStamp { modified: meta.modified().ok(), len: meta.len(), ino: meta.ino() }
+}
+
+/// read_json と同じ中身を返す。前に読んだときから更新時刻、大きさ、inode のどれも変わっていなければ、読まずに覚えた中身を返す（#11）。
+/// snapshot は一覧を取るたびに、セッションごとの state/{id}.json と close-check/{id}.json、houses.json、ccn.json を読んでいた。
+/// 無いファイルは覚えない（できたら次の回に読む）
+fn read_json_cached(p: &std::path::Path) -> Option<Value> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<PathBuf, (FileStamp, Option<Value>)>>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(meta) = fs::metadata(p) else {
+        cache.lock().unwrap_or_else(|e| e.into_inner()).remove(p);
+        return None;
+    };
+    let st = stamp_of(&meta);
+    if let Some((s, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(p) {
+        if *s == st && st.modified.is_some() {
+            return v.clone();
+        }
+    }
+    let v = read_json(&p.to_path_buf());
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(p.to_path_buf(), (st, v.clone()));
+    v
+}
+
 /// 手元の ccn ノードの入口。ccn.json の port を読む（README は 4322、実機は 4323 なので固定しない）。
 fn ccn_base() -> String {
     if let Ok(u) = std::env::var("FC_CCN_URL") {
         return u.trim_end_matches('/').to_string();
     }
     for rel in [".config/ccn/ccn.json", ".config/cc/cc.json"] {
-        if let Some(port) = read_json(&home().join(rel)).and_then(|v| v.get("port").and_then(|p| p.as_u64())) {
+        if let Some(port) = read_json_cached(&home().join(rel)).and_then(|v| v.get("port").and_then(|p| p.as_u64())) {
             return format!("http://127.0.0.1:{port}");
         }
     }
@@ -141,17 +170,51 @@ struct Snapshot {
 const LETTERS_WINDOW_MS: u128 = 10 * 60 * 1000;
 const LETTERS_MAX: usize = 300;
 fn recent_letters() -> Vec<Value> {
-    let Ok(text) = fs::read_to_string(fc_path(Scope::Shared, "letters.jsonl")) else { return vec![] };
-    let since = now_ms().saturating_sub(LETTERS_WINDOW_MS);
-    let mut out: Vec<Value> = text
-        .lines()
-        .rev()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .take_while(|v| v["at"].as_u64().map(|a| a as u128 >= since).unwrap_or(false))
-        .take(LETTERS_MAX)
-        .collect();
-    out.reverse();
-    out
+    static TAIL: Mutex<Option<LetterTail>> = Mutex::new(None);
+    let mut tail = TAIL.lock().unwrap_or_else(|e| e.into_inner());
+    letters_from(&fc_path(Scope::Shared, "letters.jsonl"), now_ms(), &mut tail)
+}
+
+/// letters.jsonl の、前回までに読んだところ（#11）。2秒ごとに最大 1MB を頭から読み直していたのをやめ、増えた分だけ読む
+struct LetterTail {
+    stamp: FileStamp,
+    /// ここまで読んだ（改行で終わる行の末尾）バイト位置
+    offset: u64,
+    /// 読んだ記録のうち、まだ窓（LETTERS_WINDOW_MS）に入りうるもの。ファイルの順
+    recs: Vec<Value>,
+}
+
+/// recent_letters の中身（試験のために置き場所と時刻を受け取る）。返すものは、ファイルを頭から読んでいた前の形と同じ:
+/// 末尾から、時刻が窓に入る行が続く間だけ取り、新しいほうから LETTERS_MAX 件を古い順に返す
+fn letters_from(path: &std::path::Path, now: u128, tail: &mut Option<LetterTail>) -> Vec<Value> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(meta) = fs::metadata(path) else { *tail = None; return vec![] };
+    let st = stamp_of(&meta);
+    // 同じファイル（inode）が後ろに伸びただけなら、続きから読む。小さくなった、入れ替わった（1MB で .1 に移した）なら頭から
+    let from = match tail.as_ref() {
+        Some(t) if t.stamp == st => None,
+        Some(t) if t.stamp.ino == st.ino && st.len >= t.offset => Some(t.offset),
+        _ => Some(0),
+    };
+    if let Some(from) = from {
+        let mut buf = Vec::new();
+        let ok = fs::File::open(path).and_then(|mut f| { f.seek(SeekFrom::Start(from))?; f.read_to_end(&mut buf) }).is_ok();
+        if !ok { *tail = None; return vec![] }
+        // 書きかけの最後の行（改行が無い）は、次の回に読む
+        let end = buf.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+        let mut recs = if from == 0 { vec![] } else { tail.take().map(|t| t.recs).unwrap_or_default() };
+        recs.extend(String::from_utf8_lossy(&buf[..end]).lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()));
+        *tail = Some(LetterTail { stamp: st, offset: from + end as u64, recs });
+    }
+    let since = now.saturating_sub(LETTERS_WINDOW_MS);
+    let in_window = |v: &Value| v["at"].as_u64().map(|a| a as u128 >= since).unwrap_or(false);
+    let t = tail.as_mut().expect("上で入れた");
+    // 窓から外れた行より前は、時刻が進んでも二度と返さないので捨てる（末尾から続く間だけ取る、という前の形と同じになる）
+    if let Some(i) = t.recs.iter().rposition(|v| !in_window(v)) {
+        t.recs.drain(..=i);
+    }
+    let n = t.recs.len();
+    t.recs[n.saturating_sub(LETTERS_MAX)..].to_vec()
 }
 
 fn peers() -> Result<Value, String> {
@@ -205,8 +268,8 @@ fn snapshot(peer: Option<String>) -> Snapshot {
         let parent = parent_from_ccn(s).filter(|p| *p != id);
         let (report, close_check) = if peer.is_none() {
             (
-                read_json(&fc_path(Scope::Shared, &format!("state/{id}.json"))),
-                read_json(&home().join(format!(".claude/close-check/{id}.json"))),
+                read_json_cached(&fc_path(Scope::Shared, &format!("state/{id}.json"))),
+                read_json_cached(&home().join(format!(".claude/close-check/{id}.json"))),
             )
         } else {
             (None, None)
@@ -305,9 +368,9 @@ fn houses_paths() -> (PathBuf, PathBuf) {
 /// 世帯の名前を読む。共有の分を下地にして、アプリの分（開発版なら開発版で付けた名前）を上に重ねる
 fn read_houses() -> Value {
     let (shared, own) = houses_paths();
-    let mut out = read_json(&shared).filter(Value::is_object).unwrap_or(json!({}));
+    let mut out = read_json_cached(&shared).filter(Value::is_object).unwrap_or(json!({}));
     if own != shared {
-        if let (Some(base), Some(Value::Object(top))) = (out.as_object_mut(), read_json(&own)) {
+        if let (Some(base), Some(Value::Object(top))) = (out.as_object_mut(), read_json_cached(&own)) {
             base.extend(top);
         }
     }
@@ -1306,7 +1369,89 @@ mod tests {
     }
 
     #[test]
-        fn watch_wait_backs_off_and_resets() {
+    fn letters_read_only_what_was_added() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("fc-letters-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let p = dir.join("letters.jsonl");
+        let now = 100 * 60 * 1000u128;
+        let line = |id: &str, at: u128| format!("{{\"ev\":\"sent\",\"id\":\"{id}\",\"at\":{at}}}\n");
+        fs::write(&p, format!("{}{}", line("old", now - LETTERS_WINDOW_MS - 1), line("a", now - 1000))).unwrap();
+        let mut tail = None;
+        let ids = |v: Vec<Value>| v.iter().map(|x| x["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(letters_from(&p, now, &mut tail)), vec!["a"]);
+        // 書きかけの行は返さず、書き終わったら返す
+        let mut f = fs::OpenOptions::new().append(true).open(&p).unwrap();
+        f.write_all(b"{\"ev\":\"sent\",\"id\":\"b\",").unwrap();
+        assert_eq!(ids(letters_from(&p, now, &mut tail)), vec!["a"]);
+        f.write_all(format!("\"at\":{}}}\n", now).as_bytes()).unwrap();
+        assert_eq!(ids(letters_from(&p, now, &mut tail)), vec!["a", "b"]);
+        // 足した分だけ読んだ
+        assert_eq!(tail.as_ref().unwrap().offset, fs::metadata(&p).unwrap().len());
+        // 時刻が進んで a が窓から外れる
+        assert_eq!(ids(letters_from(&p, now + LETTERS_WINDOW_MS - 500, &mut tail)), vec!["b"]);
+        // 入れ替わった（.1 に移して新しく始めた）ら頭から読む
+        fs::rename(&p, dir.join("letters.jsonl.1")).unwrap();
+        fs::write(&p, line("c", now)).unwrap();
+        assert_eq!(ids(letters_from(&p, now, &mut tail)), vec!["c"]);
+        // 消えたら空
+        fs::remove_file(&p).unwrap();
+        assert!(letters_from(&p, now, &mut tail).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 1MB の letters.jsonl で、頭から読む前の形と、増えた分だけ読む今の形の時間を比べる（#11）。
+    /// cargo test --release --lib letters_1mb -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn letters_1mb_timing() {
+        let dir = std::env::temp_dir().join(format!("fc-letters-1mb-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let p = dir.join("letters.jsonl");
+        let now = now_ms();
+        let mut text = String::new();
+        let mut i = 0u64;
+        while text.len() < 1_000_000 {
+            text.push_str(&format!("{{\"ev\":\"sent\",\"id\":\"l{i}\",\"at\":{},\"kind\":\"send\",\"from\":\"aaaaaaaa-0000-4000-8000-000000000001\",\"to\":\"uds:/tmp/cc-socks/1234.sock\",\"summary\":\"テストのお手紙\"}}\n", now - 3_600_000 + i as u128 * 10));
+            i += 1;
+        }
+        fs::write(&p, &text).unwrap();
+        let full = || {
+            let text = fs::read_to_string(&p).unwrap();
+            let since = now.saturating_sub(LETTERS_WINDOW_MS);
+            text.lines().rev().filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .take_while(|v| v["at"].as_u64().map(|a| a as u128 >= since).unwrap_or(false)).take(LETTERS_MAX).count()
+        };
+        let t = std::time::Instant::now();
+        for _ in 0..20 { full(); }
+        let before = t.elapsed() / 20;
+        let mut tail = None;
+        letters_from(&p, now, &mut tail);
+        let t = std::time::Instant::now();
+        for _ in 0..20 { letters_from(&p, now, &mut tail); }
+        let after = t.elapsed() / 20;
+        println!("letters.jsonl {} バイト {} 行: 頭から読む {:?}/回、増えた分だけ読む（変化なし） {:?}/回", text.len(), i, before, after);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_json_rereads_only_when_the_file_changes() {
+        let dir = std::env::temp_dir().join(format!("fc-cache-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let p = dir.join("state.json");
+        fs::write(&p, r#"{"phase":"working"}"#).unwrap();
+        assert_eq!(read_json_cached(&p).unwrap()["phase"], "working");
+        // 書き換えたら読み直す（大きさが同じでも、更新時刻が変わる）
+        std::thread::sleep(Duration::from_millis(5));
+        fs::write(&p, r#"{"phase":"resting"}"#).unwrap();
+        assert_eq!(read_json_cached(&p).unwrap()["phase"], "resting");
+        fs::remove_file(&p).unwrap();
+        assert!(read_json_cached(&p).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn watch_wait_backs_off_and_resets() {
         let mut w = WATCH_MIN;
         let mut seen = vec![];
         for _ in 0..6 { w = next_wait(w, false); seen.push(w.as_secs()); }
