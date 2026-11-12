@@ -18,6 +18,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 const SPECTER_BUNDLE_ID: &str = "jp.fybe.specter";
+/// ccn では waiting_permission に見えるが、道具の承認ではない待ち（選択肢を選ぶ画面が出る）
+const NOT_TOOL_APPROVAL: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
 const KEEP_MESSAGES: usize = 80;
 
 fn home() -> PathBuf {
@@ -370,6 +372,12 @@ fn answer_permission(
     } else {
         let state = read_json(&home().join(format!(".family-computing/state/{session_id}.json")));
         let now_id = state.as_ref().and_then(|s| s["pending"]["id"].as_str().map(String::from));
+        // 質問（AskUserQuestion）や計画の確認（ExitPlanMode）の待ちも ccn では waiting_permission になる。
+        // そこへ 1 を送ると選択肢の1番目を選んでしまうので、許可は送らない（拒否の Esc は取り消しなので送ってよい）
+        let pending_tool = state.as_ref().and_then(|s| s["pending"]["tool"].as_str().map(String::from)).unwrap_or_default();
+        if choice == "allow" && NOT_TOOL_APPROVAL.contains(&pending_tool.as_str()) {
+            return Err(format!("{pending_tool} の待ちは道具の承認ではないので、ここからは許可しない。ペインで答えて"));
+        }
         // 許可は、画面で見せた中身と今の中身が一致したときだけ送る。拒否は安全側なので、中身が分からなくても送ってよい
         if choice == "allow" && (expect_id.is_none() || now_id != expect_id) {
             return Err(if now_id.is_none() {

@@ -532,6 +532,8 @@ function Approval({ agent, canAnswer, onFocus, onDone, onError }: {
 }) {
   const [busy, setBusy] = useState<"allow" | "deny" | null>(null);
   const p = agent.report?.pending;
+  // 質問や計画の確認の待ちは道具の承認ではないので、許可のボタンを出さない（Rust 側でも断る）
+  const notTool = !!p && ["AskUserQuestion", "ExitPlanMode"].includes(p.tool);
   const answer = async (choice: "allow" | "deny") => {
     setBusy(choice);
     try {
@@ -557,7 +559,8 @@ function Approval({ agent, canAnswer, onFocus, onDone, onError }: {
         <div className="hint">中身が分からない（状態 hook が控える前に始まった承認）。ペインで確かめて答える。</div>
       )}
       <div className="ap-btns">
-        <button className="ap-allow" disabled={!canAnswer || !p || !!busy} onClick={() => answer("allow")}>{busy === "allow" ? "送っている…" : "許可する"}</button>
+        {notTool && <div className="hint">これは質問か計画の確認の待ち。選択肢はペインで選ぶ。</div>}
+        <button className="ap-allow" disabled={!canAnswer || !p || notTool || !!busy} onClick={() => answer("allow")}>{busy === "allow" ? "送っている…" : "許可する"}</button>
         <button className="ap-deny" disabled={!canAnswer || !!busy} onClick={() => answer("deny")}>{busy === "deny" ? "送っている…" : "拒否する"}</button>
         <button className="pane-btn" onClick={() => onFocus(agent)}>ペインへ ↗</button>
       </div>
