@@ -33,6 +33,8 @@ const PORT = Number(arg("port", MODE === "town" ? "4511" : "4512"));
 const DIR = arg("dir", `/tmp/ct-soak-${MODE}`)!;
 const HOME = join(DIR, "home");
 const MIN_FREE_GB = 20;
+/** この1分の load 以上の時間帯の記録は、判定に使わない（2026-11-13、ほかのセッションの試験で load が 400〜900 になった） */
+const MAX_LOAD = 20;
 if (!BIN || !existsSync(BIN)) throw new Error("--bin にビルドした family-computing を渡す");
 
 const sh = (cmd: string, args: string[]) => spawnSync(cmd, args, { encoding: "utf8" }).stdout ?? "";
@@ -79,7 +81,8 @@ const webkitPids = () => sh("/usr/bin/pgrep", ["-f", "com.apple.WebKit.(WebConte
 const before = new Set(webkitPids());
 const t0 = Date.now();
 const app = spawn(bin, [], {
-  env: { ...process.env, HOME, FC_CCN_URL: `http://127.0.0.1:${PORT}`, FC_PERF_LOG: perfLog },
+  // 開き直しの試験では窓を最前面に出す。裏に回ると WebKit が描画を止め、試験が進まない。町の記録は8時間なので出さない
+  env: { ...process.env, HOME, FC_CCN_URL: `http://127.0.0.1:${PORT}`, FC_PERF_LOG: perfLog, ...(MODE === "reopen" ? { FC_BENCH_TOP: "1" } : {}) },
   stdio: ["ignore", "ignore", "ignore"],
 });
 const kinds: Record<string, number> = {};
@@ -94,14 +97,27 @@ if (!kinds.WebContent) { stop("WebContent が見つからない"); }
 const watch: Record<string, number> = { app: app.pid!, ...kinds };
 console.log(`起動: ${JSON.stringify(watch)}（${DIR}）`);
 
+const load1 = () => Number(sh("/usr/sbin/sysctl", ["-n", "vm.loadavg"]).trim().replace(/[{}]/g, "").split(/\s+/)[0]);
+/** ps の time（[[dd-]hh:]mm:ss.cc）を秒に */
+function cpuS(pid: number) {
+  const t = sh("/bin/ps", ["-o", "time=", "-p", String(pid)]).trim();
+  if (!t) return null;
+  const [d, rest] = t.includes("-") ? t.split("-") : ["0", t];
+  return Number(d) * 86400 + rest.split(":").reduce((a, x) => a * 60 + Number(x), 0);
+}
+/** footprint の全文を残す（何が増えたかの内訳。graphics なら canvas の面、malloc なら物の保持） */
+function dumpFootprint(tag: string) {
+  for (const k of ["WebContent", "GPU"]) if (watch[k]) writeFileSync(join(DIR, `footprint-${k}-${tag}.txt`), sh("/usr/bin/footprint", ["-p", String(watch[k])]));
+}
 function rssMB(pid: number) { const v = Number(sh("/bin/ps", ["-o", "rss=", "-p", String(pid)]).trim()); return v ? Math.round(v / 102.4) / 10 : null; }
 function footMB(pid: number) { const m = sh("/usr/bin/footprint", ["-p", String(pid), "-f", "bytes"]).match(/phys_footprint: (\d+) B/); return m ? Math.round(Number(m[1]) / 1024 / 102.4) / 10 : null; }
 const freeGB = () => { const s = statfsSync("/"); return (s.bavail * s.bsize) / 1024 ** 3; };
 
 const samples: Record<string, unknown>[] = [];
 function sample(note = "") {
-  const r: Record<string, unknown> = { at: new Date().toISOString(), min: Math.round((Date.now() - t0) / 600) / 100, note };
-  for (const [k, p] of Object.entries(watch)) { r[`${k}_rss`] = rssMB(p); r[`${k}_foot`] = footMB(p); }
+  const load = load1();
+  const r: Record<string, unknown> = { at: new Date().toISOString(), min: Math.round((Date.now() - t0) / 600) / 100, note, load, valid: load < MAX_LOAD };
+  for (const [k, p] of Object.entries(watch)) { r[`${k}_rss`] = rssMB(p); r[`${k}_foot`] = footMB(p); r[`${k}_cpu`] = cpuS(p); }
   samples.push(r);
   appendFileSync(samplesPath, JSON.stringify(r) + "\n");
   writeSummary();
@@ -109,18 +125,21 @@ function sample(note = "") {
 }
 function writeSummary() {
   const keys = Object.keys(watch);
-  const first = samples[0], last = samples[samples.length - 1];
+  // load の高い時間帯の記録は判定に使わない。始めと最新は、load が低かった記録から取る
+  const ok = samples.filter((s) => s.valid);
+  const first = ok[0] ?? samples[0], last = ok[ok.length - 1] ?? samples[samples.length - 1];
   const d = (k: string) => (last[k] != null && first[k] != null ? Math.round(((last[k] as number) - (first[k] as number)) * 10) / 10 : "−");
-  const max = (k: string) => Math.max(...samples.map((s) => (s[k] as number) ?? 0));
+  const max = (k: string) => Math.max(...(ok.length ? ok : samples).map((s) => (s[k] as number) ?? 0));
   const out = [
     `# 長時間の記録（${MODE}）`, "",
-    `始め ${first.at}、最新 ${last.at}（${last.min} 分）。プロセス ${JSON.stringify(watch)}`, "",
+    `始め ${first.at}、最新 ${last.at}（${last.min} 分）。プロセス ${JSON.stringify(watch)}`,
+    `判定に使ったのは、1分の load が ${MAX_LOAD} 未満の記録（${ok.length}/${samples.length} 点）。`, "",
     "| | 始め | 最新 | 増え方 | 最大 |", "|---|---|---|---|---|",
     ...keys.flatMap((k) => [`${k}_rss`, `${k}_foot`]).map((k) => `| ${k} | ${first[k]} | ${last[k]} | ${d(k)} | ${max(k)} |`),
     "", "単位は MB。rss は ps の RSS、foot は footprint の phys_footprint。", "",
-    "| 分 | " + keys.map((k) => `${k} rss/foot`).join(" | ") + " | メモ |",
-    "|---|" + keys.map(() => "---").join("|") + "|---|",
-    ...samples.map((s) => `| ${s.min} | ` + keys.map((k) => `${s[`${k}_rss`]}/${s[`${k}_foot`]}`).join(" | ") + ` | ${s.note} |`),
+    "| 分 | load | " + keys.map((k) => `${k} rss/foot/cpu秒`).join(" | ") + " | メモ |",
+    "|---|---|" + keys.map(() => "---").join("|") + "|---|",
+    ...samples.map((s) => `| ${s.min} | ${s.load}${s.valid ? "" : "（除く）"} | ` + keys.map((k) => `${s[`${k}_rss`]}/${s[`${k}_foot`]}/${s[`${k}_cpu`]}`).join(" | ") + ` | ${s.note} |`),
   ];
   writeFileSync(join(DIR, "summary.md"), out.join("\n") + "\n");
 }
@@ -164,6 +183,7 @@ const perfLines = () => readFileSync(perfLog, "utf8").split("\n").filter(Boolean
 
 await sleep(30_000);
 sample("起動から30秒");
+dumpFootprint("start");
 
 const end = t0 + HOURS * 3600_000;
 if (MODE === "town") {
@@ -176,6 +196,7 @@ if (MODE === "town") {
     sample(`選んだ回数 ${sel}、生きているセッション ${live.length}、お手紙 ${letterN}${err ? `、画面の失敗 ${err.message}` : ""}`);
   }
   timers.forEach(clearInterval);
+  dumpFootprint("end");
   stop(`${HOURS} 時間たった`);
 } else {
   let doneAt = 0;
@@ -186,9 +207,9 @@ if (MODE === "town") {
     if (err) stop(`画面の失敗: ${err.message}`);
     const n = Math.max(0, ...ls.filter((l) => l.ev === "reopen").map((l) => l.i));
     const done = ls.find((l) => l.ev === "done");
-    if (!doneAt && done) { doneAt = Date.now(); sample(`開き直し ${REOPEN_N(ls)} 回が終わった（描けた ${done.drawn}、文脈が生きていた ${done.gl}、文脈を失った知らせ ${done.lost}）`); continue; }
+    if (!doneAt && done) { doneAt = Date.now(); dumpFootprint("done"); sample(`開き直し ${REOPEN_N(ls)} 回が終わった（描けた ${done.drawn}、文脈が生きていた ${done.gl}、文脈を失った知らせ ${done.lost}）`); continue; }
     sample(doneAt ? `終わってから ${Math.round((Date.now() - doneAt) / 1000)} 秒` : `開き直し ${n} 回`);
-    if (doneAt && Date.now() - doneAt >= AFTER_S * 1000) stop("開き直しの後の記録が済んだ");
+    if (doneAt && Date.now() - doneAt >= AFTER_S * 1000) { dumpFootprint("end"); stop("開き直しの後の記録が済んだ"); }
   }
   stop("時間切れ");
 }

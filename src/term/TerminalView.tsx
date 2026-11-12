@@ -40,7 +40,8 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
     // WebGL が使えないときと、文脈を失ったときは、アドオンを外して DOM の描き方に戻す
     let gl: WebglAddon | null = null;
     // 開発の計測用: ?renderer=dom で DOM の描き方のまま比べる
-    if (import.meta.env.DEV && new URLSearchParams(location.search).get("renderer") === "dom") perfCounters.renderer = "dom";
+    // 長時間の記録（#15）の比べ: VITE_FC_SOAK_RENDERER=dom でビルドした版も DOM の描き方にする
+    if ((import.meta.env.DEV && new URLSearchParams(location.search).get("renderer") === "dom") || import.meta.env.VITE_FC_SOAK_RENDERER === "dom") perfCounters.renderer = "dom";
     else try {
       gl = new WebglAddon();
       gl.onContextLoss(() => { gl?.dispose(); gl = null; perfCounters.renderer = "dom（文脈を失った）"; });

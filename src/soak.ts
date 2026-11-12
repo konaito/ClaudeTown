@@ -48,20 +48,24 @@ async function reopen() {
   log({ ev: "start", id: c.aid });
   // 開くたびに、描けているかを見る。WebGL の文脈が生きている、文脈を失った知らせが来ていない、「起動中…」が消えている
   let lost = 0, drawn = 0, gl = 0;
+  const t0 = Date.now();
   for (let i = 1; i <= REOPEN; i++) {
     tab("ターミナル")!.click();
     await until(() => document.querySelector(".xterm"));
     const ok = await until(() => !document.querySelector(".term-status"), 10_000).then(() => true, () => false);
-    for (const cv of document.querySelectorAll<HTMLCanvasElement>(".term canvas")) cv.addEventListener("webglcontextlost", () => lost++);
+    // 文脈を失った知らせは、canvas が画面に付いている間だけ数える（閉じるときに自分で手放した分は数えない）
+    const onLost = () => lost++;
+    const cvs = [...document.querySelectorAll<HTMLCanvasElement>(".term canvas")];
+    for (const cv of cvs) cv.addEventListener("webglcontextlost", onLost);
     await sleep(800);
-    const live = [...document.querySelectorAll<HTMLCanvasElement>(".term canvas")]
-      .map((cv) => cv.getContext("webgl2")).filter((x): x is WebGL2RenderingContext => !!x && !x.isContextLost());
+    const live = cvs.map((cv) => cv.getContext("webgl2")).filter((x): x is WebGL2RenderingContext => !!x && !x.isContextLost());
     if (ok) drawn++;
     if (live.length > 0) gl++;
+    for (const cv of cvs) cv.removeEventListener("webglcontextlost", onLost);
     tab("チャット")!.click();
     await until(() => !document.querySelector(".xterm"));
     await sleep(300);
-    if (i % 10 === 0) log({ ev: "reopen", i, drawn, gl, lost });
+    if (i % 10 === 0) log({ ev: "reopen", i, drawn, gl, lost, ms: Date.now() - t0 });
   }
   log({ ev: "done", drawn, gl, lost });
 }
