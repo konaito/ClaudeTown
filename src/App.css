@@ -254,10 +254,13 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 }
 
 /* 右パネルの端末 */
-.term-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 8px 10px 10px; gap: 6px; }
-.term { flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 10px; padding: 6px 4px 4px 8px; background: #fff; overflow: hidden; }
+/* 余白・枠・角丸は付けず、右パネルの幅と高さいっぱいに出す（本人の指定、2026-11-12） */
+.term-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.term { flex: 1; min-height: 0; background: #fff; overflow: hidden; }
 .term .xterm { height: 100%; }
-.term-status { font-size: 12px; color: var(--sub); }
+/* 行の高さで割り切れずに残る下端に、xterm.css の既定の黒（.xterm-viewport）が出ないよう白にする */
+.term .xterm .xterm-viewport { background-color: #fff; }
+.term-status { font-size: 12px; color: var(--sub); padding: 6px 12px; border-bottom: 1px solid var(--line); }
 .p-actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
 .ap-float { padding: 8px 12px 0; }
 

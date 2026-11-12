@@ -104,7 +104,7 @@ export async function openTerminal(sessionId: string, peer: string | null, on: (
     es.onerror = () => on({ id: sessionId, ev: "error", data: { message: "モックに繋がらない" } });
     return () => es.close();
   }
-  on({ id: sessionId, ev: "error", data: { message: "ブラウザ表示では端末を開けない（?mock を付けるとモックに繋ぐ）" } });
+  on({ id: sessionId, ev: "error", data: { message: "ブラウザ表示ではターミナルを開けない（?mock を付けるとモックに繋ぐ）" } });
   return () => {};
 }
 

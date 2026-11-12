@@ -213,7 +213,7 @@ export default function App() {
   useEffect(() => {
     if (!booting) return;
     // 端末が開かないまま残らないよう、時間切れで必ずやめる
-    const t = setTimeout(() => release(`端末が ${BOOT_TIMEOUT_MS / 1000} 秒たっても開かなかった`), BOOT_TIMEOUT_MS);
+    const t = setTimeout(() => release(`ターミナルが ${BOOT_TIMEOUT_MS / 1000} 秒たっても開かなかった`), BOOT_TIMEOUT_MS);
     const editable = (el: Element | null) => !!el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement || (el as HTMLElement).isContentEditable);
     const k = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
@@ -245,7 +245,7 @@ export default function App() {
   useEffect(() => {
     if (!booting || booting === "pending") return;
     const a = agents.find((x) => x.id === booting);
-    if (a && !a.capabilities?.terminal) release("このノードには端末の口がまだ無い。会話の欄から話しかけて");
+    if (a && !a.capabilities?.terminal) release("このノードにはターミナルの口がまだ無い。会話の欄から話しかけて");
   }, [agents, booting, release]);
   // 別のノードや別の子を選んだら、起動待ちをやめる
   useEffect(() => { if (booting) release(); }, [peer]);
@@ -310,7 +310,7 @@ export default function App() {
 
           {snap && agents.length === 0 && snap.ccn_ok && (
             <div className="empty">
-              <p>町にはまだ誰もいない。最初の世帯を作ると、右に端末が開いてすぐ打てる（親は ~/Documents/meta で起動する）。</p>
+              <p>町にはまだ誰もいない。最初の世帯を作ると、右にターミナルが開いてすぐ打てる（親は ~/Documents/meta で起動する）。</p>
               <NewHousehold big disabled={!local} onStart={startHousehold} onCreated={newHousehold} onError={(m) => toast(m, true)} />
             </div>
           )}
@@ -341,7 +341,7 @@ export default function App() {
               <button onClick={() => setZoom((z) => Math.min(1.6, +(((z === "fit" ? 1 : z) + 0.1).toFixed(2))))}>＋</button>
               <button className="fs" title="全画面" onClick={() => setFullscreen()}>⛶</button>
             </div>
-            <span className="hint">クリックで会話・右クリックで端末</span>
+            <span className="hint">クリックで会話・右クリックでターミナル</span>
             <Credits />
           </div>
         </div>
@@ -518,7 +518,7 @@ function NextRow({ mails, curTown, unreachable, working, total, onOpen }: {
           <span className="next-icon">{icon(first.kind)}</span>
           {stamp(first)}
           <button className="next-text" onClick={() => onOpen(first)}>{mainText(first)}</button>
-          <button className="pane-btn" onClick={() => onOpen(first, true)}>端末へ</button>
+          <button className="pane-btn" onClick={() => onOpen(first, true)}>ターミナルへ</button>
         </div>
       ) : (
         <div className="next-main nm-calm">
@@ -733,7 +733,7 @@ function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect:
         style={{ zoom: box.scale, width: box.w / box.scale, height: box.h / box.scale }}
         onClick={() => onSelect(agent)}
         onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
-        title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで広げて会話・右クリックで端末`}
+        title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで広げて会話・右クリックでターミナル`}
       >
         <Avatar pick={agent.avatar} seed={agent.name} mood={mood} role={roleOf(depth)} size={32} dead={dying.has(agent.id)} />
         <span className="mini-name"><i className={`dot st-${mood}`} />{agent.name}</span>
@@ -813,7 +813,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
       style={{ width: LAYOUT.card.w, height: LAYOUT.card.h }}
       onClick={() => onSelect(agent)}
       onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
-      title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで会話・右クリックで端末`}
+      title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで会話・右クリックでターミナル`}
     >
       <div className="card-top">
         <span className="role">{ROLE_LABEL[Math.min(depth, 4)]}</span>
@@ -880,7 +880,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, peers, takeEarly, b
   }, [items, pending]);
 
   if (!agent && booting) {
-    return <aside className="panel empty-panel"><div className="ep"><p className="ep-title">新しい世帯を立てている…</p><p className="hint">打ったキーはためておき、端末が開いたら流す</p></div></aside>;
+    return <aside className="panel empty-panel"><div className="ep"><p className="ep-title">新しい世帯を立てている…</p><p className="hint">打ったキーはためておき、ターミナルが開いたら流す</p></div></aside>;
   }
   if (!agent) {
     return (
@@ -890,7 +890,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, peers, takeEarly, b
           {needs[0] && (
             <button className="primary" onClick={() => onSelect(needs[0])}>{needs[0].name}をひらく</button>
           )}
-          <p className="hint">右クリックで、その子の端末を開く</p>
+          <p className="hint">右クリックで、その子のターミナルを開く</p>
         </div>
       </aside>
     );
@@ -935,7 +935,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, peers, takeEarly, b
       </div>
       {sheet === "teleport" && <Teleport agent={agent} descendants={descendants} peers={peers} onDone={(m) => { setSheet(null); onSent2(m); }} onError={onError} />}
       <div className="tabs">
-        {hasTerm && <button className={tab === "term" ? "on" : ""} onClick={() => setTab("term")}>端末</button>}
+        {hasTerm && <button className={tab === "term" ? "on" : ""} onClick={() => setTab("term")}>ターミナル</button>}
         <button className={tab === "talk" ? "on" : ""} onClick={() => setTab("talk")}>会話</button>
         <button className={tab === "state" ? "on" : ""} onClick={() => setTab("state")}>状態</button>
       </div>
@@ -1024,7 +1024,7 @@ function Approval({ agent, peer, onDone, onError }: {
     <div className="approval">
       <div className="ap-title">✋ {agent.name} が承認を待っている</div>
       {!canAnswer ? (
-        <div className="hint">このセッションは人が端末で開いたもので、ここからは答えられない。その端末で答える。</div>
+        <div className="hint">このセッションは人がターミナルで開いたもので、ここからは答えられない。そのターミナルで答える。</div>
       ) : p ? (
         <div>
           <div className="ap-tool">{p.toolName}</div>
@@ -1036,7 +1036,7 @@ function Approval({ agent, peer, onDone, onError }: {
       )}
       {canAnswer && (
         <div className="ap-btns">
-          {notTool && <div className="hint">これは質問か計画の確認の待ち。選択肢は端末で選ぶ。</div>}
+          {notTool && <div className="hint">これは質問か計画の確認の待ち。選択肢はターミナルで選ぶ。</div>}
           <button className="ap-allow" disabled={!p || notTool || !!busy} onClick={() => answer("allow")}>{busy === "allow" ? "送っている…" : "許可する"}</button>
           <button className="ap-deny" disabled={!p || !!busy} onClick={() => answer("deny")}>{busy === "deny" ? "送っている…" : "拒否する"}</button>
         </div>
@@ -1134,7 +1134,7 @@ function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent
           </div>
         )}
         {running && <div className="bad-text">作業中か承認待ちの人がいるので転出できない（{busyOnes.map((x) => x.name).join("、")}）。全員が待機になってから転出する。</div>}
-        <div className="hint">行き先に同じリポジトリが無ければ、ccn が行き先の ~/Documents に clone する。実行には最大95秒かかる。{agent.capabilities?.terminal ? "端末のセッションは、行き先ではまだ端末として再開しない（ccn 側の対応待ち）。" : ""}</div>
+        <div className="hint">行き先に同じリポジトリが無ければ、ccn が行き先の ~/Documents に clone する。実行には最大95秒かかる。{agent.capabilities?.terminal ? "ターミナルのセッションは、行き先ではまだターミナルとして再開しない（ccn 側の対応待ち）。" : ""}</div>
       </div>
       {result ? (
         subtree ? (

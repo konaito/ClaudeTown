@@ -426,7 +426,7 @@ fn answer_permission(session_id: String, choice: String, expect_id: Option<Strin
         return Err("もう承認待ちではない（ほかで答えたか、終わった）".into());
     }
     if detail["capabilities"]["permissions"].as_bool() != Some(true) {
-        return Err("このセッションは ccn から承認に答えられない（人が端末で開いたセッション）。その端末で答えて".into());
+        return Err("このセッションは ccn から承認に答えられない（人がターミナルで開いたセッション）。そのターミナルで答えて".into());
     }
     let pending = detail["pending"].as_array().cloned().unwrap_or_default();
     let first = pending.first().ok_or("ccn に承認の要求が見当たらない")?;
@@ -434,7 +434,7 @@ fn answer_permission(session_id: String, choice: String, expect_id: Option<Strin
     let tool = first["toolName"].as_str().unwrap_or_default();
     if choice == "allow" {
         if NOT_TOOL_APPROVAL.contains(&tool) {
-            return Err(format!("{tool} の待ちは道具の承認ではないので、ここからは許可しない。端末で答えて"));
+            return Err(format!("{tool} の待ちは道具の承認ではないので、ここからは許可しない。ターミナルで答えて"));
         }
         if expect_id.as_deref() != Some(req.as_str()) {
             return Err("承認を求めている中身が変わった。もう一度見てから答えて".into());
@@ -594,7 +594,7 @@ fn read_terminal(url: &str, stop: &AtomicBool, emit: impl Fn(&str, Value)) {
             Ok(r) => { fails = 0; r }
             Err(e) => {
                 fails += 1;
-                emit("error", json!({ "message": format!("端末に繋がらない: {e}"), "retry": fails }));
+                emit("error", json!({ "message": format!("ターミナルに繋がらない: {e}"), "retry": fails }));
                 if fails > 5 { return; }
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
@@ -649,7 +649,7 @@ fn term_input(session_id: String, text: String, peer: Option<String>) -> Result<
     agent()
         .post(&format!("{}/sessions/{session_id}/terminal/input", api(&peer)))
         .send_json(json!({ "text": text }))
-        .map_err(|e| format!("端末に書けなかった: {e}"))?;
+        .map_err(|e| format!("ターミナルに書けなかった: {e}"))?;
     Ok(())
 }
 
