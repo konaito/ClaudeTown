@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""family-computing の状態 hook（hooks/fc-report.py）を ~/.claude/settings.json に登録する、または外す。
+"""Claude Town（リポジトリは family-computing）の状態 hook（hooks/fc-report.py）を ~/.claude/settings.json に登録する、または外す。
 
   python3 scripts/hook.py install     # 登録する（何度呼んでも1つだけ）
   python3 scripts/hook.py uninstall   # 外す
   python3 scripts/hook.py status      # 登録されているかを見る
-  python3 scripts/hook.py name "<家の名前>"   # このセッション（親）の家の名前を付ける。引数なしなら今の名前を出す
+  python3 scripts/hook.py name "<世帯の名前>"   # このセッション（親）の世帯の名前を付ける。引数なしなら今の名前を出す
 
 cam の各プロファイルの settings.json は ~/.claude/settings.json へのリンクなので、ここだけ書けば全部に効く。
 書く前に settings.json.bak-fc-<時刻> を残す。読み出しが空や壊れていたら何も書かずに止まる。
@@ -65,7 +65,7 @@ def strip(data):
 
 
 def name_house(args):
-    """家の名前を付ける。本人がアプリで付けた名前（by=human）があれば、エージェントからは上書きしない"""
+    """世帯の名前を付ける。本人がアプリで付けた名前（by=human）があれば、エージェントからは上書きしない"""
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("FC_SESSION_ID")
     if not sid:
         sys.exit("セッション ID が分からない。Claude Code の中（Bash）で実行する")
@@ -75,7 +75,7 @@ def name_house(args):
         houses = {}
     cur = houses.get(sid) or {}
     if not args:
-        print(f"今の家の名前: {cur.get('name') or '（まだ無い）'}" + ("（本人が付けた）" if cur.get("by") == "human" else ""))
+        print(f"今の世帯の名前: {cur.get('name') or '（まだ無い）'}" + ("（本人が付けた）" if cur.get("by") == "human" else ""))
         return
     name = " ".join(args).strip()[:24]
     if not name:
@@ -88,7 +88,7 @@ def name_house(args):
     tmp = HOUSES.with_suffix(".tmp")
     tmp.write_text(json.dumps(houses, ensure_ascii=False, indent=2))
     os.replace(tmp, HOUSES)
-    print(f"家の名前を「{name}」にした")
+    print(f"世帯の名前を「{name}」にした")
 
 
 def main():

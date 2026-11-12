@@ -84,7 +84,7 @@ export default function App() {
       <header className="top">
         <div className="brand">
           <HouseIcon />
-          <h1>family computing</h1>
+          <h1>Claude Town</h1>
         </div>
         <div className="top-mid">
           <select className="node" value={peer} onChange={(e) => { setPeer(e.target.value); setSelected(null); }}>
@@ -111,8 +111,7 @@ export default function App() {
           )}
 
           <div className="fam-head">
-            <span className="fam-title"><PeopleIcon /> 家族</span>
-            <span className="fam-count">{tree.families.length}家族・{agents.length}人</span>
+            <span className="fam-title"><PeopleIcon /> {tree.families.length}世帯・{agents.length}人</span>
             <span className="legend">
               {(["working", "reply", "approval", "done", "idle"] as Mood[]).map((m) => (
                 <span key={m} className={`lg lg-${m}`}><i />{MOOD_LABEL[m]}{counts[m] ? ` ${counts[m]}` : ""}</span>
@@ -121,15 +120,15 @@ export default function App() {
           </div>
 
           {snap && agents.length === 0 && snap.ccn_ok && (
-            <div className="empty">いまは誰もいない。Specter で Claude Code を開くと、ここに家族がふえる。</div>
+            <div className="empty">いまは誰もいない。Specter で Claude Code を開くと、ここに世帯がふえる。</div>
           )}
           <Stage zoom={zoom} deps={agents.map((a) => `${a.id}|${a.parent ?? ""}|${a.name}`).join(",")} onBlank={() => setSelected(null)}>
             {/* 並べ方は大きいグループから（一番大きいものを左、残りを右に詰める） */}
             {[...tree.families].sort((x, y) => y.all.length - x.all.length).map((f) => (
               <Group key={f.root.id} root={f.root} all={f.all} count={f.all.length}
                 onRename={async (name) => {
-                  try { await invoke("set_house_name", { sessionId: f.root.id, name }); toast(name ? `グループの名前を「${name}」にした` : "グループの名前を戻した"); }
-                  catch (e) { toast(`グループの名前を変えられなかった: ${e}`, true); }
+                  try { await invoke("set_house_name", { sessionId: f.root.id, name }); toast(name ? `世帯の名前を「${name}」にした` : "世帯の名前を戻した"); }
+                  catch (e) { toast(`世帯の名前を変えられなかった: ${e}`, true); }
                 }}
                 hasNeeds={f.all.some((a) => NEEDS_YOU.includes(moodOf(a)))}>
                 <FamilyCanvas all={f.all} selected={selected} onSelect={(a) => setSelected(a.id)} onFocus={focus} />
@@ -324,7 +323,7 @@ function FamilyCanvas({ all, selected, onSelect, onFocus }: {
     });
     const r = layoutFamily(nodes, { prevArcIndex: prevArc.get(rootId) });
     prevArc.set(rootId, r.arcIndex);
-    if (!r.valid) console.warn("family-computing: 配置の検査に通る候補が無かった", rootId, r.metrics, r.candidates);
+    if (!r.valid) console.warn("Claude Town: 配置の検査に通る候補が無かった", rootId, r.metrics, r.candidates);
     return r;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sig]);

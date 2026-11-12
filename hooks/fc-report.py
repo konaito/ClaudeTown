@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""family-computing の状態 hook。
+"""Claude Town（リポジトリは family-computing）の状態 hook。
 
 Claude Code の各セッションが、いまの様子を ~/.family-computing/state/<session_id>.json に書く。
 アプリはこれをキャラの吹き出しと「あなたを待ってる子」の欄に使う。
@@ -151,7 +151,7 @@ def write(sid, patch, data):
 
 
 def house_nudge(sid):
-    """子を持つ根のセッションに家の名前が無ければ、名前を付けるよう1回だけ促す文を返す"""
+    """子を持つ根のセッションに世帯の名前が無ければ、名前を付けるよう1回だけ促す文を返す"""
     try:
         houses = json.loads(HOUSES.read_text())
     except Exception:
@@ -172,9 +172,9 @@ def house_nudge(sid):
         pass
     write(sid, {"house_nudged": True}, {})
     return (
-        "family-computing: あなたは子を持つ親なので、家族の家の名前を付けてください。"
+        "Claude Town: あなたは子を持つ親なので、この世帯（あなたとその子孫）の名前を付けてください。"
         "いまの依頼の中身から、短い名前（12字以内。例「TANGLE の掘り出し」「ccn の引っ越し」）を決めて、"
-        f"Bash で `{NAME_CMD} \"<家の名前>\"` を1回実行します。仕事の中身が大きく変わったら付け直してかまいません。"
+        f"Bash で `{NAME_CMD} \"<世帯の名前>\"` を1回実行します。仕事の中身が大きく変わったら付け直してかまいません。"
         "本人が付けた名前があるときは変わりません。"
     )
 

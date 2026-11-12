@@ -33,7 +33,7 @@ export type Agent = {
   selfStatus?: { state: string; note: string; at: string } | null;
   report?: Report | null;
   closeCheck?: { status: "working" | "checking" | "ok" | "ng" | "error"; short?: string | null } | null;
-  /** 家の名前（根のセッションだけ意味がある）。by=human は本人がアプリで付けた名前 */
+  /** 世帯の名前（根のセッションだけ意味がある）。by=human は本人がアプリで付けた名前 */
   house?: { name: string; by: "agent" | "human" } | null;
 };
 
@@ -156,7 +156,7 @@ export function choicesOf(text: string): string[] {
 }
 
 /**
- * 家の名前。本人が付けた名前 > 親が付けた名前 > 仮の名前。
+ * 世帯の名前。本人が付けた名前 > 親が付けた名前 > 仮の名前。
  * 仮の名前は、子や孫の作業場所で一番多いディレクトリ名（親の場所は meta などで共通なので除く）。無ければ最初の依頼の先頭。
  */
 export function houseNameOf(root: Agent, all: Agent[]): { name: string; by: "human" | "agent" | "guess" } {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Family Computing",
+  "productName": "Claude Town",
   "version": "0.1.0",
   "identifier": "jp.fybe.family-computing",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "ファミリーコンピューティング",
+        "title": "Claude Town",
         "width": 1440,
         "height": 900,
         "minWidth": 900,
