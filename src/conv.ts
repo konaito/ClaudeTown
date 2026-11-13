@@ -60,6 +60,17 @@ export function sameLive(a: Live | null | undefined, b: Live | null | undefined)
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
+/** 保存してある会話（Rust の conversation_cache、src-tauri/src/offline.rs）。ネットが切れても出せるよう、開いたセッションの分を持つ */
+export type ConvCache = { savedAt: number; total: number; items: ConvItem[] };
+
+/** 時刻を「11/13 09:05」の形にする（保存した時刻の表示） */
+export function savedLabel(ms: number, now = Date.now()): string {
+  const d = new Date(ms);
+  const p = (x: number) => String(x).padStart(2, "0");
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  return new Date(now).toDateString() === d.toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+
 /** 差分を足した一覧。増えていなければ prev をそのまま返す（描き直さない） */
 export function mergeConv(prev: ConvItem[], d: ConvDelta, keep = KEEP_CONV): ConvItem[] {
   if (d.reset) return d.items.length > keep ? d.items.slice(-keep) : d.items;

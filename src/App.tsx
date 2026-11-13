@@ -22,7 +22,7 @@ import {
 } from "./model";
 import { Markdown, linkify } from "./Markdown";
 import { chatPerf } from "./chatPerf";
-import { elapsedText, liveSummary, mergeConv, msOf, sameLive, type ConvDelta, type Live } from "./conv";
+import { elapsedText, liveSummary, mergeConv, msOf, sameLive, savedLabel, type ConvCache, type ConvDelta, type Live } from "./conv";
 import { layoutFamily, type LNode } from "./layout/layout";
 import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
@@ -87,6 +87,11 @@ export default function App() {
   useEffect(() => {
     invoke<Peer[]>("peers").then((p) => setPeers(Array.isArray(p) ? p : [])).catch(() => {});
   }, []);
+  // オフラインで起動したときの peers は保存した一覧（別の機械の status が cached）。町の一覧が読めるようになったら取り直す
+  const snapOk = !!snap?.ccn_ok;
+  useEffect(() => {
+    if (snapOk && peers.some((p) => p.status === "cached")) invoke<Peer[]>("peers").then((p) => setPeers(Array.isArray(p) ? p : [])).catch(() => {});
+  }, [snapOk]);
 
   const reload = useRef<() => void>(() => {});
   // 一覧の取得が続けて失敗している数と、失敗し始めた時刻。1回の失敗では町を描き直さない
@@ -330,6 +335,7 @@ export default function App() {
           {((err && !snap?.ccn_ok) || (snap && !snap.ccn_ok)) && (
             <div className="banner bad">
               {err ?? snap?.ccn_error}
+              {snap?.cached_at && <span>{savedLabel(snap.cached_at)} に保存した一覧と会話を出している</span>}
               <span className="hint">次: ターミナルで <code>ccn doctor</code> を実行する</span>
             </div>
           )}
@@ -929,6 +935,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   // 送ったばかりの文。after は送り始めたときに持っていた最後の番号で、これより後に届いた発言とだけ比べる
   const [pending, setPending] = useState<(ConvItem & { after: number })[]>([]);
   const [convErr, setConvErr] = useState<string | null>(null);
+  // 保存してあった会話を出しているときの、保存した時刻。ccn から読めたら null に戻す
+  const [cachedAt, setCachedAt] = useState<number | null>(null);
   // 下書きは宛先ごとに持つ。宛先を切り替えたとき、打ちかけの文が次の宛先に送られないようにする
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const text = agent ? drafts[agent.id] ?? "" : "";
@@ -951,18 +959,29 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   // 以前は stick を読み込みの effect でしか戻さず、タブの切り替えでは前の値が残り、容れ物も作り直されるのに items が変わらないので下へ送られなかった
   useLayoutEffect(() => { stick.current = true; }, [id, tab, chatReq]);
   useEffect(() => {
-    setItems([]); setPending([]); setLive(null); setConvErr(null); stick.current = true;
+    setItems([]); setPending([]); setLive(null); setConvErr(null); setCachedAt(null); stick.current = true;
     if (!id) return;
     let alive = true;
-    // 画面が持っている数。Rust は、これより後の発言だけを返す（#10）。増えていなければ items を変えず、描き直さない
+    // ccn から一度でも読めたか。読めたあとに保存分が届いても出さない
+    let live = false;
+    // 画面が持っている数。Rust は、これより後の発言だけを返す（#10）。増えていなければ items を変えず、描き直さない。
+    // 保存分を出している間は null のままにし、読めた最初の回は全部（reset）で差し替える（保存分の番号 n と混ぜない）
     let since: number | null = null;
+    // 開いた直後に保存分を出す。ネットが切れていると ccn の時間切れまで数秒かかるので、失敗を待たない
+    invoke<ConvCache | null>("conversation_cache", { sessionId: id, peer: peer || null }).then((c) => {
+      if (!alive || live || !c?.items.length) return;
+      setItems(c.items);
+      setCachedAt(c.savedAt);
+    }).catch(() => {});
     const load = async () => {
       try {
         const d = await invoke<ConvDelta>("conversation", { sessionId: id, peer: peer || null, since });
         if (!alive) return false;
+        live = true;
         since = Math.max(since ?? 0, d.total);
         if (d.reset) since = d.total;
         setConvErr(null);
+        setCachedAt(null);
         if (d.reset || d.items.length) setItems((prev) => mergeConv(prev, d));
         const nextLive = d.live ?? null;
         setLive((prev) => (sameLive(prev, nextLive) ? prev : nextLive));
@@ -988,6 +1007,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
 
   // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
   const shown = useMemo(() => collapseTools([...items, ...pending]), [items, pending]);
+  // 保存した履歴の印が出ているか。出ている間は中身の上に余白を足す（下の has-note）
+  const hasNote = shown.length > 0 && !!(convErr || cachedAt);
   const lastChoices = useMemo(() => {
     const lastAssistant = [...items].reverse().find((x) => x.role === "assistant");
     const lastIsAssistant = items.filter((x) => x.role !== "tool").slice(-1)[0]?.role === "assistant";
@@ -1001,7 +1022,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
     // 吹き出しの高さが描画のあとに決まる分（Markdown など）を拾う
     const raf = requestAnimationFrame(() => { if (stick.current) el.scrollTop = el.scrollHeight; });
     return () => cancelAnimationFrame(raf);
-  }, [items, pending, id, tab, chatReq, live, working]);
+    // 印が出て余白が付くと中身が伸びるので、一番下にいたら送り直す（開いたまま切れたとき、items は変わらない）
+  }, [items, pending, id, tab, chatReq, hasNote, live, working]);
 
   if (!agent) {
     return (
@@ -1079,10 +1101,18 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
 
       {tab === "term" ? (
         <Suspense fallback={<div className="term-wrap"><div className="term" /></div>}><TerminalView sessionId={agent.id} peer={peer || null} onError={onError} /></Suspense>
-      ) : tab === "talk" ? (
-        <ScrollEdgeGradient className="talk" wrapClassName="seg-fill" ref={scroller}
+      ) : tab === "talk" ? (<div className="talk-box">
+        {/* 保存した履歴を出しているときの印。会話の欄の流れに入れると欄とグラデーションの始まりがずれ、タブの行は端末のタブがあると幅が足りない。
+            そのため、欄の上端の中央に重ねる（position: absolute）。中身の失敗は title に入れる */}
+        {convErr && shown.length > 0 ? (
+          <span className="offline-note" title={convErr}><i /><span>つながらない・{cachedAt ? `${savedLabel(cachedAt)} 時点の履歴` : "最後に読めた履歴"}</span></span>
+        ) : !convErr && cachedAt ? (
+          <span className="offline-note wait" title="最新を読み込んでいる"><i /><span>{savedLabel(cachedAt)} 時点の履歴・更新中</span></span>
+        ) : null}
+        {/* 印が出ている間は、中身の上に印の高さぶんの余白を足す（上端まで送ったとき、いちばん古い行が印の下に入らない）。外枠とグラデーションの位置は変えない */}
+        <ScrollEdgeGradient className={`talk ${hasNote ? "has-note" : ""}`} wrapClassName="seg-fill" ref={scroller}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
-          {convErr && <div className="banner bad small">{convErr}</div>}
+          {convErr && shown.length === 0 && <div className="banner bad small">{convErr}</div>}
           {shown.length === 0 && !convErr && <p className="hint center">まだチャットが無い</p>}
           {shown.map((x, i) => <Bubble key={x.n ?? `p${x.at ?? i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "working" && live && <LiveLine live={live} turnAt={agent.report?.turn_started_at ?? null} />}
@@ -1095,7 +1125,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
             </div>
           )}
         </ScrollEdgeGradient>
-      ) : (
+      </div>) : (
         <StateTab agent={agent} mood={mood} />
       )}
 

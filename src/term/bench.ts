@@ -5,6 +5,8 @@
 // - all: new を n 回、続けて最後に作ったセッションで open を n 回
 // - watch: 40秒、1秒ごとに町の人数と接続の表示を記録する
 // - resize: 新しい世帯の右パネルの境目をドラッグし、claude が新しい幅で描き直すまでを測る（#19）
+// - offline: ?sid=<セッション> のチャットを開き、?secs=<秒>（既定 60）のあいだ1秒ごとに、会話の欄の吹き出しの数、保存した履歴の印、
+//   町の人数、接続の表示、赤い帯を記録する（オフラインのキャッシュ、src-tauri/src/offline.rs。scripts/offline-ccn-proxy.ts と使う）
 // - cpu: ?sid=<セッション> のターミナルを開いたまま30秒、IPC の回数を数える（#8、#9。scripts/mock-ccn-flood.ts と使う）
 // - scene: 軽さの計測（scripts/bench.ts、#2）。場面（scene=idle|hidden|minimized|terminal|talk|town）を用意して ready を書き、
 //   wait（ms）たったら post を書く。CPU とメモリは bench.ts が外から ps で測る。測っている間は、ここでは何も回さない
@@ -147,6 +149,23 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
     if (mode === "watch") {
       for (let i = 0; i < 40; i++) {
         await log({ t: i, at: new Date().toISOString().slice(11, 23), town: document.querySelector(".fam-title")?.textContent ?? "", conn: document.querySelector(".conn")?.textContent ?? "", banner: !!document.querySelector(".banner.bad") });
+        await sleep(1000);
+      }
+      return;
+    }
+    if (mode === "offline") {
+      h().select(params.get("sid"));
+      const secs = Number(params.get("secs") ?? 60);
+      const text = (sel: string) => document.querySelector(sel)?.textContent ?? null;
+      // 会話の欄とグラデーションの上端（印が出ても位置が変わらないか）
+      const top = (sel: string) => { const e = document.querySelector(sel); return e ? Math.round(e.getBoundingClientRect().top) : null; };
+      for (let i = 0; i < secs; i++) {
+        await log({ t: i, at: new Date().toISOString().slice(11, 23), town: text(".fam-title"), conn: text(".conn"), banner: text(".banner.bad"),
+          note: text(".offline-note"), msgs: document.querySelectorAll(".talk .msg, .talk .tool-line").length, empty: !!document.querySelector(".talk .hint.center"),
+          tabs: document.querySelectorAll(".panel .tabs button").length, segTop: top(".panel .seg-top"), scrollTop: top(".panel .seg-scroll"), noteTop: top(".offline-note"),
+          // 一番下からの距離（印の余白が付いても、一番下に留まっているか）と、町の選択肢の数（保存した peers が出るか）
+          bottomGap: (() => { const e = document.querySelector(".panel .seg-scroll"); return e ? Math.round(e.scrollHeight - e.scrollTop - e.clientHeight) : null; })(),
+          towns: document.querySelectorAll("select.node option").length });
         await sleep(1000);
       }
       return;

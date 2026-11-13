@@ -14,6 +14,7 @@
 mod avatars;
 mod composer;
 mod naming;
+mod offline;
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -73,6 +74,11 @@ fn place(home: &std::path::Path, app_id: Option<&str>, app_home: Option<String>,
         },
     };
     dir.join(name)
+}
+
+/// オフラインのキャッシュの置き場所（src-tauri/src/offline.rs）。開発版と安定版で分かれる
+fn cache_dir() -> PathBuf {
+    fc_path(Scope::App, "cache")
 }
 
 fn read_json(p: &PathBuf) -> Option<Value> {
@@ -166,6 +172,8 @@ struct Snapshot {
     /// お手紙（セッションどうしのやり取り）の最近の記録。hook が ~/.family-computing/letters.jsonl に書く。この機械の町だけ
     letters: Vec<Value>,
     fetched_at: u128,
+    /// 一覧を読めず、保存してあった一覧（offline.rs）を agents に入れたときの、保存した時刻（ms）
+    cached_at: Option<u64>,
 }
 
 /// お手紙の記録のうち、直近 LETTERS_WINDOW_MS のものを古い順に返す（多くても LETTERS_MAX 件）
@@ -219,8 +227,82 @@ fn letters_from(path: &std::path::Path, now: u128, tail: &mut Option<LetterTail>
     t.recs[n.saturating_sub(LETTERS_MAX)..].to_vec()
 }
 
+/// ccn の peers。手元のノードは peers を Cloudflare の API から引くので、ネットが切れると失敗する。
+/// 読めたら保存し、読めなければ保存した一覧を返す（別の機械の status は "cached" にして、裏で取りに行かせない）
 fn peers() -> Result<Value, String> {
-    get_json_t(&format!("{}/api/peers", ccn_base()), LIST_TIMEOUT)
+    let file = offline::peers_file(&cache_dir());
+    match get_json_t(&format!("{}/api/peers", ccn_base()), LIST_TIMEOUT) {
+        Ok(v) => {
+            if v.as_array().is_some_and(|a| !a.is_empty()) && offline::read(&file).map(|c| c["peers"] != v).unwrap_or(true) {
+                let _ = offline::write(&file, json!({ "peers": v }));
+            }
+            Ok(v)
+        }
+        Err(e) => match offline::read(&file).and_then(|c| c["peers"].as_array().cloned()) {
+            Some(list) => Ok(Value::Array(list.into_iter().map(|mut p| {
+                if p["self"] != json!(true) {
+                    p["status"] = json!("cached");
+                }
+                p
+            }).collect())),
+            None => Err(e),
+        },
+    }
+}
+
+/// 顔ぶれが同じまま中身だけ変わったときに、前の書き込みから空ける時間。
+/// 動いているセッションがあると report の doing などが取るたびに変わるので、毎回は書かない
+const TOWN_SAVE_GAP_MS: u128 = 30_000;
+
+/// 町ごとの、前回保存した一覧の鍵と顔ぶれと時刻
+struct TownSaved {
+    key: u64,
+    ids: Vec<String>,
+    at: u128,
+}
+static TOWN_SAVED: Mutex<Option<HashMap<String, Option<TownSaved>>>> = Mutex::new(None);
+
+/// 保存した一覧と同じかを比べる鍵。agents を JSON にしたもののハッシュ（保存した時刻の savedAt は agents の外にあるので入らない）
+fn town_key(agents: &[Value]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(agents).unwrap_or_default().hash(&mut h);
+    h.finish()
+}
+
+fn town_ids(agents: &[Value]) -> Vec<String> {
+    agents.iter().filter_map(|a| a["id"].as_str().map(String::from)).collect()
+}
+
+fn save_town(peer: &Option<String>, agents: &[Value]) {
+    let mut g = TOWN_SAVED.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = g.get_or_insert_with(HashMap::new).entry(offline::town(peer)).or_insert(None);
+    save_town_to(&offline::town_file(&cache_dir(), peer), agents, now_ms(), prev);
+}
+
+/// save_town の中身（試験のために置き場所、時刻、前回の記録を受け取る）。書いたら true。
+/// 中身が前回保存と同じなら書かない。顔ぶれが同じで中身だけ変わったときは、前の書き込みから TOWN_SAVE_GAP_MS 空ける
+/// （空けている間に変わった分は、間隔が過ぎた後の回で書く）。前回の記録が無い（起動直後）ときは、保存してあるファイルと比べる
+fn save_town_to(file: &std::path::Path, agents: &[Value], now: u128, prev: &mut Option<TownSaved>) -> bool {
+    if prev.is_none() {
+        *prev = offline::read(file).map(|c| {
+            let saved = c["agents"].as_array().cloned().unwrap_or_default();
+            TownSaved { key: town_key(&saved), ids: town_ids(&saved), at: c["savedAt"].as_u64().unwrap_or(0) as u128 }
+        });
+    }
+    let key = town_key(agents);
+    let ids = town_ids(agents);
+    if let Some(p) = prev.as_ref() {
+        if p.key == key || (p.ids == ids && now.saturating_sub(p.at) < TOWN_SAVE_GAP_MS) {
+            return false;
+        }
+    }
+    // 書けたときだけ覚える（書けなかったら、次の回にまた書く）
+    if offline::write(file, json!({ "agents": agents })).is_err() {
+        return false;
+    }
+    *prev = Some(TownSaved { key, ids, at: now });
+    true
 }
 
 /// ccn の一覧を、画面に渡すセッションの形に直す。読めなければ（空の一覧, 理由）。
@@ -359,7 +441,15 @@ fn snapshot_from(peer: Option<String>, got: Result<Vec<Value>, String>) -> Snaps
         }
     }
     let letters = if peer.is_none() { recent_letters() } else { vec![] };
-    Snapshot { ccn: ccn_base(), peer, ccn_ok: ccn_error.is_none(), ccn_error, agents, letters, fetched_at: now_ms() }
+    // 読めたら町の一覧を保存する。読めなければ保存した一覧を出す（ネットが切れて起動しても、世帯を選んで会話の保存を見られる）
+    let mut cached_at = None;
+    if ccn_error.is_none() {
+        save_town(&peer, &agents);
+    } else if let Some(c) = offline::read(&offline::town_file(&cache_dir(), &peer)) {
+        agents = c["agents"].as_array().cloned().unwrap_or_default();
+        cached_at = c["savedAt"].as_u64();
+    }
+    Snapshot { ccn: ccn_base(), peer, ccn_ok: ccn_error.is_none(), ccn_error, agents, letters, fetched_at: now_ms(), cached_at }
 }
 
 static AVATARS_LOCK: Mutex<()> = Mutex::new(());
@@ -603,15 +693,18 @@ struct ConvDelta {
 impl Conv {
     /// ccn の after=from から next まで読んだ分を足す。同じセッションの取得が重なり、
     /// ほかの呼び出しが先に同じ範囲を足していたら（c.next が読み始めと違う）、足さない
-    fn absorb(&mut self, from: u64, next: u64, fresh: Vec<Value>, evs: Vec<LiveEv>) {
+    /// 項目が増えたら true
+    fn absorb(&mut self, from: u64, next: u64, fresh: Vec<Value>, evs: Vec<LiveEv>) -> bool {
         if self.next != from {
-            return;
+            return false;
         }
         self.next = next;
+        let grew = !fresh.is_empty();
         for e in evs {
             self.live.apply(e);
         }
         self.push(fresh);
+        grew
     }
 
     fn push(&mut self, fresh: Vec<Value>) {
@@ -795,8 +888,18 @@ fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) ->
     forget_idle_convs(map, &key, now);
     let c = map.entry(key).or_insert_with(Conv::default);
     c.used = now;
-    c.absorb(from, next, fresh, evs);
+    // 増えたら、画面に出す分（最後の KEEP_MESSAGES 件）を保存する。ネットが切れたときは画面が conversation_cache で読む。
+    // 書くのは錠を持ったまま（同じセッションの取得が重なっても、古い中身があとから上書きしない）。80件の JSON なので短い
+    if c.absorb(from, next, fresh, evs) {
+        let _ = offline::save_conv(&cache_dir(), &peer, &session_id, c.total, &c.items);
+    }
     Ok(c.since(since))
+}
+
+/// 保存してある会話（offline.rs）。画面はセッションを開いた直後にこれを出し、ccn から読めたら差し替える
+fn conversation_cache(session_id: String, peer: Option<String>) -> Option<offline::ConvCache> {
+    let peer = peer.filter(|p| !p.is_empty());
+    offline::load_conv(&cache_dir(), &peer, &session_id)
 }
 
 fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
@@ -915,6 +1018,8 @@ fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> 
     }
     let peer = peer.filter(|p| !p.is_empty());
     agent().delete(&format!("{}/sessions/{session_id}", api(&peer))).call().map_err(|e| format!("止められなかった: {e}"))?;
+    // 止めたセッションの会話の保存は要らない
+    offline::remove_conv(&cache_dir(), &peer, &session_id);
     Ok(())
 }
 
@@ -1257,6 +1362,10 @@ mod cmd {
     #[tauri::command]
     pub async fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<super::ConvDelta, String> {
         blocking(move || super::conversation(session_id, peer, since)).await
+    }
+    #[tauri::command]
+    pub async fn conversation_cache(session_id: String, peer: Option<String>) -> Result<Option<super::offline::ConvCache>, String> {
+        blocking(move || Ok(super::conversation_cache(session_id, peer))).await
     }
     #[tauri::command]
     pub async fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
@@ -1607,6 +1716,13 @@ pub fn run() {
         println!("{:?}", send_message(args.get(i + 1).cloned().unwrap_or_default(), args.get(i + 2).cloned().unwrap_or_default(), None));
         return;
     }
+    // 会話の保存のうち、古いものと多すぎる分を消す。起動を待たせないよう別のスレッドで
+    std::thread::spawn(|| {
+        let n = offline::prune_conv(&cache_dir(), offline::CONV_MAX_AGE, offline::CONV_MAX_FILES);
+        if n > 0 {
+            eprintln!("[offline] 古い会話の保存を {n} 件消した");
+        }
+    });
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -1626,7 +1742,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::send_message, set_house_name, cmd::answer_permission,
+            cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::conversation_cache, cmd::send_message, set_house_name, cmd::answer_permission,
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
             cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session
@@ -1876,9 +1992,50 @@ mod tests {
 
     #[test]
     fn snapshot_key_ignores_fetched_at() {
-        let mk = |at: u128, n: usize| Snapshot { ccn: "x".into(), peer: None, ccn_ok: true, ccn_error: None, agents: vec![json!({"id": n})], letters: vec![], fetched_at: at };
+        let mk = |at: u128, n: usize| Snapshot { ccn: "x".into(), peer: None, ccn_ok: true, ccn_error: None, agents: vec![json!({"id": n})], letters: vec![], fetched_at: at, cached_at: None };
         assert_eq!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(2, 1)));
         assert_ne!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(1, 2)));
+    }
+
+    #[test]
+    fn town_is_saved_only_when_it_changes() {
+        let dir = std::env::temp_dir().join(format!("fc-town-{}-{}", std::process::id(), fastrand::u64(..)));
+        let file = dir.join("towns").join("_local.json");
+        let saved_at = || offline::read(&file).and_then(|c| c["savedAt"].as_u64());
+        let a = json!({ "id": "a", "state": "idle", "report": { "doing": "x" } });
+        let b = json!({ "id": "b", "state": "idle" });
+        let t0 = now_ms();
+        let mut prev = None;
+
+        // 初めては書く
+        assert!(save_town_to(&file, &[a.clone()], t0, &mut prev));
+        let first = saved_at().expect("書いた");
+        // 同じ中身は、どれだけ時間が経っても書かない（前は30秒ごとに書いていた）
+        assert!(!save_town_to(&file, &[a.clone()], t0 + 60_000, &mut prev));
+        assert!(!save_town_to(&file, &[a.clone()], t0 + 3_600_000, &mut prev));
+        assert_eq!(saved_at(), Some(first));
+
+        // 顔ぶれが変わったら、間隔を待たずに書く
+        assert!(save_town_to(&file, &[a.clone(), b.clone()], t0 + 3_600_001, &mut prev));
+        assert_eq!(offline::read(&file).unwrap()["agents"], json!([a, b]));
+
+        // 顔ぶれが同じで中身だけ変わったら、前の書き込みから TOWN_SAVE_GAP_MS 空けて書く
+        let a2 = json!({ "id": "a", "state": "running", "report": { "doing": "y" } });
+        let t1 = t0 + 3_600_001;
+        assert!(!save_town_to(&file, &[a2.clone(), b.clone()], t1 + 1_000, &mut prev));
+        assert!(save_town_to(&file, &[a2.clone(), b.clone()], t1 + TOWN_SAVE_GAP_MS, &mut prev));
+        assert_eq!(offline::read(&file).unwrap()["agents"], json!([a2, b]));
+
+        // 起動し直した（前回の記録が無い）ときは、保存してあるファイルと比べ、同じなら書かない
+        let before = saved_at();
+        let mut fresh = None;
+        assert!(!save_town_to(&file, &[a2.clone(), b.clone()], t0 + 7_200_000, &mut fresh));
+        assert_eq!(saved_at(), before);
+        // 違えば書く
+        let mut fresh = None;
+        assert!(save_town_to(&file, &[a.clone()], t0 + 7_200_000, &mut fresh));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     use super::*;
