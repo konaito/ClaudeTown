@@ -33,7 +33,8 @@ sleep 1
 grep -q "pid=$MOCK" "$TMP/mock.log" || { echo "モックが立たなかった" >&2; exit 1; }
 
 for r in $(seq 1 "$RUNS"); do
-  : > "$TMP/mock.log"
+  # モックはログを追記モードで開いていないので、空にせず、起動の直前の行数より後だけを見る
+  skip=$(wc -l < "$TMP/mock.log")
   mkdir -p "$TMP/home$r"
   t0=$(now)
   FC_CCN_URL=http://127.0.0.1:$PORT FC_APP_HOME="$TMP/home$r" "$BIN" >"$TMP/app$r.log" 2>&1 &
@@ -41,7 +42,7 @@ for r in $(seq 1 "$RUNS"); do
   first=""
   while [ -z "$first" ]; do
     [ $(( $(now) - t0 )) -gt 30000 ] && break
-    first=$(awk '$1=="req" && $3 ~ /^\/api\/sessions/ {print $2; exit}' "$TMP/mock.log")
+    first=$(awk -v skip="$skip" 'NR>skip && $1=="req" && $3 ~ /^\/api\/sessions/ {print $2; exit}' "$TMP/mock.log")
     sleep 0.02
   done
   sleep 10
