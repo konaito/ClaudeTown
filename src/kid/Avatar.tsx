@@ -71,7 +71,7 @@ function NinjaAvatar({ seed, mood, role, size, pick, dead }: { seed: string; moo
           onError={(e) => { (e.currentTarget as HTMLImageElement).src = `/sprites/ninja/characters/${char}/SeparateAnim/Idle.png`; e.currentTarget.classList.add("fallback"); }} />}
       </span>
       {mark && (
-        <span className="fc-bubble"><img src={`/sprites/noto/${mark}/512.webp`} alt="" draggable={false} /></span>
+        <span className="fc-bubble"><img src={`/sprites/noto/${mark}/64.webp`} alt="" draggable={false} /></span>
       )}
     </span>
   );
@@ -95,7 +95,7 @@ function PokemonAvatar({ seed, mood, role, size, dead, root, onBroken }: { seed:
           : <Still bmp={still.bmp} />}
       </span>
       {mark && (
-        <span className="fc-bubble"><img src={`/sprites/noto/${mark}/512.webp`} alt="" draggable={false} /></span>
+        <span className="fc-bubble"><img src={`/sprites/noto/${mark}/64.webp`} alt="" draggable={false} /></span>
       )}
     </span>
   );

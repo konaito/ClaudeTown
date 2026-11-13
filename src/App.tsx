@@ -1,12 +1,14 @@
-import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { call as invoke, setFullscreen } from "./bridge";
-import { TerminalView, lastTermSize } from "./term/TerminalView";
-import { perfMark, perfSetId, perfStart } from "./term/perf";
+import { lastTermSize } from "./term/size";
+import { perfEnd, perfMark, perfSetId, perfStart, perfWaitingPrompt } from "./term/perf";
 import { benchName, useBench } from "./term/bench";
 import { collectMail, type Mail } from "./mail";
 import { flightsOf, resolve, type Flight } from "./letters";
 import { withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
+import { Composer } from "./composer/Composer";
+import { BUILTINS, opensDialog } from "./composer/commands";
 import { isVisible, onVisibleChange, pollBackoff, pollWhileVisible, shownAt } from "./visible";
 import { reuseAgents, reuseSnap } from "./snap";
 import { kickTown, otherTownRetryMs, watchTown } from "./town";
@@ -18,15 +20,13 @@ import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
   MOOD_LABEL, NEEDS_YOU, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, targetLabel, taskOf,
 } from "./model";
-import { Markdown } from "./Markdown";
+import { Markdown, linkify } from "./Markdown";
 import { chatPerf } from "./chatPerf";
-import { mergeConv, savedLabel, type ConvCache, type ConvDelta } from "./conv";
+import { elapsedText, liveSummary, mergeConv, msOf, sameLive, savedLabel, type ConvCache, type ConvDelta, type Live } from "./conv";
 import { layoutFamily, type LNode } from "./layout/layout";
 import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
 
-/** 新しい世帯の端末が開くまで、打ったキーをためておく上限の時間 */
-const BOOT_TIMEOUT_MS = 12000;
 /**
  * 別の町（いま見ていない ccn のノード）のお便りを取りに行く間隔。町を1つずつ順に取り、前の回が終わるまで次の回を始めない。
  * 1回は町1つにつき手元のノード経由の GET /api/sessions 1本（中継先の ccn には 15 秒に1本）。peers が healthy でない町には取りに行かない。
@@ -58,10 +58,18 @@ const KillCtx = createContext<{ dying: Map<string, number>; ask: (a: Agent, inst
 const CONV_POLL_MS = 2500;
 /** 会話に新しい発言が無い回が続いたときの間隔の上限（#5）。新しい発言が来るか、文を送ったら CONV_POLL_MS に戻す */
 const CONV_POLL_MAX_MS = 10000;
+/** 相手が作業中のあいだの会話の取り直しの間隔（#59）。延ばさずに、この間隔で取り続ける */
+const CONV_POLL_LIVE_MS = 1000;
 
 type Toast = { id: number; text: string; bad?: boolean };
 
+// ターミナル（xterm と WebGL の addon）は起動のときに読まず、町を出した後に読む（#16）。
+// 起動から町を描くまでに解く JS を減らす。最初に開くときに待たないよう、起動の2秒後に先に読んでおく
+const loadTerminal = () => import("./term/TerminalView");
+const TerminalView = lazy(() => loadTerminal().then((m) => ({ default: m.TerminalView })));
+
 export default function App() {
+  useEffect(() => { const t = setTimeout(() => { void loadTerminal(); }, 2000); return () => clearTimeout(t); }, []);
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [peer, setPeer] = useState<string>("");
@@ -264,77 +272,28 @@ export default function App() {
   }, [curTown, selfName]);
 
   const local = !peer;
-  // 新しい世帯を作った直後、端末が開くまでに打ったキーをためておく（端末が最初の出力を受けたら流す）
-  const early = useRef<{ id: string | null; text: string }>({ id: null, text: "" });
-  const [booting, setBooting] = useState<string | null>(null);
-  // 起動待ちをやめ、ためた文字を捨てる。why があれば、捨てた文字があるときだけ知らせる
-  // （2026-11-12、本番のノードに端末の口が無く最初の出力が来ないまま booting が残り、英字が全部食われた）
-  const release = useCallback((why?: string) => {
-    const had = early.current.text;
-    early.current = { id: null, text: "" };
-    setBooting(null);
-    if (why && had) toast(`${why}。打った文字（${had.length}字）は捨てた`, true);
-  }, [toast]);
-  useEffect(() => {
-    if (!booting) return;
-    // 端末が開かないまま残らないよう、時間切れで必ずやめる
-    const t = setTimeout(() => release(`ターミナルが ${BOOT_TIMEOUT_MS / 1000} 秒たっても開かなかった`), BOOT_TIMEOUT_MS);
-    const editable = (el: Element | null) => !!el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement || (el as HTMLElement).isContentEditable);
-    const k = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
-      const el = document.activeElement;
-      // 端末（xterm）にフォーカスが移った後は、xterm が自分で受ける
-      if ((el as HTMLElement | null)?.closest?.(".term")) return;
-      // 入力欄に移ったら、横取りをやめる
-      if (editable(el)) { release(); return; }
-      const map: Record<string, string> = { Enter: "\r", Backspace: "\x7f", Tab: "\t", Escape: "\x1b" };
-      const t = e.key.length === 1 ? e.key : map[e.key];
-      if (!t) return;
-      e.preventDefault();
-      early.current.text += t;
-    };
-    window.addEventListener("keydown", k, true);
-    return () => { clearTimeout(t); window.removeEventListener("keydown", k, true); };
-  }, [booting, release]);
-  // 押した瞬間からキーをためる（作り終わるのを待つと、その間に打ったキーが落ちる）
-  const startHousehold = useCallback(() => { early.current = { id: "pending", text: "" }; setBooting("pending"); }, []);
-  // 作った直後のセッション。一覧（snapshot）に載るまでは、create の応答から作った仮の姿で右パネルとターミナルを出す（#18）。
-  // 一覧の取り直しを待つと、ccn が遅いときにその分だけターミナルが開かない
+  // 作った直後のセッション。一覧（snapshot）に載るまでは、create の応答から作った仮の姿で右パネルを出す（#18）。
+  // 一覧の取り直しを待つと、ccn が遅いときにその分だけ右パネルが出ない
   const [fresh, setFresh] = useState<Agent | null>(null);
+  // 作ったらチャットを開いて入力欄にフォーカスする（本人の指定）。端末は右クリックや「端末へ」で開く
   const newHousehold = useCallback((r: any) => {
-    if (!r?.id) { early.current = { id: null, text: "" }; setBooting(null); return; }
-    early.current = { id: r.id, text: early.current.id === "pending" ? early.current.text : "" };
+    if (!r?.id) return;
     setFresh({
       // 名前は一覧と同じ決め方（cardNames）。一覧に載ったときに名前が変わって見えないようにする
       id: r.id, name: cardNames([{ id: r.id, cwd: r.cwd ?? "" }]).get(r.id) ?? r.id.slice(0, 8), kind: "terminal", state: "running", cwd: r.cwd ?? "", canSend: true, parent: null,
       startedAt: Date.now(), capabilities: { terminal: true, send: true, stop: true },
     });
-    setBooting(r.id);
     setSelected(r.id);
-    setTermReq((n) => n + 1);
+    setComposeReq((n) => n + 1);
     reload.current();
-  }, []);
-  // 作った世帯に端末が無い（ノードに PTY の口がまだ無い）と分かったら、すぐやめる
-  useEffect(() => {
-    if (!booting || booting === "pending") return;
-    const a = agents.find((x) => x.id === booting);
-    if (a && !a.capabilities?.terminal) release("このノードにはターミナルの口がまだ無い。チャットの欄から話しかけて");
-  }, [agents, booting, release]);
-  // 別のノードや別の子を選んだら、起動待ちをやめる
-  useEffect(() => { if (booting) release(); }, [peer]);
-  useEffect(() => { if (booting && booting !== "pending" && selected !== booting) release(); }, [selected]);
-  const takeEarly = useCallback((id: string) => {
-    if (early.current.id !== id) return "";
-    const t = early.current.text;
-    early.current = { id: null, text: "" };
-    setBooting(null);
-    return t;
   }, []);
 
   // 右クリックや「端末へ」で、その子を選んで右パネルの端末を開く
   const [termReq, setTermReq] = useState(0);
   // お便りの「チャットへ」で、その子を選んで右パネルのチャットを開く
   const [chatReq, setChatReq] = useState(0);
+  // 新しい世帯を作ったとき、右パネルのチャットを開いて入力欄にフォーカスする
+  const [composeReq, setComposeReq] = useState(0);
   const focus = useCallback((a: Agent) => { perfStart("open", a.id); setSelected(a.id); setTermReq((n) => n + 1); }, []);
   // 前回の町を出したまま、3回続けて、または10秒以上失敗している
   const slow = !!fail && (fail.n >= 3 || Date.now() - fail.since > 10000);
@@ -383,7 +342,7 @@ export default function App() {
 
           <div className="fam-head">
             <span className="fam-title"><PeopleIcon /> {tree.families.length}世帯・{agents.length}人</span>
-            <NewHousehold disabled={!local} onStart={startHousehold} onCreated={newHousehold} onError={(m) => toast(m, true)} />
+            <NewHousehold disabled={!local} onCreated={newHousehold} onError={(m) => toast(m, true)} />
             <span className="legend">
               {(["working", "reply", "approval", "done", "idle"] as Mood[]).map((m) => (
                 <span key={m} className={`lg lg-${m}`}><i />{MOOD_LABEL[m]}{counts[m] ? ` ${counts[m]}` : ""}</span>
@@ -393,8 +352,8 @@ export default function App() {
 
           {snap && agents.length === 0 && snap.ccn_ok && (
             <div className="empty">
-              <p>町にはまだ誰もいない。最初の世帯を作ると、右にターミナルが開いてすぐ打てる（親は ~/Documents/meta で起動する）。</p>
-              <NewHousehold big disabled={!local} onStart={startHousehold} onCreated={newHousehold} onError={(m) => toast(m, true)} />
+              <p>町にはまだ誰もいない。最初の世帯を作ると、右にチャットが開いてすぐ打てる（親は ~/Documents/meta で起動する）。</p>
+              <NewHousehold big disabled={!local} onCreated={newHousehold} onError={(m) => toast(m, true)} />
             </div>
           )}
           <Stage zoom={zoom} onBlank={() => setSelected(null)} items={tree.families.map((f) => {
@@ -433,7 +392,7 @@ export default function App() {
         {/* 町と右パネルの境目。ドラッグで右パネルを 380px からウィンドウ幅の半分まで広げられる。ダブルクリックで既定の幅に戻る */}
         <Separator className="split-handle" />
         <SplitPanel id="side" defaultSize={SIDE_DEFAULT} minSize={SIDE_MIN} maxSize="50%">
-        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} descendants={sel ? descOf(tree.childrenOf, sel.id) : []} termReq={termReq} chatReq={chatReq} peers={peers} takeEarly={takeEarly} booting={booting}
+        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} descendants={sel ? descOf(tree.childrenOf, sel.id) : []} termReq={termReq} chatReq={chatReq} composeReq={composeReq} peers={peers}
           onSent={(a) => { kickTown(); toast(`${a.name} に届けた`); }} onSent2={(m) => { kickTown(); toast(m); }} onError={(m) => toast(m, true)}
           needs={needs} onSelect={(a) => setSelected(a.id)} />
         </SplitPanel>
@@ -462,7 +421,7 @@ function descOf(childrenOf: Map<string, Agent[]>, id: string): Agent[] {
 
 // ---------- お手紙 ----------
 
-const LETTER_IMG = "/sprites/noto/1f48c/512.webp";
+const LETTER_IMG = "/sprites/noto/1f48c/64.webp";
 /** 封筒の印を残す長さ。読まれたら短く、読まれないままなら長くても MARK_MAX_MS で消す */
 const MARK_READ_MS = 2500;
 /** 飛ぶ封筒と、頭に残る印の大きさ（px）。App.css の .letter-fly と .letter-mark に合わせる */
@@ -861,7 +820,7 @@ function KillFx({ w, h }: { w: number; h: number }) {
           );
         })}
       </svg>
-      <img className="kill-ghost" src="/sprites/noto/1f47b/512.webp" alt="" draggable={false} />
+      <img className="kill-ghost" src="/sprites/noto/1f47b/64.webp" alt="" draggable={false} />
     </div>
   );
 }
@@ -945,19 +904,34 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
 
 // ---------- 右のパネル ----------
 
-function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, takeEarly, booting, onSent, onSent2, onError, needs, onSelect }: {
-  agent: Agent | null; peer: string; lineage: Agent[]; descendants: Agent[]; termReq: number; chatReq: number; peers: Peer[]; takeEarly: (id: string) => string; booting: string | null;
+function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq, peers, onSent, onSent2, onError, needs, onSelect }: {
+  agent: Agent | null; peer: string; lineage: Agent[]; descendants: Agent[]; termReq: number; chatReq: number; composeReq: number; peers: Peer[];
   onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
 }) {
   const hasTerm = !!agent?.capabilities?.terminal;
   const town = useContext(TownCtx);
   const [tab, setTab] = useState<"term" | "talk" | "state">("talk");
   const [sheet, setSheet] = useState<"teleport" | null>(null);
-  // セッションを選んだときはチャットを出す。右クリックなどの termReq だけ端末を開く
+  // セッションを選んだときと新しい世帯を作ったときはチャットを出す。右クリックなどの termReq だけ端末を開く
   useEffect(() => { setTab("talk"); setSheet(null); }, [agent?.id, hasTerm]);
   useEffect(() => { if (termReq && hasTerm) setTab("term"); }, [termReq]);
   useEffect(() => { if (chatReq) setTab("talk"); }, [chatReq]);
+  // composeReq が来たら、チャットの入力欄にフォーカスする。前に選んでいた子が端末を開いていると、
+  // 最初の描画ではまだ tab が "term" で入力欄が無いので、入力欄が出てからフォーカスする
+  // 入力欄は Composer（#53）の中にあり、子を替えるたびに作り直されるので、枠から textarea を探す
+  const composerBox = useRef<HTMLDivElement>(null);
+  const wantCompose = useRef(false);
+  useEffect(() => { if (composeReq) { wantCompose.current = true; setTab("talk"); } }, [composeReq]);
+  useEffect(() => {
+    const el = composerBox.current?.querySelector<HTMLTextAreaElement>("textarea");
+    if (!wantCompose.current || !el || el.disabled) return;
+    wantCompose.current = false;
+    el.focus();
+    if (agent) { perfMark("composer", agent.id); if (perfWaitingPrompt(agent.id)) perfEnd(); }
+  });
   const [items, setItems] = useState<ConvItem[]>([]);
+  // 今の動き（#59）。中身が変わったときだけ入れ替え、末尾の行のほかは描き直さない
+  const [live, setLive] = useState<Live | null>(null);
   // 送ったばかりの文。after は送り始めたときに持っていた最後の番号で、これより後に届いた発言とだけ比べる
   const [pending, setPending] = useState<(ConvItem & { after: number })[]>([]);
   const [convErr, setConvErr] = useState<string | null>(null);
@@ -973,12 +947,19 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
   // 会話をすぐ取り直させる口（文を送った直後に使う）
   const convKick = useRef<() => void>(() => {});
   const id = agent?.id;
+  // 作業中でチャットを開いているあいだは、会話を CONV_POLL_LIVE_MS ごとに取る。取り直しの間隔は回るたびにこの値を読む（#59）。
+  // 作業中になったときも終わったときも、すぐ取り直す（終わった直後の答えを待たせない）
+  const working = !!agent && moodOf(agent) === "working";
+  const isFast = working && tab === "talk";
+  const fast = useRef(false);
+  fast.current = isFast;
+  useEffect(() => { convKick.current(); }, [working, isFast]);
 
   // チャットを開いたとき（セッションを選んだ、タブを切り替えた）は、必ず一番下から始める。
   // 以前は stick を読み込みの effect でしか戻さず、タブの切り替えでは前の値が残り、容れ物も作り直されるのに items が変わらないので下へ送られなかった
   useLayoutEffect(() => { stick.current = true; }, [id, tab, chatReq]);
   useEffect(() => {
-    setItems([]); setPending([]); setConvErr(null); setCachedAt(null); stick.current = true;
+    setItems([]); setPending([]); setLive(null); setConvErr(null); setCachedAt(null); stick.current = true;
     if (!id) return;
     let alive = true;
     // ccn から一度でも読めたか。読めたあとに保存分が届いても出さない
@@ -1002,13 +983,15 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
         setConvErr(null);
         setCachedAt(null);
         if (d.reset || d.items.length) setItems((prev) => mergeConv(prev, d));
+        const nextLive = d.live ?? null;
+        setLive((prev) => (sameLive(prev, nextLive) ? prev : nextLive));
         return d.reset || d.items.length > 0;
       } catch (e) {
         if (alive) setConvErr(String(e));
         return false;
       }
     };
-    const p = pollBackoff(load, CONV_POLL_MS, CONV_POLL_MAX_MS);
+    const p = pollBackoff(load, () => (fast.current ? CONV_POLL_LIVE_MS : CONV_POLL_MS), () => (fast.current ? CONV_POLL_LIVE_MS : CONV_POLL_MAX_MS));
     convKick.current = p.kick;
     return () => { alive = false; p.stop(); convKick.current = () => {}; };
   }, [id, peer]);
@@ -1040,11 +1023,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
     const raf = requestAnimationFrame(() => { if (stick.current) el.scrollTop = el.scrollHeight; });
     return () => cancelAnimationFrame(raf);
     // 印が出て余白が付くと中身が伸びるので、一番下にいたら送り直す（開いたまま切れたとき、items は変わらない）
-  }, [items, pending, id, tab, chatReq, hasNote]);
+  }, [items, pending, id, tab, chatReq, hasNote, live, working]);
 
-  if (!agent && booting) {
-    return <aside className="panel empty-panel"><div className="ep"><p className="ep-title">新しい世帯を立てている…</p><p className="hint">打ったキーはためておき、ターミナルが開いたら流す</p></div></aside>;
-  }
   if (!agent) {
     return (
       <aside className="panel empty-panel">
@@ -1063,19 +1043,30 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
   // 同じ名前の人が町にいたら、送信先に ID の先頭8字を添える（#36）。見出しは幅が足りず ID が切れるので名前だけにする
   const target = targetLabel(agent, town);
   const send = async (body: string) => {
-    if (!body.trim() || busy) return;
+    if (!body.trim() || busy) return false;
     setBusy(true);
     const after = items[items.length - 1]?.n ?? -1;
+    // 先頭が / か ! の文は、端末のあるセッションなら入力欄へ直接貼る。ccn の send_message は from の1行を前に付けるので、
+    // CLI のコマンドやシェルモードとして動かない（docs/research/cli-input.md）
+    const direct = hasTerm && /^[/!]/.test(body);
     try {
-      await invoke("send_message", { sessionId: agent.id, text: body, peer: peer || null });
-      setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
+      if (direct) {
+        await invoke("send_direct", { sessionId: agent.id, text: body, peer: peer || null });
+        // 画面を開くコマンド（/model など）は、ターミナルで操作してもらう
+        if (opensDialog(body, BUILTINS)) setTab("term");
+      } else {
+        await invoke("send_message", { sessionId: agent.id, text: body, peer: peer || null });
+        setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
+      }
       setText("");
       stick.current = true;
       // 返事が来るまでは間隔を縮めて取る（#5）
       convKick.current();
       onSent(agent);
+      return true;
     } catch (e) {
       onError(`${agent.name} に届かなかった: ${e}`);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -1092,7 +1083,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
           <div className="p-line">{lineage.map((a, i) => (
             <span key={a.id}>{i > 0 && <b>›</b>}<button className="lnk" onClick={() => onSelect(a)}>{a.name}</button></span>
           ))}</div>
-          <div className="p-task"><DocIcon />{taskOf(agent, mood)}</div>
+          <div className="p-task"><DocIcon />{linkify(taskOf(agent, mood))}</div>
         </div>
         <div className="p-actions">
           <button className="pane-btn" disabled={!!peer} title={peer ? "別の機械のセッションの転出は、まだ出していない" : "別の機械へ移す"} onClick={() => setSheet(sheet === "teleport" ? null : "teleport")}>転出</button>
@@ -1109,7 +1100,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
       )}
 
       {tab === "term" ? (
-        <TerminalView sessionId={agent.id} peer={peer || null} onError={onError} takeEarly={takeEarly} />
+        <Suspense fallback={<div className="term-wrap"><div className="term" /></div>}><TerminalView sessionId={agent.id} peer={peer || null} onError={onError} /></Suspense>
       ) : tab === "talk" ? (<div className="talk-box">
         {/* 保存した履歴を出しているときの印。会話の欄の流れに入れると欄とグラデーションの始まりがずれ、タブの行は端末のタブがあると幅が足りない。
             そのため、欄の上端の中央に重ねる（position: absolute）。中身の失敗は title に入れる */}
@@ -1124,6 +1115,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
           {convErr && shown.length === 0 && <div className="banner bad small">{convErr}</div>}
           {shown.length === 0 && !convErr && <p className="hint center">まだチャットが無い</p>}
           {shown.map((x, i) => <Bubble key={x.n ?? `p${x.at ?? i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
+          {mood === "working" && live && <LiveLine live={live} turnAt={agent.report?.turn_started_at ?? null} />}
           {mood === "approval" && (
             <Approval agent={agent} peer={peer} onDone={(m) => onSent2(m)} onError={onError} />
           )}
@@ -1137,21 +1129,9 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
         <StateTab agent={agent} mood={mood} />
       )}
 
-      {tab !== "term" && <div className="composer">
+      {tab !== "term" && <div className="composer" ref={composerBox}>
         <div className="to">送信先: {target}</div>
-        <div className="box">
-          <textarea
-            value={text}
-            placeholder={agent.canSend ? `${agent.name}に注文する…` : "このセッションには送れない"}
-            disabled={!agent.canSend}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(text); } }}
-          />
-          <button className="send" disabled={!agent.canSend || busy || !text.trim()} onClick={() => send(text)} title="送る（⌘Enter）">
-            <SendIcon />
-          </button>
-        </div>
-        <div className="hint">⌘ Enter で送信・ccn で届ける</div>
+        <Composer key={agent.id} agent={agent} peer={peer} text={text} setText={setText} busy={busy} running={mood === "working"} onSubmit={send} onError={onError} />
       </div>}
     </aside>
   );
@@ -1200,7 +1180,7 @@ function Approval({ agent, peer, onDone, onError }: {
       ) : p ? (
         <div>
           <div className="ap-tool">{p.toolName}</div>
-          {detail && <ScrollEdgeGradient className="ap-detail"><span>{detail}</span></ScrollEdgeGradient>}
+          {detail && <ScrollEdgeGradient className="ap-detail"><span>{linkify(detail)}</span></ScrollEdgeGradient>}
           {(pending?.length ?? 0) > 1 && <div className="hint">ほかに{pending!.length - 1}件の承認が待っている。1件ずつ答える。</div>}
         </div>
       ) : (
@@ -1219,14 +1199,12 @@ function Approval({ agent, peer, onDone, onError }: {
 
 // ---------- 新しい世帯・転出 ----------
 
-/** 新しい世帯を作る。親は ~/Documents/meta で端末のセッションとして起動する（本人の指定） */
-/** 新しい世帯を作る。最初の依頼の欄は出さず、すぐ ~/Documents/meta で親（端末のセッション）を立て、右の端末を開く */
-function NewHousehold({ big, disabled, onStart, onCreated, onError }: { big?: boolean; disabled?: boolean; onStart: () => void; onCreated: (r: any) => void; onError: (m: string) => void }) {
+/** 新しい世帯を作る。最初の依頼の欄は出さず、すぐ ~/Documents/meta で親（端末のセッション）を立て、右のチャットを開く */
+function NewHousehold({ big, disabled, onCreated, onError }: { big?: boolean; disabled?: boolean; onCreated: (r: any) => void; onError: (m: string) => void }) {
   const [busy, setBusy] = useState(false);
   const go = async () => {
     perfStart("new");
     setBusy(true);
-    onStart();
     try {
       // 前に開いたターミナルの大きさで起動する。開いた直後に大きさを変えて、claude が全部描き直すのを省く
       const { cols, rows } = lastTermSize() ?? { cols: null, rows: null };
@@ -1333,6 +1311,38 @@ function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent
   );
 }
 
+/**
+ * 作業中の末尾の1行（#59）。結果がまだ無い道具か「考え中」と、その動きを始めてからの経過、ターン全体の経過を出す。
+ * 1秒の時計はこの部品の中だけで回す。ほかの吹き出しは描き直さない。ウィンドウが見えていない間は止める（#6）
+ */
+const LiveLine = memo(function LiveLine({ live, turnAt }: { live: Live; turnAt: number | null }) {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    let t: ReturnType<typeof setInterval> | null = null;
+    const start = () => { if (t === null) t = setInterval(() => bump((x) => x + 1), 1000); };
+    const stop = () => { if (t !== null) { clearInterval(t); t = null; } };
+    const off = onVisibleChange((v) => { if (v) { bump((x) => x + 1); start(); } else stop(); });
+    if (isVisible()) start();
+    return () => { off(); stop(); };
+  }, []);
+  const sum = liveSummary(live);
+  const now = Date.now();
+  const turn = turnAt ?? msOf(live.turn_at);
+  return (
+    <div className="live-line" aria-live="off">
+      <div className="ll-main">
+        <i className="ll-dot" />
+        <span className="ll-label">{sum.label}</span>
+        <span className="ll-time">
+          {sum.since != null && <>{elapsedText(now - sum.since)}</>}
+          {turn != null && <>{sum.since != null ? " · " : ""}このターン {elapsedText(now - turn)}</>}
+        </span>
+      </div>
+      {sum.heads.map((h, i) => <div key={i} className="ll-head">{h}</div>)}
+    </div>
+  );
+});
+
 /** 道具の行が続いたら1行にまとめる。まとめた行の n は最初の行の n にする（後ろに道具が増えても key が変わらない） */
 function collapseTools(items: ConvItem[]): (ConvItem & { more?: number })[] {
   const out: (ConvItem & { more?: number })[] = [];
@@ -1371,7 +1381,7 @@ function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
   chatPerf.bubble++;
   if (item.role === "tool" && item.sent) return <SentLetter item={item} agent={agent} lineageDepth={lineageDepth} />;
   if (item.role === "tool") {
-    return <div className="tool-line">🔧 {item.text}{item.more ? ` ほか${item.more}件` : ""}</div>;
+    return <div className="tool-line">🔧 {linkify(item.text)}{item.more ? ` ほか${item.more}件` : ""}</div>;
   }
   if (item.role === "user" && item.letter) return <LetterBubble item={item} />;
   if (item.role === "user") {
@@ -1463,7 +1473,7 @@ function StateTab({ agent, mood }: { agent: Agent; mood: Mood }) {
   ];
   return (
     <ScrollEdgeGradient className="state-scroll" wrapClassName="seg-fill"><dl className="state-tab">
-      {rows.filter(([, v]) => v).map(([k, v]) => (<div key={k}><dt>{k}</dt><dd>{v}</dd></div>))}
+      {rows.filter(([, v]) => v).map(([k, v]) => (<div key={k}><dt>{k}</dt><dd>{typeof v === "string" ? linkify(v) : v}</dd></div>))}
       {!r && <p className="hint">状態 hook が入っていないので、頼まれたことと次の一手は出ない（README の「hook」を参照）。</p>}
     </dl></ScrollEdgeGradient>
   );
@@ -1488,7 +1498,7 @@ function Credits({ skin, onSkin }: { skin: Skin; onSkin: (s: Skin) => void }) {
           <b>キャラ</b>: Ninja Adventure Asset Pack（Pixel-boy、AAA）、CC0 1.0。
           <br /><b>状態の印、幽霊、お手紙</b>: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0
           （creativecommons.org/licenses/by/4.0）。Source: googlefonts.github.io/noto-emoji-animation
-          <br />どちらも配布元のファイルを改変せずに使い、表示のときに縮めている。
+          <br />キャラは配布元のファイルのまま表示のときに縮めている。Noto は 64px に縮め、コマを半分に間引いた。
           {skin === "pokemon" && (<>
             <br /><b>ポケモン（キャラの見た目で選んだとき）</b>: Pokémon Showdown のアニメ GIF を、PokeAPI/sprites（github.com/PokeAPI/sprites）の配布から
             {"表示中のキャラの分だけ実行時に読む。このアプリには画像を含めない。Pokémon © Nintendo / Creatures Inc. / GAME FREAK inc."}
@@ -1509,7 +1519,4 @@ function PeopleIcon() {
 }
 function DocIcon() {
   return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M6 3h8l4 4v14H6z" /><path d="M9 12h6M9 16h6" /></svg>);
-}
-function SendIcon() {
-  return (<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M3 11.5 20.5 4l-5 17-3.6-7.2z" /><path d="M11.9 13.8 20.5 4" stroke="#fff" strokeWidth="1.4" /></svg>);
 }

@@ -4,17 +4,16 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { call, openTerminal } from "../bridge";
+import { TERM_URL_RE, openExternal } from "../links";
 import { perfCounters, perfMark, perfEnd, perfTerm, perfWaitingPrompt } from "./perf";
+import { benchParams } from "./bench";
+import { SIZE_KEY } from "./size";
 
-const SIZE_KEY = "claude-town.term-size";
 /** ほかの画面の大きさが右パネルに収まらないとき、こちらの大きさを送り返す間隔の下限 */
 const FOREIGN_RECLAIM_MS = 5000;
-/** 最後に開いたターミナルの大きさ。新しい世帯をこの大きさで起動する */
-export function lastTermSize(): { cols: number; rows: number } | null {
-  try { const v = JSON.parse(localStorage.getItem(SIZE_KEY) ?? "null"); return v?.cols && v?.rows ? v : null; } catch { return null; }
-}
 
 /**
  * ターミナルは1つだけ作って使い回す（#15）。開くたびに作って dispose すると、WebGL の面と xterm の物が
@@ -23,7 +22,8 @@ export function lastTermSize(): { cols: number; rows: number } | null {
  */
 type Shared = { term: Terminal; fit: FitAddon; el: HTMLDivElement; gl: WebglAddon | null };
 let shared: Shared | null = null;
-const forceDom = () => (import.meta.env.DEV && new URLSearchParams(location.search).get("renderer") === "dom") || import.meta.env.VITE_FC_SOAK_RENDERER === "dom";
+// 開発の計測用: ?renderer=dom（scripts/bench.ts では VITE_FC_BENCH の renderer=dom）で DOM の描き方のまま比べる
+const forceDom = () => (import.meta.env.DEV && benchParams.get("renderer") === "dom") || import.meta.env.VITE_FC_SOAK_RENDERER === "dom";
 
 /**
  * GPU で描く（#8）。何も指定しないと xterm.js は DOM で描き、claude の書き換えのたびに WebContent の負荷になる。
@@ -49,10 +49,14 @@ function sharedTerm(): Shared {
     cursorBlink: true,
     // claude は入力欄から上を描き直し続けるので、遡る行はそれほど要らない。5000 から減らしてメモリと再描画の量を抑える（#8）
     scrollback: 1000, allowProposedApi: false,
+    // OSC 8 のリンク（claude が出す）を押したとき。既定は window.open なので、既定のブラウザで開く。http と https 以外は openExternal が開かない
+    linkHandler: { activate: (_e, uri) => { openExternal(uri); }, allowNonHttpProtocols: false },
     theme: { background: "#ffffff", foreground: "#2f2d36", cursor: "#2f2d36", selectionBackground: "#cfe0ff", black: "#2f2d36", brightBlack: "#8a8794" },
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
+  // 文字のままの URL を押したとき。既定のハンドラは window.open なので、既定のブラウザで開く
+  term.loadAddon(new WebLinksAddon((_e, uri) => { openExternal(uri); }, { urlRegex: TERM_URL_RE }));
   const el = document.createElement("div");
   el.className = "term-host";
   el.style.width = "100%"; el.style.height = "100%";
@@ -65,7 +69,7 @@ function sharedTerm(): Shared {
   return shared;
 }
 
-export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionId: string; peer: string | null; onError: (m: string) => void; takeEarly?: (id: string) => string }) {
+export function TerminalView({ sessionId, peer, onError }: { sessionId: string; peer: string | null; onError: (m: string) => void }) {
   const box = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<string>("起動中…");
 
@@ -85,7 +89,7 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
     // replay を書いている間に xterm.js が返す自動応答（カーソル位置の報告など）は PTY に送らない（claude の入力に混ざるため）
     let replaying = 0;
     let closed = false;
-    // 最初の出力が来たら、フォーカスを当て直し、起動前に打たれたキーを流す
+    // 最初の出力が来たら、フォーカスを当て直す
     let gotOutput = false;
     // 計測（#18）: 書き終えたら、最初の描画と入力欄（❯）が見えたかを印にする
     const afterWrite = () => {
@@ -103,8 +107,6 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
       gotOutput = true;
       setStatus("");
       term.focus();
-      const t = takeEarly?.(sessionId) ?? "";
-      if (t) setTimeout(() => call("term_input", { sessionId, text: t, peer }).catch((e) => onError(`ターミナルに書けなかった: ${e}`)), 300);
     };
     let lastSize = "";
     // PTY に最後に送った大きさ。届いた size がこれと違えば、ほかの画面（ccn.fybe.jp など）が大きさを変えた
@@ -182,8 +184,6 @@ export function TerminalView({ sessionId, peer, onError, takeEarly }: { sessionI
           break;
         case "error":
           setStatus(e.data?.message ?? "ターミナルに繋がらない");
-          // 端末が開かないなら、起動待ちでためた文字を捨てて横取りをやめる
-          takeEarly?.(sessionId);
           break;
       }
     }).then((c) => {

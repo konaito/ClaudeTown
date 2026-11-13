@@ -1,6 +1,6 @@
 // 開発版だけで使う、ターミナルを開くまでの自動の計測（#18）。
 // 開発版の URL に ?bench=new|open|all&n=<回数> を付けると、起動して一覧が読めた3秒後から次を回す。
-// - new: 「＋ 新しい世帯」のボタンを押し、入力欄（❯）が出るまでを測る。測り終えたら、作ったセッションだけを止める
+// - new: 「＋ 新しい世帯」のボタンを押し、右パネルのチャットの入力欄にフォーカスが入るまでを測る（端末は開かない）。測り終えたら、作ったセッションだけを止める
 // - open: 自分で作ったセッション1つを、選び直して右クリックと同じ操作で開き直し、❯ が見えるまでを測る
 // - all: new を n 回、続けて最後に作ったセッションで open を n 回
 // - watch: 40秒、1秒ごとに町の人数と接続の表示を記録する
@@ -8,12 +8,19 @@
 // - offline: ?sid=<セッション> のチャットを開き、?secs=<秒>（既定 60）のあいだ1秒ごとに、会話の欄の吹き出しの数、保存した履歴の印、
 //   町の人数、接続の表示、赤い帯を記録する（オフラインのキャッシュ、src-tauri/src/offline.rs。scripts/offline-ccn-proxy.ts と使う）
 // - cpu: ?sid=<セッション> のターミナルを開いたまま30秒、IPC の回数を数える（#8、#9。scripts/mock-ccn-flood.ts と使う）
+// - scene: 軽さの計測（scripts/bench.ts、#2）。場面（scene=idle|hidden|minimized|terminal|talk|town）を用意して ready を書き、
+//   wait（ms）たったら post を書く。CPU とメモリは bench.ts が外から ps で測る。測っている間は、ここでは何も回さない
 // 結果は perf.ts が1回ごとに perf_log に書く。作るセッションには name に bench-ct-term を付ける。
+// 引数は URL（?bench=…）か、環境変数 VITE_FC_BENCH（"bench=scene&scene=idle" の形）で渡す。
+// 環境変数なら devUrl を変えずに済むので、場面ごとに Rust を組み直さない（devUrl は Rust に埋め込まれる）
 import { useEffect, useRef } from "react";
 import { call } from "../bridge";
-import { perfCounters, perfNext, perfTerm } from "./perf";
+import { perfCounters, perfNext, perfTerm, perfWaitingPrompt } from "./perf";
 
-const params = new URLSearchParams(typeof location !== "undefined" ? location.search : "");
+const fromEnv = import.meta.env.DEV ? (import.meta.env.VITE_FC_BENCH as string | undefined) : undefined;
+/** 計測の引数。開発版だけで読む */
+export const benchParams = new URLSearchParams(fromEnv ?? (typeof location !== "undefined" ? location.search : ""));
+const params = benchParams;
 const mode = import.meta.env.DEV ? params.get("bench") : null;
 
 /** 計測中に作るセッションの名前。計測していなければ null（名前を送らない） */
@@ -28,8 +35,22 @@ export function useBench(h: { ready: boolean; select: (id: string | null) => voi
   useEffect(() => {
     if (!mode || !h.ready || started.current) return;
     started.current = true;
+    // 一覧を読んで町を描いた最初の描画の時刻（起動の時間に使う。Rust が書く procStartMs との差）
+    if (mode === "scene") requestAnimationFrame(() => { paintedAt = Date.now(); });
     run(() => latest.current).catch((e) => call("perf_log", { line: JSON.stringify({ bench: "error", message: String(e) }) }));
   }, [h.ready]);
+}
+
+let paintedAt = 0;
+
+/** ms のあいだ requestAnimationFrame が何回呼ばれたか（1秒あたり）。窓が隠れていれば 0 になる */
+async function fps(ms: number) {
+  let frames = 0, on = true;
+  const raf = () => { if (!on) return; frames++; requestAnimationFrame(raf); };
+  requestAnimationFrame(raf);
+  await sleep(ms);
+  on = false;
+  return +((frames * 1000) / ms).toFixed(1);
 }
 
 async function run(h: () => { select: (id: string | null) => void; focusId: (id: string) => void }) {
@@ -38,6 +59,36 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
   const log = (o: object) => call("perf_log", { line: JSON.stringify({ bench: mode, ...o }) });
   await sleep(3000);
   try {
+    if (mode === "scene") {
+      const scene = params.get("scene") ?? "idle";
+      const sid = params.get("sid") ?? "";
+      // 見え方が途中で変わったら記録する（見えている前提の場面で隠れた回を、bench.ts が無効にする）
+      const vis: { at: number; state: string }[] = [];
+      // その場でも1行書く。scripts/bench.ts はこれを見て、見えるはずの場面で隠れた回をすぐ打ち切る
+      const onVis = () => { vis.push({ at: Date.now(), state: document.visibilityState }); log({ visChange: document.visibilityState, at: Date.now() }); };
+      document.addEventListener("visibilitychange", onVis);
+      if (scene === "terminal") {
+        // 開いたときの計測（perf.ts の open の流れ）が終わるまで待つ。終わるまでは perf_ping を20ms ごとに回している
+        const opened = perfNext();
+        h().focusId(sid);
+        await Promise.race([opened, sleep(25000)]);
+      } else if (scene === "talk") {
+        h().select(sid);
+      } else if (scene === "hidden" || scene === "minimized") {
+        await call("perf_window", { op: scene === "hidden" ? "hide" : "minimize" });
+      }
+      await sleep(3000);
+      const ipc0 = { ...perfCounters };
+      await log({ ready: true, scene, at: Date.now(), paintedAt, vis: document.visibilityState, focus: document.hasFocus(), fps: await fps(1000), renderer: perfCounters.renderer || null });
+      const wait = Number(params.get("wait") ?? 65000);
+      const t0 = Date.now();
+      await sleep(wait);
+      const secs = (Date.now() - t0) / 1000;
+      await log({ post: true, scene, at: Date.now(), vis: document.visibilityState, visEvents: vis, fps: await fps(1000),
+        ipcPerSec: +((perfCounters.ipc - ipc0.ipc) / secs).toFixed(1), charsPerSec: Math.round((perfCounters.bytes - ipc0.bytes) / secs) });
+      document.removeEventListener("visibilitychange", onVis);
+      return;
+    }
     // cpu: ?sid=<セッション> のターミナルを開いたまま、5秒置いてから30秒、IPC の回数を数える。CPU 時間は外から ps で測る。
     // 窓が裏にあると WebKit が描画を止めるので、FC_BENCH_TOP=1 で起動して最前面に出す（lib.rs の setup）
     // resize: 新しい世帯を1つ作り、右パネルの境目をドラッグして広げてから狭め、claude が新しい幅で描き直すまでを測る（#19）
@@ -47,6 +98,12 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       const r = await done;
       if (!r.id) throw new Error("作れなかった");
       mine.push(r.id);
+      // 新しい世帯を作ると右パネルはチャットになる（#31）。右クリックと同じ操作で端末を開き、❯ が見えてから測る。
+      // 作った直後は一覧に載っておらず focusId が何もしないので、開く流れが始まるまで繰り返す
+      let got = false;
+      const opened = perfNext().then(() => { got = true; });
+      for (let k = 0; k < 40 && !got && !perfWaitingPrompt(r.id); k++) { h().focusId(r.id); await sleep(250); }
+      await Promise.race([opened, sleep(25000)]);
       await sleep(3000);
       for (const dx of [-250, 250, -120]) {
         await log({ resize: dx, ...(await dragAndWatch(dx)) });

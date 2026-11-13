@@ -5,12 +5,14 @@
 // - send_message(session_id, text, peer): ccn の POST /api/sessions/<id>/messages で文を届ける
 // - create_session / stop_session / teleport / teleport_info / session_detail: ccn の口をそのまま呼ぶ
 // - term_open / term_close / term_input / term_resize: ccn の端末（PTY）の口を読み書きし、開いた画面の Channel へ流す
+// - prompt_history / slash_commands / file_suggestions / send_direct / interrupt_session: チャットの入力欄を CLI と同じ動きにする（composer.rs）
 // HTTP を待つ命令は spawn_blocking で動かし、メインスレッドを止めない（下の「画面から呼ぶ命令」）
 //
 // ccn は Origin 付きの要求を CSRF として断るので、HTTP は必ずこちら（webview ではなく Rust）から出す。
 // 別の機械（peer）は手元のノードの中継 /n/<peer>/api/... を通す。
 
 mod avatars;
+mod composer;
 mod naming;
 mod offline;
 
@@ -306,9 +308,22 @@ fn save_town_to(file: &std::path::Path, agents: &[Value], now: u128, prev: &mut 
 /// ccn の一覧を、画面に渡すセッションの形に直す。読めなければ（空の一覧, 理由）。
 /// この機械の町（peer が None）だけ、hook の報告と close-check の判定を足す。キャラの割り当ては足さない
 fn fetch_agents(peer: &Option<String>) -> (Vec<Value>, Option<String>) {
-    let (sessions, ccn_error) = match get_json_t(&format!("{}/sessions", api(peer)), LIST_TIMEOUT) {
-        Ok(Value::Array(v)) => (v, None),
-        Ok(_) => (vec![], Some("一覧の形が想定と違う".into())),
+    agents_from(peer, list_sessions(peer))
+}
+
+/// ccn の一覧（GET /sessions）。読めなければ理由
+fn list_sessions(peer: &Option<String>) -> Result<Vec<Value>, String> {
+    match get_json_t(&format!("{}/sessions", api(peer)), LIST_TIMEOUT) {
+        Ok(Value::Array(v)) => Ok(v),
+        Ok(_) => Err("一覧の形が想定と違う".into()),
+        Err(e) => Err(e),
+    }
+}
+
+/// ccn の一覧を、画面に渡すセッションの形に直す（fetch_agents の中身）。一覧は GET /sessions でも、一覧の SSE（#5）でもよい
+fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<Value>, Option<String>) {
+    let (sessions, ccn_error) = match got {
+        Ok(v) => (v, None),
         Err(e) => (vec![], Some(e)),
     };
     let live: Vec<&Value> = sessions
@@ -387,7 +402,13 @@ fn fetch_agents(peer: &Option<String>) -> (Vec<Value>, Option<String>) {
 
 fn snapshot(peer: Option<String>) -> Snapshot {
     let peer = peer.filter(|p| !p.is_empty());
-    let (mut agents, ccn_error) = fetch_agents(&peer);
+    let got = list_sessions(&peer);
+    snapshot_from(peer, got)
+}
+
+/// 受け取った一覧から、画面に渡す町の形を作る。キャラの割り当て、状態ファイル、お手紙はここで足す
+fn snapshot_from(peer: Option<String>, got: Result<Vec<Value>, String>) -> Snapshot {
+    let (mut agents, ccn_error) = agents_from(&peer, got);
     // キャラの絵の割り当て。世代（親をたどった深さ）に合う見た目を重み付きの乱数で選び、保存して以後変えない。
     // 別の機械の町も、機械ごとのファイルに保存する（乱数なので、保存しないと読むたびに顔が変わる）
     let mut order: Vec<&Value> = agents.iter().collect();
@@ -525,6 +546,128 @@ struct Conv {
     items: Vec<Value>,
     /// 最後に読まれた時刻（ms）
     used: u128,
+    /// 今の動き（#59）
+    live: Live,
+}
+
+/// 今の動き（#59）。会話を頭から読みながら、結果がまだ無い道具、最後の出来事、ターンの始まりを持つ。
+/// 時刻は node なら ISO の文字列、pty なら jsonl の timestamp（無ければ ccn の at の ms）のまま渡し、画面が Date で読む
+#[derive(Default, Clone, Serialize, Debug, PartialEq)]
+struct Live {
+    /// 結果がまだ無い道具（古い順）
+    tools: Vec<LiveTool>,
+    /// 最後の出来事の種類（user、thinking、text、tool、result）と時刻
+    last: Option<&'static str>,
+    last_at: Value,
+    /// 最後に人（かほかのセッション）から文が届いた時刻
+    turn_at: Value,
+}
+
+#[derive(Clone, Serialize, Debug, PartialEq)]
+struct LiveTool {
+    id: String,
+    /// まとめるときの種類（シェル、ccn など）
+    kind: String,
+    /// 1行の中身（Bash ならコマンドの頭）
+    text: String,
+    at: Value,
+}
+
+#[derive(Debug, Clone)]
+enum LiveEv {
+    User(Value),
+    Thinking(Value),
+    Text(Value),
+    Tool(LiveTool),
+    Result(Vec<String>, Value),
+}
+
+impl Live {
+    fn apply(&mut self, ev: LiveEv) {
+        let (kind, at) = match ev {
+            // 新しい文が来たら、前のターンで結果が来なかった道具（中断など）は捨てる
+            LiveEv::User(at) => { self.tools.clear(); self.turn_at = at.clone(); ("user", at) }
+            LiveEv::Thinking(at) => ("thinking", at),
+            LiveEv::Text(at) => ("text", at),
+            LiveEv::Tool(t) => { let at = t.at.clone(); self.tools.retain(|x| x.id != t.id); self.tools.push(t); ("tool", at) }
+            LiveEv::Result(ids, at) => { self.tools.retain(|x| !ids.contains(&x.id)); ("result", at) }
+        };
+        self.last = Some(kind);
+        self.last_at = at;
+    }
+}
+
+/// 道具をまとめるときの種類
+fn tool_kind(name: &str) -> String {
+    match name {
+        "Bash" | "BashOutput" | "KillShell" => "シェル".into(),
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => "書く".into(),
+        "Read" => "読む".into(),
+        "Grep" | "Glob" => "探す".into(),
+        "WebSearch" | "WebFetch" => "調べる".into(),
+        "Agent" | "Task" => "手伝い".into(),
+        n if n.starts_with("mcp__") => n.split("__").nth(1).unwrap_or(n).into(),
+        n => n.into(),
+    }
+}
+
+/// ccn の1件から、今の動きに効く出来事を取り出す。simplify と同じく node と pty の両方の形を読む
+fn live_events(m: &Value) -> Vec<LiveEv> {
+    let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
+        Some(d) => (d, if d["timestamp"].is_string() { d["timestamp"].clone() } else { m["at"].clone() }),
+        None => (m, m["timestamp"].clone()),
+    };
+    let content = &m["message"]["content"];
+    let mut out = vec![];
+    match m["type"].as_str().unwrap_or("") {
+        "user" => {
+            let ids: Vec<String> = content.as_array().map(|a| a.iter()
+                .filter(|c| c["type"] == "tool_result")
+                .filter_map(|c| c["tool_use_id"].as_str().map(String::from))
+                .collect()).unwrap_or_default();
+            if !ids.is_empty() {
+                out.push(LiveEv::Result(ids, at));
+            } else {
+                let text = match content {
+                    Value::String(s) => s.trim().to_string(),
+                    Value::Array(a) => a.iter().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n").trim().to_string(),
+                    _ => String::new(),
+                };
+                // hook やシステムの差し込み（<...>、Caveat:）はターンの始まりにしない。お手紙（<cross-session-message>）は始まりにする
+                let letter = text.contains("<cross-session-message");
+                if !text.is_empty() && !m["isMeta"].as_bool().unwrap_or(false) && (letter || !(text.starts_with('<') || text.starts_with("Caveat:"))) {
+                    out.push(LiveEv::User(at));
+                }
+            }
+        }
+        "assistant" => {
+            for c in content.as_array().into_iter().flatten() {
+                match c["type"].as_str() {
+                    Some("thinking") | Some("redacted_thinking") => out.push(LiveEv::Thinking(at.clone())),
+                    Some("text") => out.push(LiveEv::Text(at.clone())),
+                    Some("tool_use") => {
+                        let name = c["name"].as_str().unwrap_or("");
+                        let inp = &c["input"];
+                        // Bash はコマンドそのもの、ccn などは宛先（session、name）を頭に出す。終わった道具の行（tool_line）は変えない
+                        let text = match (name, inp["command"].as_str()) {
+                            ("Bash", Some(cmd)) => format!("コマンド: {}", clip(cmd, 70)),
+                            _ => {
+                                let line = tool_line(name, inp);
+                                match ["session", "name"].iter().find_map(|k| inp[*k].as_str()).filter(|_| !line.contains(": ")) {
+                                    Some(to) => format!("{line}: {}", clip(to, 70)),
+                                    None => line,
+                                }
+                            }
+                        };
+                        out.push(LiveEv::Tool(LiveTool { id: c["id"].as_str().unwrap_or("").into(), kind: tool_kind(name), text, at: at.clone() }));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    out
 }
 
 /// 会話のキャッシュを残す時間（#15）。画面は開いている会話だけを 2.5 秒ごとに読むので、
@@ -543,18 +686,23 @@ struct ConvDelta {
     items: Vec<Value>,
     total: u64,
     reset: bool,
+    /// 今の動き（#59）。毎回、全部を返す
+    live: Live,
 }
 
 impl Conv {
     /// ccn の after=from から next まで読んだ分を足す。同じセッションの取得が重なり、
     /// ほかの呼び出しが先に同じ範囲を足していたら（c.next が読み始めと違う）、足さない
     /// 項目が増えたら true
-    fn absorb(&mut self, from: u64, next: u64, fresh: Vec<Value>) -> bool {
+    fn absorb(&mut self, from: u64, next: u64, fresh: Vec<Value>, evs: Vec<LiveEv>) -> bool {
         if self.next != from {
             return false;
         }
         self.next = next;
         let grew = !fresh.is_empty();
+        for e in evs {
+            self.live.apply(e);
+        }
         self.push(fresh);
         grew
     }
@@ -579,9 +727,9 @@ impl Conv {
         let base = self.total - self.items.len() as u64;
         match since {
             Some(s) if s >= base && s <= self.total => {
-                ConvDelta { items: self.items[(s - base) as usize..].to_vec(), total: self.total, reset: false }
+                ConvDelta { items: self.items[(s - base) as usize..].to_vec(), total: self.total, reset: false, live: self.live.clone() }
             }
-            _ => ConvDelta { items: self.items.clone(), total: self.total, reset: true },
+            _ => ConvDelta { items: self.items.clone(), total: self.total, reset: true, live: self.live.clone() },
         }
     }
 }
@@ -717,12 +865,14 @@ fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) ->
     };
     let mut next = from;
     let mut fresh = vec![];
+    let mut evs = vec![];
     // 1回の呼び出しで読むのは最大20ページ（4000件）。続きは次の呼び出しで読む
     for _ in 0..20 {
         let v = get_json(&format!("{}/sessions/{session_id}/messages?after={next}", api(&peer)))?;
         let msgs = v["messages"].as_array().cloned().unwrap_or_default();
         for m in &msgs {
             fresh.extend(simplify(m));
+            evs.extend(live_events(m));
         }
         match v["next"].as_u64() {
             Some(n) if n > next && !msgs.is_empty() => next = n,
@@ -740,7 +890,7 @@ fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) ->
     c.used = now;
     // 増えたら、画面に出す分（最後の KEEP_MESSAGES 件）を保存する。ネットが切れたときは画面が conversation_cache で読む。
     // 書くのは錠を持ったまま（同じセッションの取得が重なっても、古い中身があとから上書きしない）。80件の JSON なので短い
-    if c.absorb(from, next, fresh) {
+    if c.absorb(from, next, fresh, evs) {
         let _ = offline::save_conv(&cache_dir(), &peer, &session_id, c.total, &c.items);
     }
     Ok(c.since(since))
@@ -1241,6 +1391,26 @@ mod cmd {
     pub async fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> {
         blocking(move || super::stop_session(session_id, peer)).await
     }
+    #[tauri::command]
+    pub async fn prompt_history(cwd: Option<String>, all: Option<bool>) -> Result<super::composer::History, String> {
+        blocking(move || super::composer::prompt_history(cwd, all.unwrap_or(false))).await
+    }
+    #[tauri::command]
+    pub async fn slash_commands(cwd: Option<String>) -> Result<Vec<super::composer::SlashCommand>, String> {
+        blocking(move || Ok(super::composer::slash_commands(cwd))).await
+    }
+    #[tauri::command]
+    pub async fn file_suggestions(cwd: String, query: String) -> Result<Vec<String>, String> {
+        blocking(move || super::composer::file_suggestions(cwd, query)).await
+    }
+    #[tauri::command]
+    pub async fn send_direct(session_id: String, text: String, peer: Option<String>) -> Result<(), String> {
+        blocking(move || super::composer::send_direct(session_id, text, peer)).await
+    }
+    #[tauri::command]
+    pub async fn interrupt_session(session_id: String, peer: Option<String>) -> Result<(), String> {
+        blocking(move || super::composer::interrupt_session(session_id, peer)).await
+    }
 }
 
 // ---------- 町の一覧の見張り（#5） ----------
@@ -1256,7 +1426,73 @@ mod cmd {
 const WATCH_MIN: Duration = Duration::from_secs(2);
 const WATCH_MAX: Duration = Duration::from_secs(8);
 
-enum WatchCmd { Kick, Stop }
+enum WatchCmd {
+    Kick,
+    Stop,
+    /// 一覧の SSE が送ってきた一覧（ccn #35 の GET /api/sessions/stream?state=live の event: sessions の data）
+    List(Vec<Value>),
+    /// 一覧の SSE が終わった、または使えなかった。理由と、404 だったか（古い版のノード）
+    StreamEnded(String, bool),
+}
+
+/// 一覧の SSE を、この長さ何も来なければ切ってポーリングに戻す。ccn は15秒ごとに keep-alive を送る。
+/// Cloudflare の中継などで本文が溜められたときも、これで戻る
+const STREAM_SILENT: Duration = Duration::from_secs(20);
+/// 一覧の SSE が切れたときに、次に試すまでの長さ。404（古い版のノード）なら長くあける。
+/// 404 でも試し直すのは、開いたままの窓が、ノードを新しくした後に乗り替われるようにするため
+const STREAM_RETRY: Duration = Duration::from_secs(60);
+const STREAM_RETRY_NOT_FOUND: Duration = Duration::from_secs(300);
+
+/// 一覧の SSE の本文を読み、event: sessions の data（一覧の配列）ごとに on を呼ぶ。on が false を返すか stop が立てば終わる。
+/// 枠は ccn の src/api/sse.ts の形（`id: <ETag>` `event: sessions` `data: <1行の JSON>` と空行、keep-alive は `: keep-alive` と空行）。
+/// id（引用符つきの ETag）は使わない。つなぎ直すたびに一覧の全体を受ける。返り値は終わった理由
+fn pump_sessions_sse(reader: impl BufRead, stop: &AtomicBool, mut on: impl FnMut(Vec<Value>) -> bool) -> String {
+    let (mut ev, mut data) = (String::new(), String::new());
+    for line in reader.lines() {
+        if stop.load(Ordering::SeqCst) {
+            return "止めた".into();
+        }
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => return format!("読めなくなった（{}秒何も来ないときも含む）: {e}", STREAM_SILENT.as_secs()),
+        };
+        if line.is_empty() {
+            if ev == "sessions" {
+                match serde_json::from_str::<Value>(&data) {
+                    Ok(Value::Array(v)) => {
+                        if !on(v) {
+                            return "止めた".into();
+                        }
+                    }
+                    _ => return "一覧の形が想定と違う".into(),
+                }
+            }
+            ev.clear();
+            data.clear();
+        } else if let Some(x) = line.strip_prefix("event:") {
+            ev = x.trim().to_string();
+        } else if let Some(x) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(x.trim_start());
+        }
+        // id: と、: で始まる keep-alive は読み捨てる
+    }
+    "ccn が閉じた".into()
+}
+
+/// 一覧の SSE につないで読む。200 で text/event-stream のときだけ読み、それ以外（404、502、HTML のページなど）はすぐ理由を返す。
+/// 共有の agent() は全体の時間切れ（8秒）が付いていて長い接続が切れるので、読みの時間切れ（STREAM_SILENT）だけの agent を使う
+fn read_sessions_stream(url: &str, stop: &AtomicBool, on: impl FnMut(Vec<Value>) -> bool) -> (String, bool) {
+    let a = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(5)).timeout_read(STREAM_SILENT).build();
+    match a.get(url).call() {
+        Ok(r) if r.status() == 200 && r.content_type() == "text/event-stream" => (pump_sessions_sse(BufReader::new(r.into_reader()), stop, on), false),
+        Ok(r) => (format!("SSE ではない応答（{} {}）", r.status(), r.content_type()), false),
+        Err(ureq::Error::Status(code, _)) => (format!("ccn が {code} を返した"), code == 404),
+        Err(e) => (format!("つながらない: {e}"), false),
+    }
+}
 /// いま動いている見張り（窓は1つなので1本だけ）。世代と、止めるための口
 static WATCH: Mutex<Option<(u64, std::sync::mpsc::Sender<WatchCmd>)>> = Mutex::new(None);
 static WATCH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -1275,13 +1511,34 @@ fn next_wait(cur: Duration, changed: bool) -> Duration {
     if changed { WATCH_MIN } else { (cur * 2).min(WATCH_MAX) }
 }
 
-/// 見張りの本体。一覧を取り、前回と変わったとき（つながらない回は毎回）だけ send に渡す。send が false を返すか Stop で終わる
-fn watch_loop(peer: Option<String>, rx: std::sync::mpsc::Receiver<WatchCmd>, mut send: impl FnMut(Value) -> bool) {
+/// 見張りの本体。一覧を受け取り、前回と変わったとき（つながらない回は毎回）だけ send に渡す。send が false を返すか Stop で終わる。
+/// 一覧は、ccn の一覧の SSE が使えればそこから受け、使えなければ GET /sessions で取る（#5）。
+/// どちらのときも 2秒→4秒→8秒 の周期で町を作り直す。SSE が運ぶのは ccn の一覧だけで、hook の状態ファイル、close-check、
+/// 世帯の名前、お手紙の変化は来ないため。SSE の間の作り直しは、最後に受けた一覧を使い、HTTP の要求は出さない
+fn watch_loop(peer: Option<String>, tx: std::sync::mpsc::Sender<WatchCmd>, rx: std::sync::mpsc::Receiver<WatchCmd>, mut send: impl FnMut(Value) -> bool) {
     use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Instant;
     let mut last: Option<String> = None;
     let mut wait = WATCH_MIN;
+    // SSE から受けた最後の一覧。Some の間は GET /sessions を出さない
+    let mut list: Option<Vec<Value>> = None;
+    // 次に SSE を試す時刻。None はつないでいる最中
+    let mut stream_at = Some(Instant::now());
+    let stop = Arc::new(AtomicBool::new(false));
+    let url = format!("{}/sessions/stream?state=live", api(&peer));
     loop {
-        let s = snapshot(peer.clone());
+        if stream_at.is_some_and(|at| Instant::now() >= at) {
+            stream_at = None;
+            let (u, st, t) = (url.clone(), stop.clone(), tx.clone());
+            std::thread::spawn(move || {
+                let (why, not_found) = read_sessions_stream(&u, &st, |v| t.send(WatchCmd::List(v)).is_ok());
+                let _ = t.send(WatchCmd::StreamEnded(why, not_found));
+            });
+        }
+        let s = match &list {
+            Some(v) => snapshot_from(peer.clone(), Ok(v.clone())),
+            None => snapshot(peer.clone()),
+        };
         let key = snapshot_key(&s);
         let changed = last.as_deref() != Some(key.as_str());
         // つながらない回は、同じ中身でも毎回送る（画面が続けて失敗した回数を数え、「つながりにくい」を出す）
@@ -1290,13 +1547,31 @@ fn watch_loop(peer: Option<String>, rx: std::sync::mpsc::Receiver<WatchCmd>, mut
         }
         wait = if s.ccn_ok { next_wait(wait, changed) } else { WATCH_MIN };
         last = Some(key);
-        match rx.recv_timeout(wait) {
+        // SSE を試し直す時刻が先に来るなら、そこで起きる
+        let nap = stream_at.map(|at| wait.min(at.saturating_duration_since(Instant::now()))).unwrap_or(wait);
+        match rx.recv_timeout(nap) {
             // すぐ取り直す（新しい世帯を作った直後など）。間隔も下限に戻す
             Ok(WatchCmd::Kick) => wait = WATCH_MIN,
+            // 一覧が変わった。すぐ作り直す
+            Ok(WatchCmd::List(v)) => {
+                if list.is_none() {
+                    eprintln!("[town] 一覧の SSE につないだ（{url}）");
+                }
+                list = Some(v);
+                wait = WATCH_MIN;
+            }
+            // SSE が使えない、切れた。ポーリングに戻り、しばらくしてから試し直す
+            Ok(WatchCmd::StreamEnded(why, not_found)) => {
+                eprintln!("[town] 一覧の SSE をやめてポーリングに戻す: {why}");
+                list = None;
+                stream_at = Some(Instant::now() + if not_found { STREAM_RETRY_NOT_FOUND } else { STREAM_RETRY });
+            }
             Ok(WatchCmd::Stop) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
         }
     }
+    // SSE を読んでいるスレッドは、次の行（keep-alive は15秒ごと）か時間切れで、この旗を見て終わる
+    stop.store(true, Ordering::SeqCst);
 }
 
 /// 町の一覧の見張りを始める。前の見張りがあれば止める。戻り値の世代を town_unwatch に渡す
@@ -1304,12 +1579,12 @@ fn watch_loop(peer: Option<String>, rx: std::sync::mpsc::Receiver<WatchCmd>, mut
 fn town_watch(peer: Option<String>, on_event: tauri::ipc::Channel<Value>) -> u64 {
     let (tx, rx) = std::sync::mpsc::channel::<WatchCmd>();
     let generation = WATCH_GEN.fetch_add(1, Ordering::SeqCst);
+    // 見張りは、SSE を読むスレッドに渡すために送り口の写しを持つ
+    let tx2 = tx.clone();
     if let Some((_, old)) = WATCH.lock().unwrap_or_else(|e| e.into_inner()).replace((generation, tx)) {
         let _ = old.send(WatchCmd::Stop);
     }
-    std::thread::spawn(move || {
-        watch_loop(peer, rx, |v| on_event.send(v).is_ok());
-    });
+    std::thread::spawn(move || watch_loop(peer, tx2, rx, |v| on_event.send(v).is_ok()));
     generation
 }
 
@@ -1352,6 +1627,20 @@ fn perf_log(line: String) {
 #[tauri::command]
 fn perf_ping() {}
 
+/// 軽さの計測（scripts/bench.ts、#2）で、窓を隠すか最小化する。FC_PERF_LOG があるとき（計測のとき）だけ動く
+#[tauri::command]
+fn perf_window(window: tauri::WebviewWindow, op: String) -> Result<(), String> {
+    if std::env::var("FC_PERF_LOG").map(|p| p.is_empty()).unwrap_or(true) {
+        return Err("計測のときだけ使える".into());
+    }
+    match op.as_str() {
+        "hide" => window.hide(),
+        "minimize" => window.minimize(),
+        _ => return Err(format!("知らない操作: {op}")),
+    }
+    .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 開発用: 画面に渡すのと同じ JSON を出して終わる（ブラウザでの見た目の確認に使う）
@@ -1360,6 +1649,10 @@ pub fn run() {
     //   family-computing --answer <sessionId> <allow|deny> [expectId]
     // identifier はビルド時の設定（開発版は tauri.conf.json、安定版は tauri.stable.conf.json を重ねたもの）から取る。
     // 下の開発用の引数も、画面と同じ置き場所を使う
+    // 軽さの計測（scripts/bench.ts）: プロセスが始まった時刻を書く。画面が町を描いた時刻との差を、起動の時間にする
+    if std::env::var("FC_PERF_LOG").map(|p| !p.is_empty()).unwrap_or(false) {
+        perf_log(json!({ "bench": "proc", "procStartMs": now_ms() as u64 }).to_string());
+    }
     let context = tauri::generate_context!();
     let _ = APP_ID.set(context.config().identifier.clone());
     let args: Vec<String> = std::env::args().collect();
@@ -1433,12 +1726,17 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            // 開発の計測用（src/term/bench.ts）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、最前面に出す
+            // 開発の計測用（src/term/bench.ts、scripts/bench.ts）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、
+            // 最前面に出し、どのデスクトップにも出す（本人が別のデスクトップに移っても隠れないように）。
+            // 前面は奪わない（FC_BENCH_FOCUS=1 のときだけ奪う）。起動のたびに前面を奪うと、本人の作業の邪魔になる
             if std::env::var("FC_BENCH_TOP").is_ok() {
                 use tauri::Manager;
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.set_always_on_top(true);
-                    let _ = w.set_focus();
+                    let _ = w.set_visible_on_all_workspaces(true);
+                    if std::env::var("FC_BENCH_FOCUS").is_ok() {
+                        let _ = w.set_focus();
+                    }
                 }
             }
             Ok(())
@@ -1446,7 +1744,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::conversation_cache, cmd::send_message, set_house_name, cmd::answer_permission,
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, term_open, term_close, term_input, term_resize,
-            perf_log, perf_ping, town_watch, town_unwatch, town_kick
+            perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
+            cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session
         ])
         .run(context)
         .expect("error while running tauri application");
@@ -1454,6 +1753,36 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_tracks_open_tools_and_thinking() {
+        use super::{live_events, Live};
+        use serde_json::json;
+        let pty = |ts: &str, data: serde_json::Value| json!({ "at": 1, "type": "x", "seq": 0, "data": { "timestamp": ts, "type": data["type"], "message": data["message"] } });
+        let mut l = Live::default();
+        let feed = |l: &mut Live, m: serde_json::Value| for e in live_events(&m) { l.apply(e) };
+        feed(&mut l, pty("t0", json!({ "type": "user", "message": { "content": "やって" } })));
+        assert_eq!(l.turn_at, json!("t0"));
+        feed(&mut l, pty("t1", json!({ "type": "assistant", "message": { "content": [{ "type": "thinking", "thinking": "" }] } })));
+        assert_eq!(l.last, Some("thinking"));
+        feed(&mut l, pty("t2", json!({ "type": "assistant", "message": { "content": [
+            { "type": "tool_use", "id": "a", "name": "Bash", "input": { "command": "git status", "description": "見る" } },
+            { "type": "tool_use", "id": "b", "name": "mcp__ccn__send_message", "input": { "session": "abc", "text": "x" } } ] } })));
+        assert_eq!(l.tools.len(), 2);
+        assert_eq!(l.tools[0].text, "コマンド: git status");
+        assert_eq!(l.tools[1].kind, "ccn");
+        assert_eq!(l.tools[1].text, "send_message: abc");
+        // node の形（timestamp が外）でも読む
+        feed(&mut l, json!({ "type": "user", "timestamp": "t3", "message": { "content": [{ "type": "tool_result", "tool_use_id": "a" }] } }));
+        assert_eq!(l.tools.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["b"]);
+        assert_eq!((l.last, l.last_at.clone()), (Some("result"), json!("t3")));
+        // hook の差し込みはターンの始まりにしない。人の文が来たら、結果の来なかった道具は捨てる
+        feed(&mut l, pty("t4", json!({ "type": "user", "message": { "content": "<system-reminder>x</system-reminder>" } })));
+        assert_eq!(l.tools.len(), 1);
+        feed(&mut l, pty("t5", json!({ "type": "user", "message": { "content": [{ "type": "text", "text": "[Request interrupted by user]" }] } })));
+        assert!(l.tools.is_empty());
+        assert_eq!(l.turn_at, json!("t5"));
+    }
+
     #[test]
     fn conversation_returns_only_what_the_screen_lacks() {
         use super::{Conv, KEEP_MESSAGES};
@@ -1492,11 +1821,11 @@ mod tests {
         let mut c = Conv::default();
         let fresh = || vec![json!({ "role": "user", "text": "a" })];
         // 同じ after=0 から読んだ2回。先に終わった方だけ足す
-        c.absorb(0, 5, fresh());
-        c.absorb(0, 5, fresh());
+        c.absorb(0, 5, fresh(), vec![]);
+        c.absorb(0, 5, fresh(), vec![]);
         assert_eq!(c.total, 1);
         assert_eq!(c.next, 5);
-        c.absorb(5, 6, fresh());
+        c.absorb(5, 6, fresh(), vec![]);
         assert_eq!(c.total, 2);
     }
 
@@ -1520,8 +1849,9 @@ mod tests {
     fn conv_delta_is_sent_as_an_object() {
         use super::ConvDelta;
         use serde_json::json;
-        let d = ConvDelta { items: vec![json!({ "role": "user", "text": "a", "n": 0 })], total: 1, reset: true };
-        assert_eq!(serde_json::to_value(&d).unwrap(), json!({ "items": [{ "role": "user", "text": "a", "n": 0 }], "total": 1, "reset": true }));
+        let d = ConvDelta { items: vec![json!({ "role": "user", "text": "a", "n": 0 })], total: 1, reset: true, live: Default::default() };
+        assert_eq!(serde_json::to_value(&d).unwrap(), json!({ "items": [{ "role": "user", "text": "a", "n": 0 }], "total": 1, "reset": true,
+            "live": { "tools": [], "last": null, "last_at": null, "turn_at": null } }));
     }
 
     /// 見張りを、モックの町（FC_CCN_URL）につないで決まった秒数だけ回し、画面へ送った回数を数える（#5）。
@@ -1534,7 +1864,16 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel::<WatchCmd>();
         let sent = Arc::new(Mutex::new(0u32));
         let s2 = sent.clone();
-        let t = std::thread::spawn(move || watch_loop(None, rx, |_| { *s2.lock().unwrap() += 1; true }));
+        let tx2 = tx.clone();
+        let t0 = std::time::Instant::now();
+        let t = std::thread::spawn(move || watch_loop(None, tx2, rx, |v| {
+            *s2.lock().unwrap() += 1;
+            // 送った時刻と、町の人数、作業中か承認待ちの人数を出す（状態ファイルだけを変えたときに送られるかを見る）
+            let agents = v["agents"].as_array().cloned().unwrap_or_default();
+            let busy = agents.iter().filter(|a| a["report"]["phase"].is_string()).count();
+            println!("送った {:.1}秒 {}人 報告あり{}人 ccn_ok={}", t0.elapsed().as_secs_f32(), agents.len(), busy, v["ccn_ok"]);
+            true
+        }));
         std::thread::sleep(Duration::from_secs(secs));
         let _ = tx.send(WatchCmd::Stop);
         let _ = t.join();
@@ -1621,6 +1960,25 @@ mod tests {
         fs::remove_file(&p).unwrap();
         assert!(read_json_cached(&p).is_none());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sessions_sse_frames_are_read() {
+        use std::io::Cursor;
+        let stop = AtomicBool::new(false);
+        // ccn の src/api/sse.ts と同じ枠。keep-alive と id は読み捨てる
+        let body = ": keep-alive\n\nid: \"e1\"\nevent: sessions\ndata: [{\"id\":\"a\"}]\n\n: keep-alive\n\nid: \"e2\"\nevent: sessions\ndata: [{\"id\":\"a\"},{\"id\":\"b\"}]\n\n";
+        let mut got = vec![];
+        let why = pump_sessions_sse(Cursor::new(body), &stop, |v| { got.push(v.len()); true });
+        assert_eq!(got, vec![1, 2]);
+        assert_eq!(why, "ccn が閉じた");
+        // 形の違う data が来たら終わる（ポーリングに戻る）
+        let why = pump_sessions_sse(Cursor::new("event: sessions\ndata: {\"error\":1}\n\n"), &stop, |_| true);
+        assert_eq!(why, "一覧の形が想定と違う");
+        // 受け手が閉じたら終わる
+        let mut n = 0;
+        let why = pump_sessions_sse(Cursor::new(body), &stop, |_| { n += 1; false });
+        assert_eq!((n, why.as_str()), (1, "止めた"));
     }
 
     #[test]

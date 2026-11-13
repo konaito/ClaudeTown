@@ -202,11 +202,23 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .msg.kid .mini-av { flex: none; padding-top: 8px; }
 .msg.kid .b { background: #fff; border: 1px solid var(--line); }
 .tool-line { font-size: 11.5px; color: var(--sub); padding-left: 38px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 作業中の末尾の1行（#59）。点が明滅し、経過は数字の幅をそろえて揺れないようにする */
+.live-line { font-size: 11.5px; color: var(--sub); padding-left: 38px; min-width: 0; }
+.ll-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ll-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--working); animation: ll-pulse 1.2s ease-in-out infinite; }
+.ll-label { color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.ll-time { flex: none; font-variant-numeric: tabular-nums; }
+.ll-head { padding-left: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ll-head::before { content: "└ "; }
+@keyframes ll-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
 .md p { margin: 0 0 6px; }
 .md p:last-child { margin-bottom: 0; }
 .md ul, .md ol { margin: 4px 0 6px; padding-left: 20px; }
 .md li { margin: 1px 0; }
 .md-h { font-weight: 700; margin: 6px 0 2px; }
+/* メッセージの中のリンク。押すと既定のブラウザで開く（src/links.ts） */
+.ext-link { color: #2f6fd6; text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; cursor: pointer; overflow-wrap: anywhere; }
+.ext-link:hover { color: #1f56b0; }
 .md pre { background: #f6f5f2; border-radius: 8px; padding: 8px; font-size: 12px; overflow-x: auto; white-space: pre-wrap; }
 .md ul.md-check { list-style: none; padding: 8px 12px; border: 1px solid #dcefe2; border-radius: 12px; background: #fbfefc; }
 .md ul.md-check li::before { content: "✓"; color: var(--working); font-weight: 700; margin-right: 8px; }
@@ -226,6 +238,21 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .composer textarea { width: 100%; min-height: 78px; resize: none; border: 1px solid var(--line); border-radius: 12px; padding: 10px 52px 10px 12px; font: inherit; font-size: 14px; outline: none; }
 .composer textarea:focus { border-color: #b9c9e6; }
 .send { position: absolute; right: 10px; bottom: 12px; width: 36px; height: 36px; border-radius: 10px; background: var(--reply); color: #fff; display: grid; place-items: center; }
+/* 入力欄の補完、キーの一覧、履歴の検索（src/composer/）。上に重ねて出す */
+.composer .box.shell textarea { border-color: #e7a3c4; }
+.cmp-menu, .cmp-help { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); background: #fff; border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1); z-index: 20; max-height: 260px; overflow: auto; padding: 4px; }
+.cmp-menu button { display: flex; gap: 12px; width: 100%; text-align: left; padding: 5px 8px; border-radius: 8px; font-size: 13px; align-items: baseline; }
+.cmp-menu button.on { background: #eef3fb; }
+.cmp-menu .cm-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; color: var(--ink); }
+.cmp-menu .cm-name em { font-style: normal; color: var(--sub); }
+.cmp-menu .cm-desc { color: var(--sub); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.cmp-help { padding: 8px 10px; display: grid; gap: 3px; font-size: 12px; }
+.cmp-help div { display: grid; grid-template-columns: minmax(150px, 46%) 1fr; gap: 10px; }
+.cmp-help kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--ink); }
+.cmp-help span { color: var(--sub); }
+.cmp-search { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--sub); margin-bottom: 6px; }
+.cmp-search input { flex: 1; border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; font: inherit; font-size: 13px; outline: none; }
+.cmp-search em { font-style: normal; color: #b4473a; }
 
 .toasts { position: fixed; bottom: 60px; left: 30%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 6px; z-index: 30; align-items: center; }
 .toast { background: var(--ink); color: #fff; padding: 7px 16px; border-radius: 99px; font-size: 13px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12); }
@@ -249,20 +276,23 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 
 .layout-warn { position: absolute; right: 0; top: -22px; font-size: 11px; color: #b4473a; background: #fdeeee; border-radius: 99px; padding: 1px 8px; }
 
-/* 承認待ちの枠: 凡例と同じ黄色で、1.4秒周期にゆっくり強弱を付ける。選択中（青）と重なったときは、青の枠の外側に黄色の光を出す */
-@keyframes approval-pulse {
-  0%, 100% { border-color: #f2c14e; box-shadow: 0 0 0 2px rgba(242, 165, 22, 0.18); }
-  50% { border-color: var(--approval); box-shadow: 0 0 0 5px rgba(242, 165, 22, 0.32); }
+/* 承認待ちの枠: 凡例と同じ黄色で、1.4秒周期にゆっくり強弱を付ける。選択中（青）と重なったときは、青の枠の外側に黄色の光を出す。
+   枠線は黄色で止め、外側の光だけを別の層（包みの ::before）に描いて、その層の opacity を動かす（#12）。
+   前は枠の box-shadow と border-color を動かしていて、毎コマ描き直しになっていた。opacity は合成だけで済む。
+   カードは overflow: hidden なので、光の層はカードの外側（.fnode-body と .pop）に置く。角丸は包みの --kx-r に合わせる */
+@keyframes approval-glow { 0%, 100% { opacity: 0.2; } 50% { opacity: 1; } }
+.card.m-approval, .mini.m-approval { border-width: 2px; border-color: var(--approval); }
+.card.m-approval.sel, .mini.m-approval.sel { border-color: var(--sel); box-shadow: 0 0 0 3px rgba(75, 139, 245, 0.18); }
+.fnode-body:has(> .m-approval)::before, .pop:has(> .card.m-approval)::before {
+  content: ""; position: absolute; inset: 0; border-radius: var(--kx-r, 14px); pointer-events: none;
+  box-shadow: 0 0 0 5px rgba(242, 165, 22, 0.32);
+  animation: approval-glow 1.4s ease-in-out infinite;
 }
-@keyframes approval-pulse-sel {
-  0%, 100% { box-shadow: 0 0 0 3px rgba(75, 139, 245, 0.18), 0 0 0 5px rgba(242, 165, 22, 0.25); }
-  50% { box-shadow: 0 0 0 3px rgba(75, 139, 245, 0.18), 0 0 0 8px rgba(242, 165, 22, 0.45); }
-}
-.card.m-approval, .mini.m-approval { border-width: 2px; animation: approval-pulse 1.4s ease-in-out infinite; }
-.card.m-approval.sel, .mini.m-approval.sel { border-color: var(--sel); animation: approval-pulse-sel 1.4s ease-in-out infinite; }
+.fnode-body:has(> .m-approval.sel)::before, .pop:has(> .card.m-approval.sel)::before { box-shadow: 0 0 0 8px rgba(242, 165, 22, 0.45); }
 @media (prefers-reduced-motion: reduce) {
-  .card.m-approval, .mini.m-approval { animation: none; border: 3px solid var(--approval); box-shadow: none; }
+  .card.m-approval, .mini.m-approval { border: 3px solid var(--approval); box-shadow: none; }
   .card.m-approval.sel, .mini.m-approval.sel { border-color: var(--sel); box-shadow: 0 0 0 4px var(--approval); }
+  .fnode-body:has(> .m-approval)::before, .pop:has(> .card.m-approval)::before { display: none; }
 }
 
 /* 右パネルの端末 */

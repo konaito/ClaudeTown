@@ -94,7 +94,8 @@ ccn の messages には末尾から件数を指定する口が無いので、開
 - 子供を左クリックすると、右のパネルにその子が出る。端末のセッションは「端末」の欄が先に開き、打ったキーはそのまま PTY に届く（`POST /api/sessions/<id>/terminal/input`）。端末の大きさは、開いたときに ccn に伝える（後に開いた画面に合わせる）。
 - 子供を右クリックすると、その子を選んで端末を開く。
 - 子は親のセッション自身が ccn の create_session（terminal: true）で作る。画面から子を足す操作は出さない（2026-11-12、本人の判断。使う機会が無いため）。
-- 上の「＋ 新しい世帯」を押すと、すぐ `~/Documents/meta` で親のいない端末のセッションを立て、そのノードを選んで右の端末を開き、フォーカスを当てる。最初の依頼の欄は出さない。押した瞬間から端末に最初の出力が来るまでに打ったキーはためておき、出力が来たら流す。セッションが0本の空の町でも、ここから最初の世帯を作れる。
+- どのセッションを PTY で立てるかの比較と提案は `docs/research/pty-or-headless.md` にある。
+- 上の「＋ 新しい世帯」を押すと、すぐ `~/Documents/meta` で親のいない端末のセッションを立て、そのノードを選んで右のチャットを開き、入力欄にフォーカスを当てる。最初の依頼の欄は出さない。端末は右クリックか「端末へ」で開く。セッションが0本の空の町でも、ここから最初の世帯を作れる。
 - 右パネルの「転出」で、ccn の teleport（PR #18）を呼び、別の機械へ移す（move）か複製する（fork）。下見は移動元の説明（`GET /api/sessions/<id>/teleport`）だけを見せる。行き先の下見は clone することがあるので、実行の中で ccn に任せる。作業中と承認待ちのセッションは転出できない。世帯ごとの転出は出していない。ccn に一括の口が無く、1つずつ移すと子の parent が転出を呼んだ側に変わり、同じリポジトリの子が行き先の同じ作業ツリーを書き換え合うため（`docs/research/ccn-teleport.md`）。
 - 承認待ちの子は、カードの枠が黄色で点滅し、右パネルに承認の中身と「許可する」「拒否する」を出す。押すと、今も承認待ちで requestId が同じかを確かめてから、ccn の permissions の口で答える。質問（AskUserQuestion）や計画の確認（ExitPlanMode）の待ちには許可を送らない。人が端末で開いたセッションは、その端末で答える。
 - 上の帯のノードの切り替えで、ccn につながる別の機械のセッションも出せる。
@@ -137,8 +138,8 @@ hook は本物の `claude -p` で試し、頼まれたこと、道具、最後�
 
 コードは MIT ライセンスです（`LICENSE`）。以下の素材は、それぞれのライセンスのままです。
 
-- キャラ: Ninja Adventure Asset Pack（Pixel-boy、AAA。https://pixel-boy.itch.io/ninja-adventure-asset-pack）。CC0 1.0 で、帰属表示は要らない。使うキャラの Walk.png、Idle.png、Faceset.png だけを `public/sprites/ninja/` に置いた。
-- 状態の印、幽霊、お手紙: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Source: https://googlefonts.github.io/noto-emoji-animation/ 。状態の印の3種（270b、1f97a、2705）、エラー用の1種（2049_fe0f）、閉じる演出の幽霊（1f47b）、お手紙の封筒（1f48c）の 512.webp を、改変せずに `public/sprites/noto/` に置いた。アプリの下の帯の「素材」にも同じ表示を出す。
+- キャラ: Ninja Adventure Asset Pack（Pixel-boy、AAA。https://pixel-boy.itch.io/ninja-adventure-asset-pack）。CC0 1.0 で、帰属表示は要らない。使うキャラの Walk.png、Idle.png、Dead.png だけを `public/sprites/ninja/` に置いた。色のプロファイルなどの描画に使わない部分は外した（`scripts/strip-sprites.sh`、画素は変えていない）。
+- 状態の印、幽霊、お手紙: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Source: https://googlefonts.github.io/noto-emoji-animation/ 。状態の印の3種（270b、1f97a、2705）、閉じる演出の幽霊（1f47b）、お手紙の封筒（1f48c）の 512.webp を 64px に縮め、コマを半分に間引いた 64.webp を `public/sprites/noto/` に置いた。作り方は `scripts/make-noto-small.sh` にある。アプリの下の帯の「素材」にも同じ表示を出す。
 - ポケモン（「素材」の中の「キャラの見た目」でポケモンを選んだときだけ）: Pokémon Showdown のアニメ GIF を、PokeAPI/sprites（https://github.com/PokeAPI/sprites）の `sprites/pokemon/other/showdown/<図鑑番号>.gif` から読む。画像はこのリポジトリにもアプリにも入れず、表示中のキャラの分だけ実行時に raw.githubusercontent.com から取得する。URL はブランチ名ではなく、確かめたときのコミットで指す。系統の一覧 `src/kid/pokemon-lines.json` は図鑑番号と英名だけで、`bun run scripts/pokemon-lines.ts` で作り直す。Pokémon © Nintendo / Creatures Inc. / GAME FREAK inc.
 - 見本ページの Kenney のプレビュー画像（`docs/research/assets/kenney-toon-characters.png`）: Kenney（https://kenney.nl）。CC0 で、帰属表示は要らない。
 - 見本ページ（`docs/research/assets/`）は、比べたときの素材を全部参照している。絞った後の public には一部しか残っていないので、見本ページの画像は一部が出ない。

@@ -66,6 +66,13 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     case "term_input": return post(`/sessions/${a.sessionId}/terminal/input`, { text: a.text }) as T;
     case "term_resize": return post(`/sessions/${a.sessionId}/terminal/resize`, { cols: a.cols, rows: a.rows }) as T;
     case "session_detail": return j(`/sessions/${a.sessionId}`) as T;
+    // Rust の send_direct と同じく、貼り付けてから Enter を押す
+    case "send_direct": {
+      await post(`/sessions/${a.sessionId}/terminal/input`, { text: `\x1b[200~${String(a.text)}\x1b[201~` });
+      await new Promise((r) => setTimeout(r, 150));
+      return post(`/sessions/${a.sessionId}/terminal/input`, { text: "\r" }) as T;
+    }
+    case "interrupt_session": return post(`/sessions/${a.sessionId}/interrupt`, {}) as T;
     case "teleport_info": return j(`/sessions/${a.sessionId}/teleport`) as T;
     case "teleport": return post(`/sessions/${a.sessionId}/teleport`, { to: a.to, fork: a.fork, subtree: a.subtree, dryRun: a.dryRun }) as T;
     case "stop_session": return j(`/sessions/${a.sessionId}`, { method: "DELETE" }) as T;
