@@ -209,6 +209,9 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .md ul, .md ol { margin: 4px 0 6px; padding-left: 20px; }
 .md li { margin: 1px 0; }
 .md-h { font-weight: 700; margin: 6px 0 2px; }
+/* メッセージの中のリンク。押すと既定のブラウザで開く（src/links.ts） */
+.ext-link { color: #2f6fd6; text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; cursor: pointer; overflow-wrap: anywhere; }
+.ext-link:hover { color: #1f56b0; }
 .md pre { background: #f6f5f2; border-radius: 8px; padding: 8px; font-size: 12px; overflow-x: auto; white-space: pre-wrap; }
 .md ul.md-check { list-style: none; padding: 8px 12px; border: 1px solid #dcefe2; border-radius: 12px; background: #fbfefc; }
 .md ul.md-check li::before { content: "✓"; color: var(--working); font-weight: 700; margin-right: 8px; }

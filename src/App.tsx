@@ -20,7 +20,7 @@ import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
   MOOD_LABEL, NEEDS_YOU, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, targetLabel, taskOf,
 } from "./model";
-import { Markdown } from "./Markdown";
+import { Markdown, linkify } from "./Markdown";
 import { chatPerf } from "./chatPerf";
 import { elapsedText, liveSummary, mergeConv, msOf, sameLive, type ConvDelta, type Live } from "./conv";
 import { layoutFamily, type LNode } from "./layout/layout";
@@ -1061,7 +1061,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
           <div className="p-line">{lineage.map((a, i) => (
             <span key={a.id}>{i > 0 && <b>›</b>}<button className="lnk" onClick={() => onSelect(a)}>{a.name}</button></span>
           ))}</div>
-          <div className="p-task"><DocIcon />{taskOf(agent, mood)}</div>
+          <div className="p-task"><DocIcon />{linkify(taskOf(agent, mood))}</div>
         </div>
         <div className="p-actions">
           <button className="pane-btn" disabled={!!peer} title={peer ? "別の機械のセッションの転出は、まだ出していない" : "別の機械へ移す"} onClick={() => setSheet(sheet === "teleport" ? null : "teleport")}>転出</button>
@@ -1150,7 +1150,7 @@ function Approval({ agent, peer, onDone, onError }: {
       ) : p ? (
         <div>
           <div className="ap-tool">{p.toolName}</div>
-          {detail && <ScrollEdgeGradient className="ap-detail"><span>{detail}</span></ScrollEdgeGradient>}
+          {detail && <ScrollEdgeGradient className="ap-detail"><span>{linkify(detail)}</span></ScrollEdgeGradient>}
           {(pending?.length ?? 0) > 1 && <div className="hint">ほかに{pending!.length - 1}件の承認が待っている。1件ずつ答える。</div>}
         </div>
       ) : (
@@ -1351,7 +1351,7 @@ function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
   chatPerf.bubble++;
   if (item.role === "tool" && item.sent) return <SentLetter item={item} agent={agent} lineageDepth={lineageDepth} />;
   if (item.role === "tool") {
-    return <div className="tool-line">🔧 {item.text}{item.more ? ` ほか${item.more}件` : ""}</div>;
+    return <div className="tool-line">🔧 {linkify(item.text)}{item.more ? ` ほか${item.more}件` : ""}</div>;
   }
   if (item.role === "user" && item.letter) return <LetterBubble item={item} />;
   if (item.role === "user") {
@@ -1443,7 +1443,7 @@ function StateTab({ agent, mood }: { agent: Agent; mood: Mood }) {
   ];
   return (
     <ScrollEdgeGradient className="state-scroll" wrapClassName="seg-fill"><dl className="state-tab">
-      {rows.filter(([, v]) => v).map(([k, v]) => (<div key={k}><dt>{k}</dt><dd>{v}</dd></div>))}
+      {rows.filter(([, v]) => v).map(([k, v]) => (<div key={k}><dt>{k}</dt><dd>{typeof v === "string" ? linkify(v) : v}</dd></div>))}
       {!r && <p className="hint">状態 hook が入っていないので、頼まれたことと次の一手は出ない（README の「hook」を参照）。</p>}
     </dl></ScrollEdgeGradient>
   );
