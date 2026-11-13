@@ -6,7 +6,7 @@
 //   例: NODE_PATH=/tmp/pw/node_modules bun scripts/bench-crowd-webkit.ts anim64 /tmp/dist-64 20 waiting_permission 3
 // - dist は ?mock のブラウザ表示（src/bridge.ts）で開き、モック（scripts/mock-ccn-crowd.ts）に繋ぐ。開発版のポート 1420 は使わない
 // - 窓は 1440×900、deviceScaleFactor 2（Retina の Mac と同じ）
-// - CPU 時間は、WebKit のブラウザのプロセスと、その子孫全部の ps の time の和の差
+// - CPU 時間は、起動後に現れた Playwright の WebKit のプロセス（UI、WebContent、GPU、Networking）ごとの ps の time の差
 // - 始める前に、画面に出ている印の数と、document.visibilityState を記録する
 import { webkit } from "playwright";
 import { spawnSync } from "node:child_process";
@@ -32,20 +32,20 @@ const web = Bun.serve({
 });
 
 const secs = (t: string) => t.split(":").reduce((a, x) => a * 60 + Number(x), 0);
-function treeCpu(root: number): number {
-  const rows = spawnSync("ps", ["-A", "-o", "pid=,ppid=,time="]).stdout.toString().trim().split("\n").map((l) => l.trim().split(/\s+/));
-  const kids = new Map<number, number[]>();
-  for (const [pid, ppid] of rows) kids.set(Number(ppid), [...(kids.get(Number(ppid)) ?? []), Number(pid)]);
-  const want = new Set<number>(); const st = [root];
-  while (st.length) { const p = st.pop()!; want.add(p); st.push(...(kids.get(p) ?? [])); }
-  return rows.filter(([pid]) => want.has(Number(pid))).reduce((a, [, , t]) => a + secs(t), 0);
+type Proc = { pid: number; time: number; rss: number; cmd: string };
+/** Playwright の WebKit のプロセス（UI、WebContent、GPU、Networking）。WebContent などは launchd の子（ppid 1）として立つので、親子では辿れない */
+function wkProcs(): Proc[] {
+  return spawnSync("ps", ["-A", "-o", "pid=,time=,rss=,command="]).stdout.toString().trim().split("\n")
+    .map((l) => l.trim().match(/^(\d+)\s+(\S+)\s+(\d+)\s+(.*)$/)).filter((m): m is RegExpMatchArray => !!m && m[4].includes("ms-playwright/webkit"))
+    .map((m) => ({ pid: Number(m[1]), time: secs(m[2]), rss: Number(m[3]), cmd: m[4] }));
 }
+const kind = (cmd: string) => /WebContent/.test(cmd) ? "webcontent" : /\.GPU/.test(cmd) ? "gpu" : /Networking/.test(cmd) ? "net" : /Playwright\.app/.test(cmd) ? "ui" : "other";
 
-// WebKit の本体（Playwright.app）の pid は、起動前後の差分で取る（launchServer と connect は bun では繋がらなかった）
-const pgrep = () => new Set(spawnSync("pgrep", ["-f", "Playwright.app/Contents/MacOS/Playwright"]).stdout.toString().trim().split("\n").filter(Boolean).map(Number));
-const before = pgrep();
+// 起動前からいた分（別の計測の残りなど）は数えない
+const before = new Set(wkProcs().map((p) => p.pid));
 const browser = await webkit.launch({ headless: true });
-const pid = [...pgrep()].find((p) => !before.has(p));
+const mine = () => wkProcs().filter((p) => !before.has(p.pid));
+const pid = mine().find((p) => kind(p.cmd) === "ui")?.pid;
 try {
   if (!pid) throw new Error("WebKit の pid が見つからない");
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
@@ -60,10 +60,14 @@ try {
   await page.screenshot({ path: `/tmp/ct-bench-webkit-${label}-${N}-${state}.png` });
   for (let r = 1; r <= RUNS; r++) {
     if (Date.now() + WIN * 1000 > deadline) { console.error("10分の締切で打ち切った"); break; }
-    const a = treeCpu(pid);
+    const a = new Map(mine().map((p) => [p.pid, p.time]));
     await Bun.sleep(WIN * 1000);
-    const b = treeCpu(pid);
-    const line = JSON.stringify({ label, n: N, state, run: r, win: WIN, webkitCpu: +(b - a).toFixed(2), ...seen });
+    const now = mine();
+    const cpu: Record<string, number> = { ui: 0, webcontent: 0, gpu: 0, net: 0, other: 0 };
+    for (const p of now) if (a.has(p.pid)) cpu[kind(p.cmd)] += p.time - a.get(p.pid)!;
+    const total = Object.values(cpu).reduce((x, y) => x + y, 0);
+    const rssWebContentMB = Math.round(now.filter((p) => kind(p.cmd) === "webcontent").reduce((x, p) => x + p.rss, 0) / 1024);
+    const line = JSON.stringify({ label, n: N, state, run: r, win: WIN, total: +total.toFixed(2), ...Object.fromEntries(Object.entries(cpu).map(([k, v]) => [k, +v.toFixed(2)])), rssWebContentMB, procs: now.length, ...seen });
     console.log(line);
     await Bun.write(OUT, (await Bun.file(OUT).exists() ? await Bun.file(OUT).text() : "") + line + "\n");
   }
