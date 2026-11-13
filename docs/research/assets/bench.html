@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>30体ベンチ</title>
+<style>
+  body { margin:0; padding:16px; background:#fff; font:13px -apple-system, sans-serif; color:#222; }
+  #grid { display:grid; grid-template-columns:repeat(10, 72px); gap:8px; }
+  .cell { width:64px; height:64px; position:relative; }
+  .cell img, .cell .lot { width:64px; height:64px; display:block; }
+  .ninja { width:64px; height:64px; background-repeat:no-repeat; image-rendering:pixelated; background-size:256px 256px; animation:walk .6s steps(4) infinite; }
+  @keyframes walk { from { background-position:0 0; } to { background-position:0 -256px; } }
+  #info { margin-bottom:12px; }
+</style>
+</head>
+<body>
+<div id="info"></div>
+<div id="grid"></div>
+<script>
+  // 形式ごとに30体を並べる。?fmt=gif|webp|avif|lottie|ninja&n=30
+  const q = new URLSearchParams(location.search);
+  const fmt = q.get("fmt") || "webp";
+  const n = Number(q.get("n") || 30);
+  const NOTO = ["1f913","1f97a","1fae3","1f973","1f634","1f635_200d_1f4ab","1f4bb","270b","23f3","2705","2049_fe0f"];
+  const CHARS = ["Boy","EggBoy","EggGirl","Princess","NinjaBlue","NinjaGreen","NinjaRed","NinjaYellow","Monk","Hunter","Eskimo","Inspector","Noble","OldMan","Woman","Villager","Villager2","Villager3","Cavegirl","Knight","Samurai","Master","Shaman","Sultan","LionBoy","MaskFrog","Monkey","Pig","Tengu","Vampire"];
+  const base = "../../../public/sprites/";
+  const grid = document.getElementById("grid");
+  let loaded = 0, failed = 0;
+  const done = () => { document.getElementById("info").textContent = `fmt=${fmt} n=${n} loaded=${loaded} failed=${failed}`; };
+  function addImg(src) {
+    const c = document.createElement("div"); c.className = "cell";
+    const img = new Image(); img.src = src;
+    img.onload = () => { loaded++; done(); }; img.onerror = () => { failed++; done(); };
+    c.appendChild(img); grid.appendChild(c);
+  }
+  if (fmt === "lottie") {
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/lottie-web@5.12.2/build/player/lottie_light.min.js";
+    s.onload = () => {
+      for (let i = 0; i < n; i++) {
+        const c = document.createElement("div"); c.className = "cell";
+        const d = document.createElement("div"); d.className = "lot"; c.appendChild(d); grid.appendChild(c);
+        const a = lottie.loadAnimation({ container:d, renderer:"svg", loop:true, autoplay:true, path: base + "noto/" + NOTO[i % NOTO.length] + "/lottie.json" });
+        a.addEventListener("DOMLoaded", () => { loaded++; done(); });
+        a.addEventListener("data_failed", () => { failed++; done(); });
+      }
+    };
+    s.onerror = () => { failed = n; done(); };
+    document.head.appendChild(s);
+  } else if (fmt === "ninja") {
+    for (let i = 0; i < n; i++) {
+      const c = document.createElement("div"); c.className = "cell";
+      const d = document.createElement("div"); d.className = "ninja";
+      const src = base + "ninja/characters/" + CHARS[i % CHARS.length] + "/SeparateAnim/Walk.png";
+      d.style.backgroundImage = `url("${src}")`;
+      const probe = new Image(); probe.src = src;
+      probe.onload = () => { loaded++; done(); }; probe.onerror = () => { failed++; done(); };
+      c.appendChild(d); grid.appendChild(c);
+    }
+  } else {
+    const file = fmt === "gif" ? "512.gif" : fmt === "avif" ? "512.avif" : "512.webp";
+    for (let i = 0; i < n; i++) addImg(base + "noto/" + NOTO[i % NOTO.length] + "/" + file);
+  }
+  done();
+</script>
+</body>
+</html>

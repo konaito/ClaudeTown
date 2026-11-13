@@ -1,0 +1,29 @@
+[
+  {
+    "id": "7e947508-cf32-4be3-91f7-50942ffba161",
+    "title": null,
+    "state": "idle",
+    "parent": "local",
+    "kind": "node",
+    "cwd": "/private/tmp/ccn-tp/b-root/proj",
+    "awaitingFirst": true
+  },
+  {
+    "id": "dd7b3c7f-124f-4ffd-a6ce-f536d4de8d72",
+    "title": null,
+    "state": "idle",
+    "parent": "local",
+    "kind": "node",
+    "cwd": "/private/tmp/ccn-tp/b-root/proj",
+    "awaitingFirst": null
+  },
+  {
+    "id": "3694ed54-fc59-41c8-a0ae-71864483bf59",
+    "title": null,
+    "state": "idle",
+    "parent": "local",
+    "kind": "node",
+    "cwd": "/private/tmp/ccn-tp/b-root/proj",
+    "awaitingFirst": true
+  }
+]

@@ -1,0 +1,32 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# 開発中の見た目の確認用（本物のセッションの情報が入る）
+public/dev-snapshot.json
+public/dev-conversation.json
+public/dev-peers.json
+__pycache__/
+public/dev-snapshot-*.json
+public/dev-letters.json

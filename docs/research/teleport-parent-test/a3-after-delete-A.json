@@ -1,0 +1,29 @@
+[
+  {
+    "id": "3694ed54-fc59-41c8-a0ae-71864483bf59",
+    "title": "ツール不使用の OK 返答テスト",
+    "state": "exited",
+    "parent": null,
+    "kind": "node",
+    "cwd": "/private/tmp/ccn-tp/a-root/proj",
+    "awaitingFirst": null
+  },
+  {
+    "id": "dd7b3c7f-124f-4ffd-a6ce-f536d4de8d72",
+    "title": "ツール不使用の動作確認",
+    "state": "exited",
+    "parent": null,
+    "kind": "node",
+    "cwd": "/private/tmp/ccn-tp/a-root/proj",
+    "awaitingFirst": null
+  },
+  {
+    "id": "7e947508-cf32-4be3-91f7-50942ffba161",
+    "title": "Tp-a経由のlocal接続",
+    "state": "exited",
+    "parent": null,
+    "kind": "node",
+    "cwd": "/private/tmp/ccn-tp/a-root/proj",
+    "awaitingFirst": null
+  }
+]
