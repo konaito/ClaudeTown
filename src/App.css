@@ -219,6 +219,21 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .composer textarea { width: 100%; min-height: 78px; resize: none; border: 1px solid var(--line); border-radius: 12px; padding: 10px 52px 10px 12px; font: inherit; font-size: 14px; outline: none; }
 .composer textarea:focus { border-color: #b9c9e6; }
 .send { position: absolute; right: 10px; bottom: 12px; width: 36px; height: 36px; border-radius: 10px; background: var(--reply); color: #fff; display: grid; place-items: center; }
+/* 入力欄の補完、キーの一覧、履歴の検索（src/composer/）。上に重ねて出す */
+.composer .box.shell textarea { border-color: #e7a3c4; }
+.cmp-menu, .cmp-help { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); background: #fff; border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1); z-index: 20; max-height: 260px; overflow: auto; padding: 4px; }
+.cmp-menu button { display: flex; gap: 12px; width: 100%; text-align: left; padding: 5px 8px; border-radius: 8px; font-size: 13px; align-items: baseline; }
+.cmp-menu button.on { background: #eef3fb; }
+.cmp-menu .cm-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; color: var(--ink); }
+.cmp-menu .cm-name em { font-style: normal; color: var(--sub); }
+.cmp-menu .cm-desc { color: var(--sub); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.cmp-help { padding: 8px 10px; display: grid; gap: 3px; font-size: 12px; }
+.cmp-help div { display: grid; grid-template-columns: minmax(150px, 46%) 1fr; gap: 10px; }
+.cmp-help kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--ink); }
+.cmp-help span { color: var(--sub); }
+.cmp-search { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--sub); margin-bottom: 6px; }
+.cmp-search input { flex: 1; border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; font: inherit; font-size: 13px; outline: none; }
+.cmp-search em { font-style: normal; color: #b4473a; }
 
 .toasts { position: fixed; bottom: 60px; left: 30%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 6px; z-index: 30; align-items: center; }
 .toast { background: var(--ink); color: #fff; padding: 7px 16px; border-radius: 99px; font-size: 13px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12); }

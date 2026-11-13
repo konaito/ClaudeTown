@@ -7,6 +7,8 @@ import { collectMail, type Mail } from "./mail";
 import { flightsOf, resolve, type Flight } from "./letters";
 import { withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
+import { Composer } from "./composer/Composer";
+import { BUILTINS, opensDialog } from "./composer/commands";
 import { isVisible, onVisibleChange, pollBackoff, pollWhileVisible, shownAt } from "./visible";
 import { reuseAgents, reuseSnap } from "./snap";
 import { kickTown, otherTownRetryMs, watchTown } from "./town";
@@ -908,11 +910,12 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   useEffect(() => { if (chatReq) setTab("talk"); }, [chatReq]);
   // composeReq が来たら、チャットの入力欄にフォーカスする。前に選んでいた子が端末を開いていると、
   // 最初の描画ではまだ tab が "term" で入力欄が無いので、入力欄が出てからフォーカスする
-  const composer = useRef<HTMLTextAreaElement>(null);
+  // 入力欄は Composer（#53）の中にあり、子を替えるたびに作り直されるので、枠から textarea を探す
+  const composerBox = useRef<HTMLDivElement>(null);
   const wantCompose = useRef(false);
   useEffect(() => { if (composeReq) { wantCompose.current = true; setTab("talk"); } }, [composeReq]);
   useEffect(() => {
-    const el = composer.current;
+    const el = composerBox.current?.querySelector<HTMLTextAreaElement>("textarea");
     if (!wantCompose.current || !el || el.disabled) return;
     wantCompose.current = false;
     el.focus();
@@ -1005,19 +1008,30 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   // 同じ名前の人が町にいたら、送信先に ID の先頭8字を添える（#36）。見出しは幅が足りず ID が切れるので名前だけにする
   const target = targetLabel(agent, town);
   const send = async (body: string) => {
-    if (!body.trim() || busy) return;
+    if (!body.trim() || busy) return false;
     setBusy(true);
     const after = items[items.length - 1]?.n ?? -1;
+    // 先頭が / か ! の文は、端末のあるセッションなら入力欄へ直接貼る。ccn の send_message は from の1行を前に付けるので、
+    // CLI のコマンドやシェルモードとして動かない（docs/research/cli-input.md）
+    const direct = hasTerm && /^[/!]/.test(body);
     try {
-      await invoke("send_message", { sessionId: agent.id, text: body, peer: peer || null });
-      setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
+      if (direct) {
+        await invoke("send_direct", { sessionId: agent.id, text: body, peer: peer || null });
+        // 画面を開くコマンド（/model など）は、ターミナルで操作してもらう
+        if (opensDialog(body, BUILTINS)) setTab("term");
+      } else {
+        await invoke("send_message", { sessionId: agent.id, text: body, peer: peer || null });
+        setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
+      }
       setText("");
       stick.current = true;
       // 返事が来るまでは間隔を縮めて取る（#5）
       convKick.current();
       onSent(agent);
+      return true;
     } catch (e) {
       onError(`${agent.name} に届かなかった: ${e}`);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -1071,22 +1085,9 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
         <StateTab agent={agent} mood={mood} />
       )}
 
-      {tab !== "term" && <div className="composer">
+      {tab !== "term" && <div className="composer" ref={composerBox}>
         <div className="to">送信先: {target}</div>
-        <div className="box">
-          <textarea
-            ref={composer}
-            value={text}
-            placeholder={agent.canSend ? `${agent.name}に注文する…` : "このセッションには送れない"}
-            disabled={!agent.canSend}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(text); } }}
-          />
-          <button className="send" disabled={!agent.canSend || busy || !text.trim()} onClick={() => send(text)} title="送る（⌘Enter）">
-            <SendIcon />
-          </button>
-        </div>
-        <div className="hint">⌘ Enter で送信・ccn で届ける</div>
+        <Composer key={agent.id} agent={agent} peer={peer} text={text} setText={setText} busy={busy} running={mood === "working"} onSubmit={send} onError={onError} />
       </div>}
     </aside>
   );
@@ -1442,7 +1443,4 @@ function PeopleIcon() {
 }
 function DocIcon() {
   return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M6 3h8l4 4v14H6z" /><path d="M9 12h6M9 16h6" /></svg>);
-}
-function SendIcon() {
-  return (<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M3 11.5 20.5 4l-5 17-3.6-7.2z" /><path d="M11.9 13.8 20.5 4" stroke="#fff" strokeWidth="1.4" /></svg>);
 }
