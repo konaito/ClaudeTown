@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { layoutFamily, type LNode, type Placed } from "./layout";
-import { boxOf } from "./params";
+import { boxOf, groupSizeOf } from "./params";
 
 const deg = (r: number) => (r * 180) / Math.PI;
 const report: Record<string, unknown>[] = [];
@@ -106,8 +106,8 @@ describe("家族の木の配置", () => {
   test("7. 子の追加・削除: 回転や反転をせず、角度の順が保たれる", () => {
     const base: [string, string | null][] = [["p", null], ["a", "p"], ["b", "p"], ["c", "p"], ["a1", "a"], ["a2", "a"], ["b1", "b"]];
     const r0 = layoutFamily(family(base));
-    const added = layoutFamily(family([...base, ["d", "p"]]), { prevArcIndex: r0.arcIndex });
-    const removed = layoutFamily(family(base.filter(([id]) => id !== "b1")), { prevArcIndex: r0.arcIndex });
+    const added = layoutFamily(family([...base, ["d", "p"]]));
+    const removed = layoutFamily(family(base.filter(([id]) => id !== "b1")));
     const order = (ns: Placed[], ids: string[]) => ids.map((id) => get(ns, id).angle).every((v, i, a) => i === 0 || a[i - 1] < v);
     const moved = (ns: Placed[]) => Math.max(...r0.nodes.filter((n) => ns.some((m) => m.id === n.id)).map((n) => { const m = get(ns, n.id); return Math.hypot(m.x - n.x, m.y - n.y); }));
     const flipped = (ns: Placed[]) => r0.nodes.filter((n) => n.depth > 0 && ns.some((m) => m.id === n.id)).some((n) => Math.sign(Math.round(get(ns, n.id).x)) === -Math.sign(Math.round(n.x)) && Math.abs(n.x) > 20);
@@ -134,6 +134,51 @@ describe("家族の木の配置", () => {
     report.push({ ケース: 8, 短い名前の箱の幅: w(short).toFixed(0), 長い名前の箱の幅: w(long).toFixed(0), 調整の回数: long.metrics.adjustments, ...long.metrics });
     expect(w(long)).toBeGreaterThan(w(short));
     expect(ok(long.metrics)).toBe(true);
+  });
+
+  // 2026-11-12、同じ世帯（親 e8c798cd と、incertotech へ転出した子5人）が、親の町では横に広い扇形、子の町では親を囲む小さな形になった。
+  // 原因は、前に選んだ候補を世帯ごとに引き継いでいたこと（App.tsx の prevArc）。子が1人ずつ増えるのを見ていた町は、
+  // 1人のとき（どの候補も同じ s）に選ばれた候補0を、s ≤ 1 のあいだ使い続けた。直したあとは引き継がない。
+  const town = (parentId: string, kidIds: string[]): LNode[] => [
+    { id: parentId, parent: null, order: 0, ...boxOf(0, parentId.slice(-8)) },
+    ...kidIds.map((id, i) => ({ id, parent: parentId, order: i + 1, ...boxOf(1, id.slice(-8)) })),
+  ];
+  const KIDS = ["b599aaf0", "69d112e0", "97aec551", "c737a3ff", "9f68ddc0"];
+  const shape = (r: { nodes: Placed[] }) => r.nodes.map((n) => [n.depth, n.x.toFixed(3), n.y.toFixed(3), n.w, n.h].join(","));
+
+  test("9. 親の町（親が本物、子がゴースト）と子の町（親がゴースト、子が本物）で同じ配置になる", () => {
+    const local = layoutFamily(town("e8c798cd", KIDS.map((k) => `ghost:${k}`)));
+    const remote = layoutFamily(town("ghost:e8c798cd", KIDS));
+    // ゴーストの箱は本物と同じ大きさ（深さ 0、1 はカード、2 以降は boxOf。App.tsx の GhostCard も同じ値で描く）
+    expect(boxOf(1, "ghost:b599aaf0")).toEqual(boxOf(1, "b599aaf0"));
+    expect(shape(local)).toEqual(shape(remote));
+    expect(local.arcIndex).toBe(remote.arcIndex);
+    report.push({ ケース: 9, 親の町の候補: local.arcIndex, 子の町の候補: remote.arcIndex, 候補ごと: JSON.stringify(local.candidates), ...local.metrics });
+  });
+
+  test("10. 子が1人ずつ増えても、最初から5人いるのと同じ配置になる（前の候補を引き継がない）", () => {
+    const all = layoutFamily(town("e8c798cd", KIDS));
+    let last = layoutFamily(town("e8c798cd", KIDS.slice(0, 1)));
+    const picked = [last.arcIndex];
+    for (let n = 2; n <= KIDS.length; n++) {
+      last = layoutFamily(town("e8c798cd", KIDS.slice(0, n)));
+      picked.push(last.arcIndex);
+    }
+    expect(shape(last)).toEqual(shape(all));
+    report.push({ ケース: 10, "1→5人で選んだ候補": picked.join("→"), ...last.metrics });
+  });
+
+  test("11. 親1人・子5人の世帯の枠: 直す前（候補0の扇形）878×580 から、直した後 609×502 に小さくなる", () => {
+    const r = layoutFamily(town("e8c798cd", KIDS));
+    const before = r.candidates.find((c) => c.arcIndex === 0)!;
+    const after = r.candidates.find((c) => c.arcIndex === r.arcIndex)!;
+    const fb = groupSizeOf(before), fa = groupSizeOf(r.metrics);
+    expect(fb).toEqual({ w: 878, h: 580 });
+    expect(fa).toEqual({ w: 609, h: 502 });
+    expect(groupSizeOf(after)).toEqual(fa);
+    const areaB = fb.w * fb.h, areaA = fa.w * fa.h;
+    expect(areaA).toBeLessThan(areaB * 0.65);
+    report.push({ ケース: 11, 直す前の枠: `${fb.w}×${fb.h}（${areaB}）`, 直した後の枠: `${fa.w}×${fa.h}（${areaA}）`, 面積の比: (areaA / areaB).toFixed(3), ...r.metrics });
   });
 
   test("結果の表", () => {

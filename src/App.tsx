@@ -1,25 +1,30 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { call as invoke, setFullscreen } from "./bridge";
-import { TerminalView, lastTermSize } from "./term/TerminalView";
+import { lastTermSize } from "./term/size";
 import { perfEnd, perfMark, perfSetId, perfStart, perfWaitingPrompt } from "./term/perf";
 import { benchName, useBench } from "./term/bench";
 import { collectMail, type Mail } from "./mail";
 import { flightsOf, resolve, type Flight } from "./letters";
 import { withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
+import { isVisible, onVisibleChange, pollBackoff, pollWhileVisible, shownAt } from "./visible";
+import { reuseAgents, reuseSnap } from "./snap";
+import { kickTown, otherTownRetryMs, watchTown } from "./town";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
+import { SkinCtx, saveSkin, savedSkin, type Skin } from "./kid/pokemon";
 import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
-  MOOD_LABEL, NEEDS_YOU, buildTree, choicesOf, houseNameOf, moodOf, nowOf, sinceText, taskOf,
+  MOOD_LABEL, NEEDS_YOU, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, targetLabel, taskOf,
 } from "./model";
 import { Markdown } from "./Markdown";
+import { chatPerf } from "./chatPerf";
+import { mergeConv, type ConvDelta } from "./conv";
 import { layoutFamily, type LNode } from "./layout/layout";
-import { LAYOUT, boxOf } from "./layout/params";
+import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
 
-const POLL_MS = 2000;
 /**
  * 別の町（いま見ていない ccn のノード）のお便りを取りに行く間隔。町を1つずつ順に取り、前の回が終わるまで次の回を始めない。
  * 1回は町1つにつき手元のノード経由の GET /api/sessions 1本（中継先の ccn には 15 秒に1本）。peers が healthy でない町には取りに行かない。
@@ -49,10 +54,18 @@ const TownCtx = createContext<Agent[]>([]);
 const LetterCtx = createContext<Set<string>>(new Set());
 const KillCtx = createContext<{ dying: Map<string, number>; ask: (a: Agent, instant: boolean) => void }>({ dying: new Map(), ask: () => {} });
 const CONV_POLL_MS = 2500;
+/** 会話に新しい発言が無い回が続いたときの間隔の上限（#5）。新しい発言が来るか、文を送ったら CONV_POLL_MS に戻す */
+const CONV_POLL_MAX_MS = 10000;
 
 type Toast = { id: number; text: string; bad?: boolean };
 
+// ターミナル（xterm と WebGL の addon）は起動のときに読まず、町を出した後に読む（#16）。
+// 起動から町を描くまでに解く JS を減らす。最初に開くときに待たないよう、起動の2秒後に先に読んでおく
+const loadTerminal = () => import("./term/TerminalView");
+const TerminalView = lazy(() => loadTerminal().then((m) => ({ default: m.TerminalView })));
+
 export default function App() {
+  useEffect(() => { const t = setTimeout(() => { void loadTerminal(); }, 2000); return () => clearTimeout(t); }, []);
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [peer, setPeer] = useState<string>("");
@@ -60,7 +73,6 @@ export default function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [zoom, setZoom] = useState<number | "fit">("fit");
-  const [, tick] = useState(0);
 
   const toast = useCallback((text: string, bad = false) => {
     const id = Date.now() + Math.random();
@@ -78,7 +90,6 @@ export default function App() {
   const [fail, setFail] = useState<{ n: number; since: number; msg: string } | null>(null);
   useEffect(() => {
     let alive = true;
-    let running = false;
     const want = peer || null;
     setFail(null);
     // 失敗したら、同じ町の前回の一覧があればそれを出し続ける。無いときだけ、失敗した一覧（空の町と赤い帯）を出す
@@ -87,26 +98,16 @@ export default function App() {
       setSnap((prev) => (prev?.ccn_ok && (prev.peer ?? null) === want ? prev : s ?? prev));
       if (!s) setErr((e) => e ?? msg);
     };
-    const load = async () => {
-      // 前の回の取得が終わるまで次を始めない（時間切れまで待つ回があると、要求が積み重なる）
-      if (running) return;
-      running = true;
-      try {
-        const s = await invoke<Snapshot>("snapshot", { peer: want });
-        if (!alive) return;
-        if (s.ccn_ok) { setSnap(s); setErr(null); setFail(null); }
-        else failed(s.ccn_error ?? "ccn につながらない", s);
-      } catch (e) {
-        if (alive) failed(String(e));
-      } finally {
-        running = false;
-      }
-    };
-    reload.current = load;
-    load();
-    const t = setInterval(load, POLL_MS);
-    const c = setInterval(() => tick((x) => x + 1), 1000);
-    return () => { alive = false; clearInterval(t); clearInterval(c); };
+    // 一覧は Rust の見張りが、変わったときだけ送ってくる（#5）。ウィンドウが見えていない間は止まる（#6）。
+    // 経過時間の表示は Since が自分で時計を回すので、ここで町全体を毎秒描き直さない（#4）
+    const stop = watchTown(want, (s) => {
+      if (!alive) return;
+      // 中身が前回と同じなら前回のオブジェクトのまま（描き直さない）。変わらないセッションも使い回す（#4）
+      if (s.ccn_ok) { setSnap((prev) => reuseSnap(prev, s)); setErr(null); setFail(null); }
+      else failed(s.ccn_error ?? "ccn につながらない", s);
+    }, (msg) => { if (alive) failed(msg); });
+    reload.current = kickTown;
+    return () => { alive = false; stop(); };
   }, [peer]);
 
   // 閉じたセッション。演出が終わったら隠し、ccn の一覧から消えたら忘れる（10秒たっても消えなければ戻して失敗を出す）
@@ -114,6 +115,10 @@ export default function App() {
   const [hidden, setHidden] = useState<Map<string, number>>(new Map());
   const [killAsk, setKillAsk] = useState<Agent | null>(null);
   const agents = useMemo(() => (snap?.agents ?? []).filter((a) => !hidden.has(a.id)), [snap, hidden]);
+  // 隠したセッションがある間だけ、1秒ごとに下の判定を回す。一覧が前回と同じなら snap は変わらず（#4）、判定が動かないため
+  const [sweep, setSweep] = useState(0);
+  const hasHidden = hidden.size > 0;
+  useEffect(() => (hasHidden ? pollWhileVisible(() => setSweep((n) => n + 1), 1000) : undefined), [hasHidden]);
   useEffect(() => {
     if (!snap || hidden.size === 0) return;
     const present = new Set(snap.agents.map((a) => a.id));
@@ -123,11 +128,15 @@ export default function App() {
     if (!stuck.length && !gone.length) return;
     setHidden((h) => { const n = new Map(h); for (const id of [...stuck, ...gone]) n.delete(id); return n; });
     if (stuck.length) toast(`止まらなかった: ${stuck.map((id) => snap.agents.find((a) => a.id === id)?.name ?? id.slice(0, 8)).join("、")}`, true);
-  }, [snap]);
+  }, [snap, sweep]);
   // 別の町のお便り。町の表示はいま選んだノードだけで、お便りは全部の町から集める
   const selfName = peers.find((p) => p.self)?.name ?? "このMac";
   const curTown = peer || selfName;
-  const [others, setOthers] = useState<Map<string, { agents: Agent[]; at?: number } | { error: string }>>(new Map());
+  const [others, setOthers] = useState<Map<string, { agents: Agent[] } | { error: string }>>(new Map());
+  // 別の町の一覧が最後に取れた時刻。others に入れると取るたびに町が描き直されるので、別に持つ（#4）
+  const okAt = useRef<Map<string, number>>(new Map());
+  // 町ごとの、続けて失敗した回数と、次に取りに行ってよい時刻（#14）
+  const retry = useRef<Map<string, { fails: number; at: number }>>(new Map());
   useEffect(() => {
     let alive = true;
     let running = false;
@@ -140,31 +149,56 @@ export default function App() {
       if (running) return;
       running = true;
       for (const t of towns) {
-        let v: { agents: Agent[]; at?: number } | { error: string };
+        // 失敗が続いている町は、決めた時刻まで取りに行かない（前の結果を残す）
+        const r = retry.current.get(t.name);
+        if (r && Date.now() < r.at) continue;
+        let v: { agents: Agent[] } | { error: string };
         if (!t.healthy) v = { error: "つながらない" };
         else {
-          try {
-            const s = await invoke<Snapshot>("snapshot", { peer: t.key || null });
-            v = s.ccn_ok ? { agents: s.agents, at: Date.now() } : { error: s.ccn_error ?? "つながらない" };
-          } catch (e) { v = { error: String(e) }; }
+          // 一覧と、前に決めたキャラの割り当てを読むだけの軽い命令（#14）。snapshot と違い、割り当ての保存も状態ファイルの読み込みもしない
+          try { v = { agents: await invoke<Agent[]>("town_agents", { peer: t.key || null }) }; }
+          catch (e) { v = { error: String(e) }; }
         }
         if (!alive) break;
+        if ("agents" in v) { okAt.current.set(t.name, Date.now()); retry.current.delete(t.name); }
+        else if (t.healthy) {
+          const fails = (r?.fails ?? 0) + 1;
+          retry.current.set(t.name, { fails, at: Date.now() + otherTownRetryMs(fails, OTHER_TOWNS_POLL_MS) });
+        }
         // 取れなかった回は、60秒以内に取れた前回の町を残す（1回の時間切れで、お便りとゴーストが消えないように）
+        // 前回と同じなら Map を作り直さない（#4）
+        const got = v;
         setOthers((m) => {
           const prev = m.get(t.name);
-          if ("error" in v && prev && "agents" in prev && Date.now() - (prev.at ?? 0) < OTHER_TOWN_KEEP_MS) return m;
-          return new Map(m).set(t.name, v);
+          if ("error" in got) {
+            if (prev && "agents" in prev && Date.now() - (okAt.current.get(t.name) ?? 0) < OTHER_TOWN_KEEP_MS) return m;
+            if (prev && "error" in prev && prev.error === got.error) return m;
+            return new Map(m).set(t.name, got);
+          }
+          const agents = reuseAgents(prev && "agents" in prev ? prev.agents : undefined, got.agents);
+          if (prev && "agents" in prev && agents === prev.agents) return m;
+          return new Map(m).set(t.name, { agents });
         });
       }
       running = false;
     };
-    load();
-    const timer = setInterval(load, OTHER_TOWNS_POLL_MS);
-    return () => { alive = false; clearInterval(timer); };
+    const stop = pollWhileVisible(load, OTHER_TOWNS_POLL_MS);
+    return () => { alive = false; stop(); };
   }, [peer, peers, selfName]);
   // 木を作るときだけ、転出のゴースト（別の町にいる親子の影）を足す。お便りや数には入れない
   const otherTowns = useMemo(() => [...others].flatMap(([town, v]) => ("agents" in v ? [{ town, agents: v.agents }] : [])), [others]);
   const tree = useMemo(() => buildTree(withGhosts({ town: curTown, agents }, otherTowns)), [agents, otherTowns, curTown]);
+  // キャラの見た目（いつもの / ポケモン）。ポケモンでは世帯の根で進化の系統を決めるので、ID から根を引けるようにして渡す
+  const [skin, setSkin] = useState<Skin>(savedSkin);
+  // 値を作り直すのは、見た目か親子の形が変わったときだけにする。snapshot のたびに作り直すと、全員の Avatar が描き直される
+  const treeRef = useRef(tree);
+  treeRef.current = tree;
+  const shape = useMemo(() => tree.families.map((f) => f.all.map((a) => `${a.id}<${a.parent ?? ""}`).join(",")).join(";"), [tree]);
+  const skinCtx = useMemo(() => ({
+    skin,
+    // 根が転出のゴーストなら、相手の町にいる本物の ID で引く。親の町と子の町で系統をそろえるため
+    rootOf: (id: string) => { const t = treeRef.current; const a = t.byId.get(id); const r = a ? t.lineage(a)[0] : null; return r ? r.ghost?.realId ?? r.id : id; },
+  }), [skin, shape]);
   /** ゴーストを押したら、本物がいる町に切り替えてその子を選ぶ */
   const pick = useCallback((a: Agent) => {
     if (!a.ghost) { setSelected(a.id); return; }
@@ -188,6 +222,8 @@ export default function App() {
       catch { failed.push(x); }
     }
     const ok = targets.filter((x) => !failed.includes(x));
+    // 一覧から消えたのをすぐ拾う。見張りは変化が無いと間隔を延ばしているため（#5）
+    kickTown();
     // 止まらなかった分は演出を戻す。止まった分は演出が終わったら隠す
     setDying((m) => { const n = new Map(m); for (const x of failed) n.delete(x.id); return n; });
     const last = (targets.length - 1) * KILL_STAGGER + KILL_MS;
@@ -234,8 +270,8 @@ export default function App() {
   const newHousehold = useCallback((r: any) => {
     if (!r?.id) return;
     setFresh({
-      // 名前は一覧と同じく cwd の最後の名前（#30）。一覧に載ったときに名前が変わって見えないようにする
-      id: r.id, name: String(r.cwd ?? "").split("/").filter(Boolean).pop() ?? r.id.slice(0, 8), kind: "terminal", state: "running", cwd: r.cwd ?? "", canSend: true, parent: null,
+      // 名前は一覧と同じ決め方（cardNames）。一覧に載ったときに名前が変わって見えないようにする
+      id: r.id, name: cardNames([{ id: r.id, cwd: r.cwd ?? "" }]).get(r.id) ?? r.id.slice(0, 8), kind: "terminal", state: "running", cwd: r.cwd ?? "", canSend: true, parent: null,
       startedAt: Date.now(), capabilities: { terminal: true, send: true, stop: true },
     });
     setSelected(r.id);
@@ -260,6 +296,7 @@ export default function App() {
   const selfPeer = peers.find((p) => p.self);
 
   return (
+    <SkinCtx.Provider value={skinCtx}>
     <KillCtx.Provider value={killCtx}>
     <LetterCtx.Provider value={letterMarks.marks}>
     <TownCtx.Provider value={agents}>
@@ -311,13 +348,13 @@ export default function App() {
           )}
           <Stage zoom={zoom} onBlank={() => setSelected(null)} items={tree.families.map((f) => {
             const r = layoutOf(f.all);
-            const size = groupSize(r);
+            const size = groupSizeOf(r.metrics);
             return {
               id: f.root.id, ...size,
               node: (
                 <Group root={f.root} all={f.all} count={f.all.length} size={size}
                   onRename={async (name) => {
-                    try { await invoke("set_house_name", { sessionId: f.root.id, name }); toast(name ? `世帯の名前を「${name}」にした` : "世帯の名前を戻した"); }
+                    try { await invoke("set_house_name", { sessionId: f.root.id, name }); kickTown(); toast(name ? `世帯の名前を「${name}」にした` : "世帯の名前を戻した"); }
                     catch (e) { toast(`世帯の名前を変えられなかった: ${e}`, true); }
                   }}
                   hasNeeds={f.all.some((a) => NEEDS_YOU.includes(moodOf(a)))}>
@@ -337,7 +374,7 @@ export default function App() {
               <button className="fs" title="全画面" onClick={() => setFullscreen()}>⛶</button>
             </div>
             <span className="hint">クリックでチャット・右クリックでターミナル</span>
-            <Credits />
+            <Credits skin={skin} onSkin={(v) => { setSkin(v); saveSkin(v); }} />
           </div>
         </div>
 
@@ -346,7 +383,7 @@ export default function App() {
         <Separator className="split-handle" />
         <SplitPanel id="side" defaultSize={SIDE_DEFAULT} minSize={SIDE_MIN} maxSize="50%">
         <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} descendants={sel ? descOf(tree.childrenOf, sel.id) : []} termReq={termReq} chatReq={chatReq} composeReq={composeReq} peers={peers}
-          onSent={(a) => toast(`${a.name} に届けた`)} onSent2={(m) => toast(m)} onError={(m) => toast(m, true)}
+          onSent={(a) => { kickTown(); toast(`${a.name} に届けた`); }} onSent2={(m) => { kickTown(); toast(m); }} onError={(m) => toast(m, true)}
           needs={needs} onSelect={(a) => setSelected(a.id)} />
         </SplitPanel>
       </SplitGroup>
@@ -364,6 +401,7 @@ export default function App() {
     </TownCtx.Provider>
     </LetterCtx.Provider>
     </KillCtx.Provider>
+    </SkinCtx.Provider>
   );
 }
 
@@ -373,7 +411,7 @@ function descOf(childrenOf: Map<string, Agent[]>, id: string): Agent[] {
 
 // ---------- お手紙 ----------
 
-const LETTER_IMG = "/sprites/noto/1f48c/512.webp";
+const LETTER_IMG = "/sprites/noto/1f48c/64.webp";
 /** 封筒の印を残す長さ。読まれたら短く、読まれないままなら長くても MARK_MAX_MS で消す */
 const MARK_READ_MS = 2500;
 /** 飛ぶ封筒と、頭に残る印の大きさ（px）。App.css の .letter-fly と .letter-mark に合わせる */
@@ -384,6 +422,8 @@ const MARK_OFFSET = { x: -9 + MARK_SIZE / 2, y: -11 + MARK_SIZE / 2 };
 /** つなぎ線の上を進む割合。残りで印の位置へ寄せる */
 const LETTER_ALONG = 0.8;
 const MARK_MAX_MS = 30000;
+/** 飛ばした封筒の記録を覚える数。Rust の LETTERS_MAX（300）より十分多くする */
+const SEEN_MAX = 2000;
 
 /**
  * 新しいお手紙が来たら、送り手のカードから受け手のカードへ封筒を飛ばし、受け手の頭に印を残す。
@@ -402,13 +442,17 @@ function useLetterMarks(flights: Flight[]) {
     }
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     const fresh = flights.filter((f) => !seen.current!.has(f.id));
+    // 見た記録は古い順に捨て、SEEN_MAX 件までにする（#15）。Rust が渡すのは最近10分の最大300件なので、
+    // 捨てた記録が一覧に戻ることはない。いまの一覧で捨てると、一覧の取得が一度欠けただけで同じ封筒を二度飛ばす
+    for (const f of fresh) seen.current.add(f.id);
+    for (const id of seen.current) { if (seen.current.size <= SEEN_MAX) break; seen.current.delete(id); }
     fresh.forEach((f, i) => {
-      seen.current!.add(f.id);
       const land = () => setMarks((m) => new Map(m).set(f.to, { flight: f.id, until: Date.now() + (f.readAt ? MARK_READ_MS : MARK_MAX_MS) }));
       const a = document.querySelector(`[data-aid="${f.from}"]`)?.getBoundingClientRect();
       const toEl = document.querySelector<HTMLElement>(`[data-aid="${f.to}"]`);
       const b = toEl?.getBoundingClientRect();
-      if (reduce || !a || !b || !layer.current) { land(); return; }
+      // ウィンドウが隠れている間に来たお手紙は、見えた後にまとめて飛ばさず、印だけ出す（#6）
+      if (reduce || f.at < shownAt() || !a || !b || !layer.current) { land(); return; }
       const img = document.createElement("img");
       img.src = LETTER_IMG;
       img.className = "letter-fly";
@@ -614,9 +658,6 @@ function roleOf(depth: number): Role {
 }
 const ROLE_LABEL = ["親", "子", "孫", "ひ孫", "玄孫"];
 
-/** 家族ごとに前回選んだ配置の候補（更新のたびに形が変わらないよう引き継ぐ） */
-const prevArc = new Map<string, number>();
-
 /**
  * 家族の木を、配置計算（src/layout）が決めた座標に置いて描く。
  * 配置を計算し直すのは、家族の顔ぶれ（id、親、名前）が変わったときだけ。状態や会話の更新では動かさない。
@@ -624,9 +665,11 @@ const prevArc = new Map<string, number>();
  */
 /**
  * 世帯の中の配置を計算する（src/layout/layout.ts）。顔ぶれ（id、親、名前、開始時刻）が変わったときだけ計算し直し、
- * 状態や会話の更新では動かさない。前に選んだ候補を世帯ごとに引き継ぐ。
+ * 状態や会話の更新では動かさない。前に選んだ候補は引き継がず、顔ぶれだけで決める。
  */
 const layoutCache = new Map<string, { sig: string; result: ReturnType<typeof layoutFamily> }>();
+/** 覚えておく世帯の数。町に一度に出る世帯より十分多くする */
+const LAYOUT_CACHE_MAX = 64;
 function layoutOf(all: Agent[]) {
   const rootId = all[0].id;
   const sig = all.map((a) => `${a.id}|${a.parent ?? ""}|${a.name}|${a.startedAt ?? 0}`).join(",");
@@ -645,27 +688,26 @@ function layoutOf(all: Agent[]) {
     const b = boxOf(d(a), a.name);
     return { id: a.id, parent: a.parent && inFam.has(a.parent) ? a.parent : null, order: a.startedAt ?? 0, w: b.w, h: b.h };
   });
-  const r = layoutFamily(nodes, { prevArcIndex: prevArc.get(rootId) });
-  prevArc.set(rootId, r.arcIndex);
+  // 前に選んだ候補は引き継がない。引き継ぐと、子が増えるのを見ていた町と後から開いた町で形が変わる（docs/design/geometric-layout.md）
+  const r = layoutFamily(nodes);
   if (!r.valid) console.warn("Claude Town: 配置の検査に通る候補が無かった", rootId, r.metrics, r.candidates);
+  layoutCache.delete(rootId);
   layoutCache.set(rootId, { sig, result: r });
+  // 閉じた世帯の分を捨てる（#15）。Map は入れた順なので、計算し直していない古い世帯から消す
+  while (layoutCache.size > LAYOUT_CACHE_MAX) layoutCache.delete(layoutCache.keys().next().value!);
   return r;
-}
-
-/** 世帯モジュールの外寸（並べ方に渡す大きさ）。描くときもこの大きさにする */
-function groupSize(r: ReturnType<typeof layoutFamily>) {
-  const G = LAYOUT.group;
-  const cw = r.metrics.width + LAYOUT.framePad * 2, ch = r.metrics.height + LAYOUT.framePad * 2;
-  return { w: Math.ceil(Math.max(G.minW, cw + G.padX * 2 + G.border * 2)), h: Math.ceil(G.head + ch + G.padTop + G.padBottom + G.border * 2) };
 }
 
 /**
  * 家族の木を、配置計算が決めた座標に置いて描く。
  * 線は、配置の検査に使ったのと同じ「親の中心から子の中心」の線分を SVG で引く。
  */
-function FamilyCanvas({ all, result, selected, onSelect, onFocus }: {
-  all: Agent[]; result: ReturnType<typeof layoutFamily>; selected: string | null; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;
-}) {
+type CanvasProps = { all: Agent[]; result: ReturnType<typeof layoutFamily>; selected: string | null; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void };
+/** 世帯の顔ぶれ（all の中身のオブジェクト）、配置、選択、手が同じなら描き直さない（#4）。all は木を作り直すたびに新しい配列になるので、中身で比べる */
+const sameCanvas = (a: CanvasProps, b: CanvasProps) => a.result === b.result && a.selected === b.selected && a.onSelect === b.onSelect && a.onFocus === b.onFocus
+  && a.all.length === b.all.length && a.all.every((x, i) => x === b.all[i]);
+const FamilyCanvas = memo(function FamilyCanvas({ all, result, selected, onSelect, onFocus }: CanvasProps) {
+  if (import.meta.env.DEV) renders.canvas++;
   const pad = LAYOUT.framePad;
   const minX = Math.min(...result.nodes.map((n) => n.x - n.w / 2));
   const minY = Math.min(...result.nodes.map((n) => n.y - n.h / 2));
@@ -711,9 +753,13 @@ function FamilyCanvas({ all, result, selected, onSelect, onFocus }: {
       })}
     </div>
   );
-}
+}, sameCanvas);
 
-function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void }) {
+/** 描き直しの回数（開発版だけ数える）。待機中に増えないことを確かめる（#4）。ブラウザでは window.__fcRenders で読む */
+const renders = { canvas: 0, card: 0 };
+if (import.meta.env.DEV && typeof window !== "undefined") (window as any).__fcRenders = renders;
+
+const Card = memo(function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void }) {
   const { agent, depth, selected, onSelect, onFocus } = props;
   const { dying } = useContext(KillCtx);
   if (depth <= 1) return <FullCard {...props} />;
@@ -740,7 +786,7 @@ function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect:
       )}
     </>
   );
-}
+});
 
 /**
  * 人狼の「夜に襲われる」風の演出。暗くなる → 赤い爪痕の3本線が順に走る → 倒れて灰色 → 幽霊が昇って消える。
@@ -764,7 +810,7 @@ function KillFx({ w, h }: { w: number; h: number }) {
           );
         })}
       </svg>
-      <img className="kill-ghost" src="/sprites/noto/1f47b/512.webp" alt="" draggable={false} />
+      <img className="kill-ghost" src="/sprites/noto/1f47b/64.webp" alt="" draggable={false} />
     </div>
   );
 }
@@ -773,7 +819,7 @@ function KillFx({ w, h }: { w: number; h: number }) {
  * 転出のゴースト（src/ghost.ts）。別の町にいる親か子の影。半透明、点線の枠、旅行かばんの印で、閉じる演出の 👻 と分ける。
  * 押すと本物がいる町に切り替えて、その子を選ぶ。× は出さない（ここからは閉じない）。
  */
-function GhostCard({ agent, depth, onSelect }: { agent: Agent; depth: number; onSelect: (a: Agent) => void }) {
+const GhostCard = memo(function GhostCard({ agent, depth, onSelect }: { agent: Agent; depth: number; onSelect: (a: Agent) => void }) {
   const g = agent.ghost!;
   const mini = depth >= 2;
   const box = mini ? boxOf(depth, agent.name) : { w: LAYOUT.card.w, h: LAYOUT.card.h, scale: 1 };
@@ -788,20 +834,41 @@ function GhostCard({ agent, depth, onSelect }: { agent: Agent; depth: number; on
       </span>
     </button>
   );
-}
+});
 
 function SuitcaseIcon() {
   return (<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" aria-hidden><rect x="3" y="7" width="18" height="13" rx="2.5" /><path d="M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2M8 7v13M16 7v13" /></svg>);
+}
+
+/**
+ * 作業中の経過時間（sinceText）。この部品の中だけで時計を回し、町全体は描き直さない（#4）。
+ * 1分までは1秒ごと、1時間までは30秒ごと、それより後は6分ごとに描き直す。ウィンドウが見えていない間は止め、見えたらすぐ描き直す（#6）
+ */
+function Since({ at }: { at: number }) {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout> | null = null;
+    const plan = () => {
+      const age = Date.now() - at;
+      t = setTimeout(() => { t = null; bump((x) => x + 1); plan(); }, age < 60_000 ? 1000 : age < 3_600_000 ? 30_000 : 360_000);
+    };
+    const stop = () => { if (t !== null) { clearTimeout(t); t = null; } };
+    const off = onVisibleChange((v) => { stop(); if (v) { bump((x) => x + 1); plan(); } });
+    if (isVisible()) plan();
+    return () => { off(); stop(); };
+  }, [at]);
+  return <>{sinceText(at)}</>;
 }
 
 function FullCard({ agent, depth, selected, onSelect, onFocus }: {
   agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;
 }) {
   const { dying } = useContext(KillCtx);
+  if (import.meta.env.DEV) renders.card++;
   const mood = moodOf(agent);
   const task = taskOf(agent, mood);
   const now = nowOf(agent, mood);
-  const since = mood === "working" ? sinceText(agent.report?.turn_started_at) : "";
+  const started = mood === "working" ? agent.report?.turn_started_at : null;
   return (
     <button
       className={`card m-${mood} ${selected ? "sel" : ""}`}
@@ -817,7 +884,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
       <div className="card-main">
         <Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(depth)} size={48} dead={dying.has(agent.id)} />
         <div className="card-info">
-          <span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}{since && <em>{since}</em>}</span>
+          <span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}{started ? <em><Since at={started} /></em> : null}</span>
           <span className="cname">{agent.name}</span>
         </div>
       </div>
@@ -832,6 +899,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
 }) {
   const hasTerm = !!agent?.capabilities?.terminal;
+  const town = useContext(TownCtx);
   const [tab, setTab] = useState<"term" | "talk" | "state">("talk");
   const [sheet, setSheet] = useState<"teleport" | null>(null);
   // セッションを選んだときと新しい世帯を作ったときはチャットを出す。右クリックなどの termReq だけ端末を開く
@@ -851,7 +919,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
     if (agent) { perfMark("composer", agent.id); if (perfWaitingPrompt(agent.id)) perfEnd(); }
   });
   const [items, setItems] = useState<ConvItem[]>([]);
-  const [pending, setPending] = useState<ConvItem[]>([]);
+  // 送ったばかりの文。after は送り始めたときに持っていた最後の番号で、これより後に届いた発言とだけ比べる
+  const [pending, setPending] = useState<(ConvItem & { after: number })[]>([]);
   const [convErr, setConvErr] = useState<string | null>(null);
   // 下書きは宛先ごとに持つ。宛先を切り替えたとき、打ちかけの文が次の宛先に送られないようにする
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -860,6 +929,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   const [busy, setBusy] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // 会話をすぐ取り直させる口（文を送った直後に使う）
+  const convKick = useRef<() => void>(() => {});
   const id = agent?.id;
 
   // チャットを開いたとき（セッションを選んだ、タブを切り替えた）は、必ず一番下から始める。
@@ -869,21 +940,43 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
     setItems([]); setPending([]); setConvErr(null); stick.current = true;
     if (!id) return;
     let alive = true;
+    // 画面が持っている数。Rust は、これより後の発言だけを返す（#10）。増えていなければ items を変えず、描き直さない
+    let since: number | null = null;
     const load = async () => {
       try {
-        const r = await invoke<ConvItem[]>("conversation", { sessionId: id, peer: peer || null });
-        if (!alive) return;
-        setItems(r);
+        const d = await invoke<ConvDelta>("conversation", { sessionId: id, peer: peer || null, since });
+        if (!alive) return false;
+        since = Math.max(since ?? 0, d.total);
+        if (d.reset) since = d.total;
         setConvErr(null);
-        setPending((p) => p.filter((x) => !r.some((y) => y.role === "user" && y.text.trim() === x.text.trim())));
+        if (d.reset || d.items.length) setItems((prev) => mergeConv(prev, d));
+        return d.reset || d.items.length > 0;
       } catch (e) {
         if (alive) setConvErr(String(e));
+        return false;
       }
     };
-    load();
-    const t = setInterval(load, CONV_POLL_MS);
-    return () => { alive = false; clearInterval(t); };
+    const p = pollBackoff(load, CONV_POLL_MS, CONV_POLL_MAX_MS);
+    convKick.current = p.kick;
+    return () => { alive = false; p.stop(); convKick.current = () => {}; };
   }, [id, peer]);
+
+  // 送ったばかりの文は、送り始めたあとに会話に出たら仮の項目を消す（前の同じ文、「はい」や選択肢では消さない）
+  useEffect(() => {
+    setPending((p) => {
+      if (!p.length) return p;
+      const q = p.filter((x) => !items.some((y) => (y.n ?? -1) > x.after && y.role === "user" && y.text.trim() === x.text.trim()));
+      return q.length === p.length ? p : q;
+    });
+  }, [items, pending.length]);
+
+  // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
+  const shown = useMemo(() => collapseTools([...items, ...pending]), [items, pending]);
+  const lastChoices = useMemo(() => {
+    const lastAssistant = [...items].reverse().find((x) => x.role === "assistant");
+    const lastIsAssistant = items.filter((x) => x.role !== "tool").slice(-1)[0]?.role === "assistant";
+    return lastAssistant && lastIsAssistant ? choicesOf(lastAssistant.text) : [];
+  }, [items]);
 
   useLayoutEffect(() => {
     const el = scroller.current;
@@ -909,14 +1002,19 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   }
 
   const mood = moodOf(agent);
+  // 同じ名前の人が町にいたら、送信先に ID の先頭8字を添える（#36）。見出しは幅が足りず ID が切れるので名前だけにする
+  const target = targetLabel(agent, town);
   const send = async (body: string) => {
     if (!body.trim() || busy) return;
     setBusy(true);
+    const after = items[items.length - 1]?.n ?? -1;
     try {
       await invoke("send_message", { sessionId: agent.id, text: body, peer: peer || null });
-      setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString() }]);
+      setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
       setText("");
       stick.current = true;
+      // 返事が来るまでは間隔を縮めて取る（#5）
+      convKick.current();
       onSent(agent);
     } catch (e) {
       onError(`${agent.name} に届かなかった: ${e}`);
@@ -925,10 +1023,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
     }
   };
 
-  const shown = collapseTools([...items, ...pending]);
-  const lastAssistant = [...items].reverse().find((x) => x.role === "assistant");
-  const lastIsAssistant = items.filter((x) => x.role !== "tool").slice(-1)[0]?.role === "assistant";
-  const choices = lastAssistant && lastIsAssistant && mood !== "working" ? choicesOf(lastAssistant.text) : [];
+  const choices = mood !== "working" ? lastChoices : [];
 
   return (
     <aside className={`panel pm-${mood}`}>
@@ -956,13 +1051,13 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
       )}
 
       {tab === "term" ? (
-        <TerminalView sessionId={agent.id} peer={peer || null} onError={onError} />
+        <Suspense fallback={<div className="term-wrap"><div className="term" /></div>}><TerminalView sessionId={agent.id} peer={peer || null} onError={onError} /></Suspense>
       ) : tab === "talk" ? (
         <ScrollEdgeGradient className="talk" wrapClassName="seg-fill" ref={scroller}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
           {convErr && <div className="banner bad small">{convErr}</div>}
           {shown.length === 0 && !convErr && <p className="hint center">まだチャットが無い</p>}
-          {shown.map((x, i) => <Bubble key={i} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
+          {shown.map((x, i) => <Bubble key={x.n ?? `p${x.at ?? i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "approval" && (
             <Approval agent={agent} peer={peer} onDone={(m) => onSent2(m)} onError={onError} />
           )}
@@ -977,7 +1072,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
       )}
 
       {tab !== "term" && <div className="composer">
-        <div className="to">送信先: {agent.name}</div>
+        <div className="to">送信先: {target}</div>
         <div className="box">
           <textarea
             ref={composer}
@@ -1014,9 +1109,8 @@ function Approval({ agent, peer, onDone, onError }: {
     const load = () => invoke<any>("session_detail", { sessionId: agent.id, peer: peer || null })
       .then((d) => { if (alive) { setPending(Array.isArray(d?.pending) ? d.pending : []); setErr(null); } })
       .catch((e) => { if (alive) setErr(String(e)); });
-    load();
-    const t = setInterval(load, 2000);
-    return () => { alive = false; clearInterval(t); };
+    const stop = pollWhileVisible(load, 2000);
+    return () => { alive = false; stop(); };
   }, [agent.id, peer]);
   const p = pending?.[0];
   // 質問や計画の確認の待ちは道具の承認ではないので、許可のボタンを出さない（Rust 側でも断る）
@@ -1172,26 +1266,42 @@ function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent
   );
 }
 
-/** 道具の行が続いたら1行にまとめる */
+/** 道具の行が続いたら1行にまとめる。まとめた行の n は最初の行の n にする（後ろに道具が増えても key が変わらない） */
 function collapseTools(items: ConvItem[]): (ConvItem & { more?: number })[] {
   const out: (ConvItem & { more?: number })[] = [];
   for (const x of items) {
     const last = out[out.length - 1];
     if (x.role === "tool" && last?.role === "tool") {
-      out[out.length - 1] = { ...x, more: (last.more ?? 0) + 1 };
+      out[out.length - 1] = { ...x, n: last.n, more: (last.more ?? 0) + 1 };
     } else out.push(x);
   }
   return out;
 }
 
+/** 時刻の書式。toLocaleTimeString は呼ぶたびに ICU の書式を作り直すので、1つを使い回す（#10） */
+const HM = new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" });
 /** at は node のセッションなら ISO の文字列、pty のセッションなら ms の数 */
 function timeOf(at?: string | number | null): string {
+  chatPerf.time++;
   if (!at) return "";
   const d = new Date(at);
-  return isNaN(+d) ? "" : d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+  return isNaN(+d) ? "" : HM.format(d);
 }
 
-function Bubble({ item, agent, lineageDepth }: { item: ConvItem & { more?: number }; agent: Agent; lineageDepth: number }) {
+type BubbleProps = { item: ConvItem & { more?: number }; agent: Agent; lineageDepth: number };
+/**
+ * 吹き出しは、中身か見た目に使う値が変わったときだけ描き直す（#10）。
+ * agent は一覧を取るたびに別の物になるので、使う値（id、名前、絵）だけを比べる。
+ * まとめた道具の行は毎回作り直すので、n と件数と文で比べる
+ */
+const Bubble = memo(BubbleView, (a: BubbleProps, b: BubbleProps) =>
+  (a.item === b.item || (a.item.n != null && a.item.n === b.item.n && a.item.more === b.item.more && a.item.text === b.item.text && a.item.pending === b.item.pending))
+  && a.lineageDepth === b.lineageDepth
+  && a.agent.id === b.agent.id && a.agent.name === b.agent.name
+  && a.agent.avatar?.char === b.agent.avatar?.char && a.agent.avatar?.hue === b.agent.avatar?.hue);
+
+function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
+  chatPerf.bubble++;
   if (item.role === "tool" && item.sent) return <SentLetter item={item} agent={agent} lineageDepth={lineageDepth} />;
   if (item.role === "tool") {
     return <div className="tool-line">🔧 {item.text}{item.more ? ` ほか${item.more}件` : ""}</div>;
@@ -1233,15 +1343,7 @@ function LetterBubble({ item }: { item: ConvItem }) {
   const raw = item.letter?.fromRaw ?? null;
   const who = useLetterPeer(raw, item.letter?.fromName);
   const name = who?.name ?? item.letter?.fromName ?? raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? "別のセッション";
-  return (
-    <div className="msg kid letter">
-      <div className="mini-av"><Avatar pick={who?.avatar} seed={who?.id ?? name} mood="idle" role={who?.parent ? "child" : "parent"} size={32} /></div>
-      <div>
-        <div className="meta"><b>{name}</b>{timeOf(item.at)}</div>
-        <div className="b"><Markdown text={item.text} /></div>
-      </div>
-    </div>
-  );
+  return <LetterView pick={who?.avatar} seed={who?.id ?? name} role={who?.parent ? "child" : "parent"} name={name} at={item.at} text={item.text} />;
 }
 
 /** 送ったお手紙。このセッション自身の発言として出し、名前の行に宛先（→ 名前）を添える。吹き出しは肌色 */
@@ -1249,16 +1351,27 @@ function SentLetter({ item, agent, lineageDepth }: { item: ConvItem; agent: Agen
   const s = item.sent!;
   const who = useLetterPeer(s.to ?? null, s.to ?? null);
   const to = s.create ? "新しい子" : who?.name ?? (s.to ? String(s.to).replace(/^uds:.*\/(\d+)\.sock$/, "pid $1") : "相手");
+  return <LetterView pick={agent.avatar} seed={agent.id} role={roleOf(lineageDepth)} name={agent.name} to={`→ ${to}${s.peer ? `（${s.peer}）` : ""}`} at={item.at} text={s.text || s.summary || ""} />;
+}
+
+type LetterViewProps = { pick?: Agent["avatar"]; seed: string; role: Role; name: string; to?: string; at?: string | number | null; text: string };
+/**
+ * お手紙の吹き出しの見た目。お手紙の相手は町の一覧（TownCtx）から引くので、一覧を取るたびに上の2つは描き直される。
+ * 見た目に使う値が変わらなければ、ここで止める（#10）
+ */
+const LetterView = memo(function LetterView({ pick, seed, role, name, to, at, text }: LetterViewProps) {
+  chatPerf.bubble++;
   return (
     <div className="msg kid letter">
-      <div className="mini-av"><Avatar pick={agent.avatar} seed={agent.id} mood="idle" role={roleOf(lineageDepth)} size={32} /></div>
+      <div className="mini-av"><Avatar pick={pick} seed={seed} mood="idle" role={role} size={32} /></div>
       <div>
-        <div className="meta"><b>{agent.name}</b><span className="to">→ {to}{s.peer ? `（${s.peer}）` : ""}</span>{timeOf(item.at)}</div>
-        <div className="b"><Markdown text={s.text || s.summary || ""} /></div>
+        <div className="meta"><b>{name}</b>{to && <span className="to">{to}</span>}{timeOf(at)}</div>
+        <div className="b"><Markdown text={text} /></div>
       </div>
     </div>
   );
-}
+}, (a, b) => a.seed === b.seed && a.role === b.role && a.name === b.name && a.to === b.to && a.at === b.at && a.text === b.text
+  && a.pick?.char === b.pick?.char && a.pick?.hue === b.pick?.hue);
 
 function fromLabel(from: string): string {
   // "from agent:<名前> via <ノード>" / "from local via <ノード>" / "from <メール> via <ノード>"
@@ -1271,13 +1384,13 @@ function fromLabel(from: string): string {
 
 function StateTab({ agent, mood }: { agent: Agent; mood: Mood }) {
   const r = agent.report;
-  const rows: [string, string | null | undefined][] = [
+  const rows: [string, React.ReactNode][] = [
     ["いま", nowOf(agent, mood)],
     ["頼まれたこと", r?.asked],
     ["最後の報告", r?.said],
     ["次の一手", r?.next],
     ["閉じていい？", agent.closeCheck ? (agent.closeCheck.status === "ok" ? "閉じてOK" : agent.closeCheck.status === "ng" ? `まだ: ${agent.closeCheck.short ?? ""}` : "判定中") : null],
-    ["作業中の時間", mood === "working" ? sinceText(r?.turn_started_at) : null],
+    ["作業中の時間", mood === "working" && r?.turn_started_at ? <Since at={r.turn_started_at} /> : null],
     ["場所", agent.cwd.replace(/^\/Users\/[^/]+/, "~")],
     ["セッション", agent.id],
   ];
@@ -1291,17 +1404,28 @@ function StateTab({ agent, mood }: { agent: Agent; mood: Mood }) {
 
 // ---------- 素材のクレジット ----------
 
-function Credits() {
+/** 素材の表示と、キャラの見た目（いつもの / ポケモン）の切り替え。見た目で使う素材が変わるので同じ所に置く */
+function Credits({ skin, onSkin }: { skin: Skin; onSkin: (s: Skin) => void }) {
   const [open, setOpen] = useState(false);
   return (
     <span className="credits">
       <button className="credit-btn" onClick={() => setOpen((o) => !o)}>素材</button>
       {open && (
         <span className="credit-pop" onMouseLeave={() => setOpen(false)}>
+          <span className="skin-pick" title="ポケモンでは、親を最終進化、子を2段目、孫を1段目で描く">
+            キャラの見た目
+            {([["default", "いつもの"], ["pokemon", "ポケモン"]] as const).map(([v, label]) => (
+              <button key={v} className={skin === v ? "on" : ""} onClick={() => onSkin(v)}>{label}</button>
+            ))}
+          </span>
           <b>キャラ</b>: Ninja Adventure Asset Pack（Pixel-boy、AAA）、CC0 1.0。
           <br /><b>状態の印、幽霊、お手紙</b>: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0
           （creativecommons.org/licenses/by/4.0）。Source: googlefonts.github.io/noto-emoji-animation
-          <br />どちらも配布元のファイルを改変せずに使い、表示のときに縮めている。
+          <br />キャラは配布元のファイルのまま表示のときに縮めている。Noto は 64px に縮め、コマを半分に間引いた。
+          {skin === "pokemon" && (<>
+            <br /><b>ポケモン（キャラの見た目で選んだとき）</b>: Pokémon Showdown のアニメ GIF を、PokeAPI/sprites（github.com/PokeAPI/sprites）の配布から
+            {"表示中のキャラの分だけ実行時に読む。このアプリには画像を含めない。Pokémon © Nintendo / Creatures Inc. / GAME FREAK inc."}
+          </>)}
         </span>
       )}
     </span>

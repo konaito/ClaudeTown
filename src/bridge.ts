@@ -4,11 +4,15 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { perfCounters } from "./term/perf";
+import { deltaOf } from "./conv";
+import { cardNames, projectFromPath, type ConvItem } from "./model";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 // ?mockport=<ポート> で、モック以外の口（本番のノードの前に置いた試験用の中継など）にも繋げる
 const MOCK = !inTauri && typeof location !== "undefined" && location.search.includes("mock")
   ? `http://127.0.0.1:${new URLSearchParams(location.search).get("mockport") ?? "4399"}/api` : null;
+
+const LOADED_AT = Date.now();
 
 async function devJson<T>(name: string, fallback: T): Promise<T> {
   const r = await fetch(`/${name}`, { cache: "no-store" });
@@ -26,7 +30,10 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     j(path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   switch (cmd) {
     case "snapshot": {
-      const list = (await j("/sessions")) as Record<string, any>[];
+      // 別の町は、本物のノードと同じく中継の口（/n/<町>/api/...）から取る
+      const list = (a.peer
+        ? await fetch(`${MOCK!.replace(/\/api$/, "")}/n/${a.peer}/api/sessions`).then(async (r) => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
+        : await j("/sessions")) as Record<string, any>[];
       const live = list.filter((s) => s.state !== "exited");
       const parentOf = (s: Record<string, any>) => {
         const sid8 = typeof s.parent === "string" && s.parent.startsWith("agent:") ? s.parent.split("/")[1] : null;
@@ -36,8 +43,11 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
         ccn: MOCK, peer: null, ccn_ok: true, ccn_error: null, fetched_at: Date.now(),
         // お手紙の試し: public/dev-letters.json（無ければ空）
         letters: await fetch("/dev-letters.json", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
-        // 名前は Rust の snapshot（display_name）と同じく、cwd の最後の名前。cwd が無ければ題名、それも無ければ ID の先頭8字
-        agents: live.map((s) => ({ id: s.id, name: String(s.cwd ?? "").split("/").filter(Boolean).pop() || s.title || s.id.slice(0, 8), kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities })),
+        // 名前は Rust の snapshot と同じ決め方（src/model.ts の cardNames）。モックでは .git を読まないので、パスの形だけで決める
+        agents: (() => {
+          const names = cardNames(live.map((s) => ({ id: s.id, cwd: s.cwd, title: s.title, parent: parentOf(s), startedAt: s.startedAt })));
+          return live.map((s) => ({ id: s.id, name: names.get(s.id), project: s.cwd ? projectFromPath(s.cwd) : null, kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities }));
+        })(),
       } as T;
     }
     case "peers": return [{ name: "mock", url: MOCK, status: "healthy", self: true }, { name: "vm", url: "", status: "healthy", self: false }] as T;
@@ -55,13 +65,19 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     case "teleport_info": return j(`/sessions/${a.sessionId}/teleport`) as T;
     case "teleport": return post(`/sessions/${a.sessionId}/teleport`, { to: a.to, fork: a.fork, subtree: a.subtree, dryRun: a.dryRun }) as T;
     case "stop_session": return j(`/sessions/${a.sessionId}`, { method: "DELETE" }) as T;
-    case "conversation": return [] as T;
+    case "conversation": return deltaOf([], a.since as number | null) as T;
     default: console.info("[モックでは実行しない]", cmd, a); return null as T;
   }
 }
 
 export async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (inTauri) return invoke<T>(cmd, args);
+  // 別の町の一覧（#14）。ブラウザ表示では snapshot の agents で代える
+  if (cmd === "town_agents") {
+    const s = await call<{ ccn_ok: boolean; ccn_error: string | null; agents: unknown[] }>("snapshot", args);
+    if (!s.ccn_ok) throw new Error(s.ccn_error ?? "つながらない");
+    return s.agents as T;
+  }
   if (MOCK) return mockCall<T>(cmd, args);
   if (cmd === "snapshot") {
     // 別の町は public/dev-snapshot-<町>.json（`--snapshot --peer <町>` で作る）。無ければ届かない町として扱う
@@ -76,12 +92,28 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   // 見た目の確認用: ?longconv を付けると、スクロールが要る長さの仮の会話を返す
   // 見た目の確認用: ?conv を付けると public/dev-conversation.json（`--conversation <id>` の出力の Ok）を返す
   if (cmd === "conversation" && location.search.includes("conv") && !location.search.includes("longconv")) {
-    return devJson<T>("dev-conversation.json", [] as T);
+    return deltaOf(await devJson("dev-conversation.json", []), args?.since as number | null) as T;
   }
   if (cmd === "conversation" && location.search.includes("longconv")) {
-    return Array.from({ length: 24 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", text: `（仮の会話 ${i + 1}）スクロールの端のグラデーションを確かめるための文。` })) as T;
+    // ?longconv=<件数> で件数を変える（#10 の計測は 80 件、Rust が画面へ渡す上限と同じ）
+    // &grow を付けると5秒ごとに1件増える（増えた吹き出しだけ描くかを確かめる）
+    const q = new URLSearchParams(location.search);
+    const n = (Number(q.get("longconv")) || 24) + (q.has("grow") ? Math.floor((Date.now() - LOADED_AT) / 5000) : 0);
+    // 5件ごとに、発言、返事、道具の行、送ったお手紙、受け取ったお手紙を並べる（吹き出しの種類を全部出す）
+    const conv: ConvItem[] = Array.from({ length: n }, (_, i): ConvItem => {
+      const at = Date.UTC(2026, 10, 13, 0, i);
+      const head = `（仮の会話 ${i + 1}）`;
+      switch (i % 5) {
+        case 0: return { role: "user", at, text: `${head}スクロールの端のグラデーションを確かめるための文。` };
+        case 1: return { role: "assistant", at, text: `${head}**太字**と \`コード\` を含む返事。\n\n## 見出し\n- 箇条 1\n- 箇条 2` };
+        case 2: return { role: "tool", at, text: `読む: ${head}src/App.tsx` };
+        case 3: return { role: "tool", at, text: `話す: ${head}`, sent: { to: "uds:/tmp/cc-socks/1.sock", summary: `${head}送ったお手紙`, text: `${head}送ったお手紙の**本文**` } };
+        default: return { role: "user", at, text: `${head}受け取ったお手紙の**本文**`, letter: { fromName: "別の子", fromRaw: "mock/bbbbbbbb/child" } };
+      }
+    });
+    return deltaOf(conv, args?.since as number | null) as T;
   }
-  if (cmd === "conversation") return [{ role: "assistant", text: `（ブラウザ表示の仮の会話）${String(args?.sessionId ?? "").slice(0, 8)} の会話は、Tauri の中で ccn から読む。` }] as T;
+  if (cmd === "conversation") return deltaOf([{ role: "assistant", text: `（ブラウザ表示の仮の会話）${String(args?.sessionId ?? "").slice(0, 8)} の会話は、Tauri の中で ccn から読む。` }], args?.since as number | null) as T;
   console.info("[ブラウザ表示なので実行しない]", cmd, args);
   return "ブラウザ表示" as T;
 }

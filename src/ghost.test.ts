@@ -66,3 +66,14 @@ describe("ゴーストを出さない場合", () => {
     expect(withGhosts(B, []).some((a) => a.ghost)).toBe(false);
   });
 });
+
+describe("使い回し（#4）", () => {
+  test("書き換えないセッションは元のオブジェクトのまま返し、入力は書き換えない", () => {
+    const A = { town: "tp-a", agents: [ag(P, "local")] };
+    const B = { town: "tp-b", agents: [ag(K, "agent:tp-a/9bf1ce0a/test"), ag(G, "agent:tp-a/bcbd556c/test", K)] };
+    const t = withGhosts(B, [A]);
+    expect(t.find((a) => a.id === G)).toBe(B.agents[1]);
+    expect(t.find((a) => a.id === K)).not.toBe(B.agents[0]);
+    expect(B.agents[0].parent).toBeNull();
+  });
+});

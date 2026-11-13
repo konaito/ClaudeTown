@@ -23,22 +23,20 @@
 
 ## このディレクトリの中身
 
-コードポイントごとのディレクトリに、配布元のファイルを改変せずに置いた。
+配布元の 512.webp を縮めた 64.webp を、コードポイントごとのディレクトリに置いた（2026-11-13、#7）。改変の内容は次のとおり。
 
-| コードポイント | 名前 |
-|---|---|
-| 1f913 | nerd-face |
-| 1f97a | pleading |
-| 1fae3 | peeking |
-| 1f973 | partying-face |
-| 1f634 | sleep |
-| 1f635_200d_1f4ab | dizzy-face |
-| 1f4bb | laptop-computer |
-| 270b | raised-hand |
-| 23f3 | hourglass-not-done |
-| 2705 | check-mark |
-| 2049_fe0f | exclamation-question-mark |
+- 512px を 64px に縮めた（表示は 11〜30px で、高精細の画面でも 64px で足りる）
+- コマを2枚に1枚に間引き、残したコマの長さに間引いたコマの長さを足した。1周の長さは元と同じ
+- 有損失の WebP（品質 80）で作り直した
 
-形式は4つとも置いた（合計で約 18MB。GIF だけで 11.7MB）。使う形式が決まったら、使わない形式は消してよい。
+作り方は `scripts/make-noto-small.sh` にある。配布元の 512.webp を、上の取得 URL の形から取り直して作る。
 
-2026-11-12 に、閉じるときの演出のため 1f47b（ghost）の 512.webp を同じ取得 URL の形から足した。改変していない。
+| コードポイント | 名前 | 使う場所 |
+|---|---|---|
+| 270b | raised-hand | 承認待ちの印 |
+| 1f97a | pleading | 返事待ちの印 |
+| 2705 | check-mark | 完了の印 |
+| 1f47b | ghost | 閉じるときの演出 |
+| 1f48c | love-letter | お手紙の封筒 |
+
+2026-11-12 の調べ（docs/research/assets）では、ほかのコードポイントと GIF、AVIF、Lottie の形式も置いていた。使わないものは消した。

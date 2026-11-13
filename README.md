@@ -69,7 +69,7 @@ Claude Town の違いは3つある。データ源を ccn に寄せること、�
 | 頼まれたこと、いまやっていること、最後の報告、次の一手 | hook が書く `~/.family-computing/state/<session_id>.json` |
 | 閉じてよいか | close-check-state hook が書く `~/.claude/close-check/<session_id>.json` |
 
-人がターミナルで開いたセッションは、ccn から一覧と送信だけができる。親子は ccn の parent だけから引く。ccn を通さずに作った子は、親とつながらず別の世帯として出る。名前は ccn の題名、無ければセッション ID の先頭8字にする。
+人がターミナルで開いたセッションは、ccn から一覧と送信だけができる。親子は ccn の parent だけから引く。ccn を通さずに作った子は、親とつながらず別の世帯として出る。名前の決め方は、ccn で作ったセッションと同じにする（下の「世帯とカードの名前」）。
 
 ccn は Origin 付きの要求を CSRF として断る。このため、HTTP の要求は画面からではなく Tauri の Rust 側から出す。
 
@@ -78,6 +78,7 @@ ccn は Origin 付きの要求を CSRF として断る。このため、HTTP の
 - 子供を左クリックすると、右のパネルにその子が出る。端末のセッションは「端末」の欄が先に開き、打ったキーはそのまま PTY に届く（`POST /api/sessions/<id>/terminal/input`）。端末の大きさは、開いたときに ccn に伝える（後に開いた画面に合わせる）。
 - 子供を右クリックすると、その子を選んで端末を開く。
 - 子は親のセッション自身が ccn の create_session（terminal: true）で作る。画面から子を足す操作は出さない（2026-11-12、本人の判断。使う機会が無いため）。
+- どのセッションを PTY で立てるかの比較と提案は `docs/research/pty-or-headless.md` にある。
 - 上の「＋ 新しい世帯」を押すと、すぐ `~/Documents/meta` で親のいない端末のセッションを立て、そのノードを選んで右のチャットを開き、入力欄にフォーカスを当てる。最初の依頼の欄は出さない。端末は右クリックか「端末へ」で開く。セッションが0本の空の町でも、ここから最初の世帯を作れる。
 - 右パネルの「転出」で、ccn の teleport（PR #18）を呼び、別の機械へ移す（move）か複製する（fork）。下見は移動元の説明（`GET /api/sessions/<id>/teleport`）だけを見せる。行き先の下見は clone することがあるので、実行の中で ccn に任せる。作業中と承認待ちのセッションは転出できない。世帯ごとの転出は出していない。ccn に一括の口が無く、1つずつ移すと子の parent が転出を呼んだ側に変わり、同じリポジトリの子が行き先の同じ作業ツリーを書き換え合うため（`docs/research/ccn-teleport.md`）。
 - 承認待ちの子は、カードの枠が黄色で点滅し、右パネルに承認の中身と「許可する」「拒否する」を出す。押すと、今も承認待ちで requestId が同じかを確かめてから、ccn の permissions の口で答える。質問（AskUserQuestion）や計画の確認（ExitPlanMode）の待ちには許可を送らない。人が端末で開いたセッションは、その端末で答える。
@@ -104,7 +105,14 @@ hook は本物の `claude -p` で試し、頼まれたこと、道具、最後�
 - キャラの体は Ninja Adventure Asset Pack（CC0）のドット絵、状態の印は Noto Animated Emoji（CC BY 4.0）の WebP にする（見本ページの案 C）。印の置き方は案 A の位置の2段階目（A2）。親には大人のキャラ6体、子より下には子供のキャラ18体から、名前で決めて当てる。見本は `docs/research/assets/index.html` と `docs/research/assets/balance.html`。
 - 家の絵（屋根、壁、床）は描かない。世帯は淡い色の枠で見分ける。
 - プロダクト名は Claude Town にする（2026-11-12）。数える単位は世帯で、画面の見出しは「5世帯・23人」のように出す。
-- 世帯の名前は、親（根のセッション）が自分で付ける。子を持つ親に名前が無ければ、状態 hook が1回だけ「依頼の中身から短い名前を決めて `python3 scripts/hook.py name "<名前>"` で付けて」と促す。名前は `~/.family-computing/houses.json` に入る。本人は画面で世帯の名前をダブルクリックして直せて、本人が付けた名前は親が付けた名前より優先する。名前が無いあいだは、子と孫の作業場所で一番多いディレクトリ名を仮の名前にする。
+- 世帯とカードの名前は、そのセッションが作業しているプロジェクトの名前にする（2026-11-13）。プロジェクトの名前は、リポジトリの本体のディレクトリの名前（例 family-computing）。決め方は `src-tauri/src/naming.rs` と `src/model.ts` の cardNames に同じものを書き、試験の事例は `src/naming-cases.json` にまとめて両方で読む。
+  1. git の worktree は、`.git` の gitdir から本体の名前に直す（この機械の町だけ）。`.git` を読めないときは `<名前>.wt/<x>` を <名前> にし、それ以外は cwd の最後の名前にする。
+  2. cwd が振り分けの場所（ホーム、`~/Documents`、`~/Documents/meta`、`~/.local/share/ccn/lobby`、`/`、`/tmp`、`/private/tmp`、`/root`）なら、子孫のプロジェクトで一番多いものにする。振り分けの場所にいる子孫は数えず、同数なら先に始まった子孫の分にする。
+  3. 子孫から分からなければ、エージェントが `python3 scripts/hook.py name <プロジェクトの名前>` で付けた名前にする。それも無ければ cwd の最後の名前（meta など）のままにする。
+  4. cwd が無ければ ccn の題名、それも無ければセッション ID の先頭8字にする。
+- 世帯の名前は、根のカードの名前と同じにする。本人は画面で世帯の名前をダブルクリックして直せて、本人が付けた名前が最優先になる。名前は `~/.family-computing/houses.json` に入る。
+- 振り分けの場所で動く親が、別のプロジェクトで子を作ると（ccn の create_session か Specter の spawn_child）、状態 hook が「そのプロジェクトのディレクトリの名前を `hook.py name` で付けて」と促す。プロジェクトごとに1回だけ促す。Specter の子は ccn に親が残らず、アプリが子孫として数えられないので、この名前で世帯の名前が分かる。
+- キャラの見た目は、右下の「素材」を開いた中の「キャラの見た目」で「いつもの」と「ポケモン」を切り替えられる。使う素材が見た目で変わるので、素材の表示と同じ所に置く。既定は「いつもの」で、選んだ値はこの画面の localStorage に残す。ポケモンでは、世帯の根のセッションの ID から3段進化の系統を1つ決め、親を3段目（最終進化）、子を2段目、孫（孫より下も）を1段目で描く。例えばリザードンの系統なら、親がリザードン、子がリザード、孫がヒトカゲになる。作業中は GIF を動かして小さく跳ねさせ、それ以外は1フレームを止める。状態の印と待機の薄さは「いつもの」と同じ。GIF が読めないときは、その1体だけ「いつもの」の絵に戻す（2026-11-13）。
 
 ## 決まっていないこと
 
@@ -114,8 +122,9 @@ hook は本物の `claude -p` で試し、頼まれたこと、道具、最後�
 
 コードは MIT ライセンスです（`LICENSE`）。以下の素材は、それぞれのライセンスのままです。
 
-- キャラ: Ninja Adventure Asset Pack（Pixel-boy、AAA。https://pixel-boy.itch.io/ninja-adventure-asset-pack）。CC0 1.0 で、帰属表示は要らない。使うキャラの Walk.png、Idle.png、Faceset.png だけを `public/sprites/ninja/` に置いた。
-- 状態の印、幽霊、お手紙: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Source: https://googlefonts.github.io/noto-emoji-animation/ 。状態の印の3種（270b、1f97a、2705）、エラー用の1種（2049_fe0f）、閉じる演出の幽霊（1f47b）、お手紙の封筒（1f48c）の 512.webp を、改変せずに `public/sprites/noto/` に置いた。アプリの下の帯の「素材」にも同じ表示を出す。
+- キャラ: Ninja Adventure Asset Pack（Pixel-boy、AAA。https://pixel-boy.itch.io/ninja-adventure-asset-pack）。CC0 1.0 で、帰属表示は要らない。使うキャラの Walk.png、Idle.png、Dead.png だけを `public/sprites/ninja/` に置いた。色のプロファイルなどの描画に使わない部分は外した（`scripts/strip-sprites.sh`、画素は変えていない）。
+- 状態の印、幽霊、お手紙: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Source: https://googlefonts.github.io/noto-emoji-animation/ 。状態の印の3種（270b、1f97a、2705）、閉じる演出の幽霊（1f47b）、お手紙の封筒（1f48c）の 512.webp を 64px に縮め、コマを半分に間引いた 64.webp を `public/sprites/noto/` に置いた。作り方は `scripts/make-noto-small.sh` にある。アプリの下の帯の「素材」にも同じ表示を出す。
+- ポケモン（「素材」の中の「キャラの見た目」でポケモンを選んだときだけ）: Pokémon Showdown のアニメ GIF を、PokeAPI/sprites（https://github.com/PokeAPI/sprites）の `sprites/pokemon/other/showdown/<図鑑番号>.gif` から読む。画像はこのリポジトリにもアプリにも入れず、表示中のキャラの分だけ実行時に raw.githubusercontent.com から取得する。URL はブランチ名ではなく、確かめたときのコミットで指す。系統の一覧 `src/kid/pokemon-lines.json` は図鑑番号と英名だけで、`bun run scripts/pokemon-lines.ts` で作り直す。Pokémon © Nintendo / Creatures Inc. / GAME FREAK inc.
 - 見本ページの Kenney のプレビュー画像（`docs/research/assets/kenney-toon-characters.png`）: Kenney（https://kenney.nl）。CC0 で、帰属表示は要らない。
 - 見本ページ（`docs/research/assets/`）は、比べたときの素材を全部参照している。絞った後の public には一部しか残っていないので、見本ページの画像は一部が出ない。
 
@@ -181,7 +190,7 @@ echo '{"session_id":"0123abcd-0000-0000-0000-000000000001","hook_event_name":"Us
 
 - 状態 hook は1つだけ登録してあり、両版が同じ状態ファイルを読む。登録先は安定版のタグから写した `~/.family-computing/stable/hooks/fc-report.py` なので、作業ツリーの hook を書き換えても、安定版を上げ直すまで両版に出る内容は変わらない。
 - hook が書くファイル（state/、letters.jsonl）と、送信の非常停止（send-disabled）は、両版が `~/.family-computing/` の同じものを読む。非常停止は1か所で両版を止めるために共有にしてある。
-- 世帯の名前は、エージェントが hook（`scripts/hook.py name`）で付けた分が `~/.family-computing/houses.json` に入り、両版が読む。
+- エージェントが hook（`scripts/hook.py name`）で付けた世帯の名前は、`~/.family-computing/houses.json` に入り、両版が読む。
 
 両版で分けているもの:
 

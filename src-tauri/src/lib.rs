@@ -1,7 +1,7 @@
 // family-computing の裏側。画面から呼ばれる命令:
 // - snapshot(peer): ccn の一覧（状態、送信先、親子）、hook の報告、close-check の判定を1つにまとめる
 // - peers: ccn につながっている機械の一覧
-// - conversation(session_id, peer): ccn の messages を差分で読み、画面に出す形（発言と道具の1行）に縮めて返す
+// - conversation(session_id, peer, since): ccn の messages を差分で読み、画面に出す形（発言と道具の1行）に縮め、画面がまだ持っていない分だけ返す
 // - send_message(session_id, text, peer): ccn の POST /api/sessions/<id>/messages で文を届ける
 // - create_session / stop_session / teleport / teleport_info / session_detail: ccn の口をそのまま呼ぶ
 // - term_open / term_close / term_input / term_resize: ccn の端末（PTY）の口を読み書きし、開いた画面の Channel へ流す
@@ -11,6 +11,7 @@
 // 別の機械（peer）は手元のノードの中継 /n/<peer>/api/... を通す。
 
 mod avatars;
+mod naming;
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -76,13 +77,42 @@ fn read_json(p: &PathBuf) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(p).ok()?).ok()
 }
 
+/// ファイルが前に読んだときと同じか（#11）。更新時刻、大きさ、inode で見る。読む前に stat だけする
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct FileStamp { modified: Option<std::time::SystemTime>, len: u64, ino: u64 }
+fn stamp_of(meta: &fs::Metadata) -> FileStamp {
+    use std::os::unix::fs::MetadataExt;
+    FileStamp { modified: meta.modified().ok(), len: meta.len(), ino: meta.ino() }
+}
+
+/// read_json と同じ中身を返す。前に読んだときから更新時刻、大きさ、inode のどれも変わっていなければ、読まずに覚えた中身を返す（#11）。
+/// snapshot は一覧を取るたびに、セッションごとの state/{id}.json と close-check/{id}.json、houses.json、ccn.json を読んでいた。
+/// 無いファイルは覚えない（できたら次の回に読む）
+fn read_json_cached(p: &std::path::Path) -> Option<Value> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<PathBuf, (FileStamp, Option<Value>)>>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(meta) = fs::metadata(p) else {
+        cache.lock().unwrap_or_else(|e| e.into_inner()).remove(p);
+        return None;
+    };
+    let st = stamp_of(&meta);
+    if let Some((s, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(p) {
+        if *s == st && st.modified.is_some() {
+            return v.clone();
+        }
+    }
+    let v = read_json(&p.to_path_buf());
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(p.to_path_buf(), (st, v.clone()));
+    v
+}
+
 /// 手元の ccn ノードの入口。ccn.json の port を読む（README は 4322、実機は 4323 なので固定しない）。
 fn ccn_base() -> String {
     if let Ok(u) = std::env::var("FC_CCN_URL") {
         return u.trim_end_matches('/').to_string();
     }
     for rel in [".config/ccn/ccn.json", ".config/cc/cc.json"] {
-        if let Some(port) = read_json(&home().join(rel)).and_then(|v| v.get("port").and_then(|p| p.as_u64())) {
+        if let Some(port) = read_json_cached(&home().join(rel)).and_then(|v| v.get("port").and_then(|p| p.as_u64())) {
             return format!("http://127.0.0.1:{port}");
         }
     }
@@ -140,36 +170,76 @@ struct Snapshot {
 const LETTERS_WINDOW_MS: u128 = 10 * 60 * 1000;
 const LETTERS_MAX: usize = 300;
 fn recent_letters() -> Vec<Value> {
-    let Ok(text) = fs::read_to_string(fc_path(Scope::Shared, "letters.jsonl")) else { return vec![] };
-    let since = now_ms().saturating_sub(LETTERS_WINDOW_MS);
-    let mut out: Vec<Value> = text
-        .lines()
-        .rev()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .take_while(|v| v["at"].as_u64().map(|a| a as u128 >= since).unwrap_or(false))
-        .take(LETTERS_MAX)
-        .collect();
-    out.reverse();
-    out
+    static TAIL: Mutex<Option<LetterTail>> = Mutex::new(None);
+    let mut tail = TAIL.lock().unwrap_or_else(|e| e.into_inner());
+    letters_from(&fc_path(Scope::Shared, "letters.jsonl"), now_ms(), &mut tail)
+}
+
+/// letters.jsonl の、前回までに読んだところ（#11）。2秒ごとに最大 1MB を頭から読み直していたのをやめ、増えた分だけ読む
+struct LetterTail {
+    stamp: FileStamp,
+    /// ここまで読んだ（改行で終わる行の末尾）バイト位置
+    offset: u64,
+    /// 読んだ記録のうち、まだ窓（LETTERS_WINDOW_MS）に入りうるもの。ファイルの順
+    recs: Vec<Value>,
+}
+
+/// recent_letters の中身（試験のために置き場所と時刻を受け取る）。返すものは、ファイルを頭から読んでいた前の形と同じ:
+/// 末尾から、時刻が窓に入る行が続く間だけ取り、新しいほうから LETTERS_MAX 件を古い順に返す
+fn letters_from(path: &std::path::Path, now: u128, tail: &mut Option<LetterTail>) -> Vec<Value> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(meta) = fs::metadata(path) else { *tail = None; return vec![] };
+    let st = stamp_of(&meta);
+    // 同じファイル（inode）が後ろに伸びただけなら、続きから読む。小さくなった、入れ替わった（1MB で .1 に移した）なら頭から
+    let from = match tail.as_ref() {
+        Some(t) if t.stamp == st => None,
+        Some(t) if t.stamp.ino == st.ino && st.len >= t.offset => Some(t.offset),
+        _ => Some(0),
+    };
+    if let Some(from) = from {
+        let mut buf = Vec::new();
+        let ok = fs::File::open(path).and_then(|mut f| { f.seek(SeekFrom::Start(from))?; f.read_to_end(&mut buf) }).is_ok();
+        if !ok { *tail = None; return vec![] }
+        // 書きかけの最後の行（改行が無い）は、次の回に読む
+        let end = buf.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+        let mut recs = if from == 0 { vec![] } else { tail.take().map(|t| t.recs).unwrap_or_default() };
+        recs.extend(String::from_utf8_lossy(&buf[..end]).lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()));
+        *tail = Some(LetterTail { stamp: st, offset: from + end as u64, recs });
+    }
+    let since = now.saturating_sub(LETTERS_WINDOW_MS);
+    let in_window = |v: &Value| v["at"].as_u64().map(|a| a as u128 >= since).unwrap_or(false);
+    let t = tail.as_mut().expect("上で入れた");
+    // 窓から外れた行より前は、時刻が進んでも二度と返さないので捨てる（末尾から続く間だけ取る、という前の形と同じになる）
+    if let Some(i) = t.recs.iter().rposition(|v| !in_window(v)) {
+        t.recs.drain(..=i);
+    }
+    let n = t.recs.len();
+    t.recs[n.saturating_sub(LETTERS_MAX)..].to_vec()
 }
 
 fn peers() -> Result<Value, String> {
     get_json_t(&format!("{}/api/peers", ccn_base()), LIST_TIMEOUT)
 }
 
-/// カードの名前。セッションの cwd の最後の名前。cwd が無いときだけ ccn の title、それも無ければ ID の先頭8字
-fn display_name(cwd: Option<&str>, title: Option<&str>, id: &str) -> String {
-    if let Some(d) = cwd.and_then(|c| c.split('/').filter(|p| !p.is_empty()).last()) {
-        return d.to_string();
-    }
-    title.filter(|t| !t.is_empty()).map(String::from).unwrap_or_else(|| id[..8.min(id.len())].to_string())
+/// ccn の一覧を、画面に渡すセッションの形に直す。読めなければ（空の一覧, 理由）。
+/// この機械の町（peer が None）だけ、hook の報告と close-check の判定を足す。キャラの割り当ては足さない
+fn fetch_agents(peer: &Option<String>) -> (Vec<Value>, Option<String>) {
+    agents_from(peer, list_sessions(peer))
 }
 
-fn snapshot(peer: Option<String>) -> Snapshot {
-    let peer = peer.filter(|p| !p.is_empty());
-    let (sessions, ccn_error) = match get_json_t(&format!("{}/sessions", api(&peer)), LIST_TIMEOUT) {
-        Ok(Value::Array(v)) => (v, None),
-        Ok(_) => (vec![], Some("一覧の形が想定と違う".into())),
+/// ccn の一覧（GET /sessions）。読めなければ理由
+fn list_sessions(peer: &Option<String>) -> Result<Vec<Value>, String> {
+    match get_json_t(&format!("{}/sessions", api(peer)), LIST_TIMEOUT) {
+        Ok(Value::Array(v)) => Ok(v),
+        Ok(_) => Err("一覧の形が想定と違う".into()),
+        Err(e) => Err(e),
+    }
+}
+
+/// ccn の一覧を、画面に渡すセッションの形に直す（fetch_agents の中身）。一覧は GET /sessions でも、一覧の SSE（#5）でもよい
+fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<Value>, Option<String>) {
+    let (sessions, ccn_error) = match got {
+        Ok(v) => (v, None),
         Err(e) => (vec![], Some(e)),
     };
     let live: Vec<&Value> = sessions
@@ -178,12 +248,6 @@ fn snapshot(peer: Option<String>) -> Snapshot {
         .collect();
     let live_ids: HashSet<String> = live.iter().filter_map(|s| s["id"].as_str().map(String::from)).collect();
 
-    let mut name_of: HashMap<String, String> = HashMap::new();
-    for s in &live {
-        let id = s["id"].as_str().unwrap_or_default().to_string();
-        let name = display_name(s["cwd"].as_str(), s["title"].as_str(), &id);
-        name_of.insert(id, name);
-    }
     // ccn の parent は from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）
     let parent_from_ccn = |s: &Value| -> Option<String> {
         let p = s["parent"].as_str()?;
@@ -192,6 +256,25 @@ fn snapshot(peer: Option<String>) -> Snapshot {
     };
 
     let houses = read_houses();
+    // 名前は、そのセッションが作業しているプロジェクトの名前（src-tauri/src/naming.rs）。
+    // .git を読むのはこの機械の町だけ。別の機械の cwd はパスの形だけで決める
+    let local = peer.is_none();
+    let whos: Vec<naming::Who> = live.iter().map(|s| {
+        let id = s["id"].as_str().unwrap_or_default().to_string();
+        let cwd = s["cwd"].as_str().filter(|c| !c.is_empty());
+        let house = houses.get(&id);
+        naming::Who {
+            parent: parent_from_ccn(s).filter(|p| *p != id),
+            cwd: cwd.map(String::from),
+            title: s["title"].as_str().map(String::from),
+            project: cwd.and_then(|c| naming::project_of(c, local)),
+            agent_name: house.filter(|h| h["by"] == "agent").and_then(|h| h["name"].as_str()).map(String::from),
+            started_at: s["startedAt"].as_u64().unwrap_or(0),
+            id,
+        }
+    }).collect();
+    let name_of = naming::card_names(&whos);
+    let project_of: HashMap<&str, Option<&String>> = whos.iter().map(|w| (w.id.as_str(), w.project.as_ref())).collect();
     let mut agents = vec![];
     for s in &live {
         let id = s["id"].as_str().unwrap_or_default().to_string();
@@ -199,8 +282,8 @@ fn snapshot(peer: Option<String>) -> Snapshot {
         let parent = parent_from_ccn(s).filter(|p| *p != id);
         let (report, close_check) = if peer.is_none() {
             (
-                read_json(&fc_path(Scope::Shared, &format!("state/{id}.json"))),
-                read_json(&home().join(format!(".claude/close-check/{id}.json"))),
+                read_json_cached(&fc_path(Scope::Shared, &format!("state/{id}.json"))),
+                read_json_cached(&home().join(format!(".claude/close-check/{id}.json"))),
             )
         } else {
             (None, None)
@@ -208,6 +291,8 @@ fn snapshot(peer: Option<String>) -> Snapshot {
         agents.push(json!({
             "id": id,
             "name": name_of.get(&id),
+            // cwd のプロジェクトの名前（worktree なら本体の名前）。振り分けの場所でも cwd の分を入れる
+            "project": project_of.get(id.as_str()).copied().flatten(),
             "kind": s["kind"],
             "state": s["state"],
             "cwd": s["cwd"],
@@ -228,6 +313,18 @@ fn snapshot(peer: Option<String>) -> Snapshot {
             })),
         }));
     }
+    (agents, ccn_error)
+}
+
+fn snapshot(peer: Option<String>) -> Snapshot {
+    let peer = peer.filter(|p| !p.is_empty());
+    let got = list_sessions(&peer);
+    snapshot_from(peer, got)
+}
+
+/// 受け取った一覧から、画面に渡す町の形を作る。キャラの割り当て、状態ファイル、お手紙はここで足す
+fn snapshot_from(peer: Option<String>, got: Result<Vec<Value>, String>) -> Snapshot {
+    let (mut agents, ccn_error) = agents_from(&peer, got);
     // キャラの絵の割り当て。世代（親をたどった深さ）に合う見た目を重み付きの乱数で選び、保存して以後変えない。
     // 別の機械の町も、機械ごとのファイルに保存する（乱数なので、保存しないと読むたびに顔が変わる）
     let mut order: Vec<&Value> = agents.iter().collect();
@@ -265,6 +362,24 @@ fn snapshot(peer: Option<String>) -> Snapshot {
 
 static AVATARS_LOCK: Mutex<()> = Mutex::new(());
 
+/// 別の町（いま見ていない町）のセッションの一覧（#14）。お便りと転出のゴーストにだけ使う。
+/// snapshot と違い、キャラを割り当てず保存もしない（前に割り当てた分を読むだけ）。お手紙の記録も読まない。
+/// まだ割り当てていないセッションは avatar が無く、画面は ID から決まる仮の顔を出す。その町を開いたときに snapshot が割り当てる
+fn town_agents(peer: Option<String>) -> Result<Vec<Value>, String> {
+    let peer = peer.filter(|p| !p.is_empty());
+    let (mut agents, err) = fetch_agents(&peer);
+    if let Some(e) = err {
+        return Err(e);
+    }
+    let (assigned, _) = avatars::load(&avatars_path(&peer));
+    for a in agents.iter_mut() {
+        if let Some(v) = a["id"].as_str().and_then(|id| assigned.get(id)) {
+            a["avatar"] = json!({ "char": v.char, "hue": v.hue });
+        }
+    }
+    Ok(agents)
+}
+
 /// キャラの割り当ての保存先。FC_AVATARS で差し替えられる（モックの ccn で試すとき、本物の割り当てを消さないため）。
 /// 別の機械の町は、同じ場所の avatars-peer-<機械>.json に分けて置く
 /// FC_CCN_URL で別のノード（モックなど）に向けたのに FC_AVATARS が無いときは、avatars-custom-ccn.json に分ける。
@@ -297,9 +412,9 @@ fn houses_paths() -> (PathBuf, PathBuf) {
 /// 世帯の名前を読む。共有の分を下地にして、アプリの分（開発版なら開発版で付けた名前）を上に重ねる
 fn read_houses() -> Value {
     let (shared, own) = houses_paths();
-    let mut out = read_json(&shared).filter(Value::is_object).unwrap_or(json!({}));
+    let mut out = read_json_cached(&shared).filter(Value::is_object).unwrap_or(json!({}));
     if own != shared {
-        if let (Some(base), Some(Value::Object(top))) = (out.as_object_mut(), read_json(&own)) {
+        if let (Some(base), Some(Value::Object(top))) = (out.as_object_mut(), read_json_cached(&own)) {
             base.extend(top);
         }
     }
@@ -331,8 +446,70 @@ fn set_house_name(session_id: String, name: String) -> Result<(), String> {
 
 #[derive(Default)]
 struct Conv {
+    /// ccn の messages の次の読み出し位置（after=）
     next: u64,
+    /// これまでに縮めた項目の数。項目の通し番号 n は 0 から数える
+    total: u64,
+    /// 最後の KEEP_MESSAGES 件
     items: Vec<Value>,
+    /// 最後に読まれた時刻（ms）
+    used: u128,
+}
+
+/// 会話のキャッシュを残す時間（#15）。画面は開いている会話だけを 2.5 秒ごとに読むので、
+/// これより長く読まれていない会話（閉じたセッション、ほかのセッションに切り替えた後）は捨てる。
+/// 捨てた後に開き直したら、ccn の after=0 から読み直し、画面は reset で受け取る
+const CONV_IDLE_MS: u128 = 10 * 60 * 1000;
+
+fn forget_idle_convs(map: &mut HashMap<String, Conv>, keep: &str, now: u128) {
+    map.retain(|k, c| k == keep || now.saturating_sub(c.used) < CONV_IDLE_MS);
+}
+
+/// 画面へ渡す差分（#10）。items の各項目には通し番号 n を付ける。
+/// reset=true のとき、画面は持っている分を捨てて items に置き換える。total は次の呼び出しの since に渡す
+#[derive(Serialize, Debug, PartialEq)]
+struct ConvDelta {
+    items: Vec<Value>,
+    total: u64,
+    reset: bool,
+}
+
+impl Conv {
+    /// ccn の after=from から next まで読んだ分を足す。同じセッションの取得が重なり、
+    /// ほかの呼び出しが先に同じ範囲を足していたら（c.next が読み始めと違う）、足さない
+    fn absorb(&mut self, from: u64, next: u64, fresh: Vec<Value>) {
+        if self.next != from {
+            return;
+        }
+        self.next = next;
+        self.push(fresh);
+    }
+
+    fn push(&mut self, fresh: Vec<Value>) {
+        for mut v in fresh {
+            if let Value::Object(o) = &mut v {
+                o.insert("n".into(), json!(self.total));
+            }
+            self.total += 1;
+            self.items.push(v);
+        }
+        if self.items.len() > KEEP_MESSAGES {
+            let cut = self.items.len() - KEEP_MESSAGES;
+            self.items.drain(..cut);
+        }
+    }
+
+    /// 画面が total=since まで持っているときの差分。持っている分が古すぎる（捨てた分より前）、
+    /// 先に進みすぎている（キャッシュを作り直した）、since が無いときは、全部を reset で返す
+    fn since(&self, since: Option<u64>) -> ConvDelta {
+        let base = self.total - self.items.len() as u64;
+        match since {
+            Some(s) if s >= base && s <= self.total => {
+                ConvDelta { items: self.items[(s - base) as usize..].to_vec(), total: self.total, reset: false }
+            }
+            _ => ConvDelta { items: self.items.clone(), total: self.total, reset: true },
+        }
+    }
 }
 
 static CONVS: Mutex<Option<HashMap<String, Conv>>> = Mutex::new(None);
@@ -457,13 +634,14 @@ fn simplify(m: &Value) -> Vec<Value> {
     out
 }
 
-fn conversation(session_id: String, peer: Option<String>) -> Result<Vec<Value>, String> {
+fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<ConvDelta, String> {
     let peer = peer.filter(|p| !p.is_empty());
     let key = format!("{}|{session_id}", peer.clone().unwrap_or_default());
-    let mut next = {
+    let from = {
         let g = CONVS.lock().map_err(|e| e.to_string())?;
         g.as_ref().and_then(|m| m.get(&key)).map(|c| c.next).unwrap_or(0)
     };
+    let mut next = from;
     let mut fresh = vec![];
     // 1回の呼び出しで読むのは最大20ページ（4000件）。続きは次の呼び出しで読む
     for _ in 0..20 {
@@ -482,14 +660,12 @@ fn conversation(session_id: String, peer: Option<String>) -> Result<Vec<Value>, 
     }
     let mut g = CONVS.lock().map_err(|e| e.to_string())?;
     let map = g.get_or_insert_with(HashMap::new);
+    let now = now_ms();
+    forget_idle_convs(map, &key, now);
     let c = map.entry(key).or_insert_with(Conv::default);
-    c.next = next;
-    c.items.extend(fresh);
-    if c.items.len() > KEEP_MESSAGES {
-        let cut = c.items.len() - KEEP_MESSAGES;
-        c.items.drain(..cut);
-    }
-    Ok(c.items.clone())
+    c.used = now;
+    c.absorb(from, next, fresh);
+    Ok(c.since(since))
 }
 
 fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
@@ -946,8 +1122,10 @@ mod cmd {
     #[tauri::command]
     pub async fn snapshot(peer: Option<String>) -> Result<Snapshot, String> { blocking(move || Ok(super::snapshot(peer))).await }
     #[tauri::command]
-    pub async fn conversation(session_id: String, peer: Option<String>) -> Result<Vec<Value>, String> {
-        blocking(move || super::conversation(session_id, peer)).await
+    pub async fn town_agents(peer: Option<String>) -> Result<Vec<Value>, String> { blocking(move || super::town_agents(peer)).await }
+    #[tauri::command]
+    pub async fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<super::ConvDelta, String> {
+        blocking(move || super::conversation(session_id, peer, since)).await
     }
     #[tauri::command]
     pub async fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
@@ -975,6 +1153,200 @@ mod cmd {
     }
 }
 
+// ---------- 町の一覧の見張り（#5） ----------
+//
+// 画面が決まった間隔で snapshot を呼ぶのをやめ、Rust のスレッドが一覧を取り、前回と変わったときだけ Channel で画面へ送る。
+// 変化が無ければ画面（JS）は一度も起きない。ccn に変化を流す口（SSE）が町の全部を覆うまでのつなぎ。
+// ccn の GET /api/events は、コードを読んだ範囲では hook の状態ファイル（state/、close-check）とお手紙の変化を含まないので、まだ使わない。
+// 間隔は、変化が無い回が続くと 2秒→4秒→8秒と延ばし、8秒で止める。変わったら2秒に戻す。つながらない回は毎回送り、2秒で取り直す。
+// 上限を8秒にしたのは、静かな町で承認待ちや返事待ちが出たとき、画面に出るまでの遅れを8秒までに抑えるため（「あなたの番」を早く見せる）
+// 画面が見えていない間は、画面が town_unwatch で止める（#6）。
+
+/// 変化が無い回が続いたときの間隔の下限と上限
+const WATCH_MIN: Duration = Duration::from_secs(2);
+const WATCH_MAX: Duration = Duration::from_secs(8);
+
+enum WatchCmd {
+    Kick,
+    Stop,
+    /// 一覧の SSE が送ってきた一覧（ccn #35 の GET /api/sessions/stream?state=live の event: sessions の data）
+    List(Vec<Value>),
+    /// 一覧の SSE が終わった、または使えなかった。理由と、404 だったか（古い版のノード）
+    StreamEnded(String, bool),
+}
+
+/// 一覧の SSE を、この長さ何も来なければ切ってポーリングに戻す。ccn は15秒ごとに keep-alive を送る。
+/// Cloudflare の中継などで本文が溜められたときも、これで戻る
+const STREAM_SILENT: Duration = Duration::from_secs(20);
+/// 一覧の SSE が切れたときに、次に試すまでの長さ。404（古い版のノード）なら長くあける。
+/// 404 でも試し直すのは、開いたままの窓が、ノードを新しくした後に乗り替われるようにするため
+const STREAM_RETRY: Duration = Duration::from_secs(60);
+const STREAM_RETRY_NOT_FOUND: Duration = Duration::from_secs(300);
+
+/// 一覧の SSE の本文を読み、event: sessions の data（一覧の配列）ごとに on を呼ぶ。on が false を返すか stop が立てば終わる。
+/// 枠は ccn の src/api/sse.ts の形（`id: <ETag>` `event: sessions` `data: <1行の JSON>` と空行、keep-alive は `: keep-alive` と空行）。
+/// id（引用符つきの ETag）は使わない。つなぎ直すたびに一覧の全体を受ける。返り値は終わった理由
+fn pump_sessions_sse(reader: impl BufRead, stop: &AtomicBool, mut on: impl FnMut(Vec<Value>) -> bool) -> String {
+    let (mut ev, mut data) = (String::new(), String::new());
+    for line in reader.lines() {
+        if stop.load(Ordering::SeqCst) {
+            return "止めた".into();
+        }
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => return format!("読めなくなった（{}秒何も来ないときも含む）: {e}", STREAM_SILENT.as_secs()),
+        };
+        if line.is_empty() {
+            if ev == "sessions" {
+                match serde_json::from_str::<Value>(&data) {
+                    Ok(Value::Array(v)) => {
+                        if !on(v) {
+                            return "止めた".into();
+                        }
+                    }
+                    _ => return "一覧の形が想定と違う".into(),
+                }
+            }
+            ev.clear();
+            data.clear();
+        } else if let Some(x) = line.strip_prefix("event:") {
+            ev = x.trim().to_string();
+        } else if let Some(x) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(x.trim_start());
+        }
+        // id: と、: で始まる keep-alive は読み捨てる
+    }
+    "ccn が閉じた".into()
+}
+
+/// 一覧の SSE につないで読む。200 で text/event-stream のときだけ読み、それ以外（404、502、HTML のページなど）はすぐ理由を返す。
+/// 共有の agent() は全体の時間切れ（8秒）が付いていて長い接続が切れるので、読みの時間切れ（STREAM_SILENT）だけの agent を使う
+fn read_sessions_stream(url: &str, stop: &AtomicBool, on: impl FnMut(Vec<Value>) -> bool) -> (String, bool) {
+    let a = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(5)).timeout_read(STREAM_SILENT).build();
+    match a.get(url).call() {
+        Ok(r) if r.status() == 200 && r.content_type() == "text/event-stream" => (pump_sessions_sse(BufReader::new(r.into_reader()), stop, on), false),
+        Ok(r) => (format!("SSE ではない応答（{} {}）", r.status(), r.content_type()), false),
+        Err(ureq::Error::Status(code, _)) => (format!("ccn が {code} を返した"), code == 404),
+        Err(e) => (format!("つながらない: {e}"), false),
+    }
+}
+/// いま動いている見張り（窓は1つなので1本だけ）。世代と、止めるための口
+static WATCH: Mutex<Option<(u64, std::sync::mpsc::Sender<WatchCmd>)>> = Mutex::new(None);
+static WATCH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// 前回と同じかを比べる鍵。取得した時刻（fetched_at）は毎回変わるので除く
+fn snapshot_key(s: &Snapshot) -> String {
+    let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
+    if let Some(o) = v.as_object_mut() {
+        o.remove("fetched_at");
+    }
+    v.to_string()
+}
+
+/// 次に取るまでの間隔。変わったら下限に戻し、変わらなければ倍にする（上限で止める）
+fn next_wait(cur: Duration, changed: bool) -> Duration {
+    if changed { WATCH_MIN } else { (cur * 2).min(WATCH_MAX) }
+}
+
+/// 見張りの本体。一覧を受け取り、前回と変わったとき（つながらない回は毎回）だけ send に渡す。send が false を返すか Stop で終わる。
+/// 一覧は、ccn の一覧の SSE が使えればそこから受け、使えなければ GET /sessions で取る（#5）。
+/// どちらのときも 2秒→4秒→8秒 の周期で町を作り直す。SSE が運ぶのは ccn の一覧だけで、hook の状態ファイル、close-check、
+/// 世帯の名前、お手紙の変化は来ないため。SSE の間の作り直しは、最後に受けた一覧を使い、HTTP の要求は出さない
+fn watch_loop(peer: Option<String>, tx: std::sync::mpsc::Sender<WatchCmd>, rx: std::sync::mpsc::Receiver<WatchCmd>, mut send: impl FnMut(Value) -> bool) {
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Instant;
+    let mut last: Option<String> = None;
+    let mut wait = WATCH_MIN;
+    // SSE から受けた最後の一覧。Some の間は GET /sessions を出さない
+    let mut list: Option<Vec<Value>> = None;
+    // 次に SSE を試す時刻。None はつないでいる最中
+    let mut stream_at = Some(Instant::now());
+    let stop = Arc::new(AtomicBool::new(false));
+    let url = format!("{}/sessions/stream?state=live", api(&peer));
+    loop {
+        if stream_at.is_some_and(|at| Instant::now() >= at) {
+            stream_at = None;
+            let (u, st, t) = (url.clone(), stop.clone(), tx.clone());
+            std::thread::spawn(move || {
+                let (why, not_found) = read_sessions_stream(&u, &st, |v| t.send(WatchCmd::List(v)).is_ok());
+                let _ = t.send(WatchCmd::StreamEnded(why, not_found));
+            });
+        }
+        let s = match &list {
+            Some(v) => snapshot_from(peer.clone(), Ok(v.clone())),
+            None => snapshot(peer.clone()),
+        };
+        let key = snapshot_key(&s);
+        let changed = last.as_deref() != Some(key.as_str());
+        // つながらない回は、同じ中身でも毎回送る（画面が続けて失敗した回数を数え、「つながりにくい」を出す）
+        if (changed || !s.ccn_ok) && !send(serde_json::to_value(&s).unwrap_or(Value::Null)) {
+            break;
+        }
+        wait = if s.ccn_ok { next_wait(wait, changed) } else { WATCH_MIN };
+        last = Some(key);
+        // SSE を試し直す時刻が先に来るなら、そこで起きる
+        let nap = stream_at.map(|at| wait.min(at.saturating_duration_since(Instant::now()))).unwrap_or(wait);
+        match rx.recv_timeout(nap) {
+            // すぐ取り直す（新しい世帯を作った直後など）。間隔も下限に戻す
+            Ok(WatchCmd::Kick) => wait = WATCH_MIN,
+            // 一覧が変わった。すぐ作り直す
+            Ok(WatchCmd::List(v)) => {
+                if list.is_none() {
+                    eprintln!("[town] 一覧の SSE につないだ（{url}）");
+                }
+                list = Some(v);
+                wait = WATCH_MIN;
+            }
+            // SSE が使えない、切れた。ポーリングに戻り、しばらくしてから試し直す
+            Ok(WatchCmd::StreamEnded(why, not_found)) => {
+                eprintln!("[town] 一覧の SSE をやめてポーリングに戻す: {why}");
+                list = None;
+                stream_at = Some(Instant::now() + if not_found { STREAM_RETRY_NOT_FOUND } else { STREAM_RETRY });
+            }
+            Ok(WatchCmd::Stop) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+    // SSE を読んでいるスレッドは、次の行（keep-alive は15秒ごと）か時間切れで、この旗を見て終わる
+    stop.store(true, Ordering::SeqCst);
+}
+
+/// 町の一覧の見張りを始める。前の見張りがあれば止める。戻り値の世代を town_unwatch に渡す
+#[tauri::command]
+fn town_watch(peer: Option<String>, on_event: tauri::ipc::Channel<Value>) -> u64 {
+    let (tx, rx) = std::sync::mpsc::channel::<WatchCmd>();
+    let generation = WATCH_GEN.fetch_add(1, Ordering::SeqCst);
+    // 見張りは、SSE を読むスレッドに渡すために送り口の写しを持つ
+    let tx2 = tx.clone();
+    if let Some((_, old)) = WATCH.lock().unwrap_or_else(|e| e.into_inner()).replace((generation, tx)) {
+        let _ = old.send(WatchCmd::Stop);
+    }
+    std::thread::spawn(move || watch_loop(peer, tx2, rx, |v| on_event.send(v).is_ok()));
+    generation
+}
+
+/// 見張りを止める。世代が今の見張りと違えば何もしない（後から始めた見張りを止めない）
+#[tauri::command]
+fn town_unwatch(generation: u64) {
+    let mut w = WATCH.lock().unwrap_or_else(|e| e.into_inner());
+    if w.as_ref().map(|(g, _)| *g) == Some(generation) {
+        if let Some((_, tx)) = w.take() {
+            let _ = tx.send(WatchCmd::Stop);
+        }
+    }
+}
+
+/// 見張りに、すぐ取り直させる
+#[tauri::command]
+fn town_kick() {
+    if let Some((_, tx)) = WATCH.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        let _ = tx.send(WatchCmd::Kick);
+    }
+}
+
 // ---------- 計測（#18） ----------
 
 /// 画面の計測（src/term/perf.ts）の1行を書く。FC_PERF_LOG があればそのファイルに足し、無ければ標準エラーに出す
@@ -995,6 +1367,20 @@ fn perf_log(line: String) {
 #[tauri::command]
 fn perf_ping() {}
 
+/// 軽さの計測（scripts/bench.ts、#2）で、窓を隠すか最小化する。FC_PERF_LOG があるとき（計測のとき）だけ動く
+#[tauri::command]
+fn perf_window(window: tauri::WebviewWindow, op: String) -> Result<(), String> {
+    if std::env::var("FC_PERF_LOG").map(|p| p.is_empty()).unwrap_or(true) {
+        return Err("計測のときだけ使える".into());
+    }
+    match op.as_str() {
+        "hide" => window.hide(),
+        "minimize" => window.minimize(),
+        _ => return Err(format!("知らない操作: {op}")),
+    }
+    .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 開発用: 画面に渡すのと同じ JSON を出して終わる（ブラウザでの見た目の確認に使う）
@@ -1003,6 +1389,10 @@ pub fn run() {
     //   family-computing --answer <sessionId> <allow|deny> [expectId]
     // identifier はビルド時の設定（開発版は tauri.conf.json、安定版は tauri.stable.conf.json を重ねたもの）から取る。
     // 下の開発用の引数も、画面と同じ置き場所を使う
+    // 軽さの計測（scripts/bench.ts）: プロセスが始まった時刻を書く。画面が町を描いた時刻との差を、起動の時間にする
+    if std::env::var("FC_PERF_LOG").map(|p| !p.is_empty()).unwrap_or(false) {
+        perf_log(json!({ "bench": "proc", "procStartMs": now_ms() as u64 }).to_string());
+    }
     let context = tauri::generate_context!();
     let _ = APP_ID.set(context.config().identifier.clone());
     let args: Vec<String> = std::env::args().collect();
@@ -1031,7 +1421,8 @@ pub fn run() {
         return;
     }
     if let Some(id) = arg_after("--conversation") {
-        println!("{}", serde_json::to_string_pretty(&conversation(id, None)).unwrap_or_default());
+        // 出力の形は前と同じ（Ok に項目の配列）。public/dev-conversation.json に使う
+        println!("{}", serde_json::to_string_pretty(&conversation(id, None, None).map(|d| d.items)).unwrap_or_default());
         return;
     }
     // family-computing --answer <sessionId> <allow|deny> [requestId]   承認待ちに答える（画面のボタンと同じ処理）
@@ -1068,20 +1459,25 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            // 開発の計測用（src/term/bench.ts）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、最前面に出す
+            // 開発の計測用（src/term/bench.ts、scripts/bench.ts）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、
+            // 最前面に出し、どのデスクトップにも出す（本人が別のデスクトップに移っても隠れないように）。
+            // 前面は奪わない（FC_BENCH_FOCUS=1 のときだけ奪う）。起動のたびに前面を奪うと、本人の作業の邪魔になる
             if std::env::var("FC_BENCH_TOP").is_ok() {
                 use tauri::Manager;
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.set_always_on_top(true);
-                    let _ = w.set_focus();
+                    let _ = w.set_visible_on_all_workspaces(true);
+                    if std::env::var("FC_BENCH_FOCUS").is_ok() {
+                        let _ = w.set_focus();
+                    }
                 }
             }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            cmd::snapshot, cmd::peers, cmd::conversation, cmd::send_message, set_house_name, cmd::answer_permission,
+            cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::send_message, set_house_name, cmd::answer_permission,
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, term_open, term_close, term_input, term_resize,
-            perf_log, perf_ping
+            perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick
         ])
         .run(context)
         .expect("error while running tauri application");
@@ -1090,12 +1486,216 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn display_name_is_cwd_basename() {
-        use super::display_name;
-        assert_eq!(display_name(Some("/Users/x/Documents/meta"), Some("[Image #5] 安定"), "abcdef0123"), "meta");
-        assert_eq!(display_name(Some("/a/b/"), None, "abcdef0123"), "b");
-        assert_eq!(display_name(None, Some("題"), "abcdef0123"), "題");
-        assert_eq!(display_name(Some(""), None, "abcdef0123"), "abcdef01");
+    fn conversation_returns_only_what_the_screen_lacks() {
+        use super::{Conv, KEEP_MESSAGES};
+        use serde_json::json;
+        let mut c = Conv::default();
+        let item = |i: usize| json!({ "role": "assistant", "text": format!("t{i}") });
+        c.push((0..3).map(item).collect());
+        // 初めて開いたときは全部
+        let d = c.since(None);
+        assert!(d.reset);
+        assert_eq!(d.total, 3);
+        assert_eq!(d.items.iter().map(|v| v["n"].as_u64().unwrap()).collect::<Vec<_>>(), vec![0, 1, 2]);
+        // 増えていなければ空
+        let d = c.since(Some(3));
+        assert!(!d.reset && d.items.is_empty() && d.total == 3);
+        // 増えた分だけ
+        c.push(vec![item(3)]);
+        let d = c.since(Some(3));
+        assert!(!d.reset);
+        assert_eq!(d.items, vec![json!({ "role": "assistant", "text": "t3", "n": 3 })]);
+        // 一度に KEEP_MESSAGES を超えて増え、画面の持つ分が捨てた分より前になったら、全部を reset で
+        c.push((4..4 + KEEP_MESSAGES + 5).map(item).collect());
+        let d = c.since(Some(4));
+        assert!(d.reset);
+        assert_eq!(d.items.len(), KEEP_MESSAGES);
+        assert_eq!(d.items[0]["n"], json!(9));
+        assert_eq!(d.total, 4 + KEEP_MESSAGES as u64 + 5);
+        // 画面のほうが先に進んでいる（キャッシュを作り直した）ときも reset
+        assert!(c.since(Some(d.total + 1)).reset);
+    }
+
+    #[test]
+    fn overlapping_reads_do_not_add_twice() {
+        use super::Conv;
+        use serde_json::json;
+        let mut c = Conv::default();
+        let fresh = || vec![json!({ "role": "user", "text": "a" })];
+        // 同じ after=0 から読んだ2回。先に終わった方だけ足す
+        c.absorb(0, 5, fresh());
+        c.absorb(0, 5, fresh());
+        assert_eq!(c.total, 1);
+        assert_eq!(c.next, 5);
+        c.absorb(5, 6, fresh());
+        assert_eq!(c.total, 2);
+    }
+
+    #[test]
+    fn idle_conversations_are_forgotten() {
+        use super::{forget_idle_convs, Conv, CONV_IDLE_MS};
+        use std::collections::HashMap;
+        let mut m: HashMap<String, Conv> = HashMap::new();
+        let now = 100 * CONV_IDLE_MS;
+        m.insert("|open".into(), Conv { used: now - 2500, ..Default::default() });
+        m.insert("|closed".into(), Conv { used: now - CONV_IDLE_MS - 1, ..Default::default() });
+        m.insert("|asked".into(), Conv { used: 0, ..Default::default() });
+        forget_idle_convs(&mut m, "|asked", now);
+        let mut keys: Vec<_> = m.keys().cloned().collect();
+        keys.sort();
+        // 読んでいる会話と、いま読もうとしている会話は残し、長く読まれていない会話は捨てる
+        assert_eq!(keys, vec!["|asked", "|open"]);
+    }
+
+    #[test]
+    fn conv_delta_is_sent_as_an_object() {
+        use super::ConvDelta;
+        use serde_json::json;
+        let d = ConvDelta { items: vec![json!({ "role": "user", "text": "a", "n": 0 })], total: 1, reset: true };
+        assert_eq!(serde_json::to_value(&d).unwrap(), json!({ "items": [{ "role": "user", "text": "a", "n": 0 }], "total": 1, "reset": true }));
+    }
+
+    /// 見張りを、モックの町（FC_CCN_URL）につないで決まった秒数だけ回し、画面へ送った回数を数える（#5）。
+    /// ccn への要求の回数は、モックの /__bench/stats で数える。
+    /// HOME=<空のディレクトリ> FC_CCN_URL=http://127.0.0.1:<ポート> FC_WATCH_SECS=60 <cargo test --no-run で作った試験のバイナリ> watch_against_mock --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn watch_against_mock() {
+        let secs: u64 = std::env::var("FC_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+        let (tx, rx) = std::sync::mpsc::channel::<WatchCmd>();
+        let sent = Arc::new(Mutex::new(0u32));
+        let s2 = sent.clone();
+        let tx2 = tx.clone();
+        let t0 = std::time::Instant::now();
+        let t = std::thread::spawn(move || watch_loop(None, tx2, rx, |v| {
+            *s2.lock().unwrap() += 1;
+            // 送った時刻と、町の人数、作業中か承認待ちの人数を出す（状態ファイルだけを変えたときに送られるかを見る）
+            let agents = v["agents"].as_array().cloned().unwrap_or_default();
+            let busy = agents.iter().filter(|a| a["report"]["phase"].is_string()).count();
+            println!("送った {:.1}秒 {}人 報告あり{}人 ccn_ok={}", t0.elapsed().as_secs_f32(), agents.len(), busy, v["ccn_ok"]);
+            true
+        }));
+        std::thread::sleep(Duration::from_secs(secs));
+        let _ = tx.send(WatchCmd::Stop);
+        let _ = t.join();
+        println!("見張りを {secs} 秒回して、画面へ送ったのは {} 回", sent.lock().unwrap());
+    }
+
+    #[test]
+    fn letters_read_only_what_was_added() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("fc-letters-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let p = dir.join("letters.jsonl");
+        let now = 100 * 60 * 1000u128;
+        let line = |id: &str, at: u128| format!("{{\"ev\":\"sent\",\"id\":\"{id}\",\"at\":{at}}}\n");
+        fs::write(&p, format!("{}{}", line("old", now - LETTERS_WINDOW_MS - 1), line("a", now - 1000))).unwrap();
+        let mut tail = None;
+        let ids = |v: Vec<Value>| v.iter().map(|x| x["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(letters_from(&p, now, &mut tail)), vec!["a"]);
+        // 書きかけの行は返さず、書き終わったら返す
+        let mut f = fs::OpenOptions::new().append(true).open(&p).unwrap();
+        f.write_all(b"{\"ev\":\"sent\",\"id\":\"b\",").unwrap();
+        assert_eq!(ids(letters_from(&p, now, &mut tail)), vec!["a"]);
+        f.write_all(format!("\"at\":{}}}\n", now).as_bytes()).unwrap();
+        assert_eq!(ids(letters_from(&p, now, &mut tail)), vec!["a", "b"]);
+        // 足した分だけ読んだ
+        assert_eq!(tail.as_ref().unwrap().offset, fs::metadata(&p).unwrap().len());
+        // 時刻が進んで a が窓から外れる
+        assert_eq!(ids(letters_from(&p, now + LETTERS_WINDOW_MS - 500, &mut tail)), vec!["b"]);
+        // 入れ替わった（.1 に移して新しく始めた）ら頭から読む
+        fs::rename(&p, dir.join("letters.jsonl.1")).unwrap();
+        fs::write(&p, line("c", now)).unwrap();
+        assert_eq!(ids(letters_from(&p, now, &mut tail)), vec!["c"]);
+        // 消えたら空
+        fs::remove_file(&p).unwrap();
+        assert!(letters_from(&p, now, &mut tail).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 1MB の letters.jsonl で、頭から読む前の形と、増えた分だけ読む今の形の時間を比べる（#11）。
+    /// cargo test --release --lib letters_1mb -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn letters_1mb_timing() {
+        let dir = std::env::temp_dir().join(format!("fc-letters-1mb-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let p = dir.join("letters.jsonl");
+        let now = now_ms();
+        let mut text = String::new();
+        let mut i = 0u64;
+        while text.len() < 1_000_000 {
+            text.push_str(&format!("{{\"ev\":\"sent\",\"id\":\"l{i}\",\"at\":{},\"kind\":\"send\",\"from\":\"aaaaaaaa-0000-4000-8000-000000000001\",\"to\":\"uds:/tmp/cc-socks/1234.sock\",\"summary\":\"テストのお手紙\"}}\n", now - 3_600_000 + i as u128 * 10));
+            i += 1;
+        }
+        fs::write(&p, &text).unwrap();
+        let full = || {
+            let text = fs::read_to_string(&p).unwrap();
+            let since = now.saturating_sub(LETTERS_WINDOW_MS);
+            text.lines().rev().filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .take_while(|v| v["at"].as_u64().map(|a| a as u128 >= since).unwrap_or(false)).take(LETTERS_MAX).count()
+        };
+        let t = std::time::Instant::now();
+        for _ in 0..20 { full(); }
+        let before = t.elapsed() / 20;
+        let mut tail = None;
+        letters_from(&p, now, &mut tail);
+        let t = std::time::Instant::now();
+        for _ in 0..20 { letters_from(&p, now, &mut tail); }
+        let after = t.elapsed() / 20;
+        println!("letters.jsonl {} バイト {} 行: 頭から読む {:?}/回、増えた分だけ読む（変化なし） {:?}/回", text.len(), i, before, after);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_json_rereads_only_when_the_file_changes() {
+        let dir = std::env::temp_dir().join(format!("fc-cache-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let p = dir.join("state.json");
+        fs::write(&p, r#"{"phase":"working"}"#).unwrap();
+        assert_eq!(read_json_cached(&p).unwrap()["phase"], "working");
+        // 書き換えたら読み直す（大きさが同じでも、更新時刻が変わる）
+        std::thread::sleep(Duration::from_millis(5));
+        fs::write(&p, r#"{"phase":"resting"}"#).unwrap();
+        assert_eq!(read_json_cached(&p).unwrap()["phase"], "resting");
+        fs::remove_file(&p).unwrap();
+        assert!(read_json_cached(&p).is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sessions_sse_frames_are_read() {
+        use std::io::Cursor;
+        let stop = AtomicBool::new(false);
+        // ccn の src/api/sse.ts と同じ枠。keep-alive と id は読み捨てる
+        let body = ": keep-alive\n\nid: \"e1\"\nevent: sessions\ndata: [{\"id\":\"a\"}]\n\n: keep-alive\n\nid: \"e2\"\nevent: sessions\ndata: [{\"id\":\"a\"},{\"id\":\"b\"}]\n\n";
+        let mut got = vec![];
+        let why = pump_sessions_sse(Cursor::new(body), &stop, |v| { got.push(v.len()); true });
+        assert_eq!(got, vec![1, 2]);
+        assert_eq!(why, "ccn が閉じた");
+        // 形の違う data が来たら終わる（ポーリングに戻る）
+        let why = pump_sessions_sse(Cursor::new("event: sessions\ndata: {\"error\":1}\n\n"), &stop, |_| true);
+        assert_eq!(why, "一覧の形が想定と違う");
+        // 受け手が閉じたら終わる
+        let mut n = 0;
+        let why = pump_sessions_sse(Cursor::new(body), &stop, |_| { n += 1; false });
+        assert_eq!((n, why.as_str()), (1, "止めた"));
+    }
+
+    #[test]
+    fn watch_wait_backs_off_and_resets() {
+        let mut w = WATCH_MIN;
+        let mut seen = vec![];
+        for _ in 0..6 { w = next_wait(w, false); seen.push(w.as_secs()); }
+        assert_eq!(seen, vec![4, 8, 8, 8, 8, 8]);
+        assert_eq!(next_wait(WATCH_MAX, true), WATCH_MIN);
+    }
+
+    #[test]
+    fn snapshot_key_ignores_fetched_at() {
+        let mk = |at: u128, n: usize| Snapshot { ccn: "x".into(), peer: None, ccn_ok: true, ccn_error: None, agents: vec![json!({"id": n})], letters: vec![], fetched_at: at };
+        assert_eq!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(2, 1)));
+        assert_ne!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(1, 2)));
     }
 
     use super::*;
