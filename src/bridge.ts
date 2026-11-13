@@ -184,3 +184,15 @@ export async function setFullscreen() {
     await document.documentElement.requestFullscreen();
   }
 }
+
+export type FileDrop = { type: "enter" | "over" | "leave" | "drop"; paths?: string[] };
+
+/** 窓にファイルを落としたとき（#64）。Tauri はドロップを窓で受け、手元のパスを渡す（webview の drop イベントにはパスが無い）。
+ * ブラウザ表示では何もしない。返した関数で聞くのをやめる */
+export function onFileDrop(handler: (e: FileDrop) => void): () => void {
+  if (!inTauri) return () => {};
+  let off: (() => void) | null = null;
+  let done = false;
+  getCurrentWindow().onDragDropEvent((e) => handler(e.payload as FileDrop)).then((u) => { if (done) u(); else off = u; }).catch(() => {});
+  return () => { done = true; off?.(); };
+}

@@ -169,3 +169,21 @@ export function mergeHistory(local: string[], fetched: string[]): string[] {
   for (const x of [...local, ...fetched]) if (!seen.has(x)) { seen.add(x); out.push(x); }
   return out;
 }
+
+// ---------- 画像とファイルのパス（#64） ----------
+
+/** 端末にファイルをドラッグしたときと同じく、空白や記号の前に \ を付ける（macOS の Terminal と iTerm2 の書き方） */
+export function quotePath(p: string): string {
+  return p.replace(/([\s\\'"()[\]{}<>&;|$`!*?#])/g, "\\$1");
+}
+
+/** 選んだ範囲をパスで置き換える。前後の文とくっつかないよう、要るときだけ空白を挟む */
+export function insertPaths(s: Sel, paths: string[]): Edit | null {
+  if (!paths.length) return null;
+  const before = s.text.slice(0, s.start);
+  const after = s.text.slice(s.end);
+  const body = paths.map(quotePath).join(" ");
+  const lead = before && !/\s$/.test(before) ? " " : "";
+  const tail = !after || !/^\s/.test(after) ? " " : "";
+  return { from: s.start, to: s.end, insert: lead + body + tail };
+}

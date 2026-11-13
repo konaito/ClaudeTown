@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { backslashNewline, histDown, histUp, killToEnd, killToStart, killWordBack, killWordForward, mergeHistory, rankCommands, searchHistory, tokenAt, toLineEnd, toLineStart, wordBack, wordForward } from "./edit";
+import { backslashNewline, insertPaths, quotePath, histDown, histUp, killToEnd, killToStart, killWordBack, killWordForward, mergeHistory, rankCommands, searchHistory, tokenAt, toLineEnd, toLineStart, wordBack, wordForward } from "./edit";
 import { BUILTINS, opensDialog } from "./commands";
 
 const at = (text: string, i = text.length) => ({ text, start: i, end: i });
@@ -97,5 +97,19 @@ describe("組み込みのコマンド", () => {
   });
   test("名前が重ならない", () => {
     expect(new Set(BUILTINS.map((c) => c.name)).size).toBe(BUILTINS.length);
+  });
+});
+
+describe("画像とファイルのパス（#64）", () => {
+  test("空白や記号の前に \\ を付ける。日本語はそのまま", () => {
+    expect(quotePath("/Users/a/Desktop/スクリーンショット 2026-11-13 9.15.30.png")).toBe("/Users/a/Desktop/スクリーンショット\\ 2026-11-13\\ 9.15.30.png");
+    expect(quotePath("/tmp/a (1)/it's.png")).toBe("/tmp/a\\ \\(1\\)/it\\'s.png");
+    expect(quotePath("/tmp/plain.png")).toBe("/tmp/plain.png");
+  });
+  test("前後の文とくっつかないよう空白を挟む", () => {
+    expect(insertPaths({ text: "", start: 0, end: 0 }, ["/a.png"])).toEqual({ from: 0, to: 0, insert: "/a.png " });
+    expect(insertPaths({ text: "これを見て", start: 5, end: 5 }, ["/a.png", "/b c.png"])).toEqual({ from: 5, to: 5, insert: " /a.png /b\\ c.png " });
+    expect(insertPaths({ text: "見て  です", start: 3, end: 3 }, ["/a.png"])).toEqual({ from: 3, to: 3, insert: "/a.png" });
+    expect(insertPaths({ text: "x", start: 0, end: 1 }, [])).toBeNull();
   });
 });
