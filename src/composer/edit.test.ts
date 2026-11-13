@@ -55,7 +55,7 @@ describe("補完の語", () => {
   test("コマンドは名前の頭が合うものを先に出す", () => {
     const r = rankCommands(BUILTINS, "co");
     expect(r[0].name.startsWith("co")).toBe(true);
-    expect(r.every((c) => c.name.includes("co"))).toBe(true);
+    expect(r.every((c) => c.name.includes("co") || c.aliases?.some((a) => a.startsWith("co")))).toBe(true);
   });
   test("画面を開くコマンド", () => {
     expect(opensDialog("/model", BUILTINS)).toBe(true);
@@ -87,5 +87,15 @@ describe("履歴", () => {
   });
   test("手元の分を先にして重ねる", () => {
     expect(mergeHistory(["b", "a"], ["a", "c"])).toEqual(["b", "a", "c"]);
+  });
+});
+
+describe("組み込みのコマンド", () => {
+  test("別名でも引ける", () => {
+    expect(rankCommands(BUILTINS, "reset")[0].name).toBe("clear");
+    expect(opensDialog("/settings", BUILTINS)).toBe(true);
+  });
+  test("名前が重ならない", () => {
+    expect(new Set(BUILTINS.map((c) => c.name)).size).toBe(BUILTINS.length);
   });
 });

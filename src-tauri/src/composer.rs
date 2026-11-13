@@ -26,7 +26,7 @@ pub struct History {
     pub all: Vec<String>,
 }
 
-const HISTORY_ALL_MAX: usize = 3000;
+const HISTORY_ALL_MAX: usize = 1000;
 const HISTORY_PROJECT_MAX: usize = 1000;
 
 /// ccn が本文の前に付ける1行（from <誰> via <ノード>）を外す。人が打ったのは、その後ろの文だから
@@ -66,38 +66,44 @@ fn expand_pastes(display: &str, pasted: Option<&Value>, home: &Path) -> String {
     out
 }
 
-/// history.jsonl の行を新しい順に並べ、同じ文が続いたものは1つにする
-pub fn history_from(lines: &str, cwd: Option<&str>, home: &Path) -> History {
-    let mut all = Vec::new();
-    let mut project = Vec::new();
-    let mut seen_all: HashSet<String> = HashSet::new();
-    let mut seen_project: HashSet<String> = HashSet::new();
+/// history.jsonl の行を新しい順に並べ、同じ文が続いたものは1つにする。
+/// all が false なら cwd の project の分だけ、true なら全部の project の分だけを返す（上下キーと Ctrl+R で使い分け、毎回の受け渡しを小さくする）。
+/// 貼り付けの本文に戻すのは、返す行だけにする
+pub fn history_from(lines: &str, cwd: Option<&str>, all: bool, home: &Path) -> History {
+    let max = if all { HISTORY_ALL_MAX } else { HISTORY_PROJECT_MAX };
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    if !all && cwd.is_none() {
+        return History { project: out, all: vec![] };
+    }
     for line in lines.lines().rev() {
-        if all.len() >= HISTORY_ALL_MAX && (cwd.is_none() || project.len() >= HISTORY_PROJECT_MAX) {
+        if out.len() >= max {
             break;
         }
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        let Some(display) = v.get("display").and_then(|d| d.as_str()) else { continue };
-        let text = strip_from_line(&expand_pastes(display, v.get("pastedContents"), home)).to_string();
-        if text.trim().is_empty() {
-            continue;
-        }
-        if all.len() < HISTORY_ALL_MAX && seen_all.insert(text.clone()) {
-            all.push(text.clone());
-        }
-        if let Some(c) = cwd {
-            if v.get("project").and_then(|p| p.as_str()) == Some(c) && project.len() < HISTORY_PROJECT_MAX && seen_project.insert(text.clone()) {
-                project.push(text);
+        // project で先に絞る（JSON を開く前に、文字列で見て外れる行を飛ばす）
+        if let (false, Some(c)) = (all, cwd) {
+            if !line.contains(&format!("\"project\":{}", Value::String(c.to_string()))) {
+                continue;
             }
         }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if !all && v.get("project").and_then(|p| p.as_str()) != cwd {
+            continue;
+        }
+        let Some(display) = v.get("display").and_then(|d| d.as_str()) else { continue };
+        let key = strip_from_line(display).to_string();
+        if key.trim().is_empty() || !seen.insert(key) {
+            continue;
+        }
+        out.push(strip_from_line(&expand_pastes(display, v.get("pastedContents"), home)).to_string());
     }
-    History { project, all }
+    if all { History { project: vec![], all: out } } else { History { project: out, all: vec![] } }
 }
 
 /// history.jsonl は 7MB ほどあるので、変わっていなければ前に読んだ中身を使う
 static HISTORY_CACHE: Mutex<Option<(SystemTime, u64, String)>> = Mutex::new(None);
 
-pub fn prompt_history(cwd: Option<String>) -> Result<History, String> {
+pub fn prompt_history(cwd: Option<String>, all: bool) -> Result<History, String> {
     let home = super::home();
     let path = home.join(".claude/history.jsonl");
     let meta = fs::metadata(&path).map_err(|e| format!("履歴を読めない: {e}"))?;
@@ -109,7 +115,7 @@ pub fn prompt_history(cwd: Option<String>) -> Result<History, String> {
         *g = Some((stamp.0, stamp.1, s));
     }
     let s = &g.as_ref().unwrap().2;
-    Ok(history_from(s, cwd.as_deref(), &home))
+    Ok(history_from(s, cwd.as_deref(), all, &home))
 }
 
 // ---------- / の候補（スキルとコマンド） ----------
@@ -394,6 +400,14 @@ pub fn check_direct(d: &Value) -> Result<(), String> {
     if d.get("pending").and_then(|p| p.as_array()).map(|a| !a.is_empty()).unwrap_or(false) {
         return Err("承認待ちなので送らなかった。先に承認に答えて".into());
     }
+    // claude が起動し、信頼の確認を抜けたか。ccn の send は SessionStart の hook を待つが、端末の口は待たない。
+    // 信頼の確認の画面で Enter を送ると、既定の「No, exit」が選ばれて claude が終わる（2026-11-13 に画面で見た）。
+    // ccn の detail に起動済みの印は無いので、最初の hook で入る permissionMode を印に使う。
+    // Claude Town が立てる PTY は permission_mode を渡さないので、この印は起動前には無い。
+    // 立てるときに permission_mode を渡したセッションは、起動前から印があるので見分けられない（ccn 側に起動済みの印が要る）
+    if d.get("permissionMode").and_then(|v| v.as_str()).map(|s| s.is_empty()).unwrap_or(true) {
+        return Err("claude がまだ起動していない（信頼の確認の画面かもしれない）。ターミナルで答えてから送って".into());
+    }
     Ok(())
 }
 
@@ -430,9 +444,8 @@ mod tests {
             json!({"display":"c","project":"/p"}),
             json!({"display":"a","project":"/p"}),
         ].iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n");
-        let h = history_from(&lines, Some("/p"), home);
-        assert_eq!(h.project, vec!["a", "c"]);
-        assert_eq!(h.all, vec!["a", "c", "b"]);
+        assert_eq!(history_from(&lines, Some("/p"), false, home).project, vec!["a", "c"]);
+        assert_eq!(history_from(&lines, Some("/p"), true, home).all, vec!["a", "c", "b"]);
     }
 
     #[test]
@@ -474,11 +487,34 @@ mod tests {
 
     #[test]
     fn direct_send_refuses_while_waiting() {
-        let ok = json!({"capabilities":{"terminal":true},"state":"idle","pending":[]});
+        let ok = json!({"capabilities":{"terminal":true},"state":"idle","pending":[],"permissionMode":"default"});
         assert!(check_direct(&ok).is_ok());
+        // 信頼の確認の画面（hook がまだ来ていない）
+        assert!(check_direct(&json!({"capabilities":{"terminal":true},"state":"idle","pending":[]})).is_err());
         assert!(check_direct(&json!({"capabilities":{"terminal":true},"state":"running","pending":[{"requestId":"r"}]})).is_err());
         assert!(check_direct(&json!({"capabilities":{"terminal":true},"state":"waiting_permission","pending":[]})).is_err());
         assert!(check_direct(&json!({"capabilities":{"terminal":false},"state":"idle"})).is_err());
         assert_eq!(paste_body("a\x1b[201~b"), "ab");
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    /// 手元の ~/.claude/history.jsonl で、prompt_history の時間と返す大きさを測る。`cargo test --lib history_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn history_cost() {
+        let t = std::time::Instant::now();
+        let cwd = || Some("/Users/konaito/Documents/family-computing".to_string());
+        let h = super::prompt_history(cwd(), false).unwrap();
+        let first = t.elapsed();
+        let t = std::time::Instant::now();
+        let h2 = super::prompt_history(cwd(), false).unwrap();
+        let second = t.elapsed();
+        let t = std::time::Instant::now();
+        let a = super::prompt_history(cwd(), true).unwrap();
+        let third = t.elapsed();
+        let size = |x: &super::History| serde_json::to_string(x).unwrap().len();
+        println!("project: 1回目 {first:?}、2回目 {second:?}、{} 件、JSON {} バイト／all: {third:?}、{} 件、JSON {} バイト", h.project.len(), size(&h2), a.all.len(), size(&a));
     }
 }

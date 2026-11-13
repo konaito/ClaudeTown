@@ -57,16 +57,23 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
   const [help, setHelp] = useState(false);
   const [search, setSearch] = useState<{ query: string; idx: number; original: string } | null>(null);
   const histSt = useRef<HistState>({ index: -1, draft: "" });
+  // 検索を閉じたあと、検索欄の blur でもう一度閉じない（Ctrl+C でやめたのに、一致した文で上書きしないように）
+  const searchEnding = useRef(false);
   const kills = useRef<string[]>([]);
   const yank = useRef<{ from: number; to: number; i: number } | null>(null);
   const lastEsc = useRef(0);
   const caretAfter = useRef<number | null>(null);
   const [sent, setSent] = useState<string[]>(() => sentBy.get(agent.id) ?? []);
 
-  // 履歴は CLI と同じ ~/.claude/history.jsonl から読む（手元のセッションだけ）。送るたびに読み直す
+  // 履歴は CLI と同じ ~/.claude/history.jsonl から読む（手元のセッションだけ）。上下キーの分（同じ project）は開いたときと送るたびに読む。
+  // Ctrl+R の分（全部の project、1000件で約1.2MB）は、Ctrl+R を押したときだけ読む
   const loadHistory = () => {
     if (!local) return;
-    invoke<History>("prompt_history", { cwd: agent.cwd || null }).then((h) => { if (Array.isArray(h?.project) && Array.isArray(h?.all)) setHist(h); }).catch(() => {});
+    invoke<History>("prompt_history", { cwd: agent.cwd || null, all: false }).then((h) => { if (Array.isArray(h?.project)) setHist((x) => ({ ...x, project: h.project })); }).catch(() => {});
+  };
+  const loadAll = () => {
+    if (!local) return;
+    invoke<History>("prompt_history", { cwd: agent.cwd || null, all: true }).then((h) => { if (Array.isArray(h?.all)) setHist((x) => ({ ...x, all: h.all })); }).catch(() => {});
   };
   useEffect(loadHistory, [agent.id, agent.cwd, local]);
   useEffect(() => {
@@ -190,7 +197,7 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
       if (!r) return;
       stop(); histSt.current = r.st; replaceAll(r.text); return;
     }
-    if (ctrl && k === "r") { stop(); setSearch({ query: "", idx: -1, original: text }); return; }
+    if (ctrl && k === "r") { stop(); loadAll(); searchEnding.current = false; setSearch({ query: "", idx: -1, original: text }); return; }
 
     // readline の編集
     if (ctrl && k === "a") { stop(); moveTo(toLineStart(sel())); return; }
@@ -274,7 +281,8 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
     setSearch((s) => (s ? { ...s, query, idx: idx >= 0 ? idx : query === s.query ? s.idx : -1 } : s));
   };
   const endSearch = (keep: boolean) => {
-    if (!search) return;
+    if (!search || searchEnding.current) return;
+    searchEnding.current = true;
     const t = keep && searchMatch != null ? searchMatch : search.original;
     setSearch(null);
     replaceAll(t);

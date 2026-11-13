@@ -1154,8 +1154,8 @@ mod cmd {
         blocking(move || super::stop_session(session_id, peer)).await
     }
     #[tauri::command]
-    pub async fn prompt_history(cwd: Option<String>) -> Result<super::composer::History, String> {
-        blocking(move || super::composer::prompt_history(cwd)).await
+    pub async fn prompt_history(cwd: Option<String>, all: Option<bool>) -> Result<super::composer::History, String> {
+        blocking(move || super::composer::prompt_history(cwd, all.unwrap_or(false))).await
     }
     #[tauri::command]
     pub async fn slash_commands(cwd: Option<String>) -> Result<Vec<super::composer::SlashCommand>, String> {

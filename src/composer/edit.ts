@@ -111,14 +111,15 @@ export function tokenAt(s: Sel): Token | null {
 }
 
 /** / の候補を並べる。名前の頭が合うもの、名前に含むもの、説明に含むものの順 */
-export function rankCommands<T extends { name: string; description: string }>(list: T[], q: string, limit = 50): T[] {
+export function rankCommands<T extends { name: string; description: string; aliases?: string[] }>(list: T[], q: string, limit = 50): T[] {
   const lq = q.toLowerCase();
   const score = (c: T) => {
     const n = c.name.toLowerCase();
     if (!lq) return 0;
     if (n.startsWith(lq)) return 1;
-    if (n.split(/[:\-_]/).some((p) => p.startsWith(lq))) return 2;
-    if (n.includes(lq)) return 3;
+    if (c.aliases?.some((a) => a.startsWith(lq))) return 2;
+    if (n.split(/[:\-_]/).some((p) => p.startsWith(lq))) return 3;
+    if (n.includes(lq)) return 4;
     return -1;
   };
   return list
