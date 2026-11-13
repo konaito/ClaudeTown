@@ -375,13 +375,15 @@ if (fs.existsSync(file)) {
   if (other) { console.error(`${path.relative(ROOT, file)} には条件の違う回（${cond(other)}、今回は ${cond(SAME)}）がある。--label を変えて測る`); process.exit(2); }
 }
 // 場面ごとに、記録（同じ日付と label の .jsonl）にある有効な回が runs 回になるまで回す。途中で止めても、続きから再開できる。
-// 窓が隠れた回などで無効が続いても終わるように、1回の呼び出しで1場面に回すのは runs の2倍まで
+// 窓が隠れた回などで無効が続いても終わるように、1回の呼び出しで1場面に回すのは --max-tries 回まで（既定は runs の3倍）。
+// 本人が全画面のアプリ（Specter など）を前面にしている間は、見えるはずの場面が無効になる
 const done = (scene: Scene) => (fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Run) : [])
   .filter((r) => r.scene === scene && r.valid).length;
 const tries: Record<string, number> = {};
+const maxTries = Number(arg("max-tries", String(runs * 3)));
 console.log(`場面 ${scenes.join("、")} で、有効な回が ${runs} 回ずつになるまで測る。記録は ${path.relative(ROOT, file)}、作業の場所は ${o.work}`);
 for (;;) {
-  const todo = scenes.filter((s) => done(s) < runs && (tries[s] ?? 0) < runs * 2);
+  const todo = scenes.filter((s) => done(s) < runs && (tries[s] ?? 0) < maxTries);
   if (!todo.length) break;
   for (const scene of todo) {
     const round = (tries[scene] = (tries[scene] ?? 0) + 1);
