@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { backslashNewline, insertPaths, quotePath, histDown, histUp, killToEnd, killToStart, killWordBack, killWordForward, mergeHistory, rankCommands, searchHistory, tokenAt, toLineEnd, toLineStart, wordBack, wordForward } from "./edit";
+import { backslashNewline, insertPaths, isSlashCommand, quotePath, histDown, histUp, killToEnd, killToStart, killWordBack, killWordForward, mergeHistory, rankCommands, searchHistory, tokenAt, toLineEnd, toLineStart, wordBack, wordForward } from "./edit";
 import { BUILTINS, opensDialog } from "./commands";
 
 const at = (text: string, i = text.length) => ({ text, start: i, end: i });
@@ -111,5 +111,21 @@ describe("画像とファイルのパス（#64）", () => {
     expect(insertPaths({ text: "これを見て", start: 5, end: 5 }, ["/a.png", "/b c.png"])).toEqual({ from: 5, to: 5, insert: " /a.png /b\\ c.png " });
     expect(insertPaths({ text: "見て  です", start: 3, end: 3 }, ["/a.png"])).toEqual({ from: 3, to: 3, insert: "/a.png" });
     expect(insertPaths({ text: "x", start: 0, end: 1 }, [])).toBeNull();
+  });
+});
+
+describe("パスで始まる文はコマンドにしない（#64）", () => {
+  test("最初の語に2つ目の / があればパス", () => {
+    expect(isSlashCommand("/model")).toBe(true);
+    expect(isSlashCommand("/compact 要点だけ")).toBe(true);
+    expect(isSlashCommand("/")).toBe(true);
+    expect(isSlashCommand("/Users/a/.family-computing/attachments/paste-1.png これ見て")).toBe(false);
+    expect(isSlashCommand("/tmp/a\\ b.png")).toBe(false);
+    expect(isSlashCommand("見て /model")).toBe(false);
+  });
+  test("パスの途中にカーソルがあっても、コマンドの補完を出さない", () => {
+    const t = "/Users/a/x.png 見て";
+    expect(tokenAt({ text: t, start: 3, end: 3 })).toBeNull();
+    expect(tokenAt({ text: "/mo", start: 3, end: 3 })?.kind).toBe("slash");
   });
 });

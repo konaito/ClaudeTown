@@ -6,7 +6,7 @@ import getCaretCoordinates from "textarea-caret";
 import type { Agent } from "../model";
 import { BUILTINS, type Command } from "./commands";
 import {
-  backslashNewline, histDown, insertPaths, histUp, killToEnd, killToStart, killWordBack, killWordForward, mergeHistory, pushHistory,
+  backslashNewline, histDown, insertPaths, isSlashCommand, histUp, killToEnd, killToStart, killWordBack, killWordForward, mergeHistory, pushHistory,
   rankCommands, searchHistory, tokenAt, toLineEnd, toLineStart, wordBack, wordForward, type Edit, type HistState, type Sel,
 } from "./edit";
 
@@ -328,7 +328,13 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
     if (![...cd.items].some((i) => i.kind === "file")) return;
     const plain = cd.getData("text/plain");
     e.preventDefault();
-    if (!local) { if (plain) putText(plain); else onError(REMOTE_FILES); return; }
+    if (!local) {
+      // Finder でコピーしたファイルは、文としてはファイル名が載っている。ファイルがあれば断る
+      invoke<Pasted | null>("paste_clipboard", { saveImage: false })
+        .then((r) => { if (!r?.files?.length && plain) putText(plain); else onError(REMOTE_FILES); })
+        .catch(() => { if (plain) putText(plain); else onError(REMOTE_FILES); });
+      return;
+    }
     // Finder でコピーしたファイルは、webview からは名前しか見えないので、クリップボードを Rust で読む。
     // ファイルが無く、文も無いときだけ画像を保存する（表計算のセルのように、文と絵の両方が載っているものは文を入れる）
     invoke<Pasted | null>("paste_clipboard", { saveImage: !plain })
@@ -341,22 +347,23 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
       .catch((err) => { if (plain) putText(plain); else onError(`貼り付けられなかった: ${err}`); });
   };
   // ドロップは窓のどこに落としても、開いている入力欄に入れる
-  const dropRef = useRef({ local, canSend: agent.canSend, putPaths, onError });
-  dropRef.current = { local, canSend: agent.canSend, putPaths, onError };
+  const dropRef = useRef({ local, canSend: agent.canSend, searching: !!search, putPaths, onError });
+  dropRef.current = { local, canSend: agent.canSend, searching: !!search, putPaths, onError };
   useEffect(() => onFileDrop((e) => {
     if (e.type === "enter") setDropping(true);
     else if (e.type === "leave") setDropping(false);
     else if (e.type === "drop") {
       setDropping(false);
       const d = dropRef.current;
-      if (!e.paths?.length || !d.canSend) return;
+      // Ctrl+R の検索中は入れない（検索を閉じると、一致した文で入力欄が置き換わるため）
+      if (!e.paths?.length || !d.canSend || d.searching) return;
       if (!d.local) { d.onError(REMOTE_FILES); return; }
       d.putPaths(e.paths);
     }
   }), []);
 
   const shell = text.startsWith("!");
-  const cmdAtStart = text.startsWith("/");
+  const cmdAtStart = isSlashCommand(text);
   const note = (shell || cmdAtStart) && !hasTerm
     ? "端末の無いセッション（-p の子）なので、CLI のコマンドとしては動かず、Claude が文として読む"
     : shell ? "! シェルモード: 端末のセッションで、そのまま実行する"

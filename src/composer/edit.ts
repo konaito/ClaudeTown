@@ -95,6 +95,11 @@ export function backslashNewline(s: Sel): Edit | null {
 /** 補完の種類と、置き換える範囲。/ は文の頭か空白の後、@ はどこでも空白の後 */
 export type Token = { kind: "slash" | "file"; query: string; from: number; to: number; atStart: boolean };
 
+/** CLI のスラッシュコマンドとして送る文か。最初の語に2つ目の / があればファイルのパス（貼り付けやドロップで入れたもの）とみなす（#64） */
+export function isSlashCommand(text: string): boolean {
+  return /^\/[^\s/]*(\s|$)/.test(text);
+}
+
 export function tokenAt(s: Sel): Token | null {
   if (s.start !== s.end) return null;
   const before = s.text.slice(0, s.start);
@@ -107,6 +112,8 @@ export function tokenAt(s: Sel): Token | null {
   const kind = m[2] === "/" ? "slash" : "file";
   // ! のシェルモードでは / はパスなので、コマンドの補完を出さない
   if (kind === "slash" && s.text.startsWith("!")) return null;
+  // 語の中に / があるのはファイルのパス。コマンドの補完を出さない
+  if (kind === "slash" && s.text.slice(from + 1, to).includes("/")) return null;
   return { kind, query: m[3], from, to, atStart: from === 0 };
 }
 
