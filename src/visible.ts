@@ -1,16 +1,25 @@
 // ウィンドウが見えているか（#6）。見えていない間は、決まった間隔の取得と時計を止め、CSS のアニメも止める。
 // 見えているかは document.visibilityState で見る。2026-11-13 に、⌘H で隠したとき hidden になり、取得が止まることを確かめた（ccn への要求が0回）。
 // フォーカスが外れただけでは止めない。別のアプリで作業しながら町を横目で見る使い方があるため。
+// 開発版（bun tauri dev）を VITE_FC_FORCE_VISIBLE=1 で起動したときだけ、隠れていても見えている扱いにする（#62）。
+// 子が確かめるとき、開発版の窓は本人の作業の裏に隠れているため。ビルドした画面（安定版）では無視する。
 
 type Listener = (visible: boolean) => void;
 
-/** 見えているかの状態と、それに合わせて止まる取得。試験のために document から切り離してある */
-export function createVisibility(initial: boolean) {
-  let visible = initial;
+/** VITE_FC_FORCE_VISIBLE の値が、見えている扱いにする指定か（#62）。"1" のときだけ */
+export const forceVisibleFlag = (value: unknown) => value === "1";
+
+/**
+ * 見えているかの状態と、それに合わせて止まる取得。試験のために document から切り離してある。
+ * force が true なら、隠れたと受けても見えている扱いのままにする（#62）
+ */
+export function createVisibility(initial: boolean, force = false) {
+  let visible = initial || force;
   // 最後に、隠れていた状態から見えるようになった時刻（ms）。起動してから一度も隠れていなければ 0
   let shownAt = 0;
   const subs = new Set<Listener>();
-  const set = (v: boolean) => {
+  const set = (seen: boolean) => {
+    const v = seen || force;
     if (v === visible) return;
     visible = v;
     if (v) shownAt = Date.now();
@@ -64,14 +73,17 @@ export function createVisibility(initial: boolean) {
   return { isVisible: () => visible, shownAt: () => shownAt, set, subscribe, poll, backoff };
 }
 
+// import.meta.env.DEV はビルドで false に置き換わるので、安定版では右側ごと消え、変数を付けてビルドしても効かない
+const FORCE = import.meta.env.DEV && forceVisibleFlag(import.meta.env.VITE_FC_FORCE_VISIBLE);
+if (FORCE) console.info("[visible] VITE_FC_FORCE_VISIBLE=1: 窓が隠れていても取得と時計を止めない（#62）");
+
 const hasDoc = typeof document !== "undefined";
-const vis = createVisibility(!hasDoc || document.visibilityState !== "hidden");
+const vis = createVisibility(!hasDoc || document.visibilityState !== "hidden", FORCE);
 if (hasDoc) {
   const sync = () => {
-    const v = document.visibilityState !== "hidden";
-    // CSS のアニメは App.css の :root[data-hidden] で止める
-    document.documentElement.toggleAttribute("data-hidden", !v);
-    vis.set(v);
+    vis.set(document.visibilityState !== "hidden");
+    // CSS のアニメは App.css の :root[data-hidden] で止める。見えている扱いのあいだは止めない
+    document.documentElement.toggleAttribute("data-hidden", !vis.isVisible());
   };
   document.addEventListener("visibilitychange", sync);
   sync();

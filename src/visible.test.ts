@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createVisibility } from "./visible";
+import { createVisibility, forceVisibleFlag } from "./visible";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -111,5 +111,42 @@ describe("pollBackoff（#5）", () => {
     await wait(40);
     expect(n).toBe(1);
     p.stop();
+  });
+});
+
+describe("見えている扱い（VITE_FC_FORCE_VISIBLE、#62）", () => {
+  test("\"1\" のときだけ指定とみなす", () => {
+    expect(forceVisibleFlag("1")).toBe(true);
+    for (const x of [undefined, "", "0", "true", 1]) expect(forceVisibleFlag(x)).toBe(false);
+  });
+
+  test("指定があれば、隠れた状態で始めても見えている扱いで、取得を止めない", async () => {
+    const v = createVisibility(false, true);
+    expect(v.isVisible()).toBe(true);
+    let n = 0, m = 0;
+    const stop = v.poll(() => { n++; }, 20);
+    const p = v.backoff(() => { m++; return true; }, 20, 20);
+    v.set(false);
+    await wait(70);
+    expect(v.isVisible()).toBe(true);
+    expect(n).toBeGreaterThanOrEqual(3);
+    expect(m).toBeGreaterThanOrEqual(3);
+    stop();
+    p.stop();
+  });
+
+  test("指定があれば、隠れたと受けても知らせない", () => {
+    const v = createVisibility(true, true);
+    const got: boolean[] = [];
+    v.subscribe((x) => got.push(x));
+    v.set(false);
+    v.set(true);
+    expect(got).toEqual([]);
+  });
+
+  test("指定が無ければ今までどおり、隠れたら止める", () => {
+    const v = createVisibility(true);
+    v.set(false);
+    expect(v.isVisible()).toBe(false);
   });
 });

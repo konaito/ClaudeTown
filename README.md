@@ -165,6 +165,7 @@ hook は本物の `claude -p` で試し、頼まれたこと、道具、最後�
 - 起動と確認には開発版だけを使う。
 - 安定版（`/Applications/Claude Town.app`）を止めない、差し替えない、消さない。
 - 安定版へ上げるのは、本人か親が頼んだときだけにする。
+- 起動の仕方は「開発」の節の「子が開発版で確かめるとき」に書いてある。
 
 安定版へ上げる:
 
@@ -236,3 +237,33 @@ bun test src/layout
 ```
 
 `public/dev-*.json` には本物のセッションの中身が入るので、コミットしない（.gitignore に入れてある）。
+
+### 子が開発版で確かめるとき
+
+本人が安定版や他のアプリを前面で使うので、子が起動した開発版の窓はふつう裏に隠れている。隠れている間は、町・会話・承認の取得と1秒の時計が止まる（src/visible.ts、#6）。`VITE_FC_FORCE_VISIBLE=1` を付けて起動すると、窓が隠れていても見えている扱いにして、取得と時計を止めない（#62）。この変数は `bun tauri dev` の開発版でだけ効く。ビルドした画面（安定版）では、付けてビルドしても無視される。
+
+```bash
+# 1420 番は子どうしで共有している。来た順に渡すロックを取ってから使い、済んだら外す
+~/.local/bin/ct-lock acquire <名前>
+lsof -nP -iTCP:1420 -sTCP:LISTEN   # 何も出なければ空いている
+
+# 本物の ccn に繋ぐ
+VITE_FC_FORCE_VISIBLE=1 FC_PERF_LOG=/tmp/<名前>-perf.jsonl bun tauri dev
+
+# モックの ccn に繋ぐ。アプリが書くファイル（キャラの割り当てなど）は FC_APP_HOME で一時の場所に分ける
+bun run scripts/mock-ccn-town.ts <モックのポート>   # 「ready <ポート> pid <pid>」の pid が自分のものか見る
+VITE_FC_FORCE_VISIBLE=1 FC_CCN_URL=http://127.0.0.1:<モックのポート> FC_APP_HOME=$(mktemp -d) \
+  FC_PERF_LOG=/tmp/<名前>-perf.jsonl bun tauri dev
+
+~/.local/bin/ct-lock release <名前>
+```
+
+1420 番が使われていてロックを待てないときは、別のポートで起動する。`--config` に渡した JSON は tauri.conf.json に重なる。devUrl は Rust に埋め込まれるので、ポートを変えると Rust を組み直す。
+
+```bash
+VITE_FC_FORCE_VISIBLE=1 bun tauri dev --config '{"build":{"devUrl":"http://localhost:1430","beforeDevCommand":"bun run dev --port 1430"}}'
+```
+
+- この変数で続くのは取得と時計だけで、描画は続かない。窓が隠れている間は WebKit が requestAnimationFrame を止める（2026-11-13 の実測で fps 0）。起動から隠れたままだと一度も描かれないので、`screencapture -l` で見た目を撮るときは窓を前に出す。
+- 止めるときは、自分が起動した `bun tauri dev` の pid を指定する。安定版と開発版は実行ファイル名が同じなので、名前で止めない。
+- 計測（`scripts/bench.ts`）では付けない。隠した窓の負荷を測る場面（hidden、minimized）の数字が変わる。
