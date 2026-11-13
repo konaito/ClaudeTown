@@ -22,7 +22,7 @@ import {
 } from "./model";
 import { Markdown } from "./Markdown";
 import { chatPerf } from "./chatPerf";
-import { mergeConv, type ConvDelta } from "./conv";
+import { elapsedText, liveSummary, mergeConv, msOf, sameLive, type ConvDelta, type Live } from "./conv";
 import { layoutFamily, type LNode } from "./layout/layout";
 import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
@@ -58,6 +58,8 @@ const KillCtx = createContext<{ dying: Map<string, number>; ask: (a: Agent, inst
 const CONV_POLL_MS = 2500;
 /** 会話に新しい発言が無い回が続いたときの間隔の上限（#5）。新しい発言が来るか、文を送ったら CONV_POLL_MS に戻す */
 const CONV_POLL_MAX_MS = 10000;
+/** 相手が作業中のあいだの会話の取り直しの間隔（#59）。延ばさずに、この間隔で取り続ける */
+const CONV_POLL_LIVE_MS = 1000;
 
 type Toast = { id: number; text: string; bad?: boolean };
 
@@ -922,6 +924,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
     if (agent) { perfMark("composer", agent.id); if (perfWaitingPrompt(agent.id)) perfEnd(); }
   });
   const [items, setItems] = useState<ConvItem[]>([]);
+  // 今の動き（#59）。中身が変わったときだけ入れ替え、末尾の行のほかは描き直さない
+  const [live, setLive] = useState<Live | null>(null);
   // 送ったばかりの文。after は送り始めたときに持っていた最後の番号で、これより後に届いた発言とだけ比べる
   const [pending, setPending] = useState<(ConvItem & { after: number })[]>([]);
   const [convErr, setConvErr] = useState<string | null>(null);
@@ -935,12 +939,19 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   // 会話をすぐ取り直させる口（文を送った直後に使う）
   const convKick = useRef<() => void>(() => {});
   const id = agent?.id;
+  // 作業中でチャットを開いているあいだは、会話を CONV_POLL_LIVE_MS ごとに取る。取り直しの間隔は回るたびにこの値を読む（#59）。
+  // 作業中になったときも終わったときも、すぐ取り直す（終わった直後の答えを待たせない）
+  const working = !!agent && moodOf(agent) === "working";
+  const isFast = working && tab === "talk";
+  const fast = useRef(false);
+  fast.current = isFast;
+  useEffect(() => { convKick.current(); }, [working, isFast]);
 
   // チャットを開いたとき（セッションを選んだ、タブを切り替えた）は、必ず一番下から始める。
   // 以前は stick を読み込みの effect でしか戻さず、タブの切り替えでは前の値が残り、容れ物も作り直されるのに items が変わらないので下へ送られなかった
   useLayoutEffect(() => { stick.current = true; }, [id, tab, chatReq]);
   useEffect(() => {
-    setItems([]); setPending([]); setConvErr(null); stick.current = true;
+    setItems([]); setPending([]); setLive(null); setConvErr(null); stick.current = true;
     if (!id) return;
     let alive = true;
     // 画面が持っている数。Rust は、これより後の発言だけを返す（#10）。増えていなければ items を変えず、描き直さない
@@ -953,13 +964,15 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
         if (d.reset) since = d.total;
         setConvErr(null);
         if (d.reset || d.items.length) setItems((prev) => mergeConv(prev, d));
+        const nextLive = d.live ?? null;
+        setLive((prev) => (sameLive(prev, nextLive) ? prev : nextLive));
         return d.reset || d.items.length > 0;
       } catch (e) {
         if (alive) setConvErr(String(e));
         return false;
       }
     };
-    const p = pollBackoff(load, CONV_POLL_MS, CONV_POLL_MAX_MS);
+    const p = pollBackoff(load, () => (fast.current ? CONV_POLL_LIVE_MS : CONV_POLL_MS), () => (fast.current ? CONV_POLL_LIVE_MS : CONV_POLL_MAX_MS));
     convKick.current = p.kick;
     return () => { alive = false; p.stop(); convKick.current = () => {}; };
   }, [id, peer]);
@@ -988,7 +1001,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
     // 吹き出しの高さが描画のあとに決まる分（Markdown など）を拾う
     const raf = requestAnimationFrame(() => { if (stick.current) el.scrollTop = el.scrollHeight; });
     return () => cancelAnimationFrame(raf);
-  }, [items, pending, id, tab, chatReq]);
+  }, [items, pending, id, tab, chatReq, live, working]);
 
   if (!agent) {
     return (
@@ -1072,6 +1085,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
           {convErr && <div className="banner bad small">{convErr}</div>}
           {shown.length === 0 && !convErr && <p className="hint center">まだチャットが無い</p>}
           {shown.map((x, i) => <Bubble key={x.n ?? `p${x.at ?? i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
+          {mood === "working" && live && <LiveLine live={live} turnAt={agent.report?.turn_started_at ?? null} />}
           {mood === "approval" && (
             <Approval agent={agent} peer={peer} onDone={(m) => onSent2(m)} onError={onError} />
           )}
@@ -1266,6 +1280,38 @@ function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent
     </div>
   );
 }
+
+/**
+ * 作業中の末尾の1行（#59）。結果がまだ無い道具か「考え中」と、その動きを始めてからの経過、ターン全体の経過を出す。
+ * 1秒の時計はこの部品の中だけで回す。ほかの吹き出しは描き直さない。ウィンドウが見えていない間は止める（#6）
+ */
+const LiveLine = memo(function LiveLine({ live, turnAt }: { live: Live; turnAt: number | null }) {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    let t: ReturnType<typeof setInterval> | null = null;
+    const start = () => { if (t === null) t = setInterval(() => bump((x) => x + 1), 1000); };
+    const stop = () => { if (t !== null) { clearInterval(t); t = null; } };
+    const off = onVisibleChange((v) => { if (v) { bump((x) => x + 1); start(); } else stop(); });
+    if (isVisible()) start();
+    return () => { off(); stop(); };
+  }, []);
+  const sum = liveSummary(live);
+  const now = Date.now();
+  const turn = turnAt ?? msOf(live.turn_at);
+  return (
+    <div className="live-line" aria-live="off">
+      <div className="ll-main">
+        <i className="ll-dot" />
+        <span className="ll-label">{sum.label}</span>
+        <span className="ll-time">
+          {sum.since != null && <>{elapsedText(now - sum.since)}</>}
+          {turn != null && <>{sum.since != null ? " · " : ""}このターン {elapsedText(now - turn)}</>}
+        </span>
+      </div>
+      {sum.heads.map((h, i) => <div key={i} className="ll-head">{h}</div>)}
+    </div>
+  );
+});
 
 /** 道具の行が続いたら1行にまとめる。まとめた行の n は最初の行の n にする（後ろに道具が増えても key が変わらない） */
 function collapseTools(items: ConvItem[]): (ConvItem & { more?: number })[] {

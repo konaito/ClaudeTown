@@ -456,6 +456,128 @@ struct Conv {
     items: Vec<Value>,
     /// 最後に読まれた時刻（ms）
     used: u128,
+    /// 今の動き（#59）
+    live: Live,
+}
+
+/// 今の動き（#59）。会話を頭から読みながら、結果がまだ無い道具、最後の出来事、ターンの始まりを持つ。
+/// 時刻は node なら ISO の文字列、pty なら jsonl の timestamp（無ければ ccn の at の ms）のまま渡し、画面が Date で読む
+#[derive(Default, Clone, Serialize, Debug, PartialEq)]
+struct Live {
+    /// 結果がまだ無い道具（古い順）
+    tools: Vec<LiveTool>,
+    /// 最後の出来事の種類（user、thinking、text、tool、result）と時刻
+    last: Option<&'static str>,
+    last_at: Value,
+    /// 最後に人（かほかのセッション）から文が届いた時刻
+    turn_at: Value,
+}
+
+#[derive(Clone, Serialize, Debug, PartialEq)]
+struct LiveTool {
+    id: String,
+    /// まとめるときの種類（シェル、ccn など）
+    kind: String,
+    /// 1行の中身（Bash ならコマンドの頭）
+    text: String,
+    at: Value,
+}
+
+#[derive(Debug, Clone)]
+enum LiveEv {
+    User(Value),
+    Thinking(Value),
+    Text(Value),
+    Tool(LiveTool),
+    Result(Vec<String>, Value),
+}
+
+impl Live {
+    fn apply(&mut self, ev: LiveEv) {
+        let (kind, at) = match ev {
+            // 新しい文が来たら、前のターンで結果が来なかった道具（中断など）は捨てる
+            LiveEv::User(at) => { self.tools.clear(); self.turn_at = at.clone(); ("user", at) }
+            LiveEv::Thinking(at) => ("thinking", at),
+            LiveEv::Text(at) => ("text", at),
+            LiveEv::Tool(t) => { let at = t.at.clone(); self.tools.retain(|x| x.id != t.id); self.tools.push(t); ("tool", at) }
+            LiveEv::Result(ids, at) => { self.tools.retain(|x| !ids.contains(&x.id)); ("result", at) }
+        };
+        self.last = Some(kind);
+        self.last_at = at;
+    }
+}
+
+/// 道具をまとめるときの種類
+fn tool_kind(name: &str) -> String {
+    match name {
+        "Bash" | "BashOutput" | "KillShell" => "シェル".into(),
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => "書く".into(),
+        "Read" => "読む".into(),
+        "Grep" | "Glob" => "探す".into(),
+        "WebSearch" | "WebFetch" => "調べる".into(),
+        "Agent" | "Task" => "手伝い".into(),
+        n if n.starts_with("mcp__") => n.split("__").nth(1).unwrap_or(n).into(),
+        n => n.into(),
+    }
+}
+
+/// ccn の1件から、今の動きに効く出来事を取り出す。simplify と同じく node と pty の両方の形を読む
+fn live_events(m: &Value) -> Vec<LiveEv> {
+    let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
+        Some(d) => (d, if d["timestamp"].is_string() { d["timestamp"].clone() } else { m["at"].clone() }),
+        None => (m, m["timestamp"].clone()),
+    };
+    let content = &m["message"]["content"];
+    let mut out = vec![];
+    match m["type"].as_str().unwrap_or("") {
+        "user" => {
+            let ids: Vec<String> = content.as_array().map(|a| a.iter()
+                .filter(|c| c["type"] == "tool_result")
+                .filter_map(|c| c["tool_use_id"].as_str().map(String::from))
+                .collect()).unwrap_or_default();
+            if !ids.is_empty() {
+                out.push(LiveEv::Result(ids, at));
+            } else {
+                let text = match content {
+                    Value::String(s) => s.trim().to_string(),
+                    Value::Array(a) => a.iter().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n").trim().to_string(),
+                    _ => String::new(),
+                };
+                // hook やシステムの差し込み（<...>、Caveat:）はターンの始まりにしない。お手紙（<cross-session-message>）は始まりにする
+                let letter = text.contains("<cross-session-message");
+                if !text.is_empty() && !m["isMeta"].as_bool().unwrap_or(false) && (letter || !(text.starts_with('<') || text.starts_with("Caveat:"))) {
+                    out.push(LiveEv::User(at));
+                }
+            }
+        }
+        "assistant" => {
+            for c in content.as_array().into_iter().flatten() {
+                match c["type"].as_str() {
+                    Some("thinking") | Some("redacted_thinking") => out.push(LiveEv::Thinking(at.clone())),
+                    Some("text") => out.push(LiveEv::Text(at.clone())),
+                    Some("tool_use") => {
+                        let name = c["name"].as_str().unwrap_or("");
+                        let inp = &c["input"];
+                        // Bash はコマンドそのもの、ccn などは宛先（session、name）を頭に出す。終わった道具の行（tool_line）は変えない
+                        let text = match (name, inp["command"].as_str()) {
+                            ("Bash", Some(cmd)) => format!("コマンド: {}", clip(cmd, 70)),
+                            _ => {
+                                let line = tool_line(name, inp);
+                                match ["session", "name"].iter().find_map(|k| inp[*k].as_str()).filter(|_| !line.contains(": ")) {
+                                    Some(to) => format!("{line}: {}", clip(to, 70)),
+                                    None => line,
+                                }
+                            }
+                        };
+                        out.push(LiveEv::Tool(LiveTool { id: c["id"].as_str().unwrap_or("").into(), kind: tool_kind(name), text, at: at.clone() }));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    out
 }
 
 /// 会話のキャッシュを残す時間（#15）。画面は開いている会話だけを 2.5 秒ごとに読むので、
@@ -474,16 +596,21 @@ struct ConvDelta {
     items: Vec<Value>,
     total: u64,
     reset: bool,
+    /// 今の動き（#59）。毎回、全部を返す
+    live: Live,
 }
 
 impl Conv {
     /// ccn の after=from から next まで読んだ分を足す。同じセッションの取得が重なり、
     /// ほかの呼び出しが先に同じ範囲を足していたら（c.next が読み始めと違う）、足さない
-    fn absorb(&mut self, from: u64, next: u64, fresh: Vec<Value>) {
+    fn absorb(&mut self, from: u64, next: u64, fresh: Vec<Value>, evs: Vec<LiveEv>) {
         if self.next != from {
             return;
         }
         self.next = next;
+        for e in evs {
+            self.live.apply(e);
+        }
         self.push(fresh);
     }
 
@@ -507,9 +634,9 @@ impl Conv {
         let base = self.total - self.items.len() as u64;
         match since {
             Some(s) if s >= base && s <= self.total => {
-                ConvDelta { items: self.items[(s - base) as usize..].to_vec(), total: self.total, reset: false }
+                ConvDelta { items: self.items[(s - base) as usize..].to_vec(), total: self.total, reset: false, live: self.live.clone() }
             }
-            _ => ConvDelta { items: self.items.clone(), total: self.total, reset: true },
+            _ => ConvDelta { items: self.items.clone(), total: self.total, reset: true, live: self.live.clone() },
         }
     }
 }
@@ -645,12 +772,14 @@ fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) ->
     };
     let mut next = from;
     let mut fresh = vec![];
+    let mut evs = vec![];
     // 1回の呼び出しで読むのは最大20ページ（4000件）。続きは次の呼び出しで読む
     for _ in 0..20 {
         let v = get_json(&format!("{}/sessions/{session_id}/messages?after={next}", api(&peer)))?;
         let msgs = v["messages"].as_array().cloned().unwrap_or_default();
         for m in &msgs {
             fresh.extend(simplify(m));
+            evs.extend(live_events(m));
         }
         match v["next"].as_u64() {
             Some(n) if n > next && !msgs.is_empty() => next = n,
@@ -666,7 +795,7 @@ fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) ->
     forget_idle_convs(map, &key, now);
     let c = map.entry(key).or_insert_with(Conv::default);
     c.used = now;
-    c.absorb(from, next, fresh);
+    c.absorb(from, next, fresh, evs);
     Ok(c.since(since))
 }
 
@@ -1509,6 +1638,36 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn live_tracks_open_tools_and_thinking() {
+        use super::{live_events, Live};
+        use serde_json::json;
+        let pty = |ts: &str, data: serde_json::Value| json!({ "at": 1, "type": "x", "seq": 0, "data": { "timestamp": ts, "type": data["type"], "message": data["message"] } });
+        let mut l = Live::default();
+        let feed = |l: &mut Live, m: serde_json::Value| for e in live_events(&m) { l.apply(e) };
+        feed(&mut l, pty("t0", json!({ "type": "user", "message": { "content": "やって" } })));
+        assert_eq!(l.turn_at, json!("t0"));
+        feed(&mut l, pty("t1", json!({ "type": "assistant", "message": { "content": [{ "type": "thinking", "thinking": "" }] } })));
+        assert_eq!(l.last, Some("thinking"));
+        feed(&mut l, pty("t2", json!({ "type": "assistant", "message": { "content": [
+            { "type": "tool_use", "id": "a", "name": "Bash", "input": { "command": "git status", "description": "見る" } },
+            { "type": "tool_use", "id": "b", "name": "mcp__ccn__send_message", "input": { "session": "abc", "text": "x" } } ] } })));
+        assert_eq!(l.tools.len(), 2);
+        assert_eq!(l.tools[0].text, "コマンド: git status");
+        assert_eq!(l.tools[1].kind, "ccn");
+        assert_eq!(l.tools[1].text, "send_message: abc");
+        // node の形（timestamp が外）でも読む
+        feed(&mut l, json!({ "type": "user", "timestamp": "t3", "message": { "content": [{ "type": "tool_result", "tool_use_id": "a" }] } }));
+        assert_eq!(l.tools.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["b"]);
+        assert_eq!((l.last, l.last_at.clone()), (Some("result"), json!("t3")));
+        // hook の差し込みはターンの始まりにしない。人の文が来たら、結果の来なかった道具は捨てる
+        feed(&mut l, pty("t4", json!({ "type": "user", "message": { "content": "<system-reminder>x</system-reminder>" } })));
+        assert_eq!(l.tools.len(), 1);
+        feed(&mut l, pty("t5", json!({ "type": "user", "message": { "content": [{ "type": "text", "text": "[Request interrupted by user]" }] } })));
+        assert!(l.tools.is_empty());
+        assert_eq!(l.turn_at, json!("t5"));
+    }
+
+    #[test]
     fn conversation_returns_only_what_the_screen_lacks() {
         use super::{Conv, KEEP_MESSAGES};
         use serde_json::json;
@@ -1546,11 +1705,11 @@ mod tests {
         let mut c = Conv::default();
         let fresh = || vec![json!({ "role": "user", "text": "a" })];
         // 同じ after=0 から読んだ2回。先に終わった方だけ足す
-        c.absorb(0, 5, fresh());
-        c.absorb(0, 5, fresh());
+        c.absorb(0, 5, fresh(), vec![]);
+        c.absorb(0, 5, fresh(), vec![]);
         assert_eq!(c.total, 1);
         assert_eq!(c.next, 5);
-        c.absorb(5, 6, fresh());
+        c.absorb(5, 6, fresh(), vec![]);
         assert_eq!(c.total, 2);
     }
 
@@ -1574,8 +1733,9 @@ mod tests {
     fn conv_delta_is_sent_as_an_object() {
         use super::ConvDelta;
         use serde_json::json;
-        let d = ConvDelta { items: vec![json!({ "role": "user", "text": "a", "n": 0 })], total: 1, reset: true };
-        assert_eq!(serde_json::to_value(&d).unwrap(), json!({ "items": [{ "role": "user", "text": "a", "n": 0 }], "total": 1, "reset": true }));
+        let d = ConvDelta { items: vec![json!({ "role": "user", "text": "a", "n": 0 })], total: 1, reset: true, live: Default::default() };
+        assert_eq!(serde_json::to_value(&d).unwrap(), json!({ "items": [{ "role": "user", "text": "a", "n": 0 }], "total": 1, "reset": true,
+            "live": { "tools": [], "last": null, "last_at": null, "turn_at": null } }));
     }
 
     /// 見張りを、モックの町（FC_CCN_URL）につないで決まった秒数だけ回し、画面へ送った回数を数える（#5）。
