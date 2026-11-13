@@ -120,10 +120,29 @@ CLI の補完の動きも端末で確かめた。
 
 cliclick の `kp:tab` では Tab が入力欄に届かなかった。osascript の `key code 48` では届いた。押し方の違いで、アプリの動きの問題ではない。
 
+### 2回目（同じ日、PR を出したあと）
+
+テスト用の PTY の子をもう1つ立て、残りのキーを押した。
+
+| 確かめたこと | 結果 | 画像 |
+|---|---|---|
+| 2行の文の2行目で ↑、続けて ↑ | 1回目で1行目へ移り、2回目で履歴を呼び戻した | cli-input/up-multiline.png |
+| 2行目がある文の途中で `@src/u`、Tab、`f`、Tab | 候補にフォルダ `+ src/utils/` とファイルが出て、Tab で `@src/utils/foo.ts ` になった。2行目はそのまま残った | cli-input/at-menu.png、cli-input/at-tab.png |
+| Ctrl+W を2回、Ctrl+Y、Option+Y | `now` と `src/utils/foo.ts ` が順に消え、Ctrl+Y で後に消したほう、Option+Y で前に消したほうに替わった | cli-input/ctrl-y.png、cli-input/option-y.png |
+| Option+B のあと文字を打つ、Ctrl+A と Ctrl+K、Ctrl+_ | 前の語の頭に入った。行がまるごと消え、Ctrl+_ で戻った | 画像なし |
+| Ctrl+S を2回 | 空になり、もう一度で戻った | 画像なし |
+| Ctrl+R で `PONG` を探し、Ctrl+C | 探す前の文（`stash me`）に戻った | cli-input/ctrl-r-cancel.png |
+| 作業中に Esc | ccn の状態が running から idle になり、端末に `Interrupted` が出た | 画像なし（端末の文字で確かめた） |
+| `/model` を Enter で送る | 端末にモデルを選ぶ画面が開き、Claude Town はターミナルのタブに切り替わった。画面は端末の口から Esc を送って閉じた | cli-input/model-terminal.png |
+
+2回目の確かめで、次の3つを直した。
+
+- `@` と `/` の補完を Tab で決めると、カーソルの後ろの改行まで詰めて、2行目を1行目につないでいた。詰めるのを空白とタブだけにした。
+- 履歴で呼び戻した `/ct-echo` に補完が出て、続けて押した ↑ が補完の選び直しになっていた。呼び戻した文には補完を出さないようにした。
+- 2行目が `tail` のとき、↑ を押しても1行目へ移らなかった。macOS の予測入力が出ていて、↑ がそれを閉じるのに使われていたとみている。入力欄で予測入力、自動修正、スペルチェックを切ったら、1行目へ移った。CLI の端末にもこれらは無い。
+
 ## 未確認
 
 - Ctrl+K を行末で押したときに改行を消すかは、CLI で実測していない。
-- Ctrl+W、Ctrl+Y、Option+Y、Option+B、Option+F、Option+D、Ctrl+S、Ctrl+_、Esc と Ctrl+C の中断は、開発版では押していない。関数の単体テスト（src/composer/edit.test.ts）だけで確かめた。
-- @ のファイルの補完は、開発版では押していない。Rust の並べ方は単体テストで確かめた。
-- 作業中に Esc と Ctrl+C で止める動きは、ccn の interrupt の口を呼ぶだけで、開発版では試していない。
-- Esc を2回押す間の長さは、CLI の値を確かめていない。
+- Option+F、Option+D、Ctrl+D、Option+Delete と、作業中の Ctrl+C は、開発版では押していない。関数の単体テストか、Esc と同じ口を呼ぶことだけで確かめた。
+- 信頼の確認の画面で send_direct が断るかは、関数の単体テストだけで確かめた（信頼の確認の画面のセッションを作れなかった。2回目のテスト用のフォルダは、1回目で信頼済みだった）。

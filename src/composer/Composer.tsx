@@ -127,7 +127,7 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
     if (token.kind === "slash") {
       const c = slashItems[i];
       if (!c) return "";
-      const next = `${text.slice(0, token.from)}/${c.name} ${text.slice(token.to).replace(/^\s+/, "")}`;
+      const next = `${text.slice(0, token.from)}/${c.name} ${text.slice(token.to).replace(/^[ \t]+/, "")}`;
       replaceAll(next, token.from + c.name.length + 2);
       return next;
     }
@@ -135,7 +135,7 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
     if (!f) return "";
     // フォルダは続けて中を選べるように空白を付けない
     const add = f.endsWith("/") ? f : `${f} `;
-    const next = `${text.slice(0, token.from)}@${add}${text.slice(token.to).replace(/^\s+/, "")}`;
+    const next = `${text.slice(0, token.from)}@${add}${text.slice(token.to).replace(/^[ \t]+/, "")}`;
     replaceAll(next, token.from + 1 + add.length);
     return next;
   };
@@ -189,13 +189,13 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
       if (!onFirstRow()) return;
       const r = histUp(histSt.current, upList, text);
       if (!r) return;
-      stop(); histSt.current = r.st; replaceAll(r.text); return;
+      stop(); histSt.current = r.st; setDismissed(r.text); replaceAll(r.text); return;
     }
     if ((plain && k === "ArrowDown") || (ctrl && k === "n")) {
       if (!onLastRow()) return;
       const r = histDown(histSt.current, upList);
       if (!r) return;
-      stop(); histSt.current = r.st; replaceAll(r.text); return;
+      stop(); histSt.current = r.st; setDismissed(r.text); replaceAll(r.text); return;
     }
     if (ctrl && k === "r") { stop(); loadAll(); searchEnding.current = false; setSearch({ query: "", idx: -1, original: text }); return; }
 
@@ -350,13 +350,19 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
             {search.query && searchMatch == null && <em>見つからない</em>}
           </div>
         )}
+        {/* CLI の端末と同じく、macOS の予測入力、自動修正、スペルチェックを切る。予測が出ていると、上キーが予測を閉じるのに使われ、行も履歴も動かない（2026-11-13 に開発版で見た） */}
         <textarea
           ref={ta}
+          spellCheck={false}
+          autoCorrect="off"
+          autoCapitalize="off"
+          autoComplete="off"
+          {...{ writingsuggestions: "false" }}
           value={search ? searchMatch ?? search.original : text}
           readOnly={!!search}
           placeholder={agent.canSend ? `${agent.name}に注文する…` : "このセッションには送れない"}
           disabled={!agent.canSend}
-          onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart); setDismissed(null); }}
+          onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart); setDismissed(null); histSt.current = { index: -1, draft: "" }; }}
           onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
