@@ -371,7 +371,7 @@ pub fn send_direct(session_id: String, text: String, peer: Option<String>) -> Re
     let peer = peer.filter(|p| !p.is_empty());
     let base = super::api(&peer);
     let d = super::get_json(&format!("{base}/sessions/{session_id}"))?;
-    check_direct(&d)?;
+    check_direct(&d, super::now_ms() as u64)?;
     let url = format!("{base}/sessions/{session_id}/terminal/input");
     let post = |t: &str| {
         super::agent()
@@ -388,7 +388,7 @@ pub fn send_direct(session_id: String, text: String, peer: Option<String>) -> Re
 }
 
 /// 直接送ってよい状態か。PTY で、claude が動いていて、承認や質問を待っていないこと
-pub fn check_direct(d: &Value) -> Result<(), String> {
+pub fn check_direct(d: &Value, now_ms: u64) -> Result<(), String> {
     if d.pointer("/capabilities/terminal").and_then(|v| v.as_bool()) != Some(true) {
         return Err("このセッションには端末が無いので、/ と ! のコマンドを直接は送れない".into());
     }
@@ -400,13 +400,15 @@ pub fn check_direct(d: &Value) -> Result<(), String> {
     if d.get("pending").and_then(|p| p.as_array()).map(|a| !a.is_empty()).unwrap_or(false) {
         return Err("承認待ちなので送らなかった。先に承認に答えて".into());
     }
-    // claude が起動し、信頼の確認を抜けたか。ccn の send は SessionStart の hook を待つが、端末の口は待たない。
+    // claude が起動し、信頼の確認を抜けたか。ccn の send は SessionStart の hook と入力の受け付けを待つが、端末の口は待たない。
     // 信頼の確認の画面で Enter を送ると、既定の「No, exit」が選ばれて claude が終わる（2026-11-13 に画面で見た）。
-    // ccn の detail に起動済みの印は無いので、最初の hook で入る permissionMode を印に使う。
-    // Claude Town が立てる PTY は permission_mode を渡さないので、この印は起動前には無い。
-    // 立てるときに permission_mode を渡したセッションは、起動前から印があるので見分けられない（ccn 側に起動済みの印が要る）
-    if d.get("permissionMode").and_then(|v| v.as_str()).map(|s| s.is_empty()).unwrap_or(true) {
-        return Err("claude がまだ起動していない（信頼の確認の画面かもしれない）。ターミナルで答えてから送って".into());
+    // ccn の detail に起動済みの印は無い。hook が届くと lastActivityAt が進むので、startedAt より後なら SessionStart が来たとみる
+    // （信頼の確認の画面では2つが同じ値だった。2026-11-13 に実測）。入力の受け付けは SessionStart の 0.3〜1.4 秒後なので（ccn #26）、起動から3秒は待つ。
+    // 端末で何かを打っても lastActivityAt は進むので、確かな印ではない。確かにするには ccn 側に起動済みの印が要る
+    let started = d.get("startedAt").and_then(|v| v.as_u64()).unwrap_or(0);
+    let active = d.get("lastActivityAt").and_then(|v| v.as_u64()).unwrap_or(0);
+    if active <= started || now_ms.saturating_sub(started) < 3000 {
+        return Err("claude がまだ起動していない（信頼の確認の画面かもしれない）。ターミナルで確かめてから送って".into());
     }
     Ok(())
 }
@@ -487,13 +489,15 @@ mod tests {
 
     #[test]
     fn direct_send_refuses_while_waiting() {
-        let ok = json!({"capabilities":{"terminal":true},"state":"idle","pending":[],"permissionMode":"default"});
-        assert!(check_direct(&ok).is_ok());
-        // 信頼の確認の画面（hook がまだ来ていない）
-        assert!(check_direct(&json!({"capabilities":{"terminal":true},"state":"idle","pending":[]})).is_err());
-        assert!(check_direct(&json!({"capabilities":{"terminal":true},"state":"running","pending":[{"requestId":"r"}]})).is_err());
-        assert!(check_direct(&json!({"capabilities":{"terminal":true},"state":"waiting_permission","pending":[]})).is_err());
-        assert!(check_direct(&json!({"capabilities":{"terminal":false},"state":"idle"})).is_err());
+        let ok = json!({"capabilities":{"terminal":true},"state":"idle","pending":[],"startedAt":1000,"lastActivityAt":1800});
+        let now = 10_000;
+        assert!(check_direct(&ok, now).is_ok());
+        // 信頼の確認の画面（hook がまだ来ていない）と、起動の直後
+        assert!(check_direct(&json!({"capabilities":{"terminal":true},"state":"idle","pending":[],"startedAt":1000,"lastActivityAt":1000}), now).is_err());
+        assert!(check_direct(&ok, 2000).is_err());
+        assert!(check_direct(&json!({"capabilities":{"terminal":true},"state":"running","pending":[{"requestId":"r"}],"startedAt":1000,"lastActivityAt":1800}), now).is_err());
+        assert!(check_direct(&json!({"capabilities":{"terminal":true},"state":"waiting_permission","pending":[],"startedAt":1000,"lastActivityAt":1800}), now).is_err());
+        assert!(check_direct(&json!({"capabilities":{"terminal":false},"state":"idle"}), now).is_err());
         assert_eq!(paste_body("a\x1b[201~b"), "ab");
     }
 }
