@@ -344,23 +344,39 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .stage-bg { background-image: radial-gradient(#eceae5 1px, transparent 1px); background-size: 18px 18px; }
 .ap-detail { font-family: ui-monospace, Menlo, monospace; }
 
-/* ノードの右上の小さい ×。枠線の上に半分乗せる。ふだんは薄く、ホバーで濃く。押せる範囲は 24px */
-/* × の中心は、角丸の枠線（太さの中心線）の 45 度の位置: 右端と上端から d = r − (r − bw/2)·cos45° 内側。
-   r と bw はカードと札で違うので、包み（.fnode-body）に持たせる。.card と .mini の border-radius と border の太さに合わせる */
-.fnode-body { position: relative; display: flex; flex: none; --kx-size: 15px; }
+/* 承認待ちの光の層（上の approval-glow）は、包み（.fnode-body）の角丸を --kx-r で読む。
+   r と bw はカードと札で違うので、包みに持たせる。.card と .mini の border-radius と border の太さに合わせる */
+.fnode-body { position: relative; display: flex; flex: none; }
 .fnode-body.k-card { --kx-r: 14px; --kx-bw: 1.5px; }
 /* 札は zoom（--kx-k）で縮むので、角丸と枠線も同じ倍率にする */
 .fnode-body.k-mini { --kx-r: calc(10px * var(--kx-k, 1)); --kx-bw: calc(1.5px * var(--kx-k, 1)); }
-.kill-x {
-  --kx-d: calc(var(--kx-r) - (var(--kx-r) - var(--kx-bw) / 2) * 0.70711);
-  position: absolute; top: calc(var(--kx-d) - var(--kx-size) / 2); right: calc(var(--kx-d) - var(--kx-size) / 2);
-  z-index: 8; width: var(--kx-size); height: var(--kx-size); padding: 0; border-radius: 50%; box-sizing: border-box; transform-origin: 50% 50%;
-  display: grid; place-items: center; font-size: 11px; line-height: 1; color: #9a96a3; background: #fff; border: 1px solid #dcd8d1;
-  opacity: 0.5; transition: opacity 0.12s, color 0.12s, border-color 0.12s;
+
+/* カードの右下のボタン（#63、App.tsx の CARD_ACTIONS）。本人の見本（2026-11-13）どおり、角丸の四角を右下の縁にまたがって並べる。
+   見本の比率: ボタンの幅はカードの幅の約1割、右端のボタンはカードの右端から角丸の分だけ内側、間は約3px。
+   ふだんは隠し、カードに乗せたときと選んでいるカード（.fnode.open）で出す。いつも出すときは .always（CARD_ACTIONS_ALWAYS） */
+.card-acts {
+  --ca-size: 19px;
+  position: absolute; right: 12px; bottom: calc(var(--ca-size) / -2); z-index: 8; display: flex; gap: 3px;
+  opacity: 0; pointer-events: none; transition: opacity 0.12s;
 }
-.kill-x::before { content: ""; position: absolute; inset: -5px; border-radius: 50%; }
-.fnode:hover .kill-x { opacity: 0.85; }
-.kill-x:hover { opacity: 1; color: #c4493b; border-color: #e5b4ad; }
+.fnode:hover .card-acts, .fnode.open .card-acts, .card-acts.always { opacity: 1; pointer-events: auto; }
+.card-act {
+  width: var(--ca-size); height: var(--ca-size); padding: 0; box-sizing: border-box; border-radius: 5px;
+  display: grid; place-items: center; font-size: 11px; line-height: 1;
+  background: #fff; border: 1.5px solid #cfcac2; box-shadow: 0 1px 2px rgba(47, 45, 54, 0.08);
+  transition: transform 0.1s, border-color 0.12s, background 0.12s;
+}
+.card-act:hover { border-color: #8f8a96; transform: translateY(-1px); }
+.card-act.ca-kill:hover { border-color: #e5b4ad; background: #fff5f3; }
+.card-act.off { opacity: 0.4; filter: grayscale(1); cursor: not-allowed; }
+.card-act.off:hover { border-color: #cfcac2; transform: none; background: #fff; }
+.card-act.sending { opacity: 0.6; }
+/* 押したあとの一瞬の反応。届いたら緑に跳ね、届かなければ赤く揺れる。長さは CARD_ACT_FLASH_MS と合わせる */
+.card-act.sent { border-color: #3aa76d; background: #ecf8f1; animation: card-act-sent 0.7s ease-out; }
+.card-act.failed { border-color: #c4493b; background: #fdeeee; animation: card-act-failed 0.7s ease-out; }
+@keyframes card-act-sent { 0% { transform: scale(1); } 25% { transform: scale(1.3); } 60%, 100% { transform: scale(1); } }
+@keyframes card-act-failed { 0%, 100% { transform: translateX(0); } 20%, 60% { transform: translateX(-2px); } 40%, 80% { transform: translateX(2px); } }
+@media (prefers-reduced-motion: reduce) { .card-act.sent, .card-act.failed { animation: none; } }
 
 /* 閉じる前の確認 */
 .modal-scrim { position: fixed; inset: 0; z-index: 50; background: rgba(47, 45, 54, 0.22); display: grid; place-items: center; }

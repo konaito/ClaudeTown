@@ -49,12 +49,30 @@ const KILL_MS = 1150;
 /** 子孫を葉から順に倒すときのずらし（ms） */
 const KILL_STAGGER = 140;
 
-/** 閉じる操作と演出の状態。カードの × と、倒れる演出が読む */
+/**
+ * カードの右下のボタン（#63）。左から並べる順に書く。送る文を足し替えるときはここだけを直す。
+ * kind が kill のボタンはセッションを閉じる（前のカードの × と同じ動き）。send のボタンは text をチャットの送信と同じ口で送る。
+ * 見本は本人のスクショ（2026-11-13）。角丸のカードの右下の縁に、角丸の四角いボタンが縁にまたがって並ぶ
+ */
+type CardAction = { key: string; icon: string; name: string } & ({ kind: "kill" } | { kind: "send"; text: string });
+const CARD_ACTIONS: CardAction[] = [
+  { key: "kill", icon: "🔪", name: "閉じる", kind: "kill" },
+  { key: "howdy", icon: "🚪", name: "様子を聞く", kind: "send", text: "調子どうですか" },
+  { key: "go", icon: "👍", name: "許可する", kind: "send", text: "許可します、やってくださいお願いします。" },
+];
+/** true ならカードの右下のボタンをいつも出す。false ならカードに乗せたときと、選んでいるカードだけに出す */
+const CARD_ACTIONS_ALWAYS = false;
+/** 押したあとの反応（ボタンの一瞬の変化）の長さ（ms）。CSS の card-act-* と合わせる */
+const CARD_ACT_FLASH_MS = 700;
+
+/** 閉じる操作と演出の状態。カードの 🔪 と、倒れる演出が読む */
 /** いま見ている町のセッション（お手紙の送り手の名前を引くため） */
 const TownCtx = createContext<Agent[]>([]);
 /** 封筒の印（💌）を頭に出しているセッション */
 const LetterCtx = createContext<Set<string>>(new Set());
 const KillCtx = createContext<{ dying: Map<string, number>; ask: (a: Agent, instant: boolean) => void }>({ dying: new Map(), ask: () => {} });
+/** カードのボタンから文を送る口（#63）。値は App で一度だけ作り、町の描き直しの合図にしない（#10） */
+const SendCtx = createContext<(a: Agent, text: string) => Promise<boolean>>(async () => false);
 const CONV_POLL_MS = 2500;
 /** 会話に新しい発言が無い回が続いたときの間隔の上限（#5）。新しい発言が来るか、文を送ったら CONV_POLL_MS に戻す */
 const CONV_POLL_MAX_MS = 10000;
@@ -249,6 +267,24 @@ export default function App() {
   const letterMarks = useLetterMarks(flights);
   const askKill = useCallback((a: Agent, instant: boolean) => { if (instant) kill(a); else setKillAsk(a); }, [kill]);
   const killCtx = useMemo(() => ({ dying, ask: askKill }), [dying, askKill]);
+  // カードのボタンから文を送る（#63）。選んでいるセッションなら、右パネルの送信（仮の吹き出しと会話の取り直し）に任せる。
+  // ほかのセッションは send_message で送り、トーストを出す。参照を変えないよう ref を通し、町を描き直させない（#10）
+  const panelSend = useRef<((id: string, text: string) => Promise<boolean> | null) | null>(null);
+  const sendImpl = useRef<(a: Agent, text: string) => Promise<boolean>>(async () => false);
+  sendImpl.current = async (a, text) => {
+    const viaPanel = panelSend.current?.(a.id, text);
+    if (viaPanel) return viaPanel;
+    try {
+      await invoke("send_message", { sessionId: a.id, text, peer: peer || null });
+      kickTown();
+      toast(`${a.name} に届けた`);
+      return true;
+    } catch (e) {
+      toast(`${a.name} に届かなかった: ${e}`, true);
+      return false;
+    }
+  };
+  const cardSend = useCallback((a: Agent, text: string) => sendImpl.current(a, text), []);
   const counts = useMemo(() => {
     const c: Record<Mood, number> = { approval: 0, reply: 0, working: 0, done: 0, idle: 0 };
     for (const a of agents) c[moodOf(a)]++;
@@ -307,6 +343,7 @@ export default function App() {
   return (
     <SkinCtx.Provider value={skinCtx}>
     <KillCtx.Provider value={killCtx}>
+    <SendCtx.Provider value={cardSend}>
     <LetterCtx.Provider value={letterMarks.marks}>
     <TownCtx.Provider value={agents}>
     <div className="app" onContextMenu={(e) => e.preventDefault()}>
@@ -392,7 +429,7 @@ export default function App() {
         {/* 町と右パネルの境目。ドラッグで右パネルを 380px からウィンドウ幅の半分まで広げられる。ダブルクリックで既定の幅に戻る */}
         <Separator className="split-handle" />
         <SplitPanel id="side" defaultSize={SIDE_DEFAULT} minSize={SIDE_MIN} maxSize="50%">
-        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} descendants={sel ? descOf(tree.childrenOf, sel.id) : []} termReq={termReq} chatReq={chatReq} composeReq={composeReq} peers={peers}
+        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} descendants={sel ? descOf(tree.childrenOf, sel.id) : []} termReq={termReq} chatReq={chatReq} composeReq={composeReq} peers={peers} sendHook={panelSend}
           onSent={(a) => { kickTown(); toast(`${a.name} に届けた`); }} onSent2={(m) => { kickTown(); toast(m); }} onError={(m) => toast(m, true)}
           needs={needs} onSelect={(a) => setSelected(a.id)} />
         </SplitPanel>
@@ -410,6 +447,7 @@ export default function App() {
     </div>
     </TownCtx.Provider>
     </LetterCtx.Provider>
+    </SendCtx.Provider>
     </KillCtx.Provider>
     </SkinCtx.Provider>
   );
@@ -530,7 +568,7 @@ function KillConfirm({ agent, descendants, onCancel, onConfirm }: { agent: Agent
     <div className="modal-scrim" onMouseDown={onCancel}>
       <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-title">{agent.name}{descendants ? ` と子孫 ${descendants} 人` : ""}を閉じる？</div>
-        <p className="hint">ccn でセッションを止める。{descendants ? "子孫は孫から順に止める。" : ""}止まらなかった分は画面に残る。⌘ を押しながら × を押すと、確認なしで閉じる。</p>
+        <p className="hint">ccn でセッションを止める。{descendants ? "子孫は孫から順に止める。" : ""}止まらなかった分は画面に残る。⌘ を押しながら 🔪 を押すと、確認なしで閉じる。</p>
         <div className="modal-btns">
           <button className="pane-btn" onClick={onCancel}>やめる（Esc）</button>
           <button className="danger" autoFocus onClick={onConfirm}>閉じる（Enter）</button>
@@ -613,7 +651,7 @@ function Stage({ zoom, items, onBlank }: { zoom: number | "fit"; items: { id: st
   const at = new Map(packed.items.map((p) => [p.id, p]));
   return (
     <ScrollEdgeGradient className="stage" wrapClassName="seg-fill stage-bg" strength="town" ref={outer}
-      onClick={(e) => { if (!(e.target as HTMLElement).closest(".card, .mini, .pop, .g-head, .ghost-card, .kill-x, .letter-mark")) onBlank(); }}>
+      onClick={(e) => { if (!(e.target as HTMLElement).closest(".card, .mini, .pop, .g-head, .ghost-card, .card-acts, .letter-mark")) onBlank(); }}>
       <div className="stage-inner" style={{ zoom: scale, width, height: packed.height + 20 }}>
         {items.map((b) => {
           const p = at.get(b.id)!;
@@ -746,16 +784,13 @@ const FamilyCanvas = memo(function FamilyCanvas({ all, result, selected, onSelec
         return (
           <div key={n.id} className={`fnode ${selected === n.id ? "open" : ""} ${delay !== undefined ? "dying" : ""} ${n.depth >= 2 ? "is-mini" : ""}`}
             style={{ left: n.x - n.w / 2 + ox, top: n.y - n.h / 2 + oy, width: n.w, height: n.h, transition: `left ${LAYOUT.moveMs}ms ease, top ${LAYOUT.moveMs}ms ease`, ["--kd" as string]: `${delay ?? 0}ms` }}>
-            {/* × はカード（札）の角を基準に置くので、カードと同じ大きさの包みに入れる（カードは overflow: hidden） */}
+            {/* 右下のボタンはカード（札）の縁を基準に置くので、カードと同じ大きさの包みに入れる（カードは overflow: hidden） */}
             <div className={`fnode-body ${n.depth >= 2 ? "k-mini" : "k-card"}`} data-aid={n.id}
               style={n.depth >= 2 ? { ["--kx-k" as string]: boxOf(n.depth, a.name).scale } : undefined}>
               {a.ghost ? <GhostCard agent={a} depth={n.depth} onSelect={onSelect} /> : <Card agent={a} depth={n.depth} selected={selected === n.id} onSelect={onSelect} onFocus={onFocus} />}
               {letters.has(n.id) && <img className="letter-mark" src={LETTER_IMG} alt="お手紙が届いた" title="お手紙が届いた" />}
-              {a.capabilities?.stop && delay === undefined && (
-                <button className="kill-x" title="閉じる（⌘ を押しながらで確認なし）" aria-label={`${a.name} を閉じる`}
-                  onClick={(e) => { e.stopPropagation(); kill.ask(a, e.metaKey); }}
-                  onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}>×</button>
-              )}
+              {/* 孫より下の小さい札には付けない。選んだときに重なる大きいカード（.pop）の中で付ける（Card） */}
+              {!a.ghost && n.depth <= 1 && delay === undefined && <CardActions agent={a} />}
             </div>
             {delay !== undefined && <KillFx w={n.w} h={n.h} />}
           </div>
@@ -792,9 +827,56 @@ const Card = memo(function Card(props: { agent: Agent; depth: number; selected: 
       {selected && (
         <div className="pop">
           <FullCard {...props} />
+          {!dying.has(agent.id) && <CardActions agent={agent} />}
         </div>
       )}
     </>
+  );
+});
+
+/**
+ * カードの右下のボタン（#63）。並びと送る文は CARD_ACTIONS で決める。出し入れは CSS（.fnode:hover と .fnode.open）で行い、描き直さない。
+ * 押してもカードの選択や右パネルの切り替えが起きないよう、クリックはここで止める
+ */
+const CardActions = memo(function CardActions({ agent }: { agent: Agent }) {
+  const kill = useContext(KillCtx);
+  const send = useContext(SendCtx);
+  // 押したあとの一瞬の反応。key は押したボタン、ok は届いたか
+  const [flash, setFlash] = useState<{ key: string; ok: boolean } | null>(null);
+  const [sending, setSending] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  const canSend = agent.canSend;
+  const canStop = !!agent.capabilities?.stop;
+  const press = async (act: CardAction, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (act.kind === "kill") { if (canStop) kill.ask(agent, e.metaKey); return; }
+    if (!canSend || sending) return;
+    setSending(act.key);
+    const ok = await send(agent, act.text);
+    setSending(null);
+    setFlash({ key: act.key, ok });
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setFlash(null), CARD_ACT_FLASH_MS);
+  };
+  return (
+    <div className={`card-acts ${CARD_ACTIONS_ALWAYS ? "always" : ""}`}
+      onClick={(e) => e.stopPropagation()} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}>
+      {CARD_ACTIONS.map((act) => {
+        const off = act.kind === "kill" ? !canStop : !canSend;
+        const title = act.kind === "kill"
+          ? (canStop ? `${act.name}（⌘ を押しながらで確認なし）` : "ccn から止められないセッション")
+          : (canSend ? `${act.name}: 「${act.text}」を送る` : `このセッションには送れない（「${act.text}」）`);
+        const fx = flash?.key === act.key ? (flash.ok ? "sent" : "failed") : sending === act.key ? "sending" : "";
+        return (
+          <button key={act.key} type="button" className={`card-act ca-${act.key} ${off ? "off" : ""} ${fx}`}
+            aria-disabled={off} title={title} aria-label={`${agent.name}: ${title}`}
+            onClick={(e) => press(act, e)}>
+            <span aria-hidden>{act.icon}</span>
+          </button>
+        );
+      })}
+    </div>
   );
 });
 
@@ -827,7 +909,7 @@ function KillFx({ w, h }: { w: number; h: number }) {
 
 /**
  * 転出のゴースト（src/ghost.ts）。別の町にいる親か子の影。半透明、点線の枠、旅行かばんの印で、閉じる演出の 👻 と分ける。
- * 押すと本物がいる町に切り替えて、その子を選ぶ。× は出さない（ここからは閉じない）。
+ * 押すと本物がいる町に切り替えて、その子を選ぶ。右下のボタンは出さない（ここからは閉じない）。
  */
 const GhostCard = memo(function GhostCard({ agent, depth, onSelect }: { agent: Agent; depth: number; onSelect: (a: Agent) => void }) {
   const g = agent.ghost!;
@@ -904,8 +986,10 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
 
 // ---------- 右のパネル ----------
 
-function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq, peers, onSent, onSent2, onError, needs, onSelect }: {
+function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq, peers, sendHook, onSent, onSent2, onError, needs, onSelect }: {
   agent: Agent | null; peer: string; lineage: Agent[]; descendants: Agent[]; termReq: number; chatReq: number; composeReq: number; peers: Peer[];
+  /** カードのボタン（#63）が、選んでいるセッションへの送信をこのパネルに任せる口。選んでいないセッションなら null を返す */
+  sendHook: React.MutableRefObject<((id: string, text: string) => Promise<boolean> | null) | null>;
   onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
 }) {
   const hasTerm = !!agent?.capabilities?.terminal;
@@ -942,6 +1026,12 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   const text = agent ? drafts[agent.id] ?? "" : "";
   const setText = (v: string) => { if (agent) setDrafts((d) => ({ ...d, [agent.id]: v })); };
   const [busy, setBusy] = useState(false);
+  // カードのボタンからの送信（#63）。描くたびに今の send に差し替える。パネルが消えたら口を外す
+  const quickSend = useRef<((id: string, text: string) => Promise<boolean> | null) | null>(null);
+  useEffect(() => {
+    sendHook.current = (id, text) => quickSend.current?.(id, text) ?? null;
+    return () => { sendHook.current = null; };
+  }, [sendHook]);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   // 会話をすぐ取り直させる口（文を送った直後に使う）
@@ -1026,6 +1116,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   }, [items, pending, id, tab, chatReq, hasNote, live, working]);
 
   if (!agent) {
+    quickSend.current = null;
     return (
       <aside className="panel empty-panel">
         <div className="ep">
@@ -1042,7 +1133,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   const mood = moodOf(agent);
   // 同じ名前の人が町にいたら、送信先に ID の先頭8字を添える（#36）。見出しは幅が足りず ID が切れるので名前だけにする
   const target = targetLabel(agent, town);
-  const send = async (body: string) => {
+  /** quick はカードのボタンから送るとき。入力欄の下書きは消さない */
+  const send = async (body: string, quick = false) => {
     if (!body.trim() || busy) return false;
     setBusy(true);
     const after = items[items.length - 1]?.n ?? -1;
@@ -1058,7 +1150,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
         await invoke("send_message", { sessionId: agent.id, text: body, peer: peer || null });
         setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
       }
-      setText("");
+      if (!quick) setText("");
       stick.current = true;
       // 返事が来るまでは間隔を縮めて取る（#5）
       convKick.current();
@@ -1071,6 +1163,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
       setBusy(false);
     }
   };
+
+  quickSend.current = (to, body) => (to === agent.id ? send(body, true) : null);
 
   const choices = mood !== "working" ? lastChoices : [];
 
