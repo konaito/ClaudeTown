@@ -456,7 +456,7 @@ function descOf(childrenOf: Map<string, Agent[]>, id: string): Agent[] {
 
 // ---------- お手紙 ----------
 
-const LETTER_IMG = "/sprites/noto/1f48c/512.webp";
+const LETTER_IMG = "/sprites/noto/1f48c/64.webp";
 /** 封筒の印を残す長さ。読まれたら短く、読まれないままなら長くても MARK_MAX_MS で消す */
 const MARK_READ_MS = 2500;
 /** 飛ぶ封筒と、頭に残る印の大きさ（px）。App.css の .letter-fly と .letter-mark に合わせる */
@@ -855,7 +855,7 @@ function KillFx({ w, h }: { w: number; h: number }) {
           );
         })}
       </svg>
-      <img className="kill-ghost" src="/sprites/noto/1f47b/512.webp" alt="" draggable={false} />
+      <img className="kill-ghost" src="/sprites/noto/1f47b/64.webp" alt="" draggable={false} />
     </div>
   );
 }
@@ -1458,7 +1458,7 @@ function Credits({ skin, onSkin }: { skin: Skin; onSkin: (s: Skin) => void }) {
           <b>キャラ</b>: Ninja Adventure Asset Pack（Pixel-boy、AAA）、CC0 1.0。
           <br /><b>状態の印、幽霊、お手紙</b>: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0
           （creativecommons.org/licenses/by/4.0）。Source: googlefonts.github.io/noto-emoji-animation
-          <br />どちらも配布元のファイルを改変せずに使い、表示のときに縮めている。
+          <br />キャラは配布元のファイルのまま表示のときに縮めている。Noto は 64px に縮め、コマを半分に間引いた。
           {skin === "pokemon" && (<>
             <br /><b>ポケモン（キャラの見た目で選んだとき）</b>: Pokémon Showdown のアニメ GIF を、PokeAPI/sprites（github.com/PokeAPI/sprites）の配布から
             {"表示中のキャラの分だけ実行時に読む。このアプリには画像を含めない。Pokémon © Nintendo / Creatures Inc. / GAME FREAK inc."}
