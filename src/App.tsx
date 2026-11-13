@@ -1443,7 +1443,7 @@ function StateTab({ agent, mood }: { agent: Agent; mood: Mood }) {
   ];
   return (
     <ScrollEdgeGradient className="state-scroll" wrapClassName="seg-fill"><dl className="state-tab">
-      {rows.filter(([, v]) => v).map(([k, v]) => (<div key={k}><dt>{k}</dt><dd>{linkify(v!)}</dd></div>))}
+      {rows.filter(([, v]) => v).map(([k, v]) => (<div key={k}><dt>{k}</dt><dd>{typeof v === "string" ? linkify(v) : v}</dd></div>))}
       {!r && <p className="hint">状態 hook が入っていないので、頼まれたことと次の一手は出ない（README の「hook」を参照）。</p>}
     </dl></ScrollEdgeGradient>
   );
