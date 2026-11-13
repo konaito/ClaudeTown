@@ -2,6 +2,8 @@
 //   bun run scripts/mock-ccn-town.ts <ポート> [オプション]
 //     --households <数>   世帯（根のセッション）の数。既定 4
 //     --sessions <数>     セッションの合計。既定 10。根の残りを、世帯に順に子として配る（3人目からは孫）
+//     --kids <a,b,…>      世帯ごとの子の数をそのまま決める（孫は作らない）。例 --kids 1,2,3,4 で子1〜4人の世帯を4つ。
+//                         指定すると --households と --sessions は無視する（世帯の数は並べた数、合計は世帯と子の和）
 //     --running <数>      作業中（state=running）にする数。既定 0
 //     --approval <数>     承認待ち（state=waiting_permission）にする数。既定 0
 //     --flood <Hz>        先頭の世帯に PTY のセッションを1つ足し、決まった出力を1秒に Hz かたまり流し続ける（mock-ccn-flood.ts と同じ中身）。既定 0（足さない）
@@ -17,7 +19,10 @@ const argv = process.argv.slice(2);
 const PORT = Number(argv[0]);
 if (!PORT) { console.error("ポートを渡す"); process.exit(2); }
 const opt = (k: string, d: number) => { const i = argv.indexOf(`--${k}`); return i >= 0 ? Number(argv[i + 1]) : d; };
-const HOUSEHOLDS = opt("households", 4), SESSIONS = opt("sessions", 10), RUNNING = opt("running", 0), APPROVAL = opt("approval", 0);
+const kidsArg = (() => { const i = argv.indexOf("--kids"); return i >= 0 ? argv[i + 1].split(",").map(Number) : null; })();
+const HOUSEHOLDS = kidsArg ? kidsArg.length : opt("households", 4);
+const SESSIONS = kidsArg ? kidsArg.length + kidsArg.reduce((a, b) => a + b, 0) : opt("sessions", 10);
+const RUNNING = opt("running", 0), APPROVAL = opt("approval", 0);
 const FLOOD_HZ = opt("flood", 0), TALK = opt("talk", 0);
 const STREAM = !argv.includes("--no-stream");
 if (HOUSEHOLDS < 1 || SESSIONS < HOUSEHOLDS || RUNNING + APPROVAL > SESSIONS) { console.error("数が合わない"); process.exit(2); }
@@ -32,7 +37,13 @@ const roots: S[] = [];
 for (let i = 0; i < SESSIONS; i++) {
   const id = idOf(i + 1);
   let parent = "local", cwd = `/tmp/bench-town/house-${i + 1}`;
-  if (i >= HOUSEHOLDS) {
+  if (i >= HOUSEHOLDS && kidsArg) {
+    // --kids: 世帯 h に kidsArg[h] 人の子を順に置く
+    let k = i - HOUSEHOLDS, h = 0;
+    while (k >= kidsArg[h]) k -= kidsArg[h++];
+    parent = `agent:bench/${roots[h].id.slice(0, 8)}/子`;
+    cwd = `${roots[h].cwd}/kid-${k + 1}`;
+  } else if (i >= HOUSEHOLDS) {
     // 根の残りを世帯に順に配る。同じ世帯の3人目からは、その世帯の2人目の子（孫）にする
     const h = (i - HOUSEHOLDS) % HOUSEHOLDS, nth = Math.floor((i - HOUSEHOLDS) / HOUSEHOLDS);
     const kin = sessions.filter((s) => s.cwd.startsWith(`${roots[h].cwd}/`));
@@ -81,7 +92,9 @@ if (flood) {
   }, 1000 / FLOOD_HZ);
 }
 
-const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
+// ブラウザで開いた開発版（?mock&mockport=<ポート>、src/bridge.ts）からも読めるようにする
+const CORS = { "access-control-allow-origin": "*" };
+const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json", ...CORS } });
 const byId = new Map(sessions.map((s) => [s.id, s]));
 Bun.serve({
   port: PORT, hostname: "127.0.0.1", idleTimeout: 0,
@@ -108,7 +121,7 @@ Bun.serve({
         },
         cancel() { clearInterval(ping); },
       });
-      return new Response(stream, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" } });
+      return new Response(stream, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", ...CORS } });
     }
     const s = byId.get(p[2]);
     if (!s) { count("unknown"); return json({ error: "unknown session" }, 404); }
