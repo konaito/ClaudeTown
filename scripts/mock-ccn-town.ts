@@ -6,9 +6,11 @@
 //     --approval <数>     承認待ち（state=waiting_permission）にする数。既定 0
 //     --flood <Hz>        先頭の世帯に PTY のセッションを1つ足し、決まった出力を1秒に Hz かたまり流し続ける（mock-ccn-flood.ts と同じ中身）。既定 0（足さない）
 //     --talk <件>         先頭の世帯に node のセッションを1つ足し、件数ぶんの発言を messages で返す。既定 0（足さない）
+//     --no-stream         一覧の SSE（GET /api/sessions/stream）を 404 にする（口が無い ccn を真似る）。既定は、つないだときに一覧を1回送り、
+//                         あとは15秒ごとの keep-alive だけを送る（町は変わらないので）
 // 起動したら「ready <ポート> pid <pid>」と、足したセッションの ID（flood <id>、talk <id>）を標準出力に書く。
 // GET /__bench/stats で、起動してからの要求の数を口ごとに返す（ccn への問い合わせの回数を数える。#5、#14）。
-// 口は ccn と同じ形（GET /api/peers、/api/sessions、/api/sessions/<id>、…/messages?after=、…/terminal の SSE、POST …/terminal/input と resize）
+// 口は ccn と同じ形（GET /api/peers、/api/sessions、/api/sessions/stream の SSE、/api/sessions/<id>、…/messages?after=、…/terminal の SSE、POST …/terminal/input と resize）
 import { floodChunks } from "./flood-chunk";
 
 const argv = process.argv.slice(2);
@@ -17,6 +19,7 @@ if (!PORT) { console.error("ポートを渡す"); process.exit(2); }
 const opt = (k: string, d: number) => { const i = argv.indexOf(`--${k}`); return i >= 0 ? Number(argv[i + 1]) : d; };
 const HOUSEHOLDS = opt("households", 4), SESSIONS = opt("sessions", 10), RUNNING = opt("running", 0), APPROVAL = opt("approval", 0);
 const FLOOD_HZ = opt("flood", 0), TALK = opt("talk", 0);
+const STREAM = !argv.includes("--no-stream");
 if (HOUSEHOLDS < 1 || SESSIONS < HOUSEHOLDS || RUNNING + APPROVAL > SESSIONS) { console.error("数が合わない"); process.exit(2); }
 
 // 開始時刻は起動の1時間前から1分ずつずらす（町の並びと経過時間の表示が毎回同じになる）
@@ -92,6 +95,20 @@ Bun.serve({
     if (!p[2]) {
       count(`sessions.${req.method}`);
       return req.method === "GET" ? json(sessions) : json({ error: "bench のモックでは作らない" }, 400);
+    }
+    if (p[2] === "stream" && !p[3]) {
+      count("sessions.stream");
+      if (!STREAM) return json({ error: "not found" }, 404);
+      let ping: ReturnType<typeof setInterval>;
+      const stream = new ReadableStream({
+        start(c) {
+          const put = (t: string) => { try { c.enqueue(enc.encode(t)); } catch { clearInterval(ping); } };
+          put(`id: 1\nevent: sessions\ndata: ${JSON.stringify(sessions)}\n\n`);
+          ping = setInterval(() => put(": ping\n\n"), 15_000);
+        },
+        cancel() { clearInterval(ping); },
+      });
+      return new Response(stream, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" } });
     }
     const s = byId.get(p[2]);
     if (!s) { count("unknown"); return json({ error: "unknown session" }, 404); }
