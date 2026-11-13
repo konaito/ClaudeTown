@@ -62,7 +62,8 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       const sid = params.get("sid") ?? "";
       // 見え方が途中で変わったら記録する（見えている前提の場面で隠れた回を、bench.ts が無効にする）
       const vis: { at: number; state: string }[] = [];
-      const onVis = () => vis.push({ at: Date.now(), state: document.visibilityState });
+      // その場でも1行書く。scripts/bench.ts はこれを見て、見えるはずの場面で隠れた回をすぐ打ち切る
+      const onVis = () => { vis.push({ at: Date.now(), state: document.visibilityState }); log({ visChange: document.visibilityState, at: Date.now() }); };
       document.addEventListener("visibilitychange", onVis);
       if (scene === "terminal") {
         // 開いたときの計測（perf.ts の open の流れ）が終わるまで待つ。終わるまでは perf_ping を20ms ごとに回している

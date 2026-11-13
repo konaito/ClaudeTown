@@ -236,14 +236,25 @@ async function runOnce(scene: Scene, round: number, o: Opts): Promise<Run> {
     if (kinds.GPU[0]) watch.GPU = kinds.GPU[0];
     if (kinds.Networking[0]) watch.Networking = kinds.Networking[0];
 
-    await sleep(o.settle * 1000);
+    // 見えるはずの場面で、始めから描かれていなければ測らない（本人が全画面のアプリを前面にしているときなど。ロックを早く返す）
+    const shown = VISIBLE.includes(scene);
+    if (shown && (ready.vis !== "visible" || (ready.fps ?? 0) < 20)) throw new Error(`始めに描かれていない（${ready.vis}、${ready.fps} fps）。測らずに打ち切った。前面のアプリ: ${run.front.join("、")}`);
+    // 見えるはずの場面で途中で隠れたら、そこで打ち切る
+    const hiddenSince = async (ms: number) => {
+      const end = Date.now() + ms;
+      while (Date.now() < end) {
+        if (shown && readLog(perf).some((x) => x.bench === "scene" && x.visChange === "hidden")) throw new Error(`途中で隠れたので打ち切った。前面のアプリ: ${frontApp()}`);
+        await sleep(Math.min(1000, Math.max(0, end - Date.now())));
+      }
+    };
+    await hiddenSince(o.settle * 1000);
     const stats = async () => (await (await fetch(`http://127.0.0.1:${mockPort}/__bench/stats`)).json()).stats as Record<string, number>;
     const s0 = await stats();
     const c0: Record<string, number | null> = {};
     for (const [k, p] of Object.entries(watch)) c0[k] = cpuSec(p);
     const t0 = performance.now();
     run.front.push(frontApp());
-    await sleep(o.secs * 1000);
+    await hiddenSince(o.secs * 1000);
     run.front.push(frontApp());
     const c1: Record<string, number | null> = {};
     for (const [k, p] of Object.entries(watch)) c1[k] = cpuSec(p);
