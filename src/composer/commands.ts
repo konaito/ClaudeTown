@@ -1,0 +1,140 @@
+// / の候補にする組み込みのコマンド。出所は https://code.claude.com/docs/en/commands（2026-11-13 に読んだ。CLI 2.1.323）。
+// スキルとユーザーのコマンドは Rust（slash_commands）が手元のフォルダから読む。
+// 入れたのは、CMD に載っているもののうち、廃止（/pr-comments、/ultraplan、/vim）と、メニューに出ないもの（/heapdump）と、
+// 特定の環境でだけ出るもの（/setup-bedrock、/setup-vertex）を除いた全部。別名（aliases）でも引ける。
+// dialog は、CLI で画面（選択肢、設定、一覧、表示）を開くもの。チャットからは操作できないので、送ったあとターミナルを開く。
+// "noarg" は引数が無いときだけ画面を開くもの。CMD が画面を開くと書いているものに加え、/context、/diff、/memory、/usage など、
+// CLI の画面に表を出すだけのものも、チャットには結果が出ないので dialog にした（自分で決めた分）。
+
+export type Command = { name: string; description: string; argumentHint?: string; source: "builtin" | "user" | "project" | "plugin"; dialog?: true | "noarg"; aliases?: string[] };
+
+type Row = [name: string, description: string, argumentHint?: string, dialog?: true | "noarg", aliases?: string[]];
+
+const ROWS: Row[] = [
+  ["add-dir", "Add a working directory for file access this session", "<path>"],
+  ["advisor", "Enable or disable the advisor tool", "[model|off]", "noarg"],
+  ["agents", "Print a reminder to create or manage subagents"],
+  ["artifacts", "List artifacts; attach, open, or copy link", undefined, true],
+  ["autocompact", "Set the auto-compact window size", "[auto|<tokens>]", "noarg"],
+  ["background", "Detach session to run as a background agent", "[prompt]", undefined, ["bg"]],
+  ["branch", "Branch the current conversation to try another path", "[name]"],
+  ["btw", "Ask a side question without adding to history", "[question]", true],
+  ["bug", "Report a bug or share conversation", "[report]", true, ["share"]],
+  ["cd", "Move session to a new working directory", "<path>"],
+  ["chrome", "Configure Claude in Chrome settings", undefined, true],
+  ["clear", "Start a new conversation with empty context", "[name]", undefined, ["reset", "new"]],
+  ["color", "Set the prompt bar color for this session", "[color|default]"],
+  ["compact", "Summarize conversation to free context", "[instructions]"],
+  ["config", "Open Settings to adjust theme, model, etc.", "[key=value ...]", "noarg", ["settings"]],
+  ["context", "Show context usage as a colored grid", "[all]", true],
+  ["copy", "Copy last assistant response to clipboard", "[N]", true],
+  ["cost", "Alias for /usage", undefined, true],
+  ["diff", "Review working tree changes, including Claude's edits", undefined, true],
+  ["doctor", "Setup checkup that proposes fixes", undefined, undefined, ["checkup"]],
+  ["effort", "Set effort level (low to xhigh, max, auto)", "[level|auto|status]", "noarg"],
+  ["exit", "Exit the CLI", undefined, undefined, ["quit"]],
+  ["export", "Export conversation as plain text", "[filename]", "noarg"],
+  ["fast", "Toggle fast mode", "[on|off]"],
+  ["feedback", "Send product feedback about Claude Code", "[report]", "noarg"],
+  ["focus", "Toggle focus view of prompt, tool summary, and reply"],
+  ["fork", "Copy conversation into a new background session", "[prompt]"],
+  ["goal", "Keep working across turns until condition is met", "[condition|clear]"],
+  ["help", "Show help and available commands", undefined, true],
+  ["hooks", "View hook configurations", undefined, true],
+  ["ide", "Manage IDE integrations and show status", undefined, true],
+  ["init", "Initialize project with a CLAUDE.md guide"],
+  ["insights", "Generate HTML report analyzing recent sessions"],
+  ["keybindings", "Open keyboard shortcuts file"],
+  ["list-agents", "List subagents and sessions Claude can message", undefined, undefined, ["peers"]],
+  ["login", "Sign in to your Anthropic account", undefined, true],
+  ["logout", "Sign out from your Anthropic account"],
+  ["loop", "Run a prompt repeatedly while session is open", "[interval] [prompt]", undefined, ["proactive"]],
+  ["mcp", "Manage MCP server connections and OAuth", "[reconnect|enable|disable]", "noarg"],
+  ["memory", "Edit CLAUDE.md, auto memory settings and entries", undefined, true],
+  ["model", "Switch model and save as default", "[model]", "noarg"],
+  ["output-style", "List or switch output styles", "[style]", "noarg"],
+  ["permissions", "Manage allow, ask, and deny tool rules", undefined, true, ["allowed-tools"]],
+  ["plan", "Enter plan mode, optionally with a task", "[description]"],
+  ["plugin", "Manage plugins", "[subcommand]", "noarg"],
+  ["recap", "Generate one-line summary of the session on demand"],
+  ["release-notes", "View changelog in an interactive version picker", undefined, true],
+  ["reload-plugins", "Reload plugins to apply pending changes"],
+  ["reload-skills", "Rescan skill and command directories"],
+  ["remote-control", "Make session available for Remote Control", undefined, undefined, ["rc"]],
+  ["rename", "Rename session; auto-generates a name if omitted", "[name]"],
+  ["restart", "Restart and resume session to apply an update", undefined, undefined, ["update"]],
+  ["resume", "Resume by ID or name, or open session picker", "[session]", "noarg", ["continue"]],
+  ["rewind", "Rewind conversation and/or code to a checkpoint", undefined, true, ["checkpoint", "undo"]],
+  ["sandbox", "Toggle sandbox mode"],
+  ["schedule", "Create, update, list, or run cloud scheduled tasks", "[description]", undefined, ["routines"]],
+  ["security-review", "Analyze branch changes for security vulnerabilities"],
+  ["skill-doctor", "Show each skill's context cost and usage frequency", undefined, true],
+  ["skills", "List skills with filter, sort, visibility controls", undefined, true],
+  ["status", "Open Settings on the Status tab", undefined, true],
+  ["statusline", "Configure the status line", "[description]"],
+  ["tasks", "View and manage background work in session", undefined, true, ["bashes"]],
+  ["terminal-setup", "Install Shift+Enter newline keybinding in terminal"],
+  ["theme", "Change color theme, including custom themes", undefined, true],
+  ["tui", "Set terminal UI renderer and relaunch", "[default|fullscreen]"],
+  ["usage", "Show session cost, plan limits, activity stats", undefined, true],
+  ["voice", "Toggle voice dictation", "[hold|tap|off]"],
+  ["workflows", "Open the workflow progress view", undefined, true],
+  ["artifact-capabilities", "Load reference for artifact runtime capabilities"],
+  ["artifact-diagramming", "Load diagramming guidance for artifacts"],
+  ["auto-mode-setup", "Draft autoMode.environment entries and save to settings"],
+  ["autofix-pr", "Cloud session that fixes PR CI failures and comments", "[prompt]"],
+  ["batch", "Run large parallel changes across codebase", "<instruction>"],
+  ["claude-api", "Load Claude API and Managed Agents reference", "[subcommand]"],
+  ["claude-in-chrome", "Have Claude run a task in your browser", "[task]"],
+  ["code-review", "Review diff or PR for correctness bugs", "[level] [--fix] [--comment] [target]", undefined, ["review"]],
+  ["dataviz", "Design guidance for charts and dashboards", "[request]"],
+  ["debug", "Enable debug logging and read session debug log", "[description]"],
+  ["deep-research", "Fan out web research and produce cited report", "<question>"],
+  ["design", "Draft UI mockups as a Claude Design artifact", "[brief]"],
+  ["design-login", "Authorize design-system access for /design-sync"],
+  ["design-sync", "Upload repo React design system to Claude Design", "[hint]"],
+  ["desktop", "Continue session in Claude Code Desktop app", undefined, undefined, ["app"]],
+  ["fewer-permission-prompts", "Add allowlist to reduce permission prompts"],
+  ["import", "Import config from Codex, Gemini CLI, or Cursor", "[codex|gemini|cursor]", "noarg"],
+  ["install-github-app", "Install Claude GitHub App for a repository"],
+  ["install-slack-app", "Install Claude Slack app via browser OAuth"],
+  ["mobile", "Show QR code to download Claude mobile app", undefined, true, ["ios", "android"]],
+  ["passes", "Share a free week of Claude Code (if eligible)"],
+  ["plugin-authoring", "Load reference for writing a mod"],
+  ["powerup", "Discover features through interactive lessons", undefined, true],
+  ["privacy-settings", "View and update privacy settings", undefined, true],
+  ["radio", "Open Claude FM lo-fi radio in browser"],
+  ["rate-limit-options", "Show ways to keep working past a usage limit", undefined, true],
+  ["remote-env", "Choose default cloud environment for cloud sessions", undefined, true],
+  ["run", "Launch and drive the app to verify a change"],
+  ["run-skill-generator", "Write a per-project skill for /run and /verify"],
+  ["scroll-speed", "Adjust mouse wheel scroll speed (fullscreen only)", undefined, true],
+  ["simplify", "Review changed code for cleanup and apply fixes", "[target]"],
+  ["slides", "Create a Slides presentation artifact from a brief", "[brief]"],
+  ["stats", "Alias for /usage; opens on the Stats tab", undefined, true],
+  ["stickers", "Order Claude Code stickers"],
+  ["stop", "Stop the background session you're attached to"],
+  ["subtask", "Spawn a forked background subagent for a task", "<task>"],
+  ["team-onboarding", "Generate team onboarding guide from usage history"],
+  ["teleport", "Pull a cloud session into this terminal", undefined, true, ["tp"]],
+  ["ultrareview", "Deep multi-agent cloud code review", "[PR or branch]"],
+  ["update-config", "Edit settings.json from a described change", "[request]"],
+  ["upgrade", "Open the upgrade page in your browser"],
+  ["usage-credits", "Configure or request usage credits at a limit"],
+  ["verify", "Verify a change by building and running the app"],
+  ["web-setup", "Connect GitHub for cloud sessions via gh credentials"],
+  ["workflow-authoring", "Load reference for writing workflow scripts"],
+];
+
+export const BUILTINS: Command[] = ROWS
+  .map(([name, description, argumentHint, dialog, aliases]) => ({ name, description, argumentHint, dialog, aliases, source: "builtin" as const }))
+  .sort((a, b) => a.name.localeCompare(b.name));
+
+/** 送る文が、CLI で画面を開くコマンドか（送ったあとターミナルを開く） */
+export function opensDialog(text: string, list: Command[]): boolean {
+  const m = /^\/(\S+)(\s+\S)?/.exec(text.trim());
+  if (!m) return false;
+  const c = list.find((x) => x.name === m[1] || x.aliases?.includes(m[1]));
+  if (!c?.dialog) return false;
+  return c.dialog === true || !m[2];
+}

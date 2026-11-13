@@ -5,12 +5,14 @@
 // - send_message(session_id, text, peer): ccn の POST /api/sessions/<id>/messages で文を届ける
 // - create_session / stop_session / teleport / teleport_info / session_detail: ccn の口をそのまま呼ぶ
 // - term_open / term_close / term_input / term_resize: ccn の端末（PTY）の口を読み書きし、開いた画面の Channel へ流す
+// - prompt_history / slash_commands / file_suggestions / send_direct / interrupt_session: チャットの入力欄を CLI と同じ動きにする（composer.rs）
 // HTTP を待つ命令は spawn_blocking で動かし、メインスレッドを止めない（下の「画面から呼ぶ命令」）
 //
 // ccn は Origin 付きの要求を CSRF として断るので、HTTP は必ずこちら（webview ではなく Rust）から出す。
 // 別の機械（peer）は手元のノードの中継 /n/<peer>/api/... を通す。
 
 mod avatars;
+mod composer;
 mod naming;
 
 use serde::Serialize;
@@ -1151,6 +1153,26 @@ mod cmd {
     pub async fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> {
         blocking(move || super::stop_session(session_id, peer)).await
     }
+    #[tauri::command]
+    pub async fn prompt_history(cwd: Option<String>, all: Option<bool>) -> Result<super::composer::History, String> {
+        blocking(move || super::composer::prompt_history(cwd, all.unwrap_or(false))).await
+    }
+    #[tauri::command]
+    pub async fn slash_commands(cwd: Option<String>) -> Result<Vec<super::composer::SlashCommand>, String> {
+        blocking(move || Ok(super::composer::slash_commands(cwd))).await
+    }
+    #[tauri::command]
+    pub async fn file_suggestions(cwd: String, query: String) -> Result<Vec<String>, String> {
+        blocking(move || super::composer::file_suggestions(cwd, query)).await
+    }
+    #[tauri::command]
+    pub async fn send_direct(session_id: String, text: String, peer: Option<String>) -> Result<(), String> {
+        blocking(move || super::composer::send_direct(session_id, text, peer)).await
+    }
+    #[tauri::command]
+    pub async fn interrupt_session(session_id: String, peer: Option<String>) -> Result<(), String> {
+        blocking(move || super::composer::interrupt_session(session_id, peer)).await
+    }
 }
 
 // ---------- 町の一覧の見張り（#5） ----------
@@ -1477,7 +1499,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::send_message, set_house_name, cmd::answer_permission,
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, term_open, term_close, term_input, term_resize,
-            perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick
+            perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
+            cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session
         ])
         .run(context)
         .expect("error while running tauri application");
