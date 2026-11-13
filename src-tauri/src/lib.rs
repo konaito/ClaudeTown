@@ -11,6 +11,7 @@
 // ccn は Origin 付きの要求を CSRF として断るので、HTTP は必ずこちら（webview ではなく Rust）から出す。
 // 別の機械（peer）は手元のノードの中継 /n/<peer>/api/... を通す。
 
+mod attach;
 mod avatars;
 mod composer;
 mod naming;
@@ -1471,6 +1472,11 @@ mod cmd {
     pub async fn interrupt_session(session_id: String, peer: Option<String>) -> Result<(), String> {
         blocking(move || super::composer::interrupt_session(session_id, peer)).await
     }
+    /// 入力欄への貼り付け（#64）。クリップボードのファイルのパスか、保存した画像のパスを返す
+    #[tauri::command]
+    pub async fn paste_clipboard(save_image: bool) -> Result<super::attach::Pasted, String> {
+        blocking(move || super::attach::clipboard(&super::fc_path(Scope::App, "attachments"), save_image)).await
+    }
 }
 
 // ---------- 町の一覧の見張り（#5） ----------
@@ -1805,7 +1811,7 @@ pub fn run() {
             cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::conversation_cache, cmd::send_message, set_house_name, cmd::answer_permission,
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
-            cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session
+            cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::paste_clipboard
         ])
         .run(context)
         .expect("error while running tauri application");

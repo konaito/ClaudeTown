@@ -95,6 +95,11 @@ export function backslashNewline(s: Sel): Edit | null {
 /** 補完の種類と、置き換える範囲。/ は文の頭か空白の後、@ はどこでも空白の後 */
 export type Token = { kind: "slash" | "file"; query: string; from: number; to: number; atStart: boolean };
 
+/** CLI のスラッシュコマンドとして送る文か。最初の語に2つ目の / があればファイルのパス（貼り付けやドロップで入れたもの）とみなす（#64） */
+export function isSlashCommand(text: string): boolean {
+  return /^\/[^\s/]*(\s|$)/.test(text);
+}
+
 export function tokenAt(s: Sel): Token | null {
   if (s.start !== s.end) return null;
   const before = s.text.slice(0, s.start);
@@ -107,6 +112,8 @@ export function tokenAt(s: Sel): Token | null {
   const kind = m[2] === "/" ? "slash" : "file";
   // ! のシェルモードでは / はパスなので、コマンドの補完を出さない
   if (kind === "slash" && s.text.startsWith("!")) return null;
+  // 語の中に / があるのはファイルのパス。コマンドの補完を出さない
+  if (kind === "slash" && s.text.slice(from + 1, to).includes("/")) return null;
   return { kind, query: m[3], from, to, atStart: from === 0 };
 }
 
@@ -168,4 +175,22 @@ export function mergeHistory(local: string[], fetched: string[]): string[] {
   const out: string[] = [];
   for (const x of [...local, ...fetched]) if (!seen.has(x)) { seen.add(x); out.push(x); }
   return out;
+}
+
+// ---------- 画像とファイルのパス（#64） ----------
+
+/** 端末にファイルをドラッグしたときと同じく、空白や記号の前に \ を付ける（macOS の Terminal と iTerm2 の書き方） */
+export function quotePath(p: string): string {
+  return p.replace(/([\s\\'"()[\]{}<>&;|$`!*?#])/g, "\\$1");
+}
+
+/** 選んだ範囲をパスで置き換える。前後の文とくっつかないよう、要るときだけ空白を挟む */
+export function insertPaths(s: Sel, paths: string[]): Edit | null {
+  if (!paths.length) return null;
+  const before = s.text.slice(0, s.start);
+  const after = s.text.slice(s.end);
+  const body = paths.map(quotePath).join(" ");
+  const lead = before && !/\s$/.test(before) ? " " : "";
+  const tail = !after || !/^\s/.test(after) ? " " : "";
+  return { from: s.start, to: s.end, insert: lead + body + tail };
 }

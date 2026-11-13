@@ -9,6 +9,7 @@ import { withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Composer } from "./composer/Composer";
 import { BUILTINS, opensDialog } from "./composer/commands";
+import { isSlashCommand } from "./composer/edit";
 import { isVisible, onVisibleChange, pollBackoff, pollWhileVisible, shownAt } from "./visible";
 import { reuseAgents, reuseSnap } from "./snap";
 import { kickTown, otherTownRetryMs, watchTown } from "./town";
@@ -1140,7 +1141,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
     const after = items[items.length - 1]?.n ?? -1;
     // 先頭が / か ! の文は、端末のあるセッションなら入力欄へ直接貼る。ccn の send_message は from の1行を前に付けるので、
     // CLI のコマンドやシェルモードとして動かない（docs/research/cli-input.md）
-    const direct = hasTerm && /^[/!]/.test(body);
+    const direct = hasTerm && (body.startsWith("!") || isSlashCommand(body));
     try {
       if (direct) {
         await invoke("send_direct", { sessionId: agent.id, text: body, peer: peer || null });

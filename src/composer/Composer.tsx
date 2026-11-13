@@ -1,12 +1,12 @@
 // チャットの入力欄。キーの動きは Claude Code の CLI の入力に合わせる。
 // 何をどう合わせたか、合わせなかったものと理由は docs/research/cli-input.md の表にある。
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { call as invoke } from "../bridge";
+import { call as invoke, onFileDrop } from "../bridge";
 import getCaretCoordinates from "textarea-caret";
 import type { Agent } from "../model";
 import { BUILTINS, type Command } from "./commands";
 import {
-  backslashNewline, histDown, histUp, killToEnd, killToStart, killWordBack, killWordForward, mergeHistory, pushHistory,
+  backslashNewline, histDown, insertPaths, isSlashCommand, histUp, killToEnd, killToStart, killWordBack, killWordForward, mergeHistory, pushHistory,
   rankCommands, searchHistory, tokenAt, toLineEnd, toLineStart, wordBack, wordForward, type Edit, type HistState, type Sel,
 } from "./edit";
 
@@ -20,6 +20,11 @@ const skillsByCwd = new Map<string, Command[]>();
 
 /** 2回押しの間隔（Esc Esc）。CLI の値は文書に無いので、Ctrl+D の 800ms に合わせた（仮置き） */
 const DOUBLE_MS = 800;
+
+/** 別の機械のセッションには手元のパスが届かないので、画像とファイルは断る */
+const REMOTE_FILES = "別の機械のセッションには画像やファイルを渡せない（手元のパスは届かない）";
+
+type Pasted = { files: string[]; image: string | null };
 
 const HELP: [string, string][] = [
   ["Enter", "送る（補完が出ているときは選んだコマンドで送る）"],
@@ -35,6 +40,7 @@ const HELP: [string, string][] = [
   ["Option+B Option+F Option+D", "前の語へ・次の語へ・語の終わりまで消す"],
   ["Ctrl+_", "元に戻す"],
   ["Ctrl+S", "打ちかけを退避する・戻す"],
+  ["⌘V（画像）・ファイルを落とす", "画像やファイルのパスを入れる（画像は保存してから）"],
   ["Esc", "作業を止める（作業中）・補完を閉じる"],
   ["Esc Esc", "打ちかけを消して履歴に残す"],
   ["Ctrl+C", "作業を止める（作業中）・打ちかけを消す"],
@@ -64,6 +70,10 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
   const lastEsc = useRef(0);
   const caretAfter = useRef<number | null>(null);
   const [sent, setSent] = useState<string[]>(() => sentBy.get(agent.id) ?? []);
+  const [dropping, setDropping] = useState(false);
+  // 貼り付けとドロップの返事が来る前に、別のセッションへ替わって入力欄が消えていることがある
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
   // 履歴は CLI と同じ ~/.claude/history.jsonl から読む（手元のセッションだけ）。上下キーの分（同じ project）は開いたときと送るたびに読む。
   // Ctrl+R の分（全部の project、1000件で約1.2MB）は、Ctrl+R を押したときだけ読む
@@ -116,8 +126,10 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
     const el = ta.current!;
     el.focus();
     el.setSelectionRange(e.from, e.to);
+    const want = el.value.slice(0, e.from) + e.insert + el.value.slice(e.to);
     const ok = e.insert ? document.execCommand("insertText", false, e.insert) : e.from === e.to || document.execCommand("delete");
-    if (!ok) replaceAll(el.value.slice(0, e.from) + e.insert + el.value.slice(e.to), e.from + e.insert.length);
+    // 窓が前面にないとき（Finder から落としたとき）は、execCommand が true を返しても文が入らないことがある
+    if (!ok || el.value !== want) replaceAll(want, e.from + e.insert.length);
     if (e.killed) { kills.current = [e.killed, ...kills.current.filter((k) => k !== e.killed)].slice(0, 20); }
   };
   const moveTo = (p: number) => { ta.current!.setSelectionRange(p, p); setCaret(p); };
@@ -299,16 +311,59 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
     if (e.key === "Backspace" && !search?.query) { e.preventDefault(); endSearch(false); }
   };
 
-  const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const items = [...e.clipboardData.items];
-    if (items.some((i) => i.type.startsWith("image/")) && !e.clipboardData.getData("text/plain")) {
-      e.preventDefault();
-      onError("画像はまだ送れない。ccn の送信の口が文しか受けないため");
-    }
+  // 画像とファイル（#64）。ccn の送信は文しか受けないので、手元のファイルのパスを文として入れる。受け手の Claude はパスを読む
+  const putText = (t: string) => {
+    if (!alive.current || !ta.current) return;
+    const s = sel();
+    apply({ from: s.start, to: s.end, insert: t });
   };
+  const putPaths = (paths: string[]) => {
+    if (!alive.current || !ta.current) return;
+    const ed = insertPaths(sel(), paths);
+    if (ed) apply(ed);
+  };
+  const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const cd = e.clipboardData;
+    // 文だけの貼り付けは、今までどおり textarea に任せる
+    if (![...cd.items].some((i) => i.kind === "file")) return;
+    const plain = cd.getData("text/plain");
+    e.preventDefault();
+    if (!local) {
+      // Finder でコピーしたファイルは、文としてはファイル名が載っている。ファイルがあれば断る
+      invoke<Pasted | null>("paste_clipboard", { saveImage: false })
+        .then((r) => { if (!r?.files?.length && plain) putText(plain); else onError(REMOTE_FILES); })
+        .catch(() => { if (plain) putText(plain); else onError(REMOTE_FILES); });
+      return;
+    }
+    // Finder でコピーしたファイルは、webview からは名前しか見えないので、クリップボードを Rust で読む。
+    // ファイルが無く、文も無いときだけ画像を保存する（表計算のセルのように、文と絵の両方が載っているものは文を入れる）
+    invoke<Pasted | null>("paste_clipboard", { saveImage: !plain })
+      .then((r) => {
+        const paths = r?.files?.length ? r.files : r?.image ? [r.image] : [];
+        if (paths.length) putPaths(paths);
+        else if (plain) putText(plain);
+        else onError("クリップボードの画像を読めなかった");
+      })
+      .catch((err) => { if (plain) putText(plain); else onError(`貼り付けられなかった: ${err}`); });
+  };
+  // ドロップは窓のどこに落としても、開いている入力欄に入れる
+  const dropRef = useRef({ local, canSend: agent.canSend, searching: !!search, putPaths, onError });
+  dropRef.current = { local, canSend: agent.canSend, searching: !!search, putPaths, onError };
+  useEffect(() => onFileDrop((e) => {
+    if (e.type === "enter") setDropping(true);
+    else if (e.type === "leave") setDropping(false);
+    else if (e.type === "drop") {
+      setDropping(false);
+      const d = dropRef.current;
+      // Ctrl+R の検索中は入れない（検索を閉じると、一致した文で入力欄が置き換わるため）
+      if (!e.paths?.length || !d.canSend || d.searching) return;
+      if (!d.local) { d.onError(REMOTE_FILES); return; }
+      d.putPaths(e.paths);
+    }
+  }), []);
 
   const shell = text.startsWith("!");
-  const cmdAtStart = text.startsWith("/");
+  const cmdAtStart = isSlashCommand(text);
   const note = (shell || cmdAtStart) && !hasTerm
     ? "端末の無いセッション（-p の子）なので、CLI のコマンドとしては動かず、Claude が文として読む"
     : shell ? "! シェルモード: 端末のセッションで、そのまま実行する"
@@ -317,7 +372,12 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
 
   return (
     <>
-      <div className={`box${shell ? " shell" : ""}`}>
+      <div className={`box${shell ? " shell" : ""}${dropping ? " dropping" : ""}`}>
+        {dropping && (
+          <div className={`cmp-drop${local && agent.canSend ? "" : " no"}`}>
+            {!agent.canSend ? "このセッションには送れない" : local ? "離すとファイルのパスを入れる" : REMOTE_FILES}
+          </div>
+        )}
         {menuOpen && (
           <div className="cmp-menu" ref={menuRef} role="listbox">
             {token?.kind === "slash"
