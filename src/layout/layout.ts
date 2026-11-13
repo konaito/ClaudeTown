@@ -7,6 +7,8 @@
 // 5. 実際の矩形で重なりを検査し、残れば決まった順序で角度の余白、次に半径を広げてやり直す
 // 6. 兄弟を並べる弧の上限を変えた候補を作り、検査を通るもののうち s が一番小さいものを選ぶ。
 //    前に選んだ候補は引き継がない。同じ顔ぶれなら、どの町で、どの順で増えても同じ配置になる（docs/design/geometric-layout.md の末尾）
+// ただし、親1人と子1〜4人だけの世帯（孫がいない、全員がカードの大きさ）は、上の計算をせず childSlots の固定の座標に置く。
+// 子が5人以上の世帯と、孫がいる世帯は上の計算のまま（docs/design/geometric-layout.md の「子1〜4人の固定の座標」）
 
 import { LAYOUT } from "./params";
 
@@ -146,6 +148,37 @@ function place(t: Tree, arcLimit: number, gap: number, radialGap: number, pad: n
   return out;
 }
 
+// ---------- 子1〜4人の固定の座標 ----------
+
+/**
+ * 親1人と子1〜4人の世帯で、子のカードを置く位置。親の中心が (0,0)、y は下が正。座標は本人が決めた（2026-11-13）。
+ * 重ならない、余白 m を空ける、左右対称、紐を短く、外接矩形を小さく、の順に優先し、中心の間の距離をそろえることより詰めることを取る。
+ * 子は兄弟の順（order、次に id）に並べ、i 番目の子を i 番目の位置に置く。
+ */
+export function childSlots(count: number, card = LAYOUT.card, m = LAYOUT.cardMargin): { x: number; y: number }[] | null {
+  const dx = (card.w + m) / 2, dy = card.h + m, side = card.w + m;
+  switch (count) {
+    case 1: return [{ x: 0, y: dy }];
+    case 2: return [{ x: -dx, y: dy }, { x: dx, y: dy }];
+    case 3: return [{ x: 0, y: -dy }, { x: -dx, y: dy }, { x: dx, y: dy }];
+    case 4: return [{ x: -side, y: 0 }, { x: side, y: 0 }, { x: -dx, y: dy }, { x: dx, y: dy }];
+    default: return null;
+  }
+}
+
+/** 固定の座標に置ける世帯なら、置いた結果を返す。置けなければ null（今の計算に回す） */
+function placeFixed(t: Tree): Placed[] | null {
+  const ks = t.kids.get(t.root.id) ?? [];
+  if (t.byId.size !== ks.length + 1) return null; // 孫がいる
+  const all = [...t.byId.values()];
+  if (all.some((n) => n.circle || n.w !== LAYOUT.card.w || n.h !== LAYOUT.card.h)) return null;
+  const slots = childSlots(ks.length);
+  if (!slots) return null;
+  const root: Placed = { id: t.root.id, parent: null, depth: 0, x: 0, y: 0, w: t.root.w, h: t.root.h, angle: 0 };
+  // 角度は今の計算と同じ向き（下が 0、右が正）。真上は π
+  return [root, ...ks.map((k, i) => ({ id: k.id, parent: t.root.id, depth: 1, x: slots[i].x, y: slots[i].y, w: k.w, h: k.h, angle: Math.atan2(slots[i].x, slots[i].y) }))];
+}
+
 // ---------- 検査 ----------
 
 const EPS = 0.5;
@@ -244,6 +277,15 @@ export function layoutFamily(input: LNode[], opt: LayoutOptions = {}): LayoutRes
   const gap = opt.gap ?? LAYOUT.gap;
   const radialGap = opt.radialGap ?? LAYOUT.radialGap;
   const view = opt.view ?? LAYOUT.view;
+  // 余白を指定された呼び出し（検証用）は今の計算に回す
+  const fixed = opt.gap === undefined && opt.radialGap === undefined ? placeFixed(t) : null;
+  if (fixed) {
+    // 指標は今の計算と同じ measure で出す。世帯の枠（groupSizeOf）は width と height から決まるので、枠の計算も同じ式になる
+    const m = measure(fixed, view, gap / 2);
+    const valid = !m.overlaps && !m.crossings && !m.edgeThroughNode && !m.interleave;
+    // arcIndex -1 は「弧の候補を使わず固定の座標に置いた」。候補は作らない
+    return { nodes: fixed, metrics: m, arcIndex: -1, valid, candidates: [] };
+  }
   const cands = LAYOUT.arcLimits.map((a, i) => ({ i, ...solve(t, a, gap, radialGap, view) }));
   const ok = (c: (typeof cands)[number]) => !c.m.overlaps && !c.m.crossings && !c.m.edgeThroughNode && !c.m.interleave;
   const valid = cands.filter(ok);

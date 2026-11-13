@@ -3,8 +3,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { layoutFamily, type LNode, type Placed } from "./layout";
-import { boxOf, groupSizeOf } from "./params";
+import { childSlots, layoutFamily, type LNode, type Placed } from "./layout";
+import { LAYOUT, boxOf, groupSizeOf } from "./params";
 
 const deg = (r: number) => (r * 180) / Math.PI;
 const report: Record<string, unknown>[] = [];
@@ -179,6 +179,53 @@ describe("家族の木の配置", () => {
     const areaB = fb.w * fb.h, areaA = fa.w * fa.h;
     expect(areaA).toBeLessThan(areaB * 0.65);
     report.push({ ケース: 11, 直す前の枠: `${fb.w}×${fb.h}（${areaB}）`, 直した後の枠: `${fa.w}×${fa.h}（${areaA}）`, 面積の比: (areaA / areaB).toFixed(3), ...r.metrics });
+  });
+
+  // 2026-11-13、本人が子1〜4人の位置を決めた。親の中心が (0,0)、y は下が正。card 176×96、余白 m 8 で、dx 92、dy 104、side 184
+  const SPEC: Record<number, [number, number][]> = {
+    1: [[0, 104]],
+    2: [[-92, 104], [92, 104]],
+    3: [[0, -104], [-92, 104], [92, 104]],
+    4: [[-184, 0], [184, 0], [-92, 104], [92, 104]],
+  };
+  // 本人の条件のまま書く: |xA-xB| >= w+m か |yA-yB| >= h+m
+  const apart = (a: Placed, b: Placed) => Math.abs(a.x - b.x) >= 176 + 8 || Math.abs(a.y - b.y) >= 96 + 8;
+  const SIZE: Record<number, { w: number; h: number }> = { 1: { w: 251, h: 303 }, 2: { w: 435, h: 303 }, 3: { w: 435, h: 407 }, 4: { w: 619, h: 303 } };
+
+  for (const n of [1, 2, 3, 4]) {
+    test(`12-${n}. 子${n}人: 本人が決めた固定の座標に、兄弟の順で置く。どのカードの組も重ならない`, () => {
+      expect(LAYOUT.card).toEqual({ w: 176, h: 96 });
+      expect(LAYOUT.cardMargin).toBe(8);
+      expect(childSlots(n)!.map((p) => [p.x, p.y])).toEqual(SPEC[n]);
+      // 生成順をわざと入力の並びと逆にして、兄弟の順（order）で位置が決まることを見る
+      const kids = KIDS.slice(0, n);
+      const input = town("e8c798cd", kids).map((x, i) => (i === 0 ? x : { ...x, order: n + 1 - i }));
+      const r = layoutFamily(input);
+      const byOrder = [...kids].reverse();
+      expect(get(r.nodes, "e8c798cd")).toMatchObject({ x: 0, y: 0, depth: 0 });
+      expect(byOrder.map((id) => [get(r.nodes, id).x, get(r.nodes, id).y])).toEqual(SPEC[n]);
+      for (let i = 0; i < r.nodes.length; i++) for (let j = i + 1; j < r.nodes.length; j++) expect(apart(r.nodes[i], r.nodes[j])).toBe(true);
+      expect(ok(r.metrics)).toBe(true);
+      expect(r.valid).toBe(true);
+      expect(r.arcIndex).toBe(-1);
+      expect(groupSizeOf(r.metrics)).toEqual(SIZE[n]);
+      report.push({ ケース: `12-${n}`, 座標: JSON.stringify(byOrder.map((id) => [get(r.nodes, id).x, get(r.nodes, id).y])), 世帯の枠: `${SIZE[n].w}×${SIZE[n].h}`, ...r.metrics });
+    });
+  }
+
+  test("13. 子5人以上の世帯と、孫がいる世帯は、今の計算のまま（弧の候補から選ぶ）", () => {
+    expect(childSlots(5)).toBeNull();
+    const five = layoutFamily(town("e8c798cd", KIDS));
+    expect(five.arcIndex).toBeGreaterThanOrEqual(0);
+    expect(five.candidates.length).toBe(LAYOUT.arcLimits.length);
+    const withGrand = layoutFamily(family([["p", null], ["a", "p"], ["b", "p"], ["a1", "a"]]));
+    expect(withGrand.arcIndex).toBeGreaterThanOrEqual(0);
+    expect(ok(withGrand.metrics)).toBe(true);
+    // ゴーストの世帯も同じ固定の座標になる（親の町と子の町で同じ形）
+    const local = layoutFamily(town("e8c798cd", KIDS.slice(0, 4).map((k) => `ghost:${k}`)));
+    const remote = layoutFamily(town("ghost:e8c798cd", KIDS.slice(0, 4)));
+    expect(shape(local)).toEqual(shape(remote));
+    expect(local.arcIndex).toBe(-1);
   });
 
   test("結果の表", () => {
