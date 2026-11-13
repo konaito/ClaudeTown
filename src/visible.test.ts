@@ -83,6 +83,22 @@ describe("pollBackoff（#5）", () => {
     p.stop();
   });
 
+  test("間隔を関数で渡すと、毎回読み直す（作業中だけ縮める、#59）", async () => {
+    const v = createVisibility(true);
+    let n = 0;
+    let fast = false;
+    const p = v.backoff(() => { n++; return false; }, () => (fast ? 10 : 30), () => (fast ? 10 : 400));
+    await wait(100);
+    // 0, 60（延びて次は 120 後）
+    expect(n).toBe(2);
+    fast = true;
+    p.kick();
+    await wait(60);
+    // 縮めたあとは延びずに 10 ごと
+    expect(n).toBeGreaterThanOrEqual(6);
+    p.stop();
+  });
+
   test("隠れている間は呼ばない", async () => {
     const v = createVisibility(false);
     let n = 0;

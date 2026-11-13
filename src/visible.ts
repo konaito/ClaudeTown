@@ -31,11 +31,14 @@ export function createVisibility(initial: boolean) {
   };
   /**
    * 見えている間だけ load を呼ぶ。load が「変わった」（true）を返したら次は min 後、変わらなければ間隔を倍にする（max で止める）（#5）。
-   * 前の回が終わるまで次を始めない。kick で、すぐ取り直して間隔を min に戻す（取っている最中なら、終わった直後にもう1回取る）
+   * 前の回が終わるまで次を始めない。kick で、すぐ取り直して間隔を min に戻す（取っている最中なら、終わった直後にもう1回取る）。
+   * min と max は関数でも渡せる。毎回読み直すので、相手が作業中のあいだだけ間隔を縮める、といった切り替えができる（#59）
    */
-  const backoff = (load: () => Promise<boolean> | boolean, min: number, max: number) => {
+  const backoff = (load: () => Promise<boolean> | boolean, minArg: number | (() => number), maxArg: number | (() => number)) => {
+    const min = () => (typeof minArg === "function" ? minArg() : minArg);
+    const max = () => (typeof maxArg === "function" ? maxArg() : maxArg);
     let t: ReturnType<typeof setTimeout> | null = null;
-    let on = false, busy = false, again = false, wait = min;
+    let on = false, busy = false, again = false, wait = min();
     const run = async () => {
       t = null;
       if (busy) { again = true; return; }
@@ -44,18 +47,18 @@ export function createVisibility(initial: boolean) {
       try { changed = await load(); } catch { /* 失敗は load の中で扱う */ }
       busy = false;
       if (!on) return;
-      if (again) { again = false; wait = min; run(); return; }
-      wait = changed ? min : Math.min(wait * 2, max);
+      if (again) { again = false; wait = min(); run(); return; }
+      wait = changed ? min() : Math.min(wait * 2, max());
       t = setTimeout(run, wait);
     };
     const clear = () => { if (t !== null) { clearTimeout(t); t = null; } };
-    const start = () => { if (on) return; on = true; wait = min; run(); };
+    const start = () => { if (on) return; on = true; wait = min(); run(); };
     const stop = () => { on = false; again = false; clear(); };
     const off = subscribe((v) => (v ? start() : stop()));
     if (visible) start();
     return {
       stop: () => { off(); stop(); },
-      kick: () => { if (!on) return; clear(); wait = min; run(); },
+      kick: () => { if (!on) return; clear(); wait = min(); run(); },
     };
   };
   return { isVisible: () => visible, shownAt: () => shownAt, set, subscribe, poll, backoff };

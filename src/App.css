@@ -195,6 +195,15 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .msg.kid .mini-av { flex: none; padding-top: 8px; }
 .msg.kid .b { background: #fff; border: 1px solid var(--line); }
 .tool-line { font-size: 11.5px; color: var(--sub); padding-left: 38px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 作業中の末尾の1行（#59）。点が明滅し、経過は数字の幅をそろえて揺れないようにする */
+.live-line { font-size: 11.5px; color: var(--sub); padding-left: 38px; min-width: 0; }
+.ll-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ll-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--working); animation: ll-pulse 1.2s ease-in-out infinite; }
+.ll-label { color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.ll-time { flex: none; font-variant-numeric: tabular-nums; }
+.ll-head { padding-left: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ll-head::before { content: "└ "; }
+@keyframes ll-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
 .md p { margin: 0 0 6px; }
 .md p:last-child { margin-bottom: 0; }
 .md ul, .md ol { margin: 4px 0 6px; padding-left: 20px; }
