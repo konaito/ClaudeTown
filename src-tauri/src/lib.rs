@@ -540,6 +540,8 @@ fn set_house_name(session_id: String, name: String) -> Result<(), String> {
 struct Conv {
     /// ccn の messages の次の読み出し位置（after=）
     next: u64,
+    /// next の数え方の印（ccn の messages の epoch）。印を返さない古い ccn では None のまま
+    epoch: Option<String>,
     /// これまでに縮めた項目の数。項目の通し番号 n は 0 から数える
     total: u64,
     /// 最後の KEEP_MESSAGES 件
@@ -694,17 +696,41 @@ impl Conv {
     /// ccn の after=from から next まで読んだ分を足す。同じセッションの取得が重なり、
     /// ほかの呼び出しが先に同じ範囲を足していたら（c.next が読み始めと違う）、足さない
     /// 項目が増えたら true
-    fn absorb(&mut self, from: u64, next: u64, fresh: Vec<Value>, evs: Vec<LiveEv>) -> bool {
+    fn absorb(&mut self, from: u64, next: u64, fresh: Vec<Value>, evs: Vec<LiveEv>, epoch: Option<String>) -> bool {
         if self.next != from {
             return false;
         }
         self.next = next;
+        if epoch.is_some() {
+            self.epoch = epoch;
+        }
         let grew = !fresh.is_empty();
         for e in evs {
             self.live.apply(e);
         }
         self.push(fresh);
         grew
+    }
+
+    /// after=0 から読み直した中身で置き換える。読み始めたとき（from、seen）から誰も進めていなければ置き換えて true。
+    /// 通し番号 n は前の続きから1つ空けて振る。画面が持っている数（since）は必ず新しい範囲の手前に落ちるので、
+    /// since() が reset を返し、画面は持っている分を捨てて置き換える（App.tsx と conv.ts は変えない）。
+    /// n は減らないので、送ったばかりの仮の項目（pending の after）とも比べられる
+    /// 今の動き（#59）も、頭から読んだ出来事（evs）で作り直す
+    fn replace(&mut self, from: u64, seen: &Option<String>, next: u64, fresh: Vec<Value>, evs: Vec<LiveEv>, epoch: Option<String>) -> bool {
+        if self.next != from || &self.epoch != seen {
+            return false;
+        }
+        self.total += 1;
+        self.items.clear();
+        self.next = next;
+        self.epoch = epoch;
+        self.live = Live::default();
+        for e in evs {
+            self.live.apply(e);
+        }
+        self.push(fresh);
+        true
     }
 
     fn push(&mut self, fresh: Vec<Value>) {
@@ -856,19 +882,22 @@ fn simplify(m: &Value) -> Vec<Value> {
     out
 }
 
-fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<ConvDelta, String> {
-    let peer = peer.filter(|p| !p.is_empty());
-    let key = format!("{}|{session_id}", peer.clone().unwrap_or_default());
-    let from = {
-        let g = CONVS.lock().map_err(|e| e.to_string())?;
-        g.as_ref().and_then(|m| m.get(&key)).map(|c| c.next).unwrap_or(0)
-    };
-    let mut next = from;
+/// ccn の messages を after=start から読む。1回で読むのは最大20ページ（4000件）。続きは次の呼び出しで読む。
+/// 返すのは (次の after, 縮めた項目, 今の動きの出来事, 最初のページの epoch)
+fn read_messages(peer: &Option<String>, session_id: &str, start: u64) -> Result<(u64, Vec<Value>, Vec<LiveEv>, Option<String>), String> {
+    let mut next = start;
     let mut fresh = vec![];
     let mut evs = vec![];
-    // 1回の呼び出しで読むのは最大20ページ（4000件）。続きは次の呼び出しで読む
-    for _ in 0..20 {
-        let v = get_json(&format!("{}/sessions/{session_id}/messages?after={next}", api(&peer)))?;
+    let mut epoch = None;
+    for page in 0..20 {
+        let v = get_json(&format!("{}/sessions/{session_id}/messages?after={next}", api(peer)))?;
+        let e = v["epoch"].as_str().map(String::from);
+        if page == 0 {
+            epoch = e;
+        } else if e != epoch {
+            // ページの途中で数え方が変わった（読んでいる間に ccn が起動し直した）。ここまでで止め、次の呼び出しで気づく
+            break;
+        }
         let msgs = v["messages"].as_array().cloned().unwrap_or_default();
         for m in &msgs {
             fresh.extend(simplify(m));
@@ -882,15 +911,46 @@ fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) ->
             break;
         }
     }
+    Ok((next, fresh, evs, epoch))
+}
+
+/// 持っている cursor（from）が、今の ccn の番号と続いていないか。ccn の messages は epoch（番号の印）を返し、
+/// 再起動、pty の付け直し、終わって jsonl の位置に移ったときに変わる。前に読んだ印と違えば、from から先を読むと欠けるか重なる。
+/// 印を返さない古い ccn（got が None）では今までどおり続きを読む。前の印が None で今が Some なのは、
+/// 古い ccn から入れ替わった（再起動した）ので、読み直す
+fn cursor_is_stale(from: u64, seen: &Option<String>, got: &Option<String>) -> bool {
+    from > 0 && got.is_some() && got != seen
+}
+
+fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<ConvDelta, String> {
+    let peer = peer.filter(|p| !p.is_empty());
+    let key = format!("{}|{session_id}", peer.clone().unwrap_or_default());
+    let (from, seen) = {
+        let g = CONVS.lock().map_err(|e| e.to_string())?;
+        g.as_ref().and_then(|m| m.get(&key)).map(|c| (c.next, c.epoch.clone())).unwrap_or((0, None))
+    };
+    let (mut next, mut fresh, mut evs, mut epoch) = read_messages(&peer, &session_id, from)?;
+    let stale = cursor_is_stale(from, &seen, &epoch);
+    if stale {
+        // 読んだページは捨て、after=0 から読み直して置き換える。読み直しに失敗したら何も変えない（次の呼び出しでもう一度気づく）
+        (next, fresh, evs, epoch) = read_messages(&peer, &session_id, 0)?;
+    }
     let mut g = CONVS.lock().map_err(|e| e.to_string())?;
     let map = g.get_or_insert_with(HashMap::new);
     let now = now_ms();
     forget_idle_convs(map, &key, now);
     let c = map.entry(key).or_insert_with(Conv::default);
     c.used = now;
-    // 増えたら、画面に出す分（最後の KEEP_MESSAGES 件）を保存する。ネットが切れたときは画面が conversation_cache で読む。
+    let changed = if stale {
+        // 読み直しが0件で、前に中身があったときは置き換えない。ccn は jsonl を読めなかったときも空で返すので、保存分まで消さない。
+        // 置き換えたら、増えたかに関係なく保存し直す（保存分は前の中身のままなので）
+        !(fresh.is_empty() && !c.items.is_empty()) && c.replace(from, &seen, next, fresh, evs, epoch)
+    } else {
+        c.absorb(from, next, fresh, evs, epoch)
+    };
+    // 増えたか置き換えたら、画面に出す分（最後の KEEP_MESSAGES 件）を保存する。ネットが切れたときは画面が conversation_cache で読む。
     // 書くのは錠を持ったまま（同じセッションの取得が重なっても、古い中身があとから上書きしない）。80件の JSON なので短い
-    if c.absorb(from, next, fresh, evs) {
+    if changed {
         let _ = offline::save_conv(&cache_dir(), &peer, &session_id, c.total, &c.items);
     }
     Ok(c.since(since))
@@ -1821,11 +1881,11 @@ mod tests {
         let mut c = Conv::default();
         let fresh = || vec![json!({ "role": "user", "text": "a" })];
         // 同じ after=0 から読んだ2回。先に終わった方だけ足す
-        c.absorb(0, 5, fresh(), vec![]);
-        c.absorb(0, 5, fresh(), vec![]);
+        c.absorb(0, 5, fresh(), vec![], None);
+        c.absorb(0, 5, fresh(), vec![], None);
         assert_eq!(c.total, 1);
         assert_eq!(c.next, 5);
-        c.absorb(5, 6, fresh(), vec![]);
+        c.absorb(5, 6, fresh(), vec![], None);
         assert_eq!(c.total, 2);
     }
 
@@ -1846,12 +1906,134 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_epoch_means_the_cursor_does_not_continue() {
+        use super::cursor_is_stale;
+        let s = |x: &str| Some(x.to_string());
+        // 初めて読む（from=0）ときは、印が何でも続きとして読む
+        assert!(!cursor_is_stale(0, &None, &s("a")));
+        // 同じ印なら続き
+        assert!(!cursor_is_stale(3, &s("a"), &s("a")));
+        // 印が変わった（ccn の再起動、付け直し、終わって jsonl の位置へ）
+        assert!(cursor_is_stale(3, &s("a"), &s("b")));
+        assert!(cursor_is_stale(3, &s("a"), &s("history")));
+        // 印を返さない古い ccn から入れ替わった
+        assert!(cursor_is_stale(3, &None, &s("b")));
+        // 印を返さない古い ccn では今までどおり
+        assert!(!cursor_is_stale(3, &None, &None));
+        assert!(!cursor_is_stale(3, &s("a"), &None));
+    }
+
+    /// 読み直して置き換えた後は、画面が前に持っていた数（since）で呼んでも必ず reset になる。
+    /// 読み直しが前より短い、同じ、長い（KEEP_MESSAGES を超える）の3通り
+    #[test]
+    fn replacing_after_a_reread_always_resets_the_screen() {
+        use super::{Conv, KEEP_MESSAGES};
+        use serde_json::json;
+        let item = |i: usize| json!({ "role": "assistant", "text": format!("t{i}") });
+        let a = Some("a".to_string());
+        for len in [1usize, 3, KEEP_MESSAGES + 7] {
+            let mut c = Conv::default();
+            c.absorb(0, 3, (0..3).map(item).collect(), vec![], a.clone());
+            let old = c.since(None).total;
+            assert!(c.replace(3, &a, 5, (0..len).map(item).collect(), vec![], Some("b".into())));
+            let d = c.since(Some(old));
+            assert!(d.reset, "len={len}");
+            assert_eq!(d.items.len(), len.min(KEEP_MESSAGES));
+            assert_eq!(d.items.last().unwrap()["text"], json!(format!("t{}", len - 1)));
+            // n は前より大きいところから続く
+            assert!(d.items[0]["n"].as_u64().unwrap() > old);
+            assert_eq!((c.next, c.epoch.as_deref()), (5, Some("b")));
+            // 画面が追いついた後は、続きの差分だけ
+            assert!(c.absorb(5, 6, vec![item(99)], vec![], Some("b".into())));
+            let e = c.since(Some(d.total));
+            assert!(!e.reset);
+            assert_eq!(e.items.len(), 1);
+        }
+        // 0件に読み直しても、画面は reset で空になり、その後は reset を繰り返さない
+        let mut c = Conv::default();
+        c.absorb(0, 3, (0..3).map(item).collect(), vec![], a.clone());
+        assert!(c.replace(3, &a, 0, vec![], vec![], Some("b".into())));
+        let d = c.since(Some(3));
+        assert!(d.reset && d.items.is_empty());
+        assert!(!c.since(Some(d.total)).reset);
+    }
+
+    #[test]
+    fn a_second_overlapping_reread_does_not_replace_twice() {
+        use super::Conv;
+        use serde_json::json;
+        let a = Some("a".to_string());
+        let mut c = Conv::default();
+        c.absorb(0, 3, vec![json!({ "role": "user", "text": "x" })], vec![], a.clone());
+        assert!(c.replace(3, &a, 5, vec![json!({ "role": "user", "text": "y" })], vec![], Some("b".into())));
+        let total = c.total;
+        // 同じ時に読み始めたもう1回は、もう進んでいるので置き換えない
+        assert!(!c.replace(3, &a, 5, vec![json!({ "role": "user", "text": "y" })], vec![], Some("b".into())));
+        assert_eq!(c.total, total);
+        // 古い印のまま続きを足そうとした取得も足さない
+        assert!(!c.absorb(3, 4, vec![json!({ "role": "user", "text": "z" })], vec![], a.clone()));
+        assert_eq!(c.total, total);
+    }
+
+    #[test]
     fn conv_delta_is_sent_as_an_object() {
         use super::ConvDelta;
         use serde_json::json;
         let d = ConvDelta { items: vec![json!({ "role": "user", "text": "a", "n": 0 })], total: 1, reset: true, live: Default::default() };
         assert_eq!(serde_json::to_value(&d).unwrap(), json!({ "items": [{ "role": "user", "text": "a", "n": 0 }], "total": 1, "reset": true,
             "live": { "tools": [], "last": null, "last_at": null, "turn_at": null } }));
+    }
+
+    /// 試験用の ccn（FC_CCN_URL）のセッション（FC_CONV_ID）の会話を、画面と同じ形で FC_CONV_SECS 秒読み続ける。
+    /// 同じプロセスで cursor を持ったまま、外で ccn を起動し直して会話を足す。終わりに、画面が持つ分と、
+    /// after=0 から読んだ分を比べる（再起動の前後で欠けも二重も無いか）。HOME は空のディレクトリにする（保存分を分ける）。
+    /// HOME=<空> FC_CCN_URL=http://127.0.0.1:<ポート> FC_CONV_ID=<id> FC_CONV_SECS=120 <試験のバイナリ> conversation_across_restart --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn conversation_across_restart() {
+        use super::{conversation, read_messages, offline, cache_dir};
+        let id = std::env::var("FC_CONV_ID").expect("FC_CONV_ID");
+        let secs: u64 = std::env::var("FC_CONV_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
+        // 画面（App.tsx の load と conv.ts の mergeConv）と同じ持ち方
+        let mut since: Option<u64> = None;
+        let mut screen: Vec<Value> = vec![];
+        let texts = |v: &[Value]| v.iter().map(|x| format!("{}:{}", x["role"].as_str().unwrap_or(""), x["text"].as_str().unwrap_or(""))).collect::<Vec<_>>();
+        let t0 = std::time::Instant::now();
+        // FC_CONV_PAUSE のファイルがある間は読まない（再起動して1往復進めてから読む順序を作る）
+        let pause = std::env::var("FC_CONV_PAUSE").ok().map(std::path::PathBuf::from);
+        while t0.elapsed() < Duration::from_secs(secs) {
+            if pause.as_ref().is_some_and(|p| p.exists()) {
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            }
+            match conversation(id.clone(), None, since) {
+                Ok(d) => {
+                    if d.reset {
+                        screen = d.items.clone();
+                    } else {
+                        let last = screen.last().and_then(|x| x["n"].as_u64());
+                        screen.extend(d.items.iter().filter(|x| last.map_or(true, |l| x["n"].as_u64().unwrap_or(u64::MAX) > l)).cloned());
+                    }
+                    let prev = since;
+                    since = Some(if d.reset { d.total } else { since.unwrap_or(0).max(d.total) });
+                    if d.reset || !d.items.is_empty() {
+                        let g = super::CONVS.lock().unwrap();
+                        let c = g.as_ref().and_then(|m| m.get(&format!("|{id}"))).unwrap();
+                        println!("[{:>5.1}s] since {prev:?}→{since:?} reset={} +{} 画面{}件 cursor={} epoch={:?} {:?}",
+                            t0.elapsed().as_secs_f32(), d.reset, d.items.len(), screen.len(), c.next, c.epoch, texts(&d.items));
+                    }
+                }
+                Err(e) => println!("[{:>5.1}s] 読めない: {e}", t0.elapsed().as_secs_f32()),
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let (_, fresh, _, epoch) = read_messages(&None, &id, 0).expect("after=0");
+        let cached = offline::load_conv(&cache_dir(), &None, &id).map(|c| texts(&c.items)).unwrap_or_default();
+        println!("画面 {}件: {:?}", screen.len(), texts(&screen));
+        println!("after=0 {}件（epoch {epoch:?}）: {:?}", fresh.len(), texts(&fresh));
+        println!("保存分 {}件", cached.len());
+        assert_eq!(texts(&screen), texts(&fresh));
+        assert_eq!(cached, texts(&fresh));
     }
 
     /// 見張りを、モックの町（FC_CCN_URL）につないで決まった秒数だけ回し、画面へ送った回数を数える（#5）。
