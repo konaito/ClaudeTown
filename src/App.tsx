@@ -1,7 +1,7 @@
 import { Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { call as invoke, setFullscreen } from "./bridge";
 import { lastTermSize } from "./term/size";
-import { perfMark, perfSetId, perfStart } from "./term/perf";
+import { perfEnd, perfMark, perfSetId, perfStart, perfWaitingPrompt } from "./term/perf";
 import { benchName, useBench } from "./term/bench";
 import { collectMail, type Mail } from "./mail";
 import { flightsOf, resolve, type Flight } from "./letters";
@@ -27,8 +27,6 @@ import { layoutFamily, type LNode } from "./layout/layout";
 import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
 
-/** 新しい世帯の端末が開くまで、打ったキーをためておく上限の時間 */
-const BOOT_TIMEOUT_MS = 12000;
 /**
  * 別の町（いま見ていない ccn のノード）のお便りを取りに行く間隔。町を1つずつ順に取り、前の回が終わるまで次の回を始めない。
  * 1回は町1つにつき手元のノード経由の GET /api/sessions 1本（中継先の ccn には 15 秒に1本）。peers が healthy でない町には取りに行かない。
@@ -267,77 +265,28 @@ export default function App() {
   }, [curTown, selfName]);
 
   const local = !peer;
-  // 新しい世帯を作った直後、端末が開くまでに打ったキーをためておく（端末が最初の出力を受けたら流す）
-  const early = useRef<{ id: string | null; text: string }>({ id: null, text: "" });
-  const [booting, setBooting] = useState<string | null>(null);
-  // 起動待ちをやめ、ためた文字を捨てる。why があれば、捨てた文字があるときだけ知らせる
-  // （2026-11-12、本番のノードに端末の口が無く最初の出力が来ないまま booting が残り、英字が全部食われた）
-  const release = useCallback((why?: string) => {
-    const had = early.current.text;
-    early.current = { id: null, text: "" };
-    setBooting(null);
-    if (why && had) toast(`${why}。打った文字（${had.length}字）は捨てた`, true);
-  }, [toast]);
-  useEffect(() => {
-    if (!booting) return;
-    // 端末が開かないまま残らないよう、時間切れで必ずやめる
-    const t = setTimeout(() => release(`ターミナルが ${BOOT_TIMEOUT_MS / 1000} 秒たっても開かなかった`), BOOT_TIMEOUT_MS);
-    const editable = (el: Element | null) => !!el && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement || (el as HTMLElement).isContentEditable);
-    const k = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
-      const el = document.activeElement;
-      // 端末（xterm）にフォーカスが移った後は、xterm が自分で受ける
-      if ((el as HTMLElement | null)?.closest?.(".term")) return;
-      // 入力欄に移ったら、横取りをやめる
-      if (editable(el)) { release(); return; }
-      const map: Record<string, string> = { Enter: "\r", Backspace: "\x7f", Tab: "\t", Escape: "\x1b" };
-      const t = e.key.length === 1 ? e.key : map[e.key];
-      if (!t) return;
-      e.preventDefault();
-      early.current.text += t;
-    };
-    window.addEventListener("keydown", k, true);
-    return () => { clearTimeout(t); window.removeEventListener("keydown", k, true); };
-  }, [booting, release]);
-  // 押した瞬間からキーをためる（作り終わるのを待つと、その間に打ったキーが落ちる）
-  const startHousehold = useCallback(() => { early.current = { id: "pending", text: "" }; setBooting("pending"); }, []);
-  // 作った直後のセッション。一覧（snapshot）に載るまでは、create の応答から作った仮の姿で右パネルとターミナルを出す（#18）。
-  // 一覧の取り直しを待つと、ccn が遅いときにその分だけターミナルが開かない
+  // 作った直後のセッション。一覧（snapshot）に載るまでは、create の応答から作った仮の姿で右パネルを出す（#18）。
+  // 一覧の取り直しを待つと、ccn が遅いときにその分だけ右パネルが出ない
   const [fresh, setFresh] = useState<Agent | null>(null);
+  // 作ったらチャットを開いて入力欄にフォーカスする（本人の指定）。端末は右クリックや「端末へ」で開く
   const newHousehold = useCallback((r: any) => {
-    if (!r?.id) { early.current = { id: null, text: "" }; setBooting(null); return; }
-    early.current = { id: r.id, text: early.current.id === "pending" ? early.current.text : "" };
+    if (!r?.id) return;
     setFresh({
       // 名前は一覧と同じ決め方（cardNames）。一覧に載ったときに名前が変わって見えないようにする
       id: r.id, name: cardNames([{ id: r.id, cwd: r.cwd ?? "" }]).get(r.id) ?? r.id.slice(0, 8), kind: "terminal", state: "running", cwd: r.cwd ?? "", canSend: true, parent: null,
       startedAt: Date.now(), capabilities: { terminal: true, send: true, stop: true },
     });
-    setBooting(r.id);
     setSelected(r.id);
-    setTermReq((n) => n + 1);
+    setComposeReq((n) => n + 1);
     reload.current();
-  }, []);
-  // 作った世帯に端末が無い（ノードに PTY の口がまだ無い）と分かったら、すぐやめる
-  useEffect(() => {
-    if (!booting || booting === "pending") return;
-    const a = agents.find((x) => x.id === booting);
-    if (a && !a.capabilities?.terminal) release("このノードにはターミナルの口がまだ無い。チャットの欄から話しかけて");
-  }, [agents, booting, release]);
-  // 別のノードや別の子を選んだら、起動待ちをやめる
-  useEffect(() => { if (booting) release(); }, [peer]);
-  useEffect(() => { if (booting && booting !== "pending" && selected !== booting) release(); }, [selected]);
-  const takeEarly = useCallback((id: string) => {
-    if (early.current.id !== id) return "";
-    const t = early.current.text;
-    early.current = { id: null, text: "" };
-    setBooting(null);
-    return t;
   }, []);
 
   // 右クリックや「端末へ」で、その子を選んで右パネルの端末を開く
   const [termReq, setTermReq] = useState(0);
   // お便りの「チャットへ」で、その子を選んで右パネルのチャットを開く
   const [chatReq, setChatReq] = useState(0);
+  // 新しい世帯を作ったとき、右パネルのチャットを開いて入力欄にフォーカスする
+  const [composeReq, setComposeReq] = useState(0);
   const focus = useCallback((a: Agent) => { perfStart("open", a.id); setSelected(a.id); setTermReq((n) => n + 1); }, []);
   // 前回の町を出したまま、3回続けて、または10秒以上失敗している
   const slow = !!fail && (fail.n >= 3 || Date.now() - fail.since > 10000);
@@ -385,7 +334,7 @@ export default function App() {
 
           <div className="fam-head">
             <span className="fam-title"><PeopleIcon /> {tree.families.length}世帯・{agents.length}人</span>
-            <NewHousehold disabled={!local} onStart={startHousehold} onCreated={newHousehold} onError={(m) => toast(m, true)} />
+            <NewHousehold disabled={!local} onCreated={newHousehold} onError={(m) => toast(m, true)} />
             <span className="legend">
               {(["working", "reply", "approval", "done", "idle"] as Mood[]).map((m) => (
                 <span key={m} className={`lg lg-${m}`}><i />{MOOD_LABEL[m]}{counts[m] ? ` ${counts[m]}` : ""}</span>
@@ -395,8 +344,8 @@ export default function App() {
 
           {snap && agents.length === 0 && snap.ccn_ok && (
             <div className="empty">
-              <p>町にはまだ誰もいない。最初の世帯を作ると、右にターミナルが開いてすぐ打てる（親は ~/Documents/meta で起動する）。</p>
-              <NewHousehold big disabled={!local} onStart={startHousehold} onCreated={newHousehold} onError={(m) => toast(m, true)} />
+              <p>町にはまだ誰もいない。最初の世帯を作ると、右にチャットが開いてすぐ打てる（親は ~/Documents/meta で起動する）。</p>
+              <NewHousehold big disabled={!local} onCreated={newHousehold} onError={(m) => toast(m, true)} />
             </div>
           )}
           <Stage zoom={zoom} onBlank={() => setSelected(null)} items={tree.families.map((f) => {
@@ -435,7 +384,7 @@ export default function App() {
         {/* 町と右パネルの境目。ドラッグで右パネルを 380px からウィンドウ幅の半分まで広げられる。ダブルクリックで既定の幅に戻る */}
         <Separator className="split-handle" />
         <SplitPanel id="side" defaultSize={SIDE_DEFAULT} minSize={SIDE_MIN} maxSize="50%">
-        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} descendants={sel ? descOf(tree.childrenOf, sel.id) : []} termReq={termReq} chatReq={chatReq} peers={peers} takeEarly={takeEarly} booting={booting}
+        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} descendants={sel ? descOf(tree.childrenOf, sel.id) : []} termReq={termReq} chatReq={chatReq} composeReq={composeReq} peers={peers}
           onSent={(a) => { kickTown(); toast(`${a.name} に届けた`); }} onSent2={(m) => { kickTown(); toast(m); }} onError={(m) => toast(m, true)}
           needs={needs} onSelect={(a) => setSelected(a.id)} />
         </SplitPanel>
@@ -947,18 +896,31 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
 
 // ---------- 右のパネル ----------
 
-function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, takeEarly, booting, onSent, onSent2, onError, needs, onSelect }: {
-  agent: Agent | null; peer: string; lineage: Agent[]; descendants: Agent[]; termReq: number; chatReq: number; peers: Peer[]; takeEarly: (id: string) => string; booting: string | null;
+function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq, peers, onSent, onSent2, onError, needs, onSelect }: {
+  agent: Agent | null; peer: string; lineage: Agent[]; descendants: Agent[]; termReq: number; chatReq: number; composeReq: number; peers: Peer[];
   onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
 }) {
   const hasTerm = !!agent?.capabilities?.terminal;
   const town = useContext(TownCtx);
   const [tab, setTab] = useState<"term" | "talk" | "state">("talk");
   const [sheet, setSheet] = useState<"teleport" | null>(null);
-  // セッションを選んだときはチャットを出す。右クリックなどの termReq だけ端末を開く
+  // セッションを選んだときと新しい世帯を作ったときはチャットを出す。右クリックなどの termReq だけ端末を開く
   useEffect(() => { setTab("talk"); setSheet(null); }, [agent?.id, hasTerm]);
   useEffect(() => { if (termReq && hasTerm) setTab("term"); }, [termReq]);
   useEffect(() => { if (chatReq) setTab("talk"); }, [chatReq]);
+  // composeReq が来たら、チャットの入力欄にフォーカスする。前に選んでいた子が端末を開いていると、
+  // 最初の描画ではまだ tab が "term" で入力欄が無いので、入力欄が出てからフォーカスする
+  // 入力欄は Composer（#53）の中にあり、子を替えるたびに作り直されるので、枠から textarea を探す
+  const composerBox = useRef<HTMLDivElement>(null);
+  const wantCompose = useRef(false);
+  useEffect(() => { if (composeReq) { wantCompose.current = true; setTab("talk"); } }, [composeReq]);
+  useEffect(() => {
+    const el = composerBox.current?.querySelector<HTMLTextAreaElement>("textarea");
+    if (!wantCompose.current || !el || el.disabled) return;
+    wantCompose.current = false;
+    el.focus();
+    if (agent) { perfMark("composer", agent.id); if (perfWaitingPrompt(agent.id)) perfEnd(); }
+  });
   const [items, setItems] = useState<ConvItem[]>([]);
   // 送ったばかりの文。after は送り始めたときに持っていた最後の番号で、これより後に届いた発言とだけ比べる
   const [pending, setPending] = useState<(ConvItem & { after: number })[]>([]);
@@ -1028,9 +990,6 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
     return () => cancelAnimationFrame(raf);
   }, [items, pending, id, tab, chatReq]);
 
-  if (!agent && booting) {
-    return <aside className="panel empty-panel"><div className="ep"><p className="ep-title">新しい世帯を立てている…</p><p className="hint">打ったキーはためておき、ターミナルが開いたら流す</p></div></aside>;
-  }
   if (!agent) {
     return (
       <aside className="panel empty-panel">
@@ -1106,7 +1065,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
       )}
 
       {tab === "term" ? (
-        <Suspense fallback={<div className="term-wrap"><div className="term" /></div>}><TerminalView sessionId={agent.id} peer={peer || null} onError={onError} takeEarly={takeEarly} /></Suspense>
+        <Suspense fallback={<div className="term-wrap"><div className="term" /></div>}><TerminalView sessionId={agent.id} peer={peer || null} onError={onError} /></Suspense>
       ) : tab === "talk" ? (
         <ScrollEdgeGradient className="talk" wrapClassName="seg-fill" ref={scroller}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
@@ -1126,7 +1085,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
         <StateTab agent={agent} mood={mood} />
       )}
 
-      {tab !== "term" && <div className="composer">
+      {tab !== "term" && <div className="composer" ref={composerBox}>
         <div className="to">送信先: {target}</div>
         <Composer key={agent.id} agent={agent} peer={peer} text={text} setText={setText} busy={busy} running={mood === "working"} onSubmit={send} onError={onError} />
       </div>}
@@ -1196,14 +1155,12 @@ function Approval({ agent, peer, onDone, onError }: {
 
 // ---------- 新しい世帯・転出 ----------
 
-/** 新しい世帯を作る。親は ~/Documents/meta で端末のセッションとして起動する（本人の指定） */
-/** 新しい世帯を作る。最初の依頼の欄は出さず、すぐ ~/Documents/meta で親（端末のセッション）を立て、右の端末を開く */
-function NewHousehold({ big, disabled, onStart, onCreated, onError }: { big?: boolean; disabled?: boolean; onStart: () => void; onCreated: (r: any) => void; onError: (m: string) => void }) {
+/** 新しい世帯を作る。最初の依頼の欄は出さず、すぐ ~/Documents/meta で親（端末のセッション）を立て、右のチャットを開く */
+function NewHousehold({ big, disabled, onCreated, onError }: { big?: boolean; disabled?: boolean; onCreated: (r: any) => void; onError: (m: string) => void }) {
   const [busy, setBusy] = useState(false);
   const go = async () => {
     perfStart("new");
     setBusy(true);
-    onStart();
     try {
       // 前に開いたターミナルの大きさで起動する。開いた直後に大きさを変えて、claude が全部描き直すのを省く
       const { cols, rows } = lastTermSize() ?? { cols: null, rows: null };

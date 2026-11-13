@@ -1,6 +1,6 @@
 // 開発版だけで使う、ターミナルを開くまでの自動の計測（#18）。
 // 開発版の URL に ?bench=new|open|all&n=<回数> を付けると、起動して一覧が読めた3秒後から次を回す。
-// - new: 「＋ 新しい世帯」のボタンを押し、入力欄（❯）が出るまでを測る。測り終えたら、作ったセッションだけを止める
+// - new: 「＋ 新しい世帯」のボタンを押し、右パネルのチャットの入力欄にフォーカスが入るまでを測る（端末は開かない）。測り終えたら、作ったセッションだけを止める
 // - open: 自分で作ったセッション1つを、選び直して右クリックと同じ操作で開き直し、❯ が見えるまでを測る
 // - all: new を n 回、続けて最後に作ったセッションで open を n 回
 // - watch: 40秒、1秒ごとに町の人数と接続の表示を記録する
@@ -13,7 +13,7 @@
 // 環境変数なら devUrl を変えずに済むので、場面ごとに Rust を組み直さない（devUrl は Rust に埋め込まれる）
 import { useEffect, useRef } from "react";
 import { call } from "../bridge";
-import { perfCounters, perfNext, perfTerm } from "./perf";
+import { perfCounters, perfNext, perfTerm, perfWaitingPrompt } from "./perf";
 
 const fromEnv = import.meta.env.DEV ? (import.meta.env.VITE_FC_BENCH as string | undefined) : undefined;
 /** 計測の引数。開発版だけで読む */
@@ -96,6 +96,12 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       const r = await done;
       if (!r.id) throw new Error("作れなかった");
       mine.push(r.id);
+      // 新しい世帯を作ると右パネルはチャットになる（#31）。右クリックと同じ操作で端末を開き、❯ が見えてから測る。
+      // 作った直後は一覧に載っておらず focusId が何もしないので、開く流れが始まるまで繰り返す
+      let got = false;
+      const opened = perfNext().then(() => { got = true; });
+      for (let k = 0; k < 40 && !got && !perfWaitingPrompt(r.id); k++) { h().focusId(r.id); await sleep(250); }
+      await Promise.race([opened, sleep(25000)]);
       await sleep(3000);
       for (const dx of [-250, 250, -120]) {
         await log({ resize: dx, ...(await dragAndWatch(dx)) });
