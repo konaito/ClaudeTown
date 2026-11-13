@@ -238,7 +238,7 @@
     bi.src = `${S}ninja/characters/${char}/SeparateAnim/${state === "work" ? "Walk" : "Idle"}.png`;
     body.appendChild(bi);
     const bub = document.createElement("span"); bub.className = "fc-bubble";
-    if (CP[state]) { const ei = new Image(); ei.alt = ""; ei.src = `${S}noto/${CP[state]}/512.webp`; bub.appendChild(ei); }
+    if (CP[state]) { const ei = new Image(); ei.alt = ""; ei.src = `https://fonts.gstatic.com/s/e/notoemoji/latest/${CP[state]}/512.webp`; bub.appendChild(ei); }
     a.append(body, bub);
     return a;
   }
