@@ -8,14 +8,10 @@ import "@xterm/xterm/css/xterm.css";
 import { call, openTerminal } from "../bridge";
 import { perfCounters, perfMark, perfEnd, perfTerm, perfWaitingPrompt } from "./perf";
 import { benchParams } from "./bench";
+import { SIZE_KEY } from "./size";
 
-const SIZE_KEY = "claude-town.term-size";
 /** ほかの画面の大きさが右パネルに収まらないとき、こちらの大きさを送り返す間隔の下限 */
 const FOREIGN_RECLAIM_MS = 5000;
-/** 最後に開いたターミナルの大きさ。新しい世帯をこの大きさで起動する */
-export function lastTermSize(): { cols: number; rows: number } | null {
-  try { const v = JSON.parse(localStorage.getItem(SIZE_KEY) ?? "null"); return v?.cols && v?.rows ? v : null; } catch { return null; }
-}
 
 /**
  * ターミナルは1つだけ作って使い回す（#15）。開くたびに作って dispose すると、WebGL の面と xterm の物が
