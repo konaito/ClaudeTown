@@ -73,7 +73,7 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
   const [dropping, setDropping] = useState(false);
   // 貼り付けとドロップの返事が来る前に、別のセッションへ替わって入力欄が消えていることがある
   const alive = useRef(true);
-  useEffect(() => () => { alive.current = false; }, []);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
   // 履歴は CLI と同じ ~/.claude/history.jsonl から読む（手元のセッションだけ）。上下キーの分（同じ project）は開いたときと送るたびに読む。
   // Ctrl+R の分（全部の project、1000件で約1.2MB）は、Ctrl+R を押したときだけ読む
@@ -126,8 +126,10 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
     const el = ta.current!;
     el.focus();
     el.setSelectionRange(e.from, e.to);
+    const want = el.value.slice(0, e.from) + e.insert + el.value.slice(e.to);
     const ok = e.insert ? document.execCommand("insertText", false, e.insert) : e.from === e.to || document.execCommand("delete");
-    if (!ok) replaceAll(el.value.slice(0, e.from) + e.insert + el.value.slice(e.to), e.from + e.insert.length);
+    // 窓が前面にないとき（Finder から落としたとき）は、execCommand が true を返しても文が入らないことがある
+    if (!ok || el.value !== want) replaceAll(want, e.from + e.insert.length);
     if (e.killed) { kills.current = [e.killed, ...kills.current.filter((k) => k !== e.killed)].slice(0, 20); }
   };
   const moveTo = (p: number) => { ta.current!.setSelectionRange(p, p); setCaret(p); };
