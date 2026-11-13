@@ -3,6 +3,7 @@
 //   FC_CROWD_N        人数（既定 20）
 //   FC_CROWD_STATE    全員の state（既定 waiting_permission。印なしの対照は idle）
 //   FC_CROWD_HOUSE    1世帯の人数（既定 5。1人目が親で、残りはその子）
+//   FC_CROWD_LOG      1 なら、受けた要求ごとに「req <時刻ms> <パス>」を標準出力に出す（起動の時間の計測、scripts/bench-startup.sh）
 //   FC_CCN_URL=http://127.0.0.1:4396 FC_APP_HOME=$(mktemp -d) bun tauri dev
 // 口は ccn と同じ形（GET /api/peers、GET /api/sessions、GET /api/sessions/<id>）。書き込みの口は持たない
 const PORT = Number(process.argv[2] ?? 4396);
@@ -27,7 +28,9 @@ const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { sta
 Bun.serve({
   port: PORT, hostname: "127.0.0.1",
   fetch(req) {
-    const p = new URL(req.url).pathname.split("/").filter(Boolean);
+    const url = new URL(req.url);
+    if (process.env.FC_CROWD_LOG === "1") console.log(`req ${Date.now()} ${url.pathname}${url.search}`);
+    const p = url.pathname.split("/").filter(Boolean);
     if (p[0] !== "api") return json({ error: "not found" }, 404);
     if (p[1] === "peers") return json([{ name: "mock", url: `http://127.0.0.1:${PORT}`, status: "healthy", self: true }]);
     if (p[1] !== "sessions" || req.method !== "GET") return json({ error: "not found" }, 404);

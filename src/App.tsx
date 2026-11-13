@@ -1,6 +1,6 @@
-import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { call as invoke, setFullscreen } from "./bridge";
-import { TerminalView, lastTermSize } from "./term/TerminalView";
+import { lastTermSize } from "./term/size";
 import { perfMark, perfSetId, perfStart } from "./term/perf";
 import { benchName, useBench } from "./term/bench";
 import { collectMail, type Mail } from "./mail";
@@ -61,7 +61,13 @@ const CONV_POLL_MAX_MS = 10000;
 
 type Toast = { id: number; text: string; bad?: boolean };
 
+// ターミナル（xterm と WebGL の addon）は起動のときに読まず、町を出した後に読む（#16）。
+// 起動から町を描くまでに解く JS を減らす。最初に開くときに待たないよう、起動の2秒後に先に読んでおく
+const loadTerminal = () => import("./term/TerminalView");
+const TerminalView = lazy(() => loadTerminal().then((m) => ({ default: m.TerminalView })));
+
 export default function App() {
+  useEffect(() => { const t = setTimeout(() => { void loadTerminal(); }, 2000); return () => clearTimeout(t); }, []);
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [peer, setPeer] = useState<string>("");
@@ -1087,7 +1093,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, peers, tak
       )}
 
       {tab === "term" ? (
-        <TerminalView sessionId={agent.id} peer={peer || null} onError={onError} takeEarly={takeEarly} />
+        <Suspense fallback={<div className="term-wrap"><div className="term" /></div>}><TerminalView sessionId={agent.id} peer={peer || null} onError={onError} takeEarly={takeEarly} /></Suspense>
       ) : tab === "talk" ? (
         <ScrollEdgeGradient className="talk" wrapClassName="seg-fill" ref={scroller}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
