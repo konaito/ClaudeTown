@@ -23,7 +23,7 @@ import {
 } from "./model";
 import { Markdown, linkify } from "./Markdown";
 import { chatPerf } from "./chatPerf";
-import { elapsedText, liveSummary, mergeConv, msOf, sameLive, savedLabel, type ConvCache, type ConvDelta, type Live } from "./conv";
+import { elapsedText, liveSummary, mergeConv, msOf, sameLive, savedLabel, settlePending, type PendingItem, type ConvCache, type ConvDelta, type Live } from "./conv";
 import { layoutFamily, type LNode } from "./layout/layout";
 import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
@@ -1018,7 +1018,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   // 今の動き（#59）。中身が変わったときだけ入れ替え、末尾の行のほかは描き直さない
   const [live, setLive] = useState<Live | null>(null);
   // 送ったばかりの文。after は送り始めたときに持っていた最後の番号で、これより後に届いた発言とだけ比べる
-  const [pending, setPending] = useState<(ConvItem & { after: number })[]>([]);
+  const [pending, setPending] = useState<PendingItem[]>([]);
   const [convErr, setConvErr] = useState<string | null>(null);
   // 保存してあった会話を出しているときの、保存した時刻。ccn から読めたら null に戻す
   const [cachedAt, setCachedAt] = useState<number | null>(null);
@@ -1087,14 +1087,9 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
     return () => { alive = false; p.stop(); convKick.current = () => {}; };
   }, [id, peer]);
 
-  // 送ったばかりの文は、送り始めたあとに会話に出たら仮の項目を消す（前の同じ文、「はい」や選択肢では消さない）
-  useEffect(() => {
-    setPending((p) => {
-      if (!p.length) return p;
-      const q = p.filter((x) => !items.some((y) => (y.n ?? -1) > x.after && y.role === "user" && y.text.trim() === x.text.trim()));
-      return q.length === p.length ? p : q;
-    });
-  }, [items, pending.length]);
+  // 送ったばかりの文は、送り始めたあとに会話に出たら仮の項目を消す（前の同じ文、「はい」や選択肢では消さない）。
+  // 後に送った文が出たら、前に送った仮の項目も消す（#69、送った順と並びを入れ替えない）
+  useEffect(() => { setPending((p) => settlePending(items, p)); }, [items, pending.length]);
 
   // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
   const shown = useMemo(() => collapseTools([...items, ...pending]), [items, pending]);

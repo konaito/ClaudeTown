@@ -8,6 +8,10 @@
 // - offline: ?sid=<セッション> のチャットを開き、?secs=<秒>（既定 60）のあいだ1秒ごとに、会話の欄の吹き出しの数、保存した履歴の印、
 //   町の人数、接続の表示、赤い帯を記録する（オフラインのキャッシュ、src-tauri/src/offline.rs。scripts/offline-ccn-proxy.ts と使う）
 // - cpu: ?sid=<セッション> のターミナルを開いたまま30秒、IPC の回数を数える（#8、#9。scripts/mock-ccn-flood.ts と使う）
+// - order: ?sid=<セッション> のチャットを開き、子が作業中になったら、入力欄から ?a= と ?b= の2通を続けて送る。?secs=<秒>（既定 90）のあいだ1秒ごとに、
+//   会話の欄の吹き出しの並び（自分の文と、仮の吹き出しか）を記録する（#69、送った順と出る順が入れ替わらないか）
+// - drop: ?sid=<セッション> のチャットを開き、?file=<パス> を落としたときと同じドロップの出来事（tauri://drag-drop）を起こす。
+//   入力欄に入ったパスを記録し、?ask= を続けて送る（#69、一時の場所のファイルを写したパスが入り、子が読めるか）
 // - scene: 軽さの計測（scripts/bench.ts、#2）。場面（scene=idle|hidden|minimized|terminal|talk|town）を用意して ready を書き、
 //   wait（ms）たったら post を書く。CPU とメモリは bench.ts が外から ps で測る。測っている間は、ここでは何も回さない
 // 結果は perf.ts が1回ごとに perf_log に書く。作るセッションには name に bench-ct-term を付ける。
@@ -166,6 +170,60 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
           // 一番下からの距離（印の余白が付いても、一番下に留まっているか）と、町の選択肢の数（保存した peers が出るか）
           bottomGap: (() => { const e = document.querySelector(".panel .seg-scroll"); return e ? Math.round(e.scrollHeight - e.scrollTop - e.clientHeight) : null; })(),
           towns: document.querySelectorAll("select.node option").length });
+        await sleep(1000);
+      }
+      return;
+    }
+    if (mode === "order") {
+      h().select(params.get("sid"));
+      const secs = Number(params.get("secs") ?? 90);
+      const box = () => document.querySelector<HTMLTextAreaElement>(".panel .composer textarea");
+      // React の入力欄に文を入れて Enter を押す。前の送信が終わって欄が空になるまで待つ（送信中は2通目を受けない）
+      const type = async (body: string) => {
+        for (let i = 0; i < 100 && (!box() || box()!.disabled || box()!.value); i++) await sleep(100);
+        const el = box()!;
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(el, body);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        await sleep(200);
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      };
+      const bubbles = () => [...document.querySelectorAll(".talk .msg.me")].slice(-6).map((e) => ({
+        pending: e.classList.contains("pending"), text: (e.querySelector(".b")?.textContent ?? "").replace(/\s+/g, " ").slice(-40) }));
+      // 作業中の子に続けて送る場面を作る。子が作業中になるまで（最大5分）待ってから送る
+      for (let i = 0; i < 300 && document.querySelector(".panel .p-name .st")?.textContent !== "作業中"; i++) await sleep(1000);
+      await sleep(2000);
+      await type(params.get("a") ?? "一通目");
+      await log({ sent: "a", at: new Date().toISOString().slice(11, 23) });
+      await type(params.get("b") ?? "二通目");
+      await log({ sent: "b", at: new Date().toISOString().slice(11, 23) });
+      for (let i = 0; i < secs; i++) {
+        await log({ t: i, at: new Date().toISOString().slice(11, 23), mood: document.querySelector(".panel .st")?.textContent ?? null, me: bubbles() });
+        await sleep(1000);
+      }
+      return;
+    }
+    if (mode === "drop") {
+      h().select(params.get("sid"));
+      const box = () => document.querySelector<HTMLTextAreaElement>(".panel .composer textarea");
+      for (let i = 0; i < 100 && (!box() || box()!.disabled); i++) await sleep(100);
+      await sleep(1000);
+      const { emit } = await import("@tauri-apps/api/event");
+      await emit("tauri://drag-drop", { paths: [params.get("file") ?? ""], position: { x: 10, y: 10 } });
+      for (let i = 0; i < 50 && !box()!.value; i++) await sleep(100);
+      const dropped = box()!.value;
+      await log({ dropped, error: document.querySelector(".banner.bad, .toast")?.textContent ?? null });
+      if (!dropped) return;
+      const el = box()!;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(el, `${dropped}\n${params.get("ask") ?? ""}`);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      await sleep(200);
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await sleep(1500);
+      await log({ sent: true, left: box()?.value ?? null });
+      // 送った文が会話に出て、仮の吹き出しが消えるか（CLI がパスを [Image #3] にしても突き合わせられるか）
+      for (let i = 0; i < Number(params.get("secs") ?? 30); i++) {
+        await log({ t: i, me: [...document.querySelectorAll(".talk .msg.me")].slice(-3).map((e) => ({
+          pending: e.classList.contains("pending"), text: (e.querySelector(".b")?.textContent ?? "").replace(/\s+/g, " ").slice(0, 60) })) });
         await sleep(1000);
       }
       return;

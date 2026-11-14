@@ -88,3 +88,32 @@ export function deltaOf(all: ConvItem[], since: number | null | undefined): Conv
   if (since == null || since > all.length) return { items: items.slice(-KEEP_CONV), total: all.length, reset: true };
   return { items: items.slice(since), total: all.length, reset: false };
 }
+
+/** 送ったばかりの文の仮の項目。after は送り始めたときに持っていた最後の番号で、これより後に届いた発言とだけ比べる */
+export type PendingItem = ConvItem & { after: number };
+
+/** 画像のファイルのパス（空白は \ 付きか、引用符で囲んだもの）。CLI は読める画像のパスを [Image #3] の添付に置き換える */
+const IMAGE_PATH = /'[^'\n]*\.(?:png|jpe?g|gif|webp)'|"[^"\n]*\.(?:png|jpe?g|gif|webp)"|(?:\\ |[^\s'"])+\.(?:png|jpe?g|gif|webp)(?=\s|$)/gi;
+/**
+ * 比べる形にそろえる。空白の並びを1つにし（端末に貼ると改行や行末の空白が変わる）、画像のパスと [Image #3] の印を除く
+ * （送った文のパスが、会話ではパスのままのことも印になることもある、#69）
+ */
+const canon = (s: string) => s.replace(/\[Image #\d+\]/g, " ").replace(IMAGE_PATH, " ").replace(/\s+/g, " ").trim();
+const sameText = (a: string, b: string) => canon(a) === canon(b);
+
+/**
+ * 会話に出た仮の項目を消す（#69）。送った順に1件ずつ、まだ使っていない user の発言と突き合わせる（同じ「はい」を2回送っても1件ずつ消す）。
+ * 後に送った文が会話に出たら、それより前に送った仮の項目も消す。CLI は届いた順に文を取り込むので、前の文も取り込まれている。
+ * 前の文の形が会話で変わっていて（[Image #1] など）突き合わせられなくても、仮の項目が後の発言より下に残らない。
+ * 変わらなければ pending をそのまま返す
+ */
+export function settlePending(items: ConvItem[], pending: PendingItem[]): PendingItem[] {
+  if (!pending.length) return pending;
+  const used = new Set<number>();
+  let last = -1;
+  pending.forEach((x, i) => {
+    const hit = items.findIndex((y, j) => !used.has(j) && (y.n ?? -1) > x.after && y.role === "user" && sameText(y.text, x.text));
+    if (hit >= 0) { used.add(hit); last = i; }
+  });
+  return last < 0 ? pending : pending.slice(last + 1);
+}

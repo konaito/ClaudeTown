@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, type Live } from "./conv";
+import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, settlePending, type Live, type PendingItem } from "./conv";
 import type { ConvItem } from "./model";
 
 const item = (n: number): ConvItem => ({ role: "assistant", text: `t${n}`, n });
@@ -80,5 +80,42 @@ describe("今の動き（#59）", () => {
     expect(sameLive(base, { ...base })).toBe(true);
     expect(sameLive(base, { ...base, last: "tool" })).toBe(false);
     expect(sameLive(null, undefined)).toBe(true);
+  });
+});
+
+describe("settlePending（#69）", () => {
+  const u = (n: number, text: string): ConvItem => ({ role: "user", text, n });
+  const p = (text: string, after: number): PendingItem => ({ role: "user", text, pending: true, after });
+  test("会話に出た文の仮の項目を消す。出ていなければ同じ配列", () => {
+    const pend = [p("一通目", 4)];
+    expect(settlePending([u(3, "前"), item(4)], pend)).toBe(pend);
+    expect(settlePending([item(4), u(5, "一通目")], pend)).toEqual([]);
+  });
+  test("改行や行末の空白の違いは同じ文とみなす", () => {
+    expect(settlePending([u(5, "/a/b.png \n\nこれ見て")], [p("/a/b.png\nこれ見て ", 4)])).toEqual([]);
+  });
+  test("画像のパスが会話で [Image #3] になっていても同じ文とみなす", () => {
+    const sent = "/Users/me/.family-computing/attachments/drop-20261114-054022-9dae-スクリーンショット-2026-11-14-14.50.00.png \n（ドロップの確認）見て";
+    expect(settlePending([u(5, "[Image #3]\n（ドロップの確認）見て")], [p(sent, 4)])).toEqual([]);
+    // 読めなかったパスはそのまま残る（2026-11-14 の meta）
+    const tmp = "/var/folders/lp/x/T/TemporaryItems/NSIRD_screencaptureui_GJ7Y9w/スクリーンショット\\ 2026-11-14\\ 14.20.54.png \n\nこれ挙動がおかしいぞ";
+    expect(settlePending([u(5, tmp)], [p(tmp, 4)])).toEqual([]);
+    // パスだけが違う文は同じとみなすが、本文が違えば消さない
+    const pend = [p("/a/b.png\nこれ見て", 4)];
+    expect(settlePending([u(5, "[Image #1]\nあれ見て")], pend)).toBe(pend);
+  });
+  test("送り始める前の同じ文では消さない", () => {
+    const pend = [p("はい", 5)];
+    expect(settlePending([u(5, "はい")], pend)).toBe(pend);
+  });
+  test("同じ文を2回送ったら、会話に出た数だけ消す", () => {
+    const pend = [p("はい", 4), p("はい", 4)];
+    expect(settlePending([u(5, "はい")], pend)).toEqual([pend[1]]);
+  });
+  test("後に送った文が出たら、前に送った仮の項目も消す（後の文より下に残さない）", () => {
+    // 1通目は会話では形が変わって突き合わせられない（[Image #1] にされたなど）、2通目は出た、3通目はまだ
+    const pend = [p("/tmp/a.png これ見て", 4), p("先に送ったやつ", 4), p("三通目", 4)];
+    const items = [item(4), u(5, "[Image #1] これ見て"), item(6), u(7, "先に送ったやつ")];
+    expect(settlePending(items, pend)).toEqual([pend[2]]);
   });
 });

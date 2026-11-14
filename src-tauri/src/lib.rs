@@ -614,6 +614,59 @@ fn tool_kind(name: &str) -> String {
     }
 }
 
+/// CLI が貼り付けた文に付ける包み（`<pasted_content id="…">` と `</pasted_content id="…">`）を外す。
+/// ccn は文を端末に貼るので、送った文が包まれて届くことがある（2026-11-14 の meta、8074d764 の jsonl）。
+/// 包みのまま `<` で始まると、hook の差し込みと見分けられず会話から落ちていた（#69）。外した後の前後の空白は落とす
+fn unwrap_pasted(text: &str) -> String {
+    const TAGS: [&str; 2] = ["<pasted_content", "</pasted_content"];
+    if !text.contains("pasted_content") {
+        return text.trim().to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some((i, tag)) = TAGS.iter().filter_map(|t| rest.find(t).map(|i| (i, *t))).min_by_key(|(i, _)| *i) {
+        let tail = &rest[i..];
+        // 包みの印は、名前の直後が空白か > で、1行に収まり > で閉じるもの
+        let end = tail.find('>').filter(|&j| !tail[..j].contains('\n'));
+        let named = matches!(tail[tag.len()..].chars().next(), Some(' ') | Some('>'));
+        match end {
+            Some(j) if named => {
+                out.push_str(&rest[..i]);
+                rest = &tail[j + 1..];
+            }
+            _ => {
+                out.push_str(&rest[..i + 1]);
+                rest = &rest[i + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
+/// 先頭に並んだ画像の印（[Image #3]）と、その後ろの文に分ける。印が無ければ ("", text)
+fn split_image_marks(text: &str) -> (&str, &str) {
+    let mut i = 0;
+    while let Some(r) = text[i..].strip_prefix("[Image #") {
+        let digits = r.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 || !r[digits..].starts_with(']') {
+            break;
+        }
+        i += "[Image #".len() + digits + 1;
+        i += text[i..].len() - text[i..].trim_start_matches([' ', '\t']).len();
+    }
+    (text[..i].trim_end(), &text[i..])
+}
+
+/// user の行の文。文の部分をつなぎ、貼り付けの包みを外す
+fn user_text(content: &Value) -> String {
+    match content {
+        Value::String(s) => unwrap_pasted(s),
+        Value::Array(a) => unwrap_pasted(&a.iter().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n")),
+        _ => String::new(),
+    }
+}
+
 /// ccn の1件から、今の動きに効く出来事を取り出す。simplify と同じく node と pty の両方の形を読む
 fn live_events(m: &Value) -> Vec<LiveEv> {
     let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
@@ -631,11 +684,7 @@ fn live_events(m: &Value) -> Vec<LiveEv> {
             if !ids.is_empty() {
                 out.push(LiveEv::Result(ids, at));
             } else {
-                let text = match content {
-                    Value::String(s) => s.trim().to_string(),
-                    Value::Array(a) => a.iter().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n").trim().to_string(),
-                    _ => String::new(),
-                };
+                let text = user_text(content);
                 // hook やシステムの差し込み（<...>、Caveat:）はターンの始まりにしない。お手紙（<cross-session-message>）は始まりにする
                 let letter = text.contains("<cross-session-message");
                 if !text.is_empty() && !m["isMeta"].as_bool().unwrap_or(false) && (letter || !(text.starts_with('<') || text.starts_with("Caveat:"))) {
@@ -806,17 +855,9 @@ fn simplify(m: &Value) -> Vec<Value> {
     let mut out = vec![];
     match ty {
         "user" => {
-            let text = match content {
-                Value::String(s) => s.clone(),
-                Value::Array(a) => a
-                    .iter()
-                    .filter(|c| c["type"] == "text")
-                    .filter_map(|c| c["text"].as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                _ => String::new(),
-            };
-            let text = text.trim();
+            // 貼り付けの包み（<pasted_content>）は外してから見る。外さないと `<` で始まり、下の除外で落ちる（#69）
+            let text = user_text(content);
+            let text = text.as_str();
             // ターミナルのセッションには、お手紙の前に「Another Claude session sent a message:」の1行が付く
             let text = text.strip_prefix("Another Claude session sent a message:").map(str::trim_start).unwrap_or(text);
             // 別のセッションからのお手紙（<cross-session-message from=… from-name=…>本文</cross-session-message>、後ろに注記が付くことがある）は、包みの内側の本文だけ出す
@@ -838,9 +879,14 @@ fn simplify(m: &Value) -> Vec<Value> {
             if text.is_empty() || text.starts_with('<') || text.starts_with("Caveat:") {
                 return out;
             }
-            // 別のセッションからの文は1行目が from 行
-            let (from, body) = match text.split_once('\n') {
-                Some((first, rest)) if first.starts_with("from ") && first.contains(" via ") => (Some(first.to_string()), rest.trim().to_string()),
+            // 別のセッションからの文は1行目が from 行。画像のパスを含む文を端末に貼ると、CLI はパスを画像の添付にし、
+            // 先頭に [Image #3] を置く（from 行はその後ろに回る、#69）。印を外して from 行を探し、印は本文の頭に戻す
+            let (imgs, rest) = split_image_marks(text);
+            let (from, body) = match rest.split_once('\n') {
+                Some((first, rest)) if first.starts_with("from ") && first.contains(" via ") => {
+                    let body = rest.trim();
+                    (Some(first.to_string()), if imgs.is_empty() { body.to_string() } else { format!("{imgs}\n{body}") })
+                }
                 _ => (None, text.to_string()),
             };
             // from agent:<ノード>/<sid8>/<役割> の文は、セッションからのお手紙
@@ -1477,6 +1523,11 @@ mod cmd {
     pub async fn paste_clipboard(save_image: bool) -> Result<super::attach::Pasted, String> {
         blocking(move || super::attach::clipboard(&super::fc_path(Scope::App, "attachments"), save_image)).await
     }
+    /// ドロップと貼り付けで受けたファイルのうち、一時の場所のものを attachments に写し、入力欄に入れるパスを返す（#69）
+    #[tauri::command]
+    pub async fn stage_files(paths: Vec<String>) -> Result<Vec<String>, String> {
+        blocking(move || super::attach::stage(&super::fc_path(Scope::App, "attachments"), paths)).await
+    }
 }
 
 // ---------- 町の一覧の見張り（#5） ----------
@@ -1811,7 +1862,7 @@ pub fn run() {
             cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::conversation_cache, cmd::send_message, set_house_name, cmd::answer_permission,
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
-            cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::paste_clipboard
+            cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::paste_clipboard, cmd::stage_files
         ])
         .run(context)
         .expect("error while running tauri application");
@@ -2302,5 +2353,57 @@ mod tests {
         // トランスクリプトの行に data が付いていても、message があればそちらを読む
         let with_data = json!({"type": "user", "timestamp": "t", "data": {"type": "hook_progress"}, "message": {"role": "user", "content": "やあ"}});
         assert_eq!(simplify(&with_data)[0]["text"], "やあ");
+    }
+
+    // 2026-11-14 14:21 に本人が meta（8074d764）へ続けて送った3通。ccn の GET messages が返した形のまま（#69）。
+    // 1通目と3通目は CLI が <pasted_content> で包んでいた。包みのまま `<` で始まるので会話から落ち、仮の吹き出しが消えずに末尾に残った
+    #[test]
+    fn pasted_content_is_unwrapped_not_dropped() {
+        let first = json!({"at": 1794633665654u64, "type": "user", "seq": 442, "data": {"type": "user", "message": {"role": "user",
+            "content": "\n\n<pasted_content id=\"9779\">\nfrom local via konaito-pro\n\n/var/folders/lp/twxk19yd58v9rb7ytpcxt6pm0000gn/T/TemporaryItems/NSIRD_screencaptureui_GJ7Y9w/スクリーンショット\\ 2026-11-14\\ 14.20.54.png \n\nこれ挙動がおかしいぞ、掘ってくれ\n</pasted_content id=\"9779\">\n"}}});
+        let second = json!({"at": 1794633683710u64, "type": "user", "seq": 453, "data": {"type": "user", "message": {"role": "user",
+            "content": "from local via konaito-pro\n\n先に送ったやつが先に反映されてない"}}});
+        let third = json!({"at": 1794633703956u64, "type": "user", "seq": 460, "data": {"type": "user", "message": {"role": "user",
+            "content": "<pasted_content id=\"9779\">\nfrom local via konaito-pro\n\n/var/folders/lp/twxk19yd58v9rb7ytpcxt6pm0000gn/T/TemporaryItems/NSIRD_screencaptureui_s8ZkFz/スクリーンショット\\ 2026-11-14\\ 14.21.28.png \n今回も、多分送られてるし、読まれてるんだけど、判定がおかしいんだと思う\n</pasted_content id=\"9779\">"}}});
+        let a = simplify(&first);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0]["from"], "from local via konaito-pro");
+        assert_eq!(a[0]["text"], "/var/folders/lp/twxk19yd58v9rb7ytpcxt6pm0000gn/T/TemporaryItems/NSIRD_screencaptureui_GJ7Y9w/スクリーンショット\\ 2026-11-14\\ 14.20.54.png \n\nこれ挙動がおかしいぞ、掘ってくれ");
+        assert_eq!(simplify(&second)[0]["text"], "先に送ったやつが先に反映されてない");
+        let c = simplify(&third);
+        assert_eq!(c.len(), 1);
+        assert!(c[0]["text"].as_str().unwrap().ends_with("判定がおかしいんだと思う"));
+        // 包まれた文も、ターンの始まりとして数える
+        for m in [&first, &second, &third] {
+            assert!(matches!(live_events(m).as_slice(), [LiveEv::User(_)]));
+        }
+        // hook の差し込みは今までどおり落とす
+        let hook = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": "<command-name>/clear</command-name>"}});
+        assert!(simplify(&hook).is_empty());
+    }
+
+    // 2026-11-14、写した画像のパスを入れて送った文を、CLI が画像の添付にした形（ccn の GET messages のまま、#69）
+    #[test]
+    fn image_marks_before_the_from_line() {
+        let m = json!({"at": 1794634823274u64, "type": "user", "seq": 51, "data": {"type": "user", "message": {"role": "user",
+            "content": "[Image #3]from local via konaito-pro\n（ドロップの確認）上のパスの画像を Read で開いて"}}});
+        let out = simplify(&m);
+        assert_eq!(out[0]["from"], "from local via konaito-pro");
+        assert_eq!(out[0]["text"], "[Image #3]\n（ドロップの確認）上のパスの画像を Read で開いて");
+        assert_eq!(split_image_marks("[Image #1] [Image #12]from x"), ("[Image #1] [Image #12]", "from x"));
+        assert_eq!(split_image_marks("[Image #]x"), ("", "[Image #]x"));
+        assert_eq!(split_image_marks("ふつう"), ("", "ふつう"));
+    }
+
+    #[test]
+    fn unwrap_pasted_keeps_text_around_and_odd_tags() {
+        assert_eq!(unwrap_pasted("  ふつう  "), "ふつう");
+        // 打った文と貼った文が混ざっている
+        assert_eq!(unwrap_pasted("見て <pasted_content id=\"1\">\n長い文\n</pasted_content id=\"1\"> どう？"), "見て \n長い文\n どう？");
+        // 閉じの印に id が無い形も外す
+        assert_eq!(unwrap_pasted("<pasted_content id=\"2\">a</pasted_content>"), "a");
+        // 名前が続いているもの、> で閉じないものは文のまま残す
+        assert_eq!(unwrap_pasted("<pasted_contents>x"), "<pasted_contents>x");
+        assert_eq!(unwrap_pasted("<pasted_content\nx"), "<pasted_content\nx");
     }
 }
