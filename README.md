@@ -4,7 +4,7 @@ Claude Town は、Claude Code のセッションの親子を、町に住む家�
 
 ## ccn とセットで動く
 
-Claude Town は、ccn（Claude Code Nodes）とセットで動くアプリである。Claude Town だけでは動かない。ccn は作者が作っている別のプロダクトで、リポジトリは公開していない。
+Claude Town は、ccn（Claude Code Nodes）とセットで動くアプリである。Claude Town だけでは動かない。ccn は作者が作っている別のプロダクトで、[konaito/claude-code-nodes](https://github.com/konaito/claude-code-nodes) で公開している（MIT）。1台で動かす手順は、ccn の README の「1台で動かす」の節にある。Claude Town はノードの名前（`name`）とポート（`port`）を `~/.config/ccn/ccn.json` から読むので、このファイルも作っておく。
 
 ccn は、機械ごとに常駐するノードである。ノードは、その機械で Claude Code のセッションを立て、一覧にし、文を送り、承認に答える HTTP の口を出す。ノードどうしをつなぐと、別の機械のセッションも同じ口で扱える。
 
