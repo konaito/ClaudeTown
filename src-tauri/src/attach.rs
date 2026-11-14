@@ -15,6 +15,8 @@ use serde::Serialize;
 const KEEP_DAYS: u64 = 7;
 /// 保存する画像の名前の頭。掃除はこの頭のファイルだけを消す
 const PREFIX: &str = "paste-";
+/// 一時の場所から写したファイルの名前の頭（#69）。掃除は PREFIX と同じく日数で消す
+const DROP_PREFIX: &str = "drop-";
 
 #[derive(Serialize, Debug, Default, PartialEq)]
 pub struct Pasted {
@@ -99,7 +101,58 @@ fn civil(days: u64) -> (i64, u32, u32) {
     (yoe + era * 400 + if m <= 2 { 1 } else { 0 }, m, d)
 }
 
-/// KEEP_DAYS より古い、貼り付けで保存した画像を消す。ほかのファイルには触らない
+/// ドロップと貼り付けで受けたファイルのパスのうち、一時の場所にあるものを attachments の置き場（dir）に写し、写した先のパスに替える（#69）。
+/// 撮った直後のスクショのサムネは /var/folders/…/T/TemporaryItems/ にあり、ドロップを受けたアプリにしか読む許可が出ない。
+/// さらにサムネを使い終わると消える。受け手の Claude が後で読めるよう、受けたその場で写す。
+/// ふつうの場所（~/Desktop など）のファイルは元のパスのまま返す。1つでも写せなければ、理由を付けて全体を断る
+pub fn stage(dir: &Path, paths: Vec<String>) -> Result<Vec<String>, String> {
+    let tmp = std::env::var("TMPDIR").ok();
+    if !paths.iter().any(|p| is_temporary(p, tmp.as_deref())) {
+        return Ok(paths);
+    }
+    fs::create_dir_all(dir).map_err(|e| format!("写す先の置き場を作れなかった: {e}"))?;
+    prune(dir, SystemTime::now());
+    let now = SystemTime::now();
+    paths
+        .into_iter()
+        .map(|p| {
+            if !is_temporary(&p, tmp.as_deref()) {
+                return Ok(p);
+            }
+            let src = Path::new(&p);
+            let base = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let why = |e: String| format!("{base} を写せなかったので入れない（一時の場所のファイルは受け手から読めない）: {e}");
+            if src.is_dir() {
+                return Err(why("フォルダは写さない".into()));
+            }
+            let dest = dir.join(staged_name(now, fastrand::u16(..), &base));
+            fs::copy(src, &dest).map_err(|e| why(e.to_string()))?;
+            // copy は元の更新時刻を引き継ぐ。古いファイルを写すと次の掃除（prune）ですぐ消えるので、写した時刻にする
+            fs::File::options().write(true).open(&dest).and_then(|f| f.set_modified(SystemTime::now())).map_err(|e| why(e.to_string()))?;
+            Ok(dest.to_string_lossy().into_owned())
+        })
+        .collect()
+}
+
+/// 一時の場所か。/var/folders（$TMPDIR の親）、/tmp、$TMPDIR、TemporaryItems。/private を付けた形も見る
+fn is_temporary(path: &str, tmpdir: Option<&str>) -> bool {
+    let p = path.strip_prefix("/private").unwrap_or(path);
+    if p.starts_with("/var/folders/") || p.starts_with("/tmp/") || path.contains("/TemporaryItems/") {
+        return true;
+    }
+    tmpdir.map(|t| t.strip_prefix("/private").unwrap_or(t).trim_end_matches('/')).filter(|t| !t.is_empty()).is_some_and(|t| p.starts_with(&format!("{t}/")))
+}
+
+/// drop-20261114-052054-1a2b-スクリーンショット-2026-11-14-14.20.54.png（UTC）。元の名前の空白は - にする（受け手がパスを読むときに崩れない）
+fn staged_name(now: SystemTime, rand: u16, base: &str) -> String {
+    let stamp = file_name(now, rand);
+    let stamp = stamp.strip_prefix(PREFIX).and_then(|s| s.strip_suffix(".png")).unwrap_or(&stamp);
+    let base: String = base.chars().map(|c| if c.is_whitespace() || c == '/' { '-' } else { c }).collect();
+    let base = if base.is_empty() { "file".into() } else { base };
+    format!("{DROP_PREFIX}{stamp}-{base}")
+}
+
+/// KEEP_DAYS より古い、貼り付けで保存した画像と、写したファイルを消す。ほかのファイルには触らない
 fn prune(dir: &Path, now: SystemTime) -> Vec<PathBuf> {
     let keep = Duration::from_secs(KEEP_DAYS * 86400);
     let mut gone = vec![];
@@ -107,7 +160,7 @@ fn prune(dir: &Path, now: SystemTime) -> Vec<PathBuf> {
     for e in rd.flatten() {
         let name = e.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with(PREFIX) || !name.ends_with(".png") {
+        if !(name.starts_with(PREFIX) && name.ends_with(".png")) && !name.starts_with(DROP_PREFIX) {
             continue;
         }
         let old = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| now.duration_since(t).ok()).map(|age| age > keep).unwrap_or(false);
@@ -131,17 +184,61 @@ mod tests {
     }
 
     #[test]
+    fn temporary_places() {
+        let t = Some("/var/folders/lp/x/T/");
+        assert!(is_temporary("/var/folders/lp/x/T/TemporaryItems/NSIRD_screencaptureui_GJ7Y9w/スクリーンショット 2026-11-14 14.20.54.png", t));
+        assert!(is_temporary("/private/var/folders/lp/x/T/a.png", t));
+        assert!(is_temporary("/tmp/a.png", None));
+        assert!(is_temporary("/private/tmp/a.png", None));
+        assert!(is_temporary("/Volumes/X/.TemporaryItems/../TemporaryItems/a.png", None));
+        assert!(is_temporary("/Users/me/tmpdir/a.png", Some("/Users/me/tmpdir")));
+        assert!(!is_temporary("/Users/me/Desktop/スクリーンショット 2026-11-14 14.10.00.png", t));
+        assert!(!is_temporary("/Users/me/tmpdirx/a.png", Some("/Users/me/tmpdir")));
+        assert!(!is_temporary("/tmpx/a.png", None));
+    }
+
+    #[test]
+    fn stage_copies_only_temporary_files() {
+        let root = std::env::temp_dir().join(format!("fc-stage-{}", fastrand::u32(..)));
+        let dest = root.join("attachments");
+        fs::create_dir_all(&root).unwrap();
+        let tmp = root.join("スクリーンショット 2026-11-14 14.20.54.png");
+        fs::write(&tmp, b"png").unwrap();
+        // 10日前のファイル。写したものは今の時刻になり、次の掃除で消えない
+        fs::File::options().write(true).open(&tmp).unwrap().set_modified(SystemTime::now() - Duration::from_secs(10 * 86400)).unwrap();
+        let tmp = tmp.to_string_lossy().into_owned();
+        // 試験の置き場は $TMPDIR（/var/folders）の下なので、一時の場所として写す。ふつうの場所のパスはそのまま
+        let normal = "/Users/me/Desktop/a.png".to_string();
+        let out = stage(&dest, vec![normal.clone(), tmp.clone()]).unwrap();
+        assert_eq!(out[0], normal);
+        assert_ne!(out[1], tmp);
+        assert!(out[1].starts_with(&dest.to_string_lossy().into_owned()));
+        assert!(out[1].ends_with("-スクリーンショット-2026-11-14-14.20.54.png"), "{}", out[1]);
+        assert!(!out[1].contains(' '));
+        assert_eq!(fs::read(&out[1]).unwrap(), b"png");
+        assert!(prune(&dest, SystemTime::now()).is_empty());
+        // 一時の場所が無ければ置き場も作らない
+        assert_eq!(stage(&root.join("none"), vec![normal.clone()]).unwrap(), vec![normal]);
+        assert!(!root.join("none").exists());
+        // 消えたファイルとフォルダは、理由を付けて断る
+        let gone = root.join("gone.png").to_string_lossy().into_owned();
+        assert!(stage(&dest, vec![gone]).unwrap_err().contains("gone.png を写せなかった"));
+        assert!(stage(&dest, vec![root.to_string_lossy().into_owned()]).unwrap_err().contains("フォルダ"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn prune_removes_only_old_pastes() {
         let dir = std::env::temp_dir().join(format!("fc-attach-{}", fastrand::u32(..)));
         fs::create_dir_all(&dir).unwrap();
-        for n in ["paste-old.png", "paste-new.png", "other.png"] {
+        for n in ["paste-old.png", "paste-new.png", "other.png", "drop-old-a.pdf"] {
             fs::write(dir.join(n), b"x").unwrap();
         }
         // 8日後から見ると、paste- の2つは古い。other.png は消さない
         let later = SystemTime::now() + Duration::from_secs(8 * 86400);
         let mut gone: Vec<String> = prune(&dir, later).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
         gone.sort();
-        assert_eq!(gone, vec!["paste-new.png", "paste-old.png"]);
+        assert_eq!(gone, vec!["drop-old-a.pdf", "paste-new.png", "paste-old.png"]);
         assert!(dir.join("other.png").exists());
         // 今から見ると、何も消さない
         fs::write(dir.join("paste-fresh.png"), b"x").unwrap();
