@@ -100,6 +100,12 @@ describe("settlePending（#69）", () => {
     // 読めなかったパスはそのまま残る（2026-11-14 の meta）
     const tmp = "/var/folders/lp/x/T/TemporaryItems/NSIRD_screencaptureui_GJ7Y9w/スクリーンショット\\ 2026-11-14\\ 14.20.54.png \n\nこれ挙動がおかしいぞ";
     expect(settlePending([u(5, tmp)], [p(tmp, 4)])).toEqual([]);
+    // パスでない「x.png」は文として比べる
+    expect(settlePending([u(5, "[Image #1] b.png を見て")], [p("/a/x.png a.png を見て", 4)]).length).toBe(1);
+    // 長い1語でも遅くならない
+    const t0 = performance.now();
+    settlePending([u(5, "a".repeat(20000))], [p("/" + "b".repeat(20000), 4)]);
+    expect(performance.now() - t0).toBeLessThan(200);
     // パスだけが違う文は同じとみなすが、本文が違えば消さない
     const pend = [p("/a/b.png\nこれ見て", 4)];
     expect(settlePending([u(5, "[Image #1]\nあれ見て")], pend)).toBe(pend);

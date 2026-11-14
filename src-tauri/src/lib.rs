@@ -881,13 +881,14 @@ fn simplify(m: &Value) -> Vec<Value> {
             }
             // 別のセッションからの文は1行目が from 行。画像のパスを含む文を端末に貼ると、CLI はパスを画像の添付にし、
             // 先頭に [Image #3] を置く（from 行はその後ろに回る、#69）。印を外して from 行を探し、印は本文の頭に戻す
+            // 画像だけを送ると、印の後ろが from 行だけになり改行が無いことがある（観測はしていない。来ても from 行を本文に出さない）
             let (imgs, rest) = split_image_marks(text);
-            let (from, body) = match rest.split_once('\n') {
-                Some((first, rest)) if first.starts_with("from ") && first.contains(" via ") => {
-                    let body = rest.trim();
-                    (Some(first.to_string()), if imgs.is_empty() { body.to_string() } else { format!("{imgs}\n{body}") })
-                }
-                _ => (None, text.to_string()),
+            let (first, after) = rest.split_once('\n').unwrap_or((rest, ""));
+            let (from, body) = if first.starts_with("from ") && first.contains(" via ") && (rest.contains('\n') || !imgs.is_empty()) {
+                let after = after.trim();
+                (Some(first.trim_end().to_string()), if imgs.is_empty() { after.to_string() } else if after.is_empty() { imgs.to_string() } else { format!("{imgs}\n{after}") })
+            } else {
+                (None, text.to_string())
             };
             // from agent:<ノード>/<sid8>/<役割> の文は、セッションからのお手紙
             let letter = from.as_deref().and_then(|f| f.strip_prefix("from agent:")).map(|r| {
@@ -2390,6 +2391,13 @@ mod tests {
         let out = simplify(&m);
         assert_eq!(out[0]["from"], "from local via konaito-pro");
         assert_eq!(out[0]["text"], "[Image #3]\n（ドロップの確認）上のパスの画像を Read で開いて");
+        // 画像だけを送り、from 行の後ろに何も無い形
+        let only = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": "[Image #4]from local via konaito-pro"}});
+        assert_eq!(simplify(&only)[0]["from"], "from local via konaito-pro");
+        assert_eq!(simplify(&only)[0]["text"], "[Image #4]");
+        // 印が無く改行も無い from 始まりの文は、今までどおり本文として出す
+        let plain = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": "from A via B"}});
+        assert_eq!(simplify(&plain)[0]["text"], "from A via B");
         assert_eq!(split_image_marks("[Image #1] [Image #12]from x"), ("[Image #1] [Image #12]", "from x"));
         assert_eq!(split_image_marks("[Image #]x"), ("", "[Image #]x"));
         assert_eq!(split_image_marks("ふつう"), ("", "ふつう"));

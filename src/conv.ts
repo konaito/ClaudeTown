@@ -92,13 +92,16 @@ export function deltaOf(all: ConvItem[], since: number | null | undefined): Conv
 /** 送ったばかりの文の仮の項目。after は送り始めたときに持っていた最後の番号で、これより後に届いた発言とだけ比べる */
 export type PendingItem = ConvItem & { after: number };
 
-/** 画像のファイルのパス（空白は \ 付きか、引用符で囲んだもの）。CLI は読める画像のパスを [Image #3] の添付に置き換える */
-const IMAGE_PATH = /'[^'\n]*\.(?:png|jpe?g|gif|webp)'|"[^"\n]*\.(?:png|jpe?g|gif|webp)"|(?:\\ |[^\s'"])+\.(?:png|jpe?g|gif|webp)(?=\s|$)/gi;
+/**
+ * 画像のファイルのパス。文の頭か空白の直後で、/ か ~ から始まるもの（空白は \ 付きか、引用符で囲んだもの）。
+ * CLI は読める画像のパスを [Image #3] の添付に置き換える
+ */
+const IMAGE_PATH = /(^|\s)(?:'[/~][^'\n]*\.(?:png|jpe?g|gif|webp)'|"[/~][^"\n]*\.(?:png|jpe?g|gif|webp)"|[/~](?:\\ |[^\s'"])*\.(?:png|jpe?g|gif|webp))(?=\s|$)/gi;
 /**
  * 比べる形にそろえる。空白の並びを1つにし（端末に貼ると改行や行末の空白が変わる）、画像のパスと [Image #3] の印を除く
  * （送った文のパスが、会話ではパスのままのことも印になることもある、#69）
  */
-const canon = (s: string) => s.replace(/\[Image #\d+\]/g, " ").replace(IMAGE_PATH, " ").replace(/\s+/g, " ").trim();
+const canon = (s: string) => s.replace(/\[Image #\d+\]/g, " ").replace(IMAGE_PATH, "$1 ").replace(/\s+/g, " ").trim();
 const sameText = (a: string, b: string) => canon(a) === canon(b);
 
 /**
