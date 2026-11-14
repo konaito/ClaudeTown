@@ -197,8 +197,11 @@ def project_of(cwd):
 
 def house_nudge(sid, own_cwd, child_cwd):
     """振り分けの場所（meta など）で動く親が、別のプロジェクトで子を作ったら、世帯の名前をそのプロジェクトの
-    ディレクトリの名前にするよう促す文を返す。プロジェクトごとに1回だけ。
-    振り分けの場所でない親は、自分の cwd のプロジェクトがそのまま名前になるので促さない"""
+    ディレクトリの名前にするよう促す文を返す。まだ名前が無いときに1回だけ。
+    振り分けの場所でない親は、自分の cwd のプロジェクトがそのまま名前になるので促さない。
+    名前が付いた後は、別のプロジェクトで子を作っても付け直しを勧めない。meta のような振り分け役は毎回違う
+    プロジェクトで子を作るので、勧めると子を作るたびに名前が替わる。子孫が町にいる間は、カードと世帯の名前は
+    子孫のプロジェクトで一番多いものになり（src-tauri/src/naming.rs）、この名前は使われない"""
     own_cwd, child_cwd = (os.path.expanduser(str(c)) if c else c for c in (own_cwd, child_cwd))
     if not own_cwd or not is_dispatch_place(own_cwd) or not child_cwd or is_dispatch_place(child_cwd):
         return None
@@ -210,19 +213,14 @@ def house_nudge(sid, own_cwd, child_cwd):
     except Exception:
         houses = {}
     cur = houses.get(sid) or {}
-    if cur.get("by") == "human" or cur.get("name") == project:
+    if cur.get("by") == "human" or cur.get("name"):
         return None
     nudged = cur_field(sid, "house_nudged_projects") or []
-    if not isinstance(nudged, list) or project in nudged:
+    if not isinstance(nudged, list) or nudged:
         return None
     write(sid, {"house_nudged_projects": nudged + [project]}, {})
     cmd = f"`{NAME_CMD} {shlex.quote(project)}`"
     head = "Claude Town: この世帯の名前は、作業しているプロジェクトのディレクトリの名前にします。依頼の文の要約は名前にしません。"
-    if cur.get("name"):
-        return (
-            f"{head}今の名前は「{cur.get('name')}」です。子を {project} で動かしました。"
-            f"この世帯で主に作業するのが {project} なら、Bash で {cmd} を1回実行して付け直してください。そうでなければ何もしません。"
-        )
     return (
         f"{head}子を {project} で動かしたので、Bash で {cmd} を1回実行してください。"
         "本人が付けた名前があるときは変わりません。"

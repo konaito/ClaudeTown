@@ -19,7 +19,7 @@ import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
 import { SkinCtx, saveSkin, savedSkin, type Skin } from "./kid/pokemon";
 import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
-  MOOD_LABEL, NEEDS_YOU, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, targetLabel, taskOf,
+  MOOD_LABEL, NEEDS_YOU, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, speakerName, targetLabel, taskOf,
 } from "./model";
 import { Markdown, linkify } from "./Markdown";
 import { chatPerf } from "./chatPerf";
@@ -1458,13 +1458,13 @@ function timeOf(at?: string | number | null): string {
 type BubbleProps = { item: ConvItem & { more?: number }; agent: Agent; lineageDepth: number };
 /**
  * 吹き出しは、中身か見た目に使う値が変わったときだけ描き直す（#10）。
- * agent は一覧を取るたびに別の物になるので、使う値（id、名前、絵）だけを比べる。
+ * agent は一覧を取るたびに別の物になるので、使う値（id、名前、cwd、絵）だけを比べる。
  * まとめた道具の行は毎回作り直すので、n と件数と文で比べる
  */
 const Bubble = memo(BubbleView, (a: BubbleProps, b: BubbleProps) =>
   (a.item === b.item || (a.item.n != null && a.item.n === b.item.n && a.item.more === b.item.more && a.item.text === b.item.text && a.item.pending === b.item.pending))
   && a.lineageDepth === b.lineageDepth
-  && a.agent.id === b.agent.id && a.agent.name === b.agent.name
+  && a.agent.id === b.agent.id && a.agent.name === b.agent.name && a.agent.cwd === b.agent.cwd
   && a.agent.avatar?.char === b.agent.avatar?.char && a.agent.avatar?.hue === b.agent.avatar?.hue);
 
 function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
@@ -1487,7 +1487,7 @@ function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
     <div className="msg kid">
       <div className="mini-av"><Avatar pick={agent.avatar} seed={agent.id} mood="idle" role={roleOf(lineageDepth)} size={32} /></div>
       <div>
-        <div className="meta"><b>{agent.name}</b>{timeOf(item.at)}</div>
+        <div className="meta"><b>{speakerName(agent)}</b>{timeOf(item.at)}</div>
         <div className="b"><Markdown text={item.text} /></div>
       </div>
     </div>
@@ -1509,7 +1509,7 @@ function useLetterPeer(raw: string | null | undefined, name?: string | null): Ag
 function LetterBubble({ item }: { item: ConvItem }) {
   const raw = item.letter?.fromRaw ?? null;
   const who = useLetterPeer(raw, item.letter?.fromName);
-  const name = who?.name ?? item.letter?.fromName ?? raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? "別のセッション";
+  const name = (who && speakerName(who)) ?? item.letter?.fromName ?? raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? "別のセッション";
   return <LetterView pick={who?.avatar} seed={who?.id ?? name} role={who?.parent ? "child" : "parent"} name={name} at={item.at} text={item.text} />;
 }
 
@@ -1518,7 +1518,7 @@ function SentLetter({ item, agent, lineageDepth }: { item: ConvItem; agent: Agen
   const s = item.sent!;
   const who = useLetterPeer(s.to ?? null, s.to ?? null);
   const to = s.create ? "新しい子" : who?.name ?? (s.to ? String(s.to).replace(/^uds:.*\/(\d+)\.sock$/, "pid $1") : "相手");
-  return <LetterView pick={agent.avatar} seed={agent.id} role={roleOf(lineageDepth)} name={agent.name} to={`→ ${to}${s.peer ? `（${s.peer}）` : ""}`} at={item.at} text={s.text || s.summary || ""} />;
+  return <LetterView pick={agent.avatar} seed={agent.id} role={roleOf(lineageDepth)} name={speakerName(agent)} to={`→ ${to}${s.peer ? `（${s.peer}）` : ""}`} at={item.at} text={s.text || s.summary || ""} />;
 }
 
 type LetterViewProps = { pick?: Agent["avatar"]; seed: string; role: Role; name: string; to?: string; at?: string | number | null; text: string };

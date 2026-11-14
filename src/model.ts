@@ -245,6 +245,16 @@ export function cardNames(ws: Who[]): Map<string, string> {
   return out;
 }
 
+/**
+ * チャットで発言の差出人として出す名前。ふつうはカードの名前（cardNames）と同じ。
+ * 振り分けの場所（~/Documents/meta など）で動くセッションのカードの名前は、子孫のプロジェクトの名前になるので、
+ * 発言には自分の cwd の最後の名前（meta など）を出す。子のプロジェクトの名前を親の発言に付けないため
+ */
+export function speakerName(a: Pick<Agent, "name" | "cwd">): string {
+  if (a.cwd && isDispatchPlace(a.cwd)) return projectFromPath(a.cwd) ?? "/";
+  return a.name;
+}
+
 /** cwd のプロジェクトの名前（worktree なら本体の名前）。Rust が出した分が無ければパスの形で出す */
 export function projectOf(a: Agent): string {
   return a.project || projectFromPath(a.cwd) || a.cwd;
