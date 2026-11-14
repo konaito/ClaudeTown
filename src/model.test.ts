@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cardNames, houseNameOf, isDispatchPlace, projectFromPath, targetLabel, type Agent, type Who } from "./model";
+import { cardNames, houseNameOf, isDispatchPlace, projectFromPath, speakerName, targetLabel, type Agent, type Who } from "./model";
 import cases from "./naming-cases.json";
 
 const ag = (id: string, cwd: string, over: Partial<Agent> = {}): Agent => ({
@@ -44,6 +44,28 @@ describe("houseNameOf", () => {
   test("エージェントが付けた名前は、根のカードの名前を通してだけ使う", () => {
     const root = ag("r", "/Users/x/Documents/family-computing", { name: "family-computing", house: { name: "ファミコン作り", by: "agent" } });
     expect(houseNameOf(root, [root]).name).toBe("family-computing");
+  });
+});
+
+describe("speakerName（発言の差出人の名前）", () => {
+  test("振り分けの場所の親は、子孫のプロジェクトでなく自分の cwd の名前", () => {
+    const sessions: Who[] = [
+      { id: "p", cwd: "/Users/x/Documents/meta" },
+      { id: "c", cwd: "/Users/x/Documents/family-computing", parent: "p" },
+    ];
+    const names = cardNames(sessions);
+    expect(names.get("p")).toBe("family-computing");
+    expect(speakerName(ag("p", "/Users/x/Documents/meta", { name: names.get("p")! }))).toBe("meta");
+    expect(speakerName(ag("c", "/Users/x/Documents/family-computing", { name: names.get("c")! }))).toBe("family-computing");
+  });
+  test("ふつうの場所ではカードの名前のまま（worktree は本体の名前）", () => {
+    expect(speakerName(ag("a", "/Users/x/Documents/family-computing.wt/chat", { name: "family-computing" }))).toBe("family-computing");
+  });
+  test("ホーム、ccn の受け口、/、cwd 無し", () => {
+    expect(speakerName(ag("a", "/Users/x", { name: "family-computing" }))).toBe("x");
+    expect(speakerName(ag("a", "/Users/x/.local/share/ccn/lobby", { name: "family-computing" }))).toBe("lobby");
+    expect(speakerName(ag("a", "/", { name: "family-computing" }))).toBe("/");
+    expect(speakerName(ag("a", "", { name: "題名" }))).toBe("題名");
   });
 });
 
