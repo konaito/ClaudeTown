@@ -1,8 +1,9 @@
-// 返事の文を出す小さい Markdown 表示。段落、見出し、箇条書き、太字、インラインのコード、リンクだけを扱う。
+// 返事の文を出す小さい Markdown 表示。段落、見出し、箇条書き、太字、インラインのコード、コードブロック、リンクだけを扱う。
 // http と https の URL と [文字](URL) はリンクにし、押すと既定のブラウザで開く（src/links.ts）。
 // 「できたこと」「やったこと」などの見出しの下の箇条書きと、✓ で始まる行は、チェックの付いた一覧にする。
 // HTML は解釈しない（文字列のまま出す）。
-import { memo, type MouseEvent, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { copyText } from "./bridge";
 import { chatPerf } from "./chatPerf";
 import { openExternal, safeUrl, splitLinks } from "./links";
 
@@ -86,6 +87,30 @@ function blocks(text: string): Block[] {
   return out.filter((b) => b.lines.length);
 }
 
+/** コードブロック。右上のボタンで中身（``` の行と言語名を除いた文字列）をクリップボードに入れる */
+function CodeBlock({ text, k }: { text: string; k: number }) {
+  const [done, setDone] = useState<"ok" | "ng" | null>(null);
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const copy = async () => {
+    let ok = true;
+    try { await copyText(text); } catch (e) { ok = false; console.warn("[copy]", e); }
+    setDone(ok ? "ok" : "ng");
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setDone(null), 1500);
+  };
+  return (
+    <div className="md-code">
+      <div className="md-copy-bar">
+        <button type="button" className={`md-copy${done ? " " + done : ""}`} onClick={copy} title="コードをコピー">
+          {done === "ok" ? "コピーしました" : done === "ng" ? "コピーできませんでした" : "コピー"}
+        </button>
+      </div>
+      <pre>{linkify(text, k)}</pre>
+    </div>
+  );
+}
+
 /** 同じ文は解析し直さない（#10）。吹き出しが描き直されても、文が同じなら前の結果を使う */
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
   const bs = blocks(text);
@@ -94,7 +119,7 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
       {bs.map((b, i) => {
         switch (b.kind) {
           case "h": return <div key={i} className="md-h">{inline(b.lines[0])}</div>;
-          case "code": return <pre key={i}>{linkify(b.lines.join("\n"), i)}</pre>;
+          case "code": return <CodeBlock key={i} k={i} text={b.lines.join("\n")} />;
           case "ul":
           case "ol": {
             const Tag = b.kind;

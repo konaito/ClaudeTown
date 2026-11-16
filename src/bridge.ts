@@ -3,6 +3,7 @@
 // ?mock が無ければ public/dev-*.json を読み、送信はしない。
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { perfCounters } from "./term/perf";
 import { deltaOf } from "./conv";
 import { cardNames, projectFromPath, type ConvItem } from "./model";
@@ -183,6 +184,13 @@ export async function setFullscreen() {
   } else {
     await document.documentElement.requestFullscreen();
   }
+}
+
+/** 文字列をクリップボードに入れる。アプリでは Tauri の clipboard-manager（Rust 側で書く）を使う。
+ * WebKit の navigator.clipboard は人の操作の中からしか書けず、開発版で計測のコードから呼ぶと NotAllowedError になった（PR #73） */
+export async function copyText(text: string) {
+  if (inTauri) await writeText(text);
+  else await navigator.clipboard.writeText(text);
 }
 
 export type FileDrop = { type: "enter" | "over" | "leave" | "drop"; paths?: string[] };
