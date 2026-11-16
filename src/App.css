@@ -220,6 +220,16 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .ext-link { color: #2f6fd6; text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; cursor: pointer; overflow-wrap: anywhere; }
 .ext-link:hover { color: #1f56b0; }
 .md pre { background: #f6f5f2; border-radius: 8px; padding: 8px; font-size: 12px; overflow-x: auto; white-space: pre-wrap; }
+/* コードブロックの右上のコピー（#341）。ボタンは pre の外の帯に置き、横スクロールで動かず、ドラッグの選択にも入らないようにする。
+   帯は sticky にして、長いブロックの途中までスクロールしても、ブロックが見えている間はボタンが上に残る。
+   top の -14px は .talk の padding-top の分。0 だと padding の分だけ下に貼り付き、1行目を覆う */
+.md-code { margin: 4px 0 6px; background: #f6f5f2; border-radius: 8px; }
+.md-copy-bar { position: sticky; top: -14px; z-index: 1; display: flex; justify-content: flex-end; padding: 5px 6px 2px; background: #f6f5f2; border-radius: 8px 8px 0 0; }
+.md-code pre { margin: 0; padding-top: 0; border-radius: 0 0 8px 8px; user-select: text; -webkit-user-select: text; cursor: text; }
+.md-copy { font: inherit; font-size: 11px; line-height: 1; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--sub); cursor: pointer; user-select: none; -webkit-user-select: none; }
+.md-copy:hover { color: var(--ink); border-color: #d6d2cb; }
+.md-copy.ok { color: var(--working); border-color: #cfe9d7; }
+.md-copy.ng { color: #c0453a; border-color: #f0d2ce; }
 .md ul.md-check { list-style: none; padding: 8px 12px; border: 1px solid #dcefe2; border-radius: 12px; background: #fbfefc; }
 .md ul.md-check li::before { content: "✓"; color: var(--working); font-weight: 700; margin-right: 8px; }
 .choices { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border-radius: 14px; background: #eef4ff; margin-left: 38px; }

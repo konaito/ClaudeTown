@@ -1843,6 +1843,7 @@ pub fn run() {
     });
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             // 開発の計測用（src/term/bench.ts、scripts/bench.ts）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、
             // 最前面に出し、どのデスクトップにも出す（本人が別のデスクトップに移っても隠れないように）。
