@@ -187,7 +187,7 @@ export async function setFullscreen() {
 }
 
 /** 文字列をクリップボードに入れる。アプリでは Tauri の clipboard-manager（Rust 側で書く）を使う。
- * WebKit の navigator.clipboard は人の操作の中からしか書けず、開発版で計測のコードから呼ぶと NotAllowedError になった（#341） */
+ * WebKit の navigator.clipboard は人の操作の中からしか書けず、開発版で計測のコードから呼ぶと NotAllowedError になった（PR #73） */
 export async function copyText(text: string) {
   if (inTauri) await writeText(text);
   else await navigator.clipboard.writeText(text);

@@ -220,7 +220,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .ext-link { color: #2f6fd6; text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; cursor: pointer; overflow-wrap: anywhere; }
 .ext-link:hover { color: #1f56b0; }
 .md pre { background: #f6f5f2; border-radius: 8px; padding: 8px; font-size: 12px; overflow-x: auto; white-space: pre-wrap; }
-/* コードブロックの右上のコピー（#341）。ボタンは pre の外の帯に置き、横スクロールで動かず、ドラッグの選択にも入らないようにする。
+/* コードブロックの右上のコピー（PR #73）。ボタンは pre の外の帯に置き、横スクロールで動かず、ドラッグの選択にも入らないようにする。
    帯は sticky にして、長いブロックの途中までスクロールしても、ブロックが見えている間はボタンが上に残る。
    top の -14px は .talk の padding-top の分。0 だと padding の分だけ下に貼り付き、1行目を覆う */
 .md-code { margin: 4px 0 6px; background: #f6f5f2; border-radius: 8px; }
