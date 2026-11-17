@@ -389,6 +389,9 @@ fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<V
             // ccn の parent の生の値。別の町にいる親を引くのに使う（src/ghost.ts）
             "parentRaw": s["parent"],
             "capabilities": s["capabilities"],
+            // どのアカウントで動いているか（cam のコマンド名と email）。ccn の PR #56 から載る。古い ccn と、選べなかったセッションでは null
+            "account": s["account"],
+            "accountEmail": s["accountEmail"],
             "house": houses.get(&id).cloned(),
             "report": report,
             // status が ok/ng なら short は直下、working/checking なら前回の判定が last に入っている
@@ -1072,8 +1075,9 @@ fn answer_permission(session_id: String, choice: String, expect_id: Option<Strin
 
 // ---------- 作る・止める・転出 ----------
 
-/// 付け直し（resume）の作成を待つ上限。ccn は `cam usage`（上限5秒）と `cam sync` の後に claude を起動する
-const RESUME_TIMEOUT: Duration = Duration::from_secs(30);
+/// 付け直し（resume）の作成を待つ上限。ccn は `cam usage`（上限5秒）と `cam sync`（上限5秒）の後に claude を起動する。
+/// 引き継ぎでは、さらに後継の起動の印（上限10秒）と前任の停止を待ってから応答する
+const RESUME_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// この機械のノード名（~/.config/ccn/ccn.json の name）。親を名乗るヘッダに使う
 fn node_name() -> String {
@@ -1085,8 +1089,9 @@ fn node_name() -> String {
     "local".into()
 }
 
-/// ccn の POST /api/sessions に送る中身（create_session の分）。空の prompt と name は送らない。fork は resume があるときだけ送る
-fn create_body(cwd: String, prompt: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>) -> Value {
+/// ccn の POST /api/sessions に送る中身（create_session の分）。空の prompt と name は送らない。fork は resume があるときだけ、
+/// succeed は resume と fork があるときだけ送る（ccn は succeed に resume と fork: true を求める）
+fn create_body(cwd: String, prompt: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, succeed: Option<bool>) -> Value {
     // ccn は 10〜1000 だけを受ける
     let ok = |v: Option<u16>| v.filter(|n| (10..=1000).contains(n));
     let mut body = json!({ "terminal": true, "cwd": cwd, "cols": ok(cols).unwrap_or(120), "rows": ok(rows).unwrap_or(40) });
@@ -1094,7 +1099,10 @@ fn create_body(cwd: String, prompt: Option<String>, name: Option<String>, cols: 
     if let Some(n) = name.filter(|n| !n.trim().is_empty()) { body["name"] = json!(n); }
     if let Some(r) = resume.filter(|r| !r.trim().is_empty()) {
         body["resume"] = json!(r);
-        if fork.unwrap_or(false) { body["fork"] = json!(true); }
+        if fork.unwrap_or(false) {
+            body["fork"] = json!(true);
+            if succeed.unwrap_or(false) { body["succeed"] = json!(true); }
+        }
     }
     body
 }
@@ -1104,17 +1112,21 @@ fn create_body(cwd: String, prompt: Option<String>, name: Option<String>, cols: 
 /// cols と rows は、画面のターミナルの今の大きさ。渡せば claude を最初からその大きさで起動し、開いた直後の描き直しを省く（#18）
 /// resume を渡すと、そのセッションの会話を付け直す。fork も渡すと、会話を複製した新しい id で立てる（引き継ぎ。src/succeed.ts）。
 /// このとき claude のアカウントは、ほかの作成と同じく ccn が選ぶ
-fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, peer: Option<String>) -> Result<Value, String> {
+/// succeed も渡すと、ccn に引き継ぎを頼む（ccn の PR #56 から）。ccn が後継の起動を確かめ、前任の子を後継へ付け替え、前任を止め、応答に succeeded を入れる。
+/// 古い ccn は succeed を読まず、ただの複製を返す（応答に succeeded が無い）。どちらだったかは画面が応答で見分ける（src/succeed.ts）。
+/// ccn が断ったときの失敗は「ccn が <状態> を返した: <応答の JSON>」の形で返す。画面はこの JSON から code（no_account など）を読む
+fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, succeed: Option<bool>, peer: Option<String>) -> Result<Value, String> {
     if send_disabled() {
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
     }
     let peer = peer.filter(|p| !p.is_empty());
     let cwd = cwd.filter(|c| !c.is_empty()).unwrap_or_else(|| home().join("Documents/meta").to_string_lossy().to_string());
-    let body = create_body(cwd, prompt, name, cols, rows, resume, fork);
+    let body = create_body(cwd, prompt, name, cols, rows, resume, fork, succeed);
     let mut req = agent().post(&format!("{}/sessions", api(&peer)));
     if body.get("resume").is_some() {
         // 付け直しは、ccn がアカウントを選んでから claude を起動するまで待つ。既定の8秒で切ると、ccn の側では後継が立っているのに
-        // 画面は失敗と見て前任を残し、同じ作業が二重に進む。長めに待つ
+        // 画面は失敗と見て前任を残し、同じ作業が二重に進む。長めに待つ。引き継ぎ（succeed）では、ccn が後継の起動の印（上限10秒）と
+        // 前任の停止まで済ませてから応答する（実測 3.5〜5.4 秒、2026-11-17）
         req = req.timeout(RESUME_TIMEOUT);
     }
     if let Some(pid) = parent.filter(|p| !p.is_empty()) {
@@ -1504,8 +1516,8 @@ mod cmd {
         blocking(move || super::answer_permission(session_id, choice, expect_id, peer)).await
     }
     #[tauri::command]
-    pub async fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::create_session(cwd, prompt, parent, name, cols, rows, resume, fork, peer)).await
+    pub async fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, succeed: Option<bool>, peer: Option<String>) -> Result<Value, String> {
+        blocking(move || super::create_session(cwd, prompt, parent, name, cols, rows, resume, fork, succeed, peer)).await
     }
     #[tauri::command]
     pub async fn session_detail(session_id: String, peer: Option<String>) -> Result<Value, String> {
@@ -1846,7 +1858,7 @@ pub fn run() {
     }
     // family-computing --create [cwd] [prompt] [parentId]   端末のセッションを立てる（画面の「子を足す」「新しい世帯」と同じ処理）
     if let Some(i) = args.iter().position(|a| a == "--create") {
-        println!("{:?}", create_session(args.get(i + 1).cloned(), args.get(i + 2).cloned(), args.get(i + 3).cloned(), None, None, None, None, None, None));
+        println!("{:?}", create_session(args.get(i + 1).cloned(), args.get(i + 2).cloned(), args.get(i + 3).cloned(), None, None, None, None, None, None, None));
         return;
     }
     // family-computing --send <sessionId> <文>   注文を送る（画面の送信と同じ処理）
@@ -2324,16 +2336,37 @@ mod tests {
     #[test]
     fn create_body_sends_fork_only_with_resume() {
         let s = |v: &str| Some(v.to_string());
-        // 新しい世帯: resume も fork も送らない。空の prompt と name も送らない
-        let b = create_body("/w".into(), s(" "), None, Some(100), Some(30), None, Some(true));
+        // 新しい世帯: resume も fork も succeed も送らない。空の prompt と name も送らない
+        let b = create_body("/w".into(), s(" "), None, Some(100), Some(30), None, Some(true), Some(true));
         assert_eq!(b, json!({ "terminal": true, "cwd": "/w", "cols": 100, "rows": 30 }));
-        // 引き継ぎ: 前任の ID を resume に、fork を true にして送る
-        let b = create_body("/w".into(), s("続き"), s("meta"), None, Some(5), s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true));
+        // 複製: 前任の ID を resume に、fork を true にして送る
+        let b = create_body("/w".into(), s("続き"), s("meta"), None, Some(5), s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), None);
         assert_eq!(b, json!({ "terminal": true, "cwd": "/w", "cols": 120, "rows": 40, "prompt": "続き", "name": "meta", "resume": "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa", "fork": true }));
-        // fork 無しの付け直しは resume だけ
-        let b = create_body("/w".into(), None, None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), None);
+        // 引き継ぎ: resume と fork に succeed を足す
+        let b = create_body("/w".into(), s("続き"), None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), Some(true));
+        assert_eq!(b, json!({ "terminal": true, "cwd": "/w", "cols": 120, "rows": 40, "prompt": "続き", "resume": "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa", "fork": true, "succeed": true }));
+        // fork 無しの付け直しは resume だけ。succeed を渡されても送らない（ccn は fork の無い succeed を 400 で断る）
+        let b = create_body("/w".into(), None, None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), None, Some(true));
         assert_eq!(b["resume"], "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa");
         assert!(b.get("fork").is_none());
+        assert!(b.get("succeed").is_none());
+    }
+
+    #[test]
+    fn agents_carry_account_when_ccn_lists_it() {
+        // 別の機械の町として読む（この機械の状態ファイルを読まない）
+        let peer = Some("vm".to_string());
+        let list = vec![
+            json!({ "id": "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa", "kind": "pty", "state": "idle", "cwd": "/w/a", "account": "acct-a", "accountEmail": "a@example.invalid" }),
+            // 古い ccn の一覧にはアカウントが無い
+            json!({ "id": "f7a05063-6d62-40d7-b13c-3604a655dfda", "kind": "pty", "state": "idle", "cwd": "/w/b" }),
+        ];
+        let (agents, err) = agents_from(&peer, Ok(list));
+        assert!(err.is_none());
+        assert_eq!(agents[0]["account"], "acct-a");
+        assert_eq!(agents[0]["accountEmail"], "a@example.invalid");
+        assert!(agents[1]["account"].is_null());
+        assert!(agents[1]["accountEmail"].is_null());
     }
 
     #[test]

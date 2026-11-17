@@ -42,7 +42,19 @@ export type Agent = {
   avatar?: { char: string; hue: number } | null;
   /** 世帯の名前（根のセッションだけ意味がある）。by=human は本人がアプリで付けた名前 */
   house?: { name: string; by: "agent" | "human" } | null;
+  /**
+   * このセッションの claude が動いているアカウント。cam のコマンド名と、その email（ccn の PR #56 から一覧に載る）。
+   * 古い ccn、cam で選べずノードの設定で起動したセッション、アカウントを読めなかった端末のセッションには無い
+   */
+  account?: string | null;
+  accountEmail?: string | null;
 };
+
+/** アカウントの表示（「名前（email）」）。email が無ければ名前だけ。アカウントが分からなければ null */
+export function accountText(a: Agent): string | null {
+  if (!a.account) return null;
+  return a.accountEmail ? `${a.account}（${a.accountEmail}）` : a.account;
+}
 
 export type Snapshot = {
   ccn: string;

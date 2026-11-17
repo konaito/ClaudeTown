@@ -143,6 +143,8 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .st-reply { color: var(--reply); }
 .st-approval { color: #c98500; }
 .cname { font-size: 14px; font-weight: 700; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* カードのアカウント（cam のコマンド名）。状態の行の上に小さく出す。カードの箱（176×96）は変えない */
+.cacct { font-size: 10.5px; line-height: 12px; color: var(--sub); max-width: 104px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 孫より下の小さい札。選ぶと同じ大きさのカード（.pop）を上に重ねる */
 .mini {
@@ -180,6 +182,8 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .p-id { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .p-name { font-size: 22px; font-weight: 700; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; }
 .p-name .st { font-size: 14px; }
+/* 見出しのアカウント。カードの「親」「子」の印（.role）と同じ見た目の小さい札にする */
+.p-name .acct { font-size: 11px; font-weight: 400; color: #6c6a75; background: #f1efeb; border-radius: 6px; padding: 0 6px; line-height: 18px; white-space: nowrap; }
 .pn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .p-line { font-size: 13px; color: var(--sub); display: flex; flex-wrap: wrap; gap: 4px; }
 .p-line b { margin: 0 4px; font-weight: 400; }

@@ -13,14 +13,14 @@ import { isSlashCommand } from "./composer/edit";
 import { isVisible, onVisibleChange, pollBackoff, pollWhileVisible, shownAt } from "./visible";
 import { reuseAgents, reuseSnap } from "./snap";
 import { kickTown, otherTownRetryMs, watchTown } from "./town";
-import { kidsOf, startSuccessor, succeedBlock } from "./succeed";
+import { SucceedError, kidsOf, startSuccessor, succeedBlock } from "./succeed";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
 import { SkinCtx, saveSkin, savedSkin, type Skin } from "./kid/pokemon";
 import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
-  MOOD_LABEL, NEEDS_YOU, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, speakerName, targetLabel, taskOf,
+  MOOD_LABEL, NEEDS_YOU, accountText, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, speakerName, targetLabel, taskOf,
 } from "./model";
 import { Markdown, linkify } from "./Markdown";
 import { chatPerf } from "./chatPerf";
@@ -279,8 +279,11 @@ export default function App() {
   const letterMarks = useLetterMarks(flights);
   const askKill = useCallback((a: Agent, instant: boolean) => { if (instant) kill(a); else setKillAsk(a); }, [kill]);
   const killCtx = useMemo(() => ({ dying, ask: askKill }), [dying, askKill]);
-  // 引き継ぎ（src/succeed.ts）。確認を挟んでから、後継を立て、後継が1通目を受け取ったら前任だけを止める
+  // 引き継ぎ（src/succeed.ts）。確認を挟んでから、ccn に後継を立てさせる。新しい ccn は前任の停止と子の付け替えまで行う。
+  // 古い ccn では、後継が1通目を受け取ったら、ここで前任だけを止める
   const [succeedAsk, setSucceedAsk] = useState<Agent | null>(null);
+  // 引き継げなかったときの、閉じるまで残る知らせ（枠の残るアカウントが無いとき。次に空く時刻を読めるように、消えるトーストにしない）
+  const [succeedNote, setSucceedNote] = useState<{ title: string; text: string } | null>(null);
   const [succeeding, setSucceeding] = useState<Set<string>>(new Set());
   // 同じ前任で二重に走らせない（確認の Enter の連打、カードと見出しの両方からの操作）。後継が2人立つと、同じ作業が二重に進む
   const succeedRun = useRef<Set<string>>(new Set());
@@ -324,14 +327,31 @@ export default function App() {
       if (!a.parent && a.house?.by === "human" && a.house.name) {
         await invoke("set_house_name", { sessionId: r.id, name: a.house.name }).catch(() => toast("世帯の名前を後継に移せなかった", true));
       }
-      // 前任を選んでいたら、止める前に選択を後継へ移す（右パネルを空にしない）
+      // 前任を選んでいたら、選択を後継へ移す（右パネルを空にしない）
       if (selectedNow.current === a.id) show(false);
+      const id8 = r.id.slice(0, 8);
+      if (r.kind === "ccn") {
+        // 新しい ccn。後継の起動、子の付け替え、前任の停止まで ccn が済ませている
+        let stopped = r.stopped;
+        // 止まった前任は、一覧から消えるまで隠す。10秒たっても残っていれば、上の見張りが「止まらなかった」と出す。
+        // ccn が止められなかったときだけ、ここから1回止める
+        if (stopped) setHidden((h) => new Map(h).set(a.id, Date.now()));
+        else stopped = await kill(a, true);
+        kickTown();
+        const kids = r.adopted.length ? `。子 ${r.adopted.length} 人も後継の下に付けた` : "";
+        if (r.already) toast(`${a.name} は、すでに後継（${id8}）に引き継がれている`);
+        else if (stopped) toast(`${a.name} を後継（${id8}）へ引き継いだ${kids}${r.account ? `（アカウント: ${r.account}）` : ""}`);
+        else toast(`${a.name} の後継（${id8}）は立ったが、${a.name} を止められなかった。手で閉じる`, true);
+        return;
+      }
+      // 古い ccn。後継が1通目を受け取ったので、前任だけを止める（子孫は止めない）
       const stopped = await kill(a, true);
       const note = r.depthChecked ? "" : "（前任の深さが ccn に無く、深さは比べていない）";
-      if (stopped) toast(`${a.name} を後継（${r.id.slice(0, 8)}）へ引き継いだ${note}`);
-      else toast(`${a.name} の後継（${r.id.slice(0, 8)}）は立ったが、${a.name} を止められなかった。手で閉じる${note}`, true);
+      if (stopped) toast(`${a.name} を後継（${id8}）へ引き継いだ${note}`);
+      else toast(`${a.name} の後継（${id8}）は立ったが、${a.name} を止められなかった。手で閉じる${note}`, true);
     } catch (e) {
-      toast(`${a.name} を引き継げなかった: ${e instanceof Error ? e.message : e}`, true);
+      if (e instanceof SucceedError && e.kind === "no_account") setSucceedNote({ title: `${a.name} を引き継げなかった`, text: e.message });
+      else toast(`${a.name} を引き継げなかった: ${e instanceof Error ? e.message : e}`, true);
     } finally {
       mark(false);
     }
@@ -515,6 +535,9 @@ export default function App() {
           kids={(tree.childrenOf.get(succeedAsk.id) ?? []).length}
           onCancel={() => setSucceedAsk(null)} onConfirm={() => { const a = succeedAsk; setSucceedAsk(null); succeed(a); }} />
       )}
+      {succeedNote && (
+        <Confirm title={succeedNote.title} ok="閉じる" single onCancel={() => setSucceedNote(null)} onConfirm={() => setSucceedNote(null)}>{succeedNote.text}</Confirm>
+      )}
 
       <div className="toasts">
         {toasts.map((t) => <div key={t.id} className={`toast ${t.bad ? "bad" : ""}`}>{t.text}</div>)}
@@ -631,8 +654,8 @@ function countDesc(childrenOf: Map<string, Agent[]>, id: string): number {
   return (childrenOf.get(id) ?? []).reduce((n, k) => n + 1 + countDesc(childrenOf, k.id), 0);
 }
 
-/** セッションを止める操作の前の確認。Enter で進める、Esc でやめる。ok は進めるボタンの名前 */
-function Confirm({ title, ok, danger, onCancel, onConfirm, children }: { title: string; ok: string; danger?: boolean; onCancel: () => void; onConfirm: () => void; children: React.ReactNode }) {
+/** セッションを止める操作の前の確認。Enter で進める、Esc でやめる。ok は進めるボタンの名前。single なら、やめるボタンを出さない（読んで閉じるだけの知らせ） */
+function Confirm({ title, ok, danger, single, onCancel, onConfirm, children }: { title: string; ok: string; danger?: boolean; single?: boolean; onCancel: () => void; onConfirm: () => void; children: React.ReactNode }) {
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
       if (e.key === "Escape") { e.preventDefault(); onCancel(); }
@@ -647,7 +670,7 @@ function Confirm({ title, ok, danger, onCancel, onConfirm, children }: { title: 
         <div className="modal-title">{title}</div>
         <p className="hint">{children}</p>
         <div className="modal-btns">
-          <button className="pane-btn" onClick={onCancel}>やめる（Esc）</button>
+          {!single && <button className="pane-btn" onClick={onCancel}>やめる（Esc）</button>}
           <button className={danger ? "danger" : "primary"} autoFocus onClick={onConfirm}>{ok}（Enter）</button>
         </div>
       </div>
@@ -668,9 +691,9 @@ function KillConfirm({ agent, descendants, onCancel, onConfirm }: { agent: Agent
 function SucceedConfirm({ agent, parent, kids, onCancel, onConfirm }: { agent: Agent; parent: Agent | null; kids: number; onCancel: () => void; onConfirm: () => void }) {
   return (
     <Confirm title={`${agent.name} を後継に引き継ぐ？`} ok="引き継ぐ" onCancel={onCancel} onConfirm={onConfirm}>
-      利用上限で止まったときに使う。同じ会話を複製した後継を、{parent ? `${parent.name} の下に` : "新しい世帯として"}立てる。アカウントは ccn が枠の残るものを選ぶ。
-      後継が引き継ぎの文を受け取ったら、{agent.name} を止める。後継が立たなかったら止めない。
-      {kids ? `子 ${kids} 人は止めない。子の親は ${agent.name} のままなので、町では別の世帯に分かれ、子の知らせは後継に届かない（後継が自分から読む）。` : ""}
+      利用上限で止まったときに使う。同じ会話を複製した後継を、{parent ? `${parent.name} の下に` : "世帯の親として"}立てる。アカウントは ccn が枠の残るものを選ぶ。
+      後継が起動したのを確かめてから、{agent.name} を止める。後継が立たなかったら止めない。
+      {kids ? `子 ${kids} 人は止めない。ccn が子を後継の下に付け替える（古い ccn では付け替わらず、子は別の世帯に分かれる）。` : ""}
     </Confirm>
   );
 }
@@ -908,6 +931,7 @@ const Card = memo(function Card(props: { agent: Agent; depth: number; selected: 
   // 孫より下は小さい札。選んだときだけ、親や子と同じ大きさのカードを上に重ねる（周りは動かさない）
   const mood = moodOf(agent);
   const now = nowOf(agent, mood);
+  const acct = accountText(agent);
   const box = boxOf(depth, agent.name);
   return (
     <>
@@ -916,7 +940,7 @@ const Card = memo(function Card(props: { agent: Agent; depth: number; selected: 
         style={{ zoom: box.scale, width: box.w / box.scale, height: box.h / box.scale }}
         onClick={() => onSelect(agent)}
         onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
-        title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックで広げてチャット・右クリックでターミナル`}
+        title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}${acct ? `\nアカウント: ${acct}` : ""}\nクリックで広げてチャット・右クリックでターミナル`}
       >
         <Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(depth)} size={32} dead={dying.has(agent.id)} />
         <span className="mini-name"><i className={`dot st-${mood}`} />{agent.name}</span>
@@ -1067,13 +1091,14 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
   const task = taskOf(agent, mood);
   const now = nowOf(agent, mood);
   const started = mood === "working" ? agent.report?.turn_started_at : null;
+  const acct = accountText(agent);
   return (
     <button
       className={`card m-${mood} ${selected ? "sel" : ""}`}
       style={{ width: LAYOUT.card.w, height: LAYOUT.card.h }}
       onClick={() => onSelect(agent)}
       onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
-      title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}\nクリックでチャット・右クリックでターミナル`}
+      title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}${acct ? `\nアカウント: ${acct}` : ""}\nクリックでチャット・右クリックでターミナル`}
     >
       <div className="card-top">
         <span className="role">{ROLE_LABEL[Math.min(depth, 4)]}</span>
@@ -1082,6 +1107,8 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
       <div className="card-main">
         <Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(depth)} size={48} dead={dying.has(agent.id)} />
         <div className="card-info">
+          {/* このセッションの claude が動いているアカウント（cam のコマンド名）。ccn が載せたときだけ出す */}
+          {agent.account && <span className="cacct">{agent.account}</span>}
           <span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}{started ? <em><Since at={started} /></em> : null}</span>
           <span className="cname">{agent.name}</span>
         </div>
@@ -1274,7 +1301,10 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
       <div className="p-head">
         <div className="p-avatar"><Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(lineage.length - 1)} size={64} /></div>
         <div className="p-id">
-          <div className="p-name"><span className="pn">{agent.name}</span><span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}</span></div>
+          <div className="p-name">
+            <span className="pn">{agent.name}</span><span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}</span>
+            {agent.account && <span className="acct" title={`アカウント: ${accountText(agent)}。このセッションの claude が動いているアカウント`}>{agent.account}</span>}
+          </div>
           <div className="p-line">{lineage.map((a, i) => (
             <span key={a.id}>{i > 0 && <b>›</b>}<button className="lnk" onClick={() => onSelect(a)}>{a.name}</button></span>
           ))}</div>
@@ -1665,6 +1695,7 @@ function StateTab({ agent, mood }: { agent: Agent; mood: Mood }) {
     ["次の一手", r?.next],
     ["閉じていい？", agent.closeCheck ? (agent.closeCheck.status === "ok" ? "閉じてOK" : agent.closeCheck.status === "ng" ? `まだ: ${agent.closeCheck.short ?? ""}` : "判定中") : null],
     ["作業中の時間", mood === "working" && r?.turn_started_at ? <Since at={r.turn_started_at} /> : null],
+    ["アカウント", accountText(agent)],
     ["場所", agent.cwd.replace(/^\/Users\/[^/]+/, "~")],
     ["セッション", agent.id],
   ];
