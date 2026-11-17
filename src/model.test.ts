@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cardNames, houseNameOf, isDispatchPlace, projectFromPath, speakerName, targetLabel, type Agent, type Who } from "./model";
+import { accountText, cardNames, houseNameOf, isDispatchPlace, projectFromPath, speakerName, targetLabel, type Agent, type Who } from "./model";
 import cases from "./naming-cases.json";
 
 const ag = (id: string, cwd: string, over: Partial<Agent> = {}): Agent => ({
@@ -79,5 +79,16 @@ describe("targetLabel", () => {
     const b = ag("bbbbbbbb-2", "/tmp", { name: "tmp" });
     expect(targetLabel(a, [a, b])).toBe("tmp（aaaaaaaa）");
     expect(targetLabel(b, [a, b])).toBe("tmp（bbbbbbbb）");
+  });
+});
+
+describe("アカウントの表示", () => {
+  test("名前と email があれば「名前（email）」、email が無ければ名前だけ", () => {
+    expect(accountText(ag("a", "/w", { account: "acct-a", accountEmail: "a@example.invalid" }))).toBe("acct-a（a@example.invalid）");
+    expect(accountText(ag("a", "/w", { account: "acct-a" }))).toBe("acct-a");
+  });
+  test("アカウントが無い（古い ccn、選べなかったセッション）なら null", () => {
+    expect(accountText(ag("a", "/w"))).toBeNull();
+    expect(accountText(ag("a", "/w", { account: null, accountEmail: "a@example.invalid" }))).toBeNull();
   });
 });

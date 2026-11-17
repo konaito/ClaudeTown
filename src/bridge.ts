@@ -51,7 +51,7 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
         // 名前は Rust の snapshot と同じ決め方（src/model.ts の cardNames）。モックでは .git を読まないので、パスの形だけで決める
         agents: (() => {
           const names = cardNames(live.map((s) => ({ id: s.id, cwd: s.cwd, title: s.title, parent: parentOf(s), startedAt: s.startedAt })));
-          return live.map((s) => ({ id: s.id, name: names.get(s.id), project: s.cwd ? projectFromPath(s.cwd) : null, kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities }));
+          return live.map((s) => ({ id: s.id, name: names.get(s.id), project: s.cwd ? projectFromPath(s.cwd) : null, kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities, account: s.account ?? null, accountEmail: s.accountEmail ?? null }));
         })(),
       } as T;
     }
@@ -62,8 +62,8 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
       const body: Record<string, unknown> = { terminal: true, cwd: a.cwd || (new URLSearchParams(location.search).get("cwd") ?? "/tmp"), cols: a.cols ?? 120, rows: a.rows ?? 40 };
       if (typeof a.prompt === "string" && a.prompt.trim()) body.prompt = a.prompt;
       if (typeof a.name === "string" && a.name.trim()) body.name = a.name;
-      // 引き継ぎ（src/succeed.ts）。Rust と同じく、resume があるときだけ fork を送る
-      if (typeof a.resume === "string" && a.resume.trim()) { body.resume = a.resume; if (a.fork) body.fork = true; }
+      // 引き継ぎ（src/succeed.ts）。Rust と同じく、resume があるときだけ fork を、fork があるときだけ succeed を送る
+      if (typeof a.resume === "string" && a.resume.trim()) { body.resume = a.resume; if (a.fork) { body.fork = true; if (a.succeed) body.succeed = true; } }
       return post("/sessions", body, headers) as T;
     }
     case "term_input": return post(`/sessions/${a.sessionId}/terminal/input`, { text: a.text }) as T;
