@@ -143,8 +143,9 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .st-reply { color: var(--reply); }
 .st-approval { color: #c98500; }
 .cname { font-size: 14px; font-weight: 700; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* カードのアカウント（cam のコマンド名）。状態の行の上に小さく出す。カードの箱（176×96）は変えない */
-.cacct { font-size: 10.5px; line-height: 12px; color: var(--sub); max-width: 104px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* カードのアカウント（cam のコマンド名）。状態の行の上に小さく出す。カードの箱（176×96）は変えない。
+   左は状態の文字（丸の印の右）にそろえる。そろえないと、キャラの右上の状態の印（✅ など）が1文字目に重なる */
+.cacct { font-size: 10.5px; line-height: 12px; color: var(--sub); padding-left: 14px; box-sizing: border-box; max-width: 104px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 孫より下の小さい札。選ぶと同じ大きさのカード（.pop）を上に重ねる */
 .mini {

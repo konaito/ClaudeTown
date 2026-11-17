@@ -338,9 +338,14 @@ export default function App() {
         if (stopped) setHidden((h) => new Map(h).set(a.id, Date.now()));
         else stopped = await kill(a, true);
         kickTown();
-        const kids = r.adopted.length ? `。子 ${r.adopted.length} 人も後継の下に付けた` : "";
+        // 付け替わった子の数は、町に出ていた子で数える（ccn の adopted には、止まって30分以内の子も入る）。
+        // 済んでいた引き継ぎ（already が付く）は、どの子が付け替わったかが分からないので書かない
+        const before = (tree.childrenOf.get(a.id) ?? []).filter((k) => !k.ghost);
+        const moved = before.filter((k) => r.adopted.includes(k.id)).length;
+        const left = r.already === undefined ? before.length - moved : 0;
+        const kids = `${moved ? `。子 ${moved} 人も後継の下に付けた` : ""}${left ? `。子 ${left} 人は付け替わらず、別の世帯に分かれる` : ""}`;
         if (r.already) toast(`${a.name} は、すでに後継（${id8}）に引き継がれている`);
-        else if (stopped) toast(`${a.name} を後継（${id8}）へ引き継いだ${kids}${r.account ? `（アカウント: ${r.account}）` : ""}`);
+        else if (stopped) toast(`${a.name} を後継（${id8}）へ引き継いだ${kids}${r.account ? `（アカウント: ${r.account}）` : ""}`, left > 0);
         else toast(`${a.name} の後継（${id8}）は立ったが、${a.name} を止められなかった。手で閉じる`, true);
         return;
       }
