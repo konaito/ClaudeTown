@@ -1122,16 +1122,23 @@ fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<St
     let peer = peer.filter(|p| !p.is_empty());
     let cwd = cwd.filter(|c| !c.is_empty()).unwrap_or_else(|| home().join("Documents/meta").to_string_lossy().to_string());
     let body = create_body(cwd, prompt, name, cols, rows, resume, fork, succeed);
-    let mut req = agent().post(&format!("{}/sessions", api(&peer)));
+    // 親を名乗る。一覧の parent に agent:<ノード>/<親の sid 先頭8>/town が入り、木がつながる
+    let from = parent.filter(|p| !p.is_empty()).map(|pid| format!("agent:{}/{}/town", node_name(), &pid[..8.min(pid.len())]));
+    post_create(&format!("{}/sessions", api(&peer)), body, from)
+}
+
+/// 作成の要求を送る。from は親を名乗るヘッダ（x-ccn-from）の値
+fn post_create(url: &str, body: Value, from: Option<String>) -> Result<Value, String> {
+    let mut req = agent().post(url);
     if body.get("resume").is_some() {
         // 付け直しは、ccn がアカウントを選んでから claude を起動するまで待つ。既定の8秒で切ると、ccn の側では後継が立っているのに
         // 画面は失敗と見て前任を残し、同じ作業が二重に進む。長めに待つ。引き継ぎ（succeed）では、ccn が後継の起動の印（上限10秒）と
-        // 前任の停止まで済ませてから応答する（実測 3.5〜5.4 秒、2026-11-17）
+        // 前任の停止まで済ませてから応答する（実測 3.5〜5.4 秒、2026-11-17）。
+        // 要求ごとの timeout は、共有の Agent の8秒より優先される（ureq 2 の Request::timeout。下の resume_create_waits_longer_than_default で確かめた）
         req = req.timeout(RESUME_TIMEOUT);
     }
-    if let Some(pid) = parent.filter(|p| !p.is_empty()) {
-        // 親を名乗る。一覧の parent に agent:<ノード>/<親の sid 先頭8>/town が入り、木がつながる
-        req = req.set("x-ccn-from", &format!("agent:{}/{}/town", node_name(), &pid[..8.min(pid.len())]));
+    if let Some(f) = from {
+        req = req.set("x-ccn-from", &f);
     }
     match req.send_json(body) {
         Ok(r) => r.into_json::<Value>().map_err(|e| e.to_string()),
@@ -2350,6 +2357,40 @@ mod tests {
         assert_eq!(b["resume"], "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa");
         assert!(b.get("fork").is_none());
         assert!(b.get("succeed").is_none());
+    }
+
+    /// 付け直し（resume）の作成は、共有の Agent の8秒より長く待つ（RESUME_TIMEOUT）。10秒かけて返す偽の ccn で確かめる。
+    /// 時間がかかる（約18秒）ので、ふだんは回さない: cargo test resume_create_waits -- --ignored
+    #[test]
+    #[ignore]
+    fn resume_create_waits_longer_than_default() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 8192];
+                    let _ = s.read(&mut buf);
+                    std::thread::sleep(Duration::from_secs(10));
+                    let body = r#"{"id":"f7a05063-6d62-40d7-b13c-3604a655dfda","depth":0}"#;
+                    let _ = write!(s, "HTTP/1.1 201 Created\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body);
+                });
+            }
+        });
+        let url = format!("http://127.0.0.1:{port}/api/sessions");
+        let s = |v: &str| Some(v.to_string());
+        // resume 無し: 既定の8秒で切れる
+        let t = std::time::Instant::now();
+        let plain = post_create(&url, create_body("/w".into(), None, None, None, None, None, None, None), None);
+        assert!(plain.is_err(), "{plain:?}");
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+        // resume あり: 10秒かかる応答を受け取る
+        let t = std::time::Instant::now();
+        let got = post_create(&url, create_body("/w".into(), s("続き"), None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), Some(true)), None);
+        assert_eq!(got.unwrap()["id"], "f7a05063-6d62-40d7-b13c-3604a655dfda");
+        assert!(t.elapsed() >= Duration::from_secs(10), "{:?}", t.elapsed());
     }
 
     #[test]

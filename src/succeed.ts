@@ -5,7 +5,8 @@
 // 作成の要求には、いつも succeed: true（resume と fork と一緒）を付ける。あとは応答で分ける。
 // - 応答に succeeded がある（ccn の PR #56 から）: ccn が後継の起動を確かめ、前任の子を後継へ付け替え、前任を止めている。画面は結果を出すだけ
 // - 応答に succeeded が無い（古い ccn）: ただの複製が返っている。後継が1通目を受け取るのを見てから、画面が前任だけを止める
-// 先に版を聞かずに応答で分けるのは、ccn に版を返す口が無く、古い ccn は知らない項目を読まないため（下の実測）。
+// 先に版を聞かずに応答で分けるのは、ccn の HTTP の口が ccn の版を返さず（/api/host は claude の版だけ。MCP の名乗りの版は新旧とも 0.0.1）、
+// 古い ccn は知らない項目を読まないため（下の実測）。応答の succeeded は、引き継ぎが行われたことそのものを示す。
 // 分かれるのは応答の後なので、確認の文と後継への文は、どちらの ccn でも正しい文にしてある
 //
 // 2026-11-17 に確かめたこと（捨てのセッション、haiku。古い ccn は本番のノード、新しい ccn は main e6c5f87 の開発用ノード）:
@@ -22,6 +23,9 @@ import type { Agent } from "./model";
 export const SUCCEED_WAIT_MS = 20000;
 /** 後継の様子を見る間隔（ms） */
 export const SUCCEED_POLL_MS = 500;
+/** 作成の応答が届かなかった後に、前任を読み直す回数と間隔（ms）。ccn の側では引き継ぎが進んでいることがあるので、少し待って確かめる */
+export const SUCCEED_RECHECKS = 3;
+export const SUCCEED_RECHECK_MS = 2000;
 
 /** 前任の子。後継への文に名前と id を入れる。town は、別の町にいる子（転出のゴースト）のときの町の名前 */
 export type Kid = { name: string; id: string; town?: string };
@@ -192,12 +196,17 @@ export async function startSuccessor(o: { agent: Agent; kids: Kid[]; cols: numbe
   } catch (e) {
     const no = ccnRefusal(e);
     if (no?.code === "already_succeeded" && no.successor) return done(no.successor, true);
-    if (no?.code) throw refusalError(no, d.now());
-    // 届かない、時間切れ、code の無い断り。ccn の側では引き継ぎが済んでいることがあるので（応答を待ち切れなかったとき）、前任を読んで確かめる
-    const after = await detail(a.id).catch(() => null);
-    const succ = successorIn(after?.exitReason);
-    if (after?.state === "exited" && succ) return done(succ, false);
-    throw no ? refusalError(no, d.now()) : new SucceedError(e instanceof Error ? e.message : String(e));
+    // ccn が断った。前任と子には触っていない
+    if (no) throw refusalError(no, d.now());
+    // ccn の答えが届かなかった（時間切れ、つながらない）。ccn の側では引き継ぎが進んでいることがあるので、前任を数回読んで確かめる。
+    // 引き継がれて止まっていれば、成功として扱う
+    for (let i = 0; i < SUCCEED_RECHECKS; i++) {
+      if (i > 0) await d.sleep(SUCCEED_RECHECK_MS);
+      const after = await detail(a.id).catch(() => null);
+      const succ = successorIn(after?.exitReason);
+      if (after?.state === "exited" && succ) return done(succ, false);
+    }
+    throw new SucceedError(e instanceof Error ? e.message : String(e));
   }
   if (!r?.id || r.id === a.id) throw new SucceedError("ccn が後継の ID を返さなかった");
   const id = r.id;

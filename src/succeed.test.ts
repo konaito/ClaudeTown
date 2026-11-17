@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { SUCCEED_POLL_MS, SUCCEED_WAIT_MS, SucceedError, ccnRefusal, clockText, handoffPrompt, kidsOf, refusalError, startSuccessor, succeedBlock, successorIn, type SucceedDeps } from "./succeed";
+import { SUCCEED_POLL_MS, SUCCEED_RECHECKS, SUCCEED_RECHECK_MS, SUCCEED_WAIT_MS, SucceedError, ccnRefusal, clockText, handoffPrompt, kidsOf, refusalError, startSuccessor, succeedBlock, successorIn, type SucceedDeps } from "./succeed";
 import type { Agent } from "./model";
 
 const OLD = "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa";
@@ -229,11 +229,27 @@ describe("後継を立てる（新しい ccn。応答に succeeded がある）"
   test("応答を待ち切れなくても、前任が引き継がれて止まっていれば成功として返す", async () => {
     const f = fake({ details: { [OLD]: [{ state: "idle", depth: 0 }, { state: "exited", exitReason: SUCCEEDED_REASON }] }, createError: "ccn に届かない: timed out reading response" });
     expect(await startSuccessor({ agent: ag(), kids: [], ...size }, f.d)).toEqual({ kind: "ccn", id: NEW, cwd: "/w/meta", stopped: true, adopted: [], already: false });
+    expect(f.elapsed()).toBe(0);
   });
 
-  test("応答を待ち切れず、前任が待機のままなら、失敗の文をそのまま投げる", async () => {
+  test("応答を待ち切れず、ccn がまだ途中でも、少し待って読み直す", async () => {
+    // 1回目の読み直しではまだ待機、2回目で引き継がれて止まっている
+    const f = fake({ details: { [OLD]: [{ state: "idle", depth: 0 }, { state: "idle", depth: 0 }, { state: "exited", exitReason: SUCCEEDED_REASON }] }, createError: "ccn に届かない: timed out reading response" });
+    expect(await startSuccessor({ agent: ag(), kids: [], ...size }, f.d)).toMatchObject({ kind: "ccn", id: NEW, already: false });
+    expect(f.elapsed()).toBe(SUCCEED_RECHECK_MS);
+  });
+
+  test("応答を待ち切れず、読み直しても前任が待機のままなら、失敗の文をそのまま投げる", async () => {
     const f = fake({ details: { [OLD]: [{ state: "idle", depth: 0 }] }, createError: "ccn に届かない: timed out reading response" });
     await expect(startSuccessor({ agent: ag(), kids: [], ...size }, f.d)).rejects.toThrow("timed out reading response");
+    expect(f.calls.filter((c) => c.cmd === "session_detail")).toHaveLength(1 + SUCCEED_RECHECKS);
+    expect(f.elapsed()).toBe(SUCCEED_RECHECK_MS * (SUCCEED_RECHECKS - 1));
+  });
+
+  test("ccn が code の無い断りを返したら、読み直さずにその文を投げる", async () => {
+    const f = fake({ details: { [OLD]: [{ state: "idle", depth: 0 }] }, createError: `ccn が 400 を返した: {"error":"cwd is outside roots","roots":["/x"]}` });
+    await expect(startSuccessor({ agent: ag(), kids: [], ...size }, f.d)).rejects.toThrow("ccn が断った（400）: cwd is outside roots");
+    expect(f.calls.filter((c) => c.cmd === "session_detail")).toHaveLength(1);
   });
 });
 
