@@ -13,6 +13,7 @@ import { isSlashCommand } from "./composer/edit";
 import { isVisible, onVisibleChange, pollBackoff, pollWhileVisible, shownAt } from "./visible";
 import { reuseAgents, reuseSnap } from "./snap";
 import { kickTown, otherTownRetryMs, watchTown } from "./town";
+import { kidsOf, startSuccessor, succeedBlock } from "./succeed";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import "./App.css";
 import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
@@ -52,12 +53,15 @@ const KILL_STAGGER = 140;
 
 /**
  * カードの右下のボタン（#63）。左から並べる順に書く。送る文を足し替えるときはここだけを直す。
+ * 右パネルの見出しにも、同じ定義から同じボタンを並べる（CardActions の place）。
  * kind が kill のボタンはセッションを閉じる（前のカードの × と同じ動き）。send のボタンは text をチャットの送信と同じ口で送る。
+ * succeed のボタンは、利用上限で止まったセッションを同じ段の後継へ引き継ぐ（src/succeed.ts）。
  * 見本は本人のスクショ（2026-11-13）。角丸のカードの右下の縁に、角丸の四角いボタンが縁にまたがって並ぶ
  */
-type CardAction = { key: string; icon: string; name: string } & ({ kind: "kill" } | { kind: "send"; text: string });
+type CardAction = { key: string; icon: string; name: string } & ({ kind: "kill" } | { kind: "succeed" } | { kind: "send"; text: string });
 const CARD_ACTIONS: CardAction[] = [
-  { key: "kill", icon: "🔪", name: "閉じる", kind: "kill" },
+  { key: "kill", icon: "🐺", name: "閉じる", kind: "kill" },
+  { key: "succeed", icon: "🤝", name: "引き継ぐ", kind: "succeed" },
   { key: "howdy", icon: "🚪", name: "様子を聞く", kind: "send", text: "調子どうですか" },
   { key: "go", icon: "👍", name: "許可する", kind: "send", text: "許可します、やってくださいお願いします。" },
 ];
@@ -66,12 +70,14 @@ const CARD_ACTIONS_ALWAYS = false;
 /** 押したあとの反応（ボタンの一瞬の変化）の長さ（ms）。CSS の card-act-* と合わせる */
 const CARD_ACT_FLASH_MS = 700;
 
-/** 閉じる操作と演出の状態。カードの 🔪 と、倒れる演出が読む */
 /** いま見ている町のセッション（お手紙の送り手の名前を引くため） */
 const TownCtx = createContext<Agent[]>([]);
 /** 封筒の印（💌）を頭に出しているセッション */
 const LetterCtx = createContext<Set<string>>(new Set());
+/** 閉じる操作と演出の状態。カードの 🐺 と、倒れる演出が読む */
 const KillCtx = createContext<{ dying: Map<string, number>; ask: (a: Agent, instant: boolean) => void }>({ dying: new Map(), ask: () => {} });
+/** 引き継ぎの操作（🤝）。local は手元のノードの町を見ているか。busy は、いま引き継いでいる前任の ID */
+const SucceedCtx = createContext<{ local: boolean; busy: Set<string>; ask: (a: Agent) => void }>({ local: false, busy: new Set(), ask: () => {} });
 /** カードのボタンから文を送る口（#63）。値は App で一度だけ作り、町の描き直しの合図にしない（#10） */
 const SendCtx = createContext<(a: Agent, text: string) => Promise<boolean>>(async () => false);
 const CONV_POLL_MS = 2500;
@@ -234,16 +240,19 @@ export default function App() {
     setSelected(a.ghost.realId);
   }, [selfName]);
 
-  /** a とその子孫を、葉から順に止める。倒れる演出も葉から少しずつずらして出す */
-  const kill = useCallback(async (a: Agent) => {
+  /**
+   * a とその子孫を、葉から順に止める。倒れる演出も葉から少しずつずらして出す。
+   * alone なら a だけを止め、子孫は残す（引き継ぎで前任を止めるとき）。このときの知らせと選択の切り替えは呼び手が行う。全部止まったら true
+   */
+  const kill = useCallback(async (a: Agent, alone = false) => {
     const order: Agent[] = [];
     // ゴースト（別の町にいる本物の影）は閉じない
     const walk = (x: Agent) => { for (const k of tree.childrenOf.get(x.id) ?? []) if (!k.ghost) walk(k); order.push(x); };
-    walk(a);
+    if (alone) order.push(a); else walk(a);
     const targets = order.filter((x) => x.capabilities?.stop);
     const skipped = order.filter((x) => !x.capabilities?.stop);
     setDying((m) => { const n = new Map(m); targets.forEach((x, i) => n.set(x.id, i * KILL_STAGGER)); return n; });
-    if (selected && targets.some((x) => x.id === selected)) setSelected(null);
+    if (!alone && selected && targets.some((x) => x.id === selected)) setSelected(null);
     const failed: Agent[] = [];
     for (const x of targets) {
       try { await invoke("stop_session", { sessionId: x.id, peer: peer || null }); }
@@ -259,15 +268,76 @@ export default function App() {
       setHidden((h) => { const n = new Map(h); for (const x of ok) n.set(x.id, Date.now()); return n; });
       setDying((m) => { const n = new Map(m); for (const x of ok) n.delete(x.id); return n; });
     }, last);
+    if (alone) return failed.length === 0 && skipped.length === 0;
     if (failed.length) toast(`止められなかった: ${failed.map((x) => x.name).join("、")}`, true);
     else toast(`${a.name}${order.length > 1 ? ` と子孫 ${order.length - 1} 人` : ""}を閉じた`);
     if (skipped.length) toast(`ccn から止められないので残した: ${skipped.map((x) => x.name).join("、")}`, true);
+    return failed.length === 0 && skipped.length === 0;
   }, [tree, selected, peer, toast]);
   // お手紙。この機械の町を見ているときだけ（記録はこの機械の hook が書く）
   const flights = useMemo(() => (peer ? [] : flightsOf(snap?.letters ?? [], agents)), [snap, agents, peer]);
   const letterMarks = useLetterMarks(flights);
   const askKill = useCallback((a: Agent, instant: boolean) => { if (instant) kill(a); else setKillAsk(a); }, [kill]);
   const killCtx = useMemo(() => ({ dying, ask: askKill }), [dying, askKill]);
+  // 引き継ぎ（src/succeed.ts）。確認を挟んでから、後継を立て、後継が1通目を受け取ったら前任だけを止める
+  const [succeedAsk, setSucceedAsk] = useState<Agent | null>(null);
+  const [succeeding, setSucceeding] = useState<Set<string>>(new Set());
+  // 同じ前任で二重に走らせない（確認の Enter の連打、カードと見出しの両方からの操作）。後継が2人立つと、同じ作業が二重に進む
+  const succeedRun = useRef<Set<string>>(new Set());
+  // 後継が立つまでの間に本人がほかを選んだら、選択を後継へ移さない。待った後の値を読むので ref で持つ
+  const selectedNow = useRef(selected);
+  selectedNow.current = selected;
+  const succeed = async (a0: Agent) => {
+    if (succeedRun.current.has(a0.id)) return;
+    // 確認を出している間に一覧が変わることがあるので、今の木の姿で見直す
+    const a = tree.byId.get(a0.id) ?? a0;
+    const why = succeedBlock(a, !peer);
+    if (why) { toast(`${a.name} を引き継げない: ${why}`, true); return; }
+    const mark = (on: boolean) => {
+      if (on) succeedRun.current.add(a.id); else succeedRun.current.delete(a.id);
+      setSucceeding(new Set(succeedRun.current));
+    };
+    mark(true);
+    toast(`${a.name} の後継を立てている…`);
+    try {
+      const { cols, rows } = lastTermSize() ?? { cols: null, rows: null };
+      const r = await startSuccessor({ agent: a, kids: kidsOf(tree.childrenOf.get(a.id) ?? []), cols, rows }, {
+        call: invoke, sleep: (ms) => new Promise((ok) => setTimeout(ok, ms)), now: Date.now,
+      });
+      // 一覧に載るまでは、作成の応答から作った仮の姿で右パネルを出す（新しい世帯と同じ）
+      const show = (term: boolean) => {
+        setFresh({
+          id: r.id, name: a.name, kind: "terminal", state: "running", cwd: r.cwd, canSend: true, parent: a.parent,
+          startedAt: Date.now(), capabilities: { terminal: true, send: true, stop: true },
+        });
+        setSelected(r.id);
+        if (term) setTermReq((n) => n + 1);
+      };
+      kickTown();
+      if (r.kind === "waiting") {
+        // 後継は生きているが、1通目をまだ受け取っていない。端末で確認の画面に止まっていることがあるので、端末を開いて見せる。前任は止めない
+        show(true);
+        toast(`${a.name} の後継（${r.id.slice(0, 8)}）は起動したが、引き継ぎの文をまだ受け取っていない。ターミナルを見る。${a.name} は止めていないので、後継が動いたら閉じる`, true);
+        return;
+      }
+      // 本人が付けた世帯の名前は根の ID で持っているので、後継の ID にも付ける
+      if (!a.parent && a.house?.by === "human" && a.house.name) {
+        await invoke("set_house_name", { sessionId: r.id, name: a.house.name }).catch(() => toast("世帯の名前を後継に移せなかった", true));
+      }
+      // 前任を選んでいたら、止める前に選択を後継へ移す（右パネルを空にしない）
+      if (selectedNow.current === a.id) show(false);
+      const stopped = await kill(a, true);
+      const note = r.depthChecked ? "" : "（前任の深さが ccn に無く、深さは比べていない）";
+      if (stopped) toast(`${a.name} を後継（${r.id.slice(0, 8)}）へ引き継いだ${note}`);
+      else toast(`${a.name} の後継（${r.id.slice(0, 8)}）は立ったが、${a.name} を止められなかった。手で閉じる${note}`, true);
+    } catch (e) {
+      toast(`${a.name} を引き継げなかった: ${e instanceof Error ? e.message : e}`, true);
+    } finally {
+      mark(false);
+    }
+  };
+  const local = !peer;
+  const succeedCtx = useMemo(() => ({ local, busy: succeeding, ask: setSucceedAsk }), [local, succeeding]);
   // カードのボタンから文を送る（#63）。選んでいるセッションなら、右パネルの送信（仮の吹き出しと会話の取り直し）に任せる。
   // ほかのセッションは send_message で送り、トーストを出す。参照を変えないよう ref を通し、町を描き直させない（#10）
   const panelSend = useRef<((id: string, text: string) => Promise<boolean> | null) | null>(null);
@@ -308,7 +378,6 @@ export default function App() {
     if (chat) setChatReq((n) => n + 1);
   }, [curTown, selfName]);
 
-  const local = !peer;
   // 作った直後のセッション。一覧（snapshot）に載るまでは、create の応答から作った仮の姿で右パネルを出す（#18）。
   // 一覧の取り直しを待つと、ccn が遅いときにその分だけ右パネルが出ない
   const [fresh, setFresh] = useState<Agent | null>(null);
@@ -344,6 +413,7 @@ export default function App() {
   return (
     <SkinCtx.Provider value={skinCtx}>
     <KillCtx.Provider value={killCtx}>
+    <SucceedCtx.Provider value={succeedCtx}>
     <SendCtx.Provider value={cardSend}>
     <LetterCtx.Provider value={letterMarks.marks}>
     <TownCtx.Provider value={agents}>
@@ -440,6 +510,11 @@ export default function App() {
         <KillConfirm agent={killAsk} descendants={countDesc(tree.childrenOf, killAsk.id)}
           onCancel={() => setKillAsk(null)} onConfirm={() => { const a = killAsk; setKillAsk(null); kill(a); }} />
       )}
+      {succeedAsk && (
+        <SucceedConfirm agent={succeedAsk} parent={succeedAsk.parent ? tree.byId.get(succeedAsk.parent) ?? null : null}
+          kids={(tree.childrenOf.get(succeedAsk.id) ?? []).length}
+          onCancel={() => setSucceedAsk(null)} onConfirm={() => { const a = succeedAsk; setSucceedAsk(null); succeed(a); }} />
+      )}
 
       <div className="toasts">
         {toasts.map((t) => <div key={t.id} className={`toast ${t.bad ? "bad" : ""}`}>{t.text}</div>)}
@@ -449,6 +524,7 @@ export default function App() {
     </TownCtx.Provider>
     </LetterCtx.Provider>
     </SendCtx.Provider>
+    </SucceedCtx.Provider>
     </KillCtx.Provider>
     </SkinCtx.Provider>
   );
@@ -555,8 +631,8 @@ function countDesc(childrenOf: Map<string, Agent[]>, id: string): number {
   return (childrenOf.get(id) ?? []).reduce((n, k) => n + 1 + countDesc(childrenOf, k.id), 0);
 }
 
-/** 閉じる前の確認。Enter で閉じる、Esc でやめる */
-function KillConfirm({ agent, descendants, onCancel, onConfirm }: { agent: Agent; descendants: number; onCancel: () => void; onConfirm: () => void }) {
+/** セッションを止める操作の前の確認。Enter で進める、Esc でやめる。ok は進めるボタンの名前 */
+function Confirm({ title, ok, danger, onCancel, onConfirm, children }: { title: string; ok: string; danger?: boolean; onCancel: () => void; onConfirm: () => void; children: React.ReactNode }) {
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
       if (e.key === "Escape") { e.preventDefault(); onCancel(); }
@@ -568,14 +644,34 @@ function KillConfirm({ agent, descendants, onCancel, onConfirm }: { agent: Agent
   return (
     <div className="modal-scrim" onMouseDown={onCancel}>
       <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="modal-title">{agent.name}{descendants ? ` と子孫 ${descendants} 人` : ""}を閉じる？</div>
-        <p className="hint">ccn でセッションを止める。{descendants ? "子孫は孫から順に止める。" : ""}止まらなかった分は画面に残る。⌘ を押しながら 🔪 を押すと、確認なしで閉じる。</p>
+        <div className="modal-title">{title}</div>
+        <p className="hint">{children}</p>
         <div className="modal-btns">
           <button className="pane-btn" onClick={onCancel}>やめる（Esc）</button>
-          <button className="danger" autoFocus onClick={onConfirm}>閉じる（Enter）</button>
+          <button className={danger ? "danger" : "primary"} autoFocus onClick={onConfirm}>{ok}（Enter）</button>
         </div>
       </div>
     </div>
+  );
+}
+
+/** 閉じる前の確認 */
+function KillConfirm({ agent, descendants, onCancel, onConfirm }: { agent: Agent; descendants: number; onCancel: () => void; onConfirm: () => void }) {
+  return (
+    <Confirm title={`${agent.name}${descendants ? ` と子孫 ${descendants} 人` : ""}を閉じる？`} ok="閉じる" danger onCancel={onCancel} onConfirm={onConfirm}>
+      ccn でセッションを止める。{descendants ? "子孫は孫から順に止める。" : ""}止まらなかった分は画面に残る。⌘ を押しながら 🐺 を押すと、確認なしで閉じる。
+    </Confirm>
+  );
+}
+
+/** 引き継ぐ前の確認。前任を止める操作を含むので、閉じるときと同じ形で確かめる。parent は前任の親（根なら null）、kids は前任の子の数 */
+function SucceedConfirm({ agent, parent, kids, onCancel, onConfirm }: { agent: Agent; parent: Agent | null; kids: number; onCancel: () => void; onConfirm: () => void }) {
+  return (
+    <Confirm title={`${agent.name} を後継に引き継ぐ？`} ok="引き継ぐ" onCancel={onCancel} onConfirm={onConfirm}>
+      利用上限で止まったときに使う。同じ会話を複製した後継を、{parent ? `${parent.name} の下に` : "新しい世帯として"}立てる。アカウントは ccn が枠の残るものを選ぶ。
+      後継が引き継ぎの文を受け取ったら、{agent.name} を止める。後継が立たなかったら止めない。
+      {kids ? `子 ${kids} 人は止めない。子の親は ${agent.name} のままなので、町では別の世帯に分かれ、子の知らせは後継に届かない（後継が自分から読む）。` : ""}
+    </Confirm>
   );
 }
 
@@ -837,10 +933,13 @@ const Card = memo(function Card(props: { agent: Agent; depth: number; selected: 
 
 /**
  * カードの右下のボタン（#63）。並びと送る文は CARD_ACTIONS で決める。出し入れは CSS（.fnode:hover と .fnode.open）で行い、描き直さない。
- * 押してもカードの選択や右パネルの切り替えが起きないよう、クリックはここで止める
+ * 押してもカードの選択や右パネルの切り替えが起きないよう、クリックはここで止める。
+ * place が head なら、右パネルの見出しに、いつも見える形で並べる（動きはカードと同じ）。
+ * ボタンに乗せたときの説明は title で出す（WebView の標準のツールチップ）。押せるときは何をするか、押せないときは押せない理由を書く
  */
-const CardActions = memo(function CardActions({ agent }: { agent: Agent }) {
+const CardActions = memo(function CardActions({ agent, place = "card" }: { agent: Agent; place?: "card" | "head" }) {
   const kill = useContext(KillCtx);
+  const suc = useContext(SucceedCtx);
   const send = useContext(SendCtx);
   // 押したあとの一瞬の反応。key は押したボタン、ok は届いたか
   const [flash, setFlash] = useState<{ key: string; ok: boolean } | null>(null);
@@ -849,9 +948,13 @@ const CardActions = memo(function CardActions({ agent }: { agent: Agent }) {
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
   const canSend = agent.canSend;
   const canStop = !!agent.capabilities?.stop;
+  // 引き継げない理由（引き継げるなら null）と、いま引き継いでいる最中か
+  const sucWhy = succeedBlock(agent, suc.local);
+  const sucBusy = suc.busy.has(agent.id);
   const press = async (act: CardAction, e: React.MouseEvent) => {
     e.stopPropagation();
     if (act.kind === "kill") { if (canStop) kill.ask(agent, e.metaKey); return; }
+    if (act.kind === "succeed") { if (!sucWhy && !sucBusy) suc.ask(agent); return; }
     if (!canSend || sending) return;
     setSending(act.key);
     const ok = await send(agent, act.text);
@@ -861,14 +964,16 @@ const CardActions = memo(function CardActions({ agent }: { agent: Agent }) {
     timer.current = setTimeout(() => setFlash(null), CARD_ACT_FLASH_MS);
   };
   return (
-    <div className={`card-acts ${CARD_ACTIONS_ALWAYS ? "always" : ""}`}
+    <div className={`card-acts ${place === "head" ? "in-head" : CARD_ACTIONS_ALWAYS ? "always" : ""}`}
       onClick={(e) => e.stopPropagation()} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}>
       {CARD_ACTIONS.map((act) => {
-        const off = act.kind === "kill" ? !canStop : !canSend;
+        const off = act.kind === "kill" ? !canStop : act.kind === "succeed" ? !!sucWhy || sucBusy : !canSend;
         const title = act.kind === "kill"
-          ? (canStop ? `${act.name}（⌘ を押しながらで確認なし）` : "ccn から止められないセッション")
-          : (canSend ? `${act.name}: 「${act.text}」を送る` : `このセッションには送れない（「${act.text}」）`);
-        const fx = flash?.key === act.key ? (flash.ok ? "sent" : "failed") : sending === act.key ? "sending" : "";
+          ? (canStop ? `${act.name}: このセッションを止める。子孫がいれば一緒に止める（⌘ を押しながらで確認なし）` : "閉じられない: ccn から止められないセッション")
+          : act.kind === "succeed"
+            ? (sucBusy ? "引き継いでいる…" : sucWhy ? `引き継げない: ${sucWhy}` : `${act.name}: 利用上限で止まったとき、同じ会話の後継を立てて、このセッションを止める`)
+            : (canSend ? `${act.name}: 「${act.text}」を送る` : `${act.name}を送れない: このセッションには文を送れない`);
+        const fx = flash?.key === act.key ? (flash.ok ? "sent" : "failed") : sending === act.key || (act.kind === "succeed" && sucBusy) ? "sending" : "";
         return (
           <button key={act.key} type="button" className={`card-act ca-${act.key} ${off ? "off" : ""} ${fx}`}
             aria-disabled={off} title={title} aria-label={`${agent.name}: ${title}`}
@@ -1176,7 +1281,9 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
           <div className="p-task"><DocIcon />{linkify(taskOf(agent, mood))}</div>
         </div>
         <div className="p-actions">
-          <button className="pane-btn" disabled={!!peer} title={peer ? "別の機械のセッションの転出は、まだ出していない" : "別の機械へ移す"} onClick={() => setSheet(sheet === "teleport" ? null : "teleport")}>転出</button>
+          <button className="pane-btn" disabled={!!peer} title={peer ? "転出できない: 別の機械のセッションの転出は、まだ出していない" : "転出: このセッションを別の機械（ccn のノード）へ移すか、複製する"} onClick={() => setSheet(sheet === "teleport" ? null : "teleport")}>転出</button>
+          {/* カードの右下と同じボタン（CARD_ACTIONS）。カードに乗せなくても押せるよう、ここにも並べる */}
+          {!agent.ghost && <CardActions agent={agent} place="head" />}
         </div>
       </div>
       {sheet === "teleport" && <Teleport agent={agent} descendants={descendants} peers={peers} onDone={(m) => { setSheet(null); onSent2(m); }} onError={onError} />}

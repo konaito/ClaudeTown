@@ -316,7 +316,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 /* 行の高さで割り切れずに残る下端に、xterm.css の既定の黒（.xterm-viewport）が出ないよう白にする */
 .term .xterm .xterm-viewport { background-color: #fff; }
 .term-status { font-size: 12px; color: var(--sub); padding: 6px 12px; border-bottom: 1px solid var(--line); }
-.p-actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+.p-actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
 .ap-float { padding: 8px 12px 0; }
 
 /* 転出の欄 */
@@ -373,6 +373,9 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
   opacity: 0; pointer-events: none; transition: opacity 0.12s;
 }
 .fnode:hover .card-acts, .fnode.open .card-acts, .card-acts.always { opacity: 1; pointer-events: auto; }
+/* 右パネルの見出しに並べるとき（CardActions の place="head"）。縁にまたがらせず、「転出」の下にいつも見える形で置く */
+.card-acts.in-head { --ca-size: 26px; position: static; opacity: 1; pointer-events: auto; gap: 4px; }
+.card-acts.in-head .card-act { font-size: 15px; border-radius: 7px; }
 .card-act {
   width: var(--ca-size); height: var(--ca-size); padding: 0; box-sizing: border-box; border-radius: 5px;
   display: grid; place-items: center; font-size: 11px; line-height: 1;
