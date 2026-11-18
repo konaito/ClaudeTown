@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { parentSid8, withGhosts } from "./ghost";
-import type { Agent } from "./model";
+import { parentSid8, rootIds, withGhosts } from "./ghost";
+import { buildTree, type Agent } from "./model";
 
 // 試験ノードの記録（/tmp/ccn-tp/out の b と c）と同じ形の一覧
 const ag = (id: string, parentRaw: string | null, parent: string | null = null): Agent => ({
@@ -75,5 +75,57 @@ describe("使い回し（#4）", () => {
     expect(t.find((a) => a.id === G)).toBe(B.agents[1]);
     expect(t.find((a) => a.id === K)).not.toBe(B.agents[0]);
     expect(B.agents[0].parent).toBeNull();
+  });
+});
+
+// ポケモンの系統は世帯の根の ID で決まる。町によって根が違うと、親子なのに系統が割れる
+describe("世帯の根が町によらず同じ", () => {
+  const GP = "aaaaaaaa-0000-0000-0000-00000000000a"; // 祖父
+  const H = "dddddddd-0000-0000-0000-00000000000d"; // 玄孫
+  // App.tsx の旧 rootOf と同じ決め方（木の根。ゴーストなら realId）
+  const treeRoot = (cur: { town: string; agents: Agent[] }, others: { town: string; agents: Agent[] }[], id: string) => {
+    const t = buildTree(withGhosts(cur, others));
+    const r = t.lineage(t.byId.get(id)!)[0];
+    return r.ghost?.realId ?? r.id;
+  };
+
+  // 祖父-親は町A、子と孫は町B（親の転出ではなく子の転出）
+  const A = { town: "tp-a", agents: [ag(GP, "local"), ag(P, "agent:tp-a/aaaaaaaa/test", GP)] };
+  const B = { town: "tp-b", agents: [ag(K, "agent:tp-a/9bf1ce0a/test"), ag(G, "agent:tp-a/bcbd556c/test", K)] };
+
+  test("再現: 旧い決め方だと、親の町は祖父、子の町は親が根になって割れる", () => {
+    expect(treeRoot(A, [B], P)).toBe(GP);
+    expect(treeRoot(B, [A], K)).toBe(P);
+  });
+
+  test("直した決め方: どの町から見ても、祖父・親・子・孫が同じ根", () => {
+    for (const towns of [[A, B], [B, A]]) {
+      const r = rootIds(towns);
+      for (const id of [GP, P, K, G]) expect(r.get(id)).toBe(GP);
+    }
+  });
+
+  test("親だけが根（祖父なし）なら、親が根で今まで通り", () => {
+    const A2 = { town: "tp-a", agents: [ag(P, "local")] };
+    expect(rootIds([A2, B]).get(G)).toBe(P);
+    expect(treeRoot(B, [A2], K)).toBe(P);
+  });
+
+  test("4世代が3つの町にまたがっても同じ根", () => {
+    const B2 = { town: "tp-b", agents: [ag(K, "agent:tp-a/9bf1ce0a/test"), ag(G, "agent:tp-b/bcbd556c/test", K)] };
+    const C2 = { town: "tp-c", agents: [ag(H, "agent:tp-b/1272d4a3/test")] };
+    const r = rootIds([C2, A, B2]);
+    expect([GP, P, K, G, H].map((id) => r.get(id))).toEqual([GP, GP, GP, GP, GP]);
+  });
+
+  test("親が閉じて見つからない子は、その子が根（町ごとに変わらない）", () => {
+    const lone = { town: "tp-b", agents: [ag(K, "agent:tp-a/9bf1ce0a/test")] };
+    expect(rootIds([lone, { town: "tp-a", agents: [] }]).get(K)).toBe(K);
+    expect(rootIds([{ town: "tp-a", agents: [] }, lone]).get(K)).toBe(K);
+  });
+
+  test("親子が逆に指し合っても止まる", () => {
+    const loop = { town: "tp-a", agents: [ag(P, "agent:tp-a/bcbd556c/test"), ag(K, "agent:tp-a/9bf1ce0a/test")] };
+    expect(rootIds([loop]).size).toBe(2);
   });
 });

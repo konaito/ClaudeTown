@@ -70,6 +70,31 @@ export function withGhosts(cur: Town, others: Town[]): Agent[] {
   return out;
 }
 
+/**
+ * 全部の町を通した、世帯の根の ID（ポケモンの系統を決める。町によらず同じ値になる）。
+ * 木の根では決められない。親の町では親が祖父の子で根は祖父だが、子の町ではゴーストの親（parent: null）が根になり、町ごとに根が割れるため。
+ * 親は、同じ町なら parent、別の町なら parentRaw の sid8 で全部の町から探す。見つからなければ、その人が根。
+ * 返すのは id ごとの根。ゴーストは含めない（引くときは ghost.realId に直す）。
+ */
+export function rootIds(towns: Town[]): Map<string, string> {
+  const real = towns.flatMap((t) => t.agents.filter((a) => !a.ghost));
+  const byId = new Map<string, Agent>();
+  for (const a of real) if (!byId.has(a.id)) byId.set(a.id, a);
+  const parentOf = (a: Agent): Agent | null => {
+    if (a.parent && byId.has(a.parent)) return byId.get(a.parent)!;
+    const sid8 = parentSid8(a.parentRaw);
+    return sid8 ? findBySid8(real, sid8) : null;
+  };
+  const out = new Map<string, string>();
+  for (const a of byId.values()) {
+    let cur = a;
+    const seen = new Set([cur.id]);
+    for (let p = parentOf(cur); p && !seen.has(p.id); p = parentOf(cur)) { seen.add(p.id); cur = p; }
+    out.set(a.id, cur.id);
+  }
+  return out;
+}
+
 function ghost(real: Agent, town: string, parent: string | null, role: "parent" | "child"): Agent {
   return {
     id: `ghost:${real.id}`,

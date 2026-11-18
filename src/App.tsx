@@ -5,7 +5,7 @@ import { perfEnd, perfMark, perfSetId, perfStart, perfWaitingPrompt } from "./te
 import { benchName, useBench } from "./term/bench";
 import { collectMail, type Mail } from "./mail";
 import { flightsOf, resolve, type Flight } from "./letters";
-import { withGhosts } from "./ghost";
+import { rootIds, withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Composer } from "./composer/Composer";
 import { BUILTINS, opensDialog } from "./composer/commands";
@@ -222,11 +222,23 @@ export default function App() {
   const treeRef = useRef(tree);
   treeRef.current = tree;
   const shape = useMemo(() => tree.families.map((f) => f.all.map((a) => `${a.id}<${a.parent ?? ""}`).join(",")).join(";"), [tree]);
+  // 世帯の根は、全部の町を通して決める。木の根だと、親の町（根は祖父）と子の町（根はゴーストの親）で割れる
+  const roots = useMemo(() => rootIds([{ town: curTown, agents }, ...otherTowns]), [agents, otherTowns, curTown]);
+  const rootsKey = useMemo(() => [...roots].map(([k, v]) => `${k}>${v}`).join(","), [roots]);
+  const rootsRef = useRef(roots);
+  rootsRef.current = roots;
   const skinCtx = useMemo(() => ({
     skin,
-    // 根が転出のゴーストなら、相手の町にいる本物の ID で引く。親の町と子の町で系統をそろえるため
-    rootOf: (id: string) => { const t = treeRef.current; const a = t.byId.get(id); const r = a ? t.lineage(a)[0] : null; return r ? r.ghost?.realId ?? r.id : id; },
-  }), [skin, shape]);
+    rootOf: (id: string) => {
+      const t = treeRef.current;
+      const real = t.byId.get(id)?.ghost?.realId ?? id;
+      const hit = rootsRef.current.get(real);
+      if (hit) return hit;
+      // どの町の一覧にも無いとき（モックなど）は木の根
+      const a = t.byId.get(id); const r = a ? t.lineage(a)[0] : null;
+      return r ? r.ghost?.realId ?? r.id : id;
+    },
+  }), [skin, shape, rootsKey]);
   /** ゴーストを押したら、本物がいる町に切り替えてその子を選ぶ */
   const pick = useCallback((a: Agent) => {
     if (!a.ghost) { setSelected(a.id); return; }
