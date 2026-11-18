@@ -62,6 +62,6 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .fc-avatar.pk.fc-dead .fc-body .pk-img { animation: none; filter: grayscale(1); }
-  /* 跳ねは止める。GIF の動きで作業中は分かる */
+  /* 跳ねは止める。GIF の動きで作業中は分かる。止め絵しか無い番号（pokemon-lines.json の still）は絵では分からず、カードの状態の文字と点で分かる */
   .fc-avatar.pk.fc-working .fc-body .pk-img { animation: none; }
 }
