@@ -1733,7 +1733,7 @@ function Credits({ skin, onSkin }: { skin: Skin; onSkin: (s: Skin) => void }) {
           （creativecommons.org/licenses/by/4.0）。Source: googlefonts.github.io/noto-emoji-animation
           <br />キャラは配布元のファイルのまま表示のときに縮めている。Noto は 64px に縮め、コマを半分に間引いた。
           {skin === "pokemon" && (<>
-            <br /><b>ポケモン（キャラの見た目で選んだとき）</b>: Pokémon Showdown のアニメ GIF を、PokeAPI/sprites（github.com/PokeAPI/sprites）の配布から
+            <br /><b>ポケモン（キャラの見た目で選んだとき）</b>: ブラック・ホワイトの形の2Dのドット絵（アニメ GIF と止め絵）を、PokeAPI/sprites（github.com/PokeAPI/sprites）の配布から
             {"表示中のキャラの分だけ実行時に読む。このアプリには画像を含めない。Pokémon © Nintendo / Creatures Inc. / GAME FREAK inc."}
           </>)}
         </span>

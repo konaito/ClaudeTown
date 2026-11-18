@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Mood } from "../model";
 import "./avatar.css";
-import { pokemonOf, spriteUrl, useSkin, useStill } from "./pokemon";
+import { cropOf, pokemonOf, spriteUrl, useSkin, useStill } from "./pokemon";
 
 // 年齢の印象の点数と世代の目標は Rust（src-tauri/src/avatars.rs の AGES）が正本。ages.json はそこから生成したもの
 import AGES from "./ages.json";
@@ -80,6 +80,7 @@ function NinjaAvatar({ seed, mood, role, size, pick, dead }: { seed: string; moo
 /**
  * ポケモンスキンの1体（src/kid/pokemon.ts）。世帯の根で系統が決まり、親・子・孫が3段目・2段目・1段目になる。
  * 作業中は GIF をそのまま動かし、少し跳ねさせる。それ以外は1フレームを止めて見せる。印と待機の薄さは元のスキンと同じ。
+ * 絵の余白は切ってから箱に収める（止め絵は stillOf で切り、動く GIF は Moving で切る）。
  */
 function PokemonAvatar({ seed, mood, role, size, dead, root, onBroken }: { seed: string; mood: Mood; role: Role; size: number; dead?: boolean; root: string; onBroken: () => void }) {
   const p = pokemonOf(root, role);
@@ -91,12 +92,32 @@ function PokemonAvatar({ seed, mood, role, size, dead, root, onBroken }: { seed:
     <span className={`fc-avatar fc-${mood} pk ${dead ? "fc-dead" : ""}`} style={{ ["--fc-size" as string]: `${size}px` }} aria-hidden data-pokemon={p.name} data-seed={seed}>
       <span className="fc-body pk-body">
         {moving
-          ? <img className="pk-img" src={spriteUrl(p.id)} alt="" draggable={false} onError={onBroken} />
+          ? <Moving id={p.id} onBroken={onBroken} />
           : <Still bmp={still.bmp} />}
       </span>
       {mark && (
         <span className="fc-bubble"><img src={`/sprites/noto/${mark}/64.webp`} alt="" draggable={false} /></span>
       )}
+    </span>
+  );
+}
+
+/**
+ * 動く GIF。余白のある絵は、不透明な部分の矩形だけが見える枠に入れ、その枠を箱の下の中央に収める
+ * （object-fit: contain と同じ収め方）。img の寸法と位置は枠に対する割合で決める。
+ */
+function Moving({ id, onBroken }: { id: number; onBroken: () => void }) {
+  const src = spriteUrl(id);
+  const c = cropOf(id);
+  if (!c) return <img className="pk-img" src={src} alt="" draggable={false} onError={onBroken} />;
+  const [x, y, w, h, W, H] = c;
+  const frame = w >= h
+    ? { left: 0, width: "100%", height: `${(h / w) * 100}%` }
+    : { left: `${((1 - w / h) / 2) * 100}%`, width: `${(w / h) * 100}%`, height: "100%" };
+  return (
+    <span className="pk-img pk-crop" style={frame}>
+      <img className="pk-src" src={src} alt="" draggable={false} onError={onBroken}
+        style={{ left: `${(-x / w) * 100}%`, top: `${(-y / h) * 100}%`, width: `${(W / w) * 100}%`, height: `${(H / h) * 100}%` }} />
     </span>
   );
 }
