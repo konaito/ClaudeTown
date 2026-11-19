@@ -21,6 +21,8 @@ type Props = {
   open: Agent | null;
   mails: Mail[];
   curTown: string;
+  /** 取れなかった別の町 */
+  unreachable: string[];
   onTown: (v: string) => void;
   onPick: (a: Agent) => void;
   onMail: (m: Mail) => void;
@@ -86,6 +88,8 @@ export function MobileShell(p: Props) {
         </header>
         <div className="m-scroll">
           {p.snap && !p.snap.ccn_ok && <p className="m-note bad">{p.err ?? p.snap.ccn_error ?? "ccn につながりません。"}</p>}
+
+          {p.unreachable.length > 0 && <p className="m-note">{p.unreachable.join("、")}の町には、いま届きません。その町のお便りは出ていません。</p>}
 
           {needs.length > 0 && (
             <section>

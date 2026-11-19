@@ -6,6 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { perfCounters } from "./term/perf";
 import { deltaOf } from "./conv";
+import { answerPermission } from "./webPerm";
 import { newConvState, readConversation, type ConvState } from "./webConv";
 import { cardNames, projectFromPath, type ConvItem } from "./model";
 
@@ -18,7 +19,6 @@ const MOCK = !inTauri && typeof location !== "undefined" && location.search.incl
   ? `http://127.0.0.1:${new URLSearchParams(location.search).get("mockport") ?? "4399"}/api` : WEB ? `${location.origin}/api` : null;
 
 export const IS_WEB = WEB;
-const WEB_UNSUPPORTED = "ブラウザ版ではまだ使えない（承認への返事は、アプリか端末で行う）";
 const LOADED_AT = Date.now();
 // 見た目の確認用: ?offline を付けると、ccn に届かない状態を真似る。一覧は保存した一覧として出し、会話は読めず、
 // 保存してあった会話（?longconv と同じ仮の会話）を出す。Rust の保存（src-tauri/src/offline.rs）は通らない
@@ -103,7 +103,8 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
       return (await run) as T;
     }
     case "conversation_cache": return null as T;
-    case "answer_permission": if (WEB) throw new Error(WEB_UNSUPPORTED); return null as T;
+    // ブラウザ版は Rust の代わりに、同じ確認をここで行う（src/webPerm.ts）
+    case "answer_permission": if (WEB) return answerPermission((path) => j(path), (path, body) => post(path, body), String(a.sessionId), String(a.choice), (a.expectId as string | null) ?? null) as T; return null as T;
     case "send_message": {
       if (!WEB) return null as T; // ?mock の試験では送らない（今までどおり）
       if (!String(a.text ?? "").trim()) throw new Error("文が空");

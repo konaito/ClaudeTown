@@ -480,7 +480,7 @@ export default function App() {
     <div className={`app${mobile ? " mobile" : ""}`} onContextMenu={(e) => e.preventDefault()}>
       {mobile ? (
         <MobileShell tree={tree} peers={peers} peer={peer} selfName={selfName} snap={snap} err={err} conn={connView} counts={counts} total={agents.length}
-          open={sel} mails={mails} curTown={curTown} onTown={changeTown} onPick={pick} onMail={(m) => openMail(m, true)} onBack={() => setSelected(null)}
+          open={sel} mails={mails} curTown={curTown} unreachable={unreachable} onTown={changeTown} onPick={pick} onMail={(m) => openMail(m, true)} onBack={() => setSelected(null)}
           chat={(back) => <Panel {...panelProps} mobile onBack={back} />} />
       ) : (<>
       <header className="top">

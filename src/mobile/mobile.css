@@ -82,3 +82,17 @@ html.kb .app.mobile .composer { padding-bottom: 8px; }
 .app.mobile .md pre { font-size: 12px; }
 .app.mobile .composer textarea { min-height: 56px; }
 .app.mobile .send { right: 6px; bottom: 6px; }
+
+/* 承認。許可と拒否は 48px 以上の幅いっぱいのボタンにする */
+.app.mobile .approval { margin: 4px 0; }
+.app.mobile .ap-btns { display: flex; flex-wrap: wrap; gap: 10px; }
+.app.mobile .ap-btns button { flex: 1 1 40%; min-height: 48px; font-size: 16px; }
+.app.mobile .ap-btns .hint { flex-basis: 100%; }
+
+/* 横向きでノッチがあるとき */
+.app.mobile { padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); }
+
+/* 承認も枠の面にせず、細い線と左の色の帯で区切る */
+.app.mobile .approval { background: none; border: 0; border-left: 3px solid var(--approval); border-radius: 0; padding: 4px 0 4px 12px; }
+.app.mobile .ap-detail { background: none; border: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); border-radius: 0; padding: 8px 0; }
+.m-head .p-avatar { margin-right: 10px; }

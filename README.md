@@ -241,14 +241,23 @@ Claude Town は、ブラウザから開けるインストール可能な PWA と
 - Service Worker（`public/sw.js`）は何もキャッシュしない。ホーム画面に追加するためだけに置いた。manifest は `public/manifest.webmanifest`、アイコンは `public/app-icon.svg` から `bun run pwa:icons` で作る。
 - デプロイは、既定ブランチへのマージで `.github/workflows/void-deploy.yml` が行う。
 
+会話の表示と承認への返事は、Rust の `conversation` と `answer_permission` と同じ処理を TS に移してある（`src/webConv.ts`、`src/webPerm.ts`）。承認への返事は Rust と同じ確認（まだ承認待ちか、requestId が見せた中身と同じか、質問と計画の確認に許可を送らないか）をしてから送る。ただし送信の非常停止（`~/.family-computing/send-disabled`）は手元のファイルなので、ブラウザ版では効かない。会話の「今の動き」の行（`live`）と、保存した会話は移していない。
+
 ブラウザ版で使えない機能は次のとおり。Rust にしか実装が無いものを、TS に移していない。
 
 | 機能 | 状態 |
 | --- | --- |
-| 会話の表示（`conversation`） | 使えない。理由を画面に出す。端末（右クリック）で見る |
-| 承認への返事（`answer_permission`） | 使えない。安全確認が Rust にある |
 | お手紙、プロンプト履歴、スラッシュ補完、ファイルの候補、クリップボードの貼り付け、世帯の名前の変更 | 動かない |
 | 町の一覧の名前づけ | パスの形だけで決める（Rust は `.git` も読む） |
+
+### スマホ専用の画面
+
+幅が 720px 以下か、タッチが主の入力で幅が 1024px 以下のときだけ、スマホ専用の画面（`src/mobile/`）に切り替わる。Tauri の画面は常に今までの画面である。URL に `?layout=mobile` か `?layout=desktop` を付けると、判定を上書きできる。
+
+- 取得、選択、送信の状態は `App` が持つ。`MobileShell` は並べ方だけを持ち、チャットの中身は `Panel` を `mobile` つきで使う。
+- 一覧、チャットの2画面。一覧の先頭の「あなたの番」に、承認待ちと返事待ちを別の町の分も含めて出す。押すとチャットが全画面で開き、戻る操作（履歴の `popstate`）で一覧に戻る。
+- 入力欄は画面の下に固定する。キーボードが出ると、`visualViewport` の高さ（`--vv-h`）に合わせて縮む。Enter は改行で、送るのは送信ボタンだけである。
+- スマホの見た目の確認は、モックの ccn（`scripts/mock-ccn-town.ts`）に `bun run dev` をつなぎ、agent-browser を 390x844、倍率 3 にして行う。
 
 Void アプリの確認は `web/` で行う。
 
