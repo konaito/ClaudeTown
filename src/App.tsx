@@ -1,5 +1,6 @@
 import { Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { call as invoke, setFullscreen } from "./bridge";
+import { IS_WEB, call as invoke, setFullscreen } from "./bridge";
+import { pickTown, savedTown, saveTown } from "./webTown";
 import { lastTermSize } from "./term/size";
 import { perfEnd, perfMark, perfSetId, perfStart, perfWaitingPrompt } from "./term/perf";
 import { benchName, useBench } from "./term/bench";
@@ -117,6 +118,25 @@ export default function App() {
   useEffect(() => {
     if (snapOk && peers.some((p) => p.status === "cached")) invoke<Peer[]>("peers").then((p) => setPeers(Array.isArray(p) ? p : [])).catch(() => {});
   }, [snapOk]);
+
+  // ブラウザ版は、最初の町を生きている子が最も多い町にする。町を選び直したら、その後は勝手に動かさない
+  const touched = useRef(false);
+  const chosen = useRef(false);
+  useEffect(() => {
+    if (!IS_WEB || chosen.current || !peers.length) return;
+    chosen.current = true;
+    const healthy = peers.filter((p) => p.self || p.status === "healthy");
+    Promise.all(healthy.map(async (p) => {
+      try { return { name: p.name, self: p.self, n: (await invoke<Agent[]>("town_agents", { peer: p.self ? null : p.name })).length }; }
+      catch { return { name: p.name, self: p.self, n: -1 }; }
+    })).then((counts) => {
+      if (touched.current) return;
+      const t = pickTown(counts.filter((c) => c.n >= 0), savedTown());
+      if (!t) return;
+      saveTown(t.name);
+      setPeer(t.self ? "" : t.name);
+    });
+  }, [peers]);
 
   const reload = useRef<() => void>(() => {});
   // 一覧の取得が続けて失敗している数と、失敗し始めた時刻。1回の失敗では町を描き直さない
@@ -449,8 +469,8 @@ export default function App() {
           <h1>Claude Town</h1>
         </div>
         <div className="top-mid">
-          <select className="node" value={peer} onChange={(e) => { setPeer(e.target.value); setSelected(null); }}>
-            <option value="">このMac{selfPeer ? `（${selfPeer.name}）` : ""}</option>
+          <select className="node" value={peer} onChange={(e) => { touched.current = true; setPeer(e.target.value); setSelected(null); if (IS_WEB) saveTown(e.target.value || selfPeer?.name || ""); }}>
+            <option value="">{IS_WEB && selfPeer ? selfPeer.name : `このMac${selfPeer ? `（${selfPeer.name}）` : ""}`}</option>
             {peers.filter((p) => !p.self).map((p) => (
               <option key={p.name} value={p.name} disabled={p.status !== "healthy"}>{p.name}{p.status !== "healthy" ? "（つながらない）" : ""}</option>
             ))}
