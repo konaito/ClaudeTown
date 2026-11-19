@@ -229,6 +229,34 @@ echo '{"session_id":"0123abcd-0000-0000-0000-000000000001","hook_event_name":"Us
 - 置き場所は `src-tauri/target/debug/family-computing --paths` で確かめられる。identifier と、各ファイルの置き場所を出す。
 - 開発版の dev/ は、初めて起動したときは空なので、キャラは安定版と違う顔ぶれで振り直される。avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json の3つは、キャラの選び方の変更（feat/char-age）が入った版から使う。
 
+## ブラウザ版（PWA）
+
+Claude Town は、ブラウザから開けるインストール可能な PWA としても配る。公開先は https://town.fybe.jp である。Cloudflare Access（アプリ `claude-town`）が全体を守り、ポリシー `town-owner` が `ceo@fybe.jp` だけを通す。
+
+仕組みは次のとおり。
+
+- 画面は Tauri 版と同じ `src/` である。Tauri の外でビルドした版（`import.meta.env.PROD`）は、`invoke` の代わりに、同じオリジンの `/api` と `/n/<町>/api` へ HTTP で話す（`src/bridge.ts` の `WEB`）。
+- ccn は別オリジンからの要求を 403 で断るので、ブラウザは ccn に直接つなげない。`web/` の Worker（Void アプリ）が画面を配り、`/api` と `/n/` を `https://ccn.fybe.jp` に中継する。
+- 中継は、受け取った Access の JWT を `Cf-Access-Token` で渡す（Linked App Token）。ccn の Access アプリ `ccn` に、`claude-town` からの Linked App Token を通すポリシー `town-linked` を足してある。ccn には人（email）の呼び手として届き、サービストークンの秘密は持たない。
+- Service Worker（`public/sw.js`）は何もキャッシュしない。ホーム画面に追加するためだけに置いた。manifest は `public/manifest.webmanifest`、アイコンは `public/app-icon.svg` から `bun run pwa:icons` で作る。
+- デプロイは、既定ブランチへのマージで `.github/workflows/void-deploy.yml` が行う。
+
+ブラウザ版で使えない機能は次のとおり。Rust にしか実装が無いものを、TS に移していない。
+
+| 機能 | 状態 |
+| --- | --- |
+| 会話の表示（`conversation`） | 使えない。理由を画面に出す。端末（右クリック）で見る |
+| 承認への返事（`answer_permission`） | 使えない。安全確認が Rust にある |
+| お手紙、プロンプト履歴、スラッシュ補完、ファイルの候補、クリップボードの貼り付け、世帯の名前の変更 | 動かない |
+| 町の一覧の名前づけ | パスの形だけで決める（Rust は `.git` も読む） |
+
+Void アプリの確認は `web/` で行う。
+
+```sh
+cd web && bun install
+bun run build   # .cloudflare/ に Worker と画面が出る
+```
+
 ## 開発
 
 ```bash

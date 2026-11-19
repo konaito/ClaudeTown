@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "pwa:icons": "pwa-assets-generator --config pwa-assets.config.ts && mv public/icon-192.png public/icon-512.png public/maskable-512.png public/apple-touch-icon-180.png public/pwa/"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -30,6 +31,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@types/textarea-caret": "3.0.4",
+    "@vite-pwa/assets-generator": "^2.0.0",
     "@vitejs/plugin-react": "^6.0.2",
     "@xterm/headless": "6.0.0",
     "omggif": "1.0.10",
