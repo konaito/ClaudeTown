@@ -10,13 +10,17 @@ import { cardNames, projectFromPath, type ConvItem } from "./model";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 // ?mockport=<ポート> で、モック以外の口（本番のノードの前に置いた試験用の中継など）にも繋げる
+// ビルドした版（PWA）。Tauri の外で、ccn と同じオリジンの /api と /n/<町>/api に直接つなぐ（ccn は別オリジンからの要求を 403 で断る）。
+// 本番では Worker（web/）が、この道を Access のリンクトークンを付けて ccn に中継する
+const WEB = !inTauri && import.meta.env.PROD && typeof location !== "undefined";
 const MOCK = !inTauri && typeof location !== "undefined" && location.search.includes("mock")
-  ? `http://127.0.0.1:${new URLSearchParams(location.search).get("mockport") ?? "4399"}/api` : null;
+  ? `http://127.0.0.1:${new URLSearchParams(location.search).get("mockport") ?? "4399"}/api` : WEB ? `${location.origin}/api` : null;
 
+const WEB_UNSUPPORTED = "ブラウザ版ではまだ使えない（会話の表示と承認への返事は、アプリか端末で行う）";
 const LOADED_AT = Date.now();
 // 見た目の確認用: ?offline を付けると、ccn に届かない状態を真似る。一覧は保存した一覧として出し、会話は読めず、
 // 保存してあった会話（?longconv と同じ仮の会話）を出す。Rust の保存（src-tauri/src/offline.rs）は通らない
-const OFFLINE = !inTauri && !MOCK && typeof location !== "undefined" && location.search.includes("offline");
+const OFFLINE = !inTauri && !MOCK && !WEB && typeof location !== "undefined" && location.search.includes("offline");
 const OFFLINE_ERR = `ccn が 502 を返した: {"error":"peer incertotech unreachable: fetch failed","peer":"incertotech"}`;
 
 async function devJson<T>(name: string, fallback: T): Promise<T> {
@@ -26,8 +30,10 @@ async function devJson<T>(name: string, fallback: T): Promise<T> {
 }
 
 async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promise<T> {
+  // ビルドした版では、別の町への要求も中継の口（/n/<町>/api）へ向ける。?mock のモックは今までどおり peer を見ない
+  const base = WEB && a.peer ? `${MOCK!.replace(/\/api$/, "")}/n/${encodeURIComponent(String(a.peer))}/api` : MOCK;
   const j = async (path: string, init?: RequestInit) => {
-    const r = await fetch(`${MOCK}${path}`, init);
+    const r = await fetch(`${base}${path}`, { credentials: "same-origin", ...init });
     if (!r.ok) throw new Error(await r.text());
     return r.status === 204 ? null : r.json();
   };
@@ -47,7 +53,7 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
       return {
         ccn: MOCK, peer: null, ccn_ok: true, ccn_error: null, fetched_at: Date.now(),
         // お手紙の試し: public/dev-letters.json（無ければ空）
-        letters: await fetch("/dev-letters.json", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
+        letters: WEB ? [] : await fetch("/dev-letters.json", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
         // 名前は Rust の snapshot と同じ決め方（src/model.ts の cardNames）。モックでは .git を読まないので、パスの形だけで決める
         agents: (() => {
           const names = cardNames(live.map((s) => ({ id: s.id, cwd: s.cwd, title: s.title, parent: parentOf(s), startedAt: s.startedAt })));
@@ -55,7 +61,8 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
         })(),
       } as T;
     }
-    case "peers": return [{ name: "mock", url: MOCK, status: "healthy", self: true }, { name: "vm", url: "", status: "healthy", self: false }] as T;
+    case "peers": if (WEB) return j("/peers") as T;
+      return [{ name: "mock", url: MOCK, status: "healthy", self: true }, { name: "vm", url: "", status: "healthy", self: false }] as T;
     case "create_session": {
       const headers: Record<string, string> = a.parent ? { "x-ccn-from": `agent:mock/${String(a.parent).slice(0, 8)}/town` } : {};
       // Rust の create_session と同じく、空の prompt と name は送らない（本番のノードは name: null を 400 で断る）
@@ -79,7 +86,16 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     case "teleport_info": return j(`/sessions/${a.sessionId}/teleport`) as T;
     case "teleport": return post(`/sessions/${a.sessionId}/teleport`, { to: a.to, fork: a.fork, subtree: a.subtree, dryRun: a.dryRun }) as T;
     case "stop_session": return j(`/sessions/${a.sessionId}`, { method: "DELETE" }) as T;
-    case "conversation": return deltaOf([], a.since as number | null) as T;
+    // 会話の整形（Rust の simplify）と、承認の安全確認つきの返事（answer_permission）は、まだ TS に移していない。黙って成功させず、画面に理由を出す
+    case "conversation": if (WEB) throw new Error(WEB_UNSUPPORTED); return deltaOf([], a.since as number | null) as T;
+    case "conversation_cache": return null as T;
+    case "answer_permission": if (WEB) throw new Error(WEB_UNSUPPORTED); return null as T;
+    case "send_message": {
+      if (!WEB) return null as T; // ?mock の試験では送らない（今までどおり）
+      if (!String(a.text ?? "").trim()) throw new Error("文が空");
+      const r = await j(`/sessions/${a.sessionId}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: a.text }) });
+      return JSON.stringify(r) as T;
+    }
     default: console.info("[モックでは実行しない]", cmd, a); return null as T;
   }
 }
@@ -161,7 +177,8 @@ export async function openTerminal(sessionId: string, peer: string | null, on: (
     return () => { open = false; invoke("term_close", { sessionId, generation }).catch(() => {}); };
   }
   if (MOCK) {
-    const es = new EventSource(`${MOCK}/sessions/${sessionId}/terminal`);
+    const base = WEB && peer ? `${MOCK.replace(/\/api$/, "")}/n/${encodeURIComponent(peer)}/api` : MOCK;
+    const es = new EventSource(`${base}/sessions/${sessionId}/terminal`);
     // Tauri と同じ形（{ s }）に直す。文字の途中で切れた分は TextDecoder が次に回す
     const dec = new TextDecoder();
     for (const ev of ["size", "replay", "data", "exit"]) {
@@ -170,7 +187,7 @@ export async function openTerminal(sessionId: string, peer: string | null, on: (
         on({ id: sessionId, ev, data: typeof d?.b64 === "string" ? { s: dec.decode(Uint8Array.from(atob(d.b64), (c) => c.charCodeAt(0)), { stream: true }) } : d });
       });
     }
-    es.onerror = () => on({ id: sessionId, ev: "error", data: { message: "モックに繋がらない" } });
+    es.onerror = () => on({ id: sessionId, ev: "error", data: { message: WEB ? "ccn に繋がらない" : "モックに繋がらない" } });
     return () => es.close();
   }
   on({ id: sessionId, ev: "error", data: { message: "ブラウザ表示ではターミナルを開けない（?mock を付けるとモックに繋ぐ）" } });
