@@ -6,6 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { perfCounters } from "./term/perf";
 import { deltaOf } from "./conv";
+import { newConvState, readConversation, type ConvState } from "./webConv";
 import { cardNames, projectFromPath, type ConvItem } from "./model";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -17,7 +18,7 @@ const MOCK = !inTauri && typeof location !== "undefined" && location.search.incl
   ? `http://127.0.0.1:${new URLSearchParams(location.search).get("mockport") ?? "4399"}/api` : WEB ? `${location.origin}/api` : null;
 
 export const IS_WEB = WEB;
-const WEB_UNSUPPORTED = "ブラウザ版ではまだ使えない（会話の表示と承認への返事は、アプリか端末で行う）";
+const WEB_UNSUPPORTED = "ブラウザ版ではまだ使えない（承認への返事は、アプリか端末で行う）";
 const LOADED_AT = Date.now();
 // 見た目の確認用: ?offline を付けると、ccn に届かない状態を真似る。一覧は保存した一覧として出し、会話は読めず、
 // 保存してあった会話（?longconv と同じ仮の会話）を出す。Rust の保存（src-tauri/src/offline.rs）は通らない
@@ -29,6 +30,9 @@ async function devJson<T>(name: string, fallback: T): Promise<T> {
   if (!r.ok) return fallback;
   return (await r.json()) as T;
 }
+
+const WEB_CONVS = new Map<string, ConvState>();
+const WEB_CONV_RUN = new Map<string, Promise<unknown>>();
 
 async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promise<T> {
   // ビルドした版では、別の町への要求も中継の口（/n/<町>/api）へ向ける。?mock のモックは今までどおり peer を見ない
@@ -88,7 +92,16 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     case "teleport": return post(`/sessions/${a.sessionId}/teleport`, { to: a.to, fork: a.fork, subtree: a.subtree, dryRun: a.dryRun }) as T;
     case "stop_session": return j(`/sessions/${a.sessionId}`, { method: "DELETE" }) as T;
     // 会話の整形（Rust の simplify）と、承認の安全確認つきの返事（answer_permission）は、まだ TS に移していない。黙って成功させず、画面に理由を出す
-    case "conversation": if (WEB) throw new Error(WEB_UNSUPPORTED); return deltaOf([], a.since as number | null) as T;
+    case "conversation": {
+      // ブラウザ版は Rust の代わりに、ここで ccn の messages を読んで縮める（src/webConv.ts）。?mock のモックも同じ道を通る。同じ会話への取得は1本ずつ順に通す
+      const key = `${a.peer ?? ""}|${a.sessionId}`;
+      const st = WEB_CONVS.get(key) ?? newConvState();
+      WEB_CONVS.set(key, st);
+      const run = (WEB_CONV_RUN.get(key) ?? Promise.resolve()).catch(() => {}).then(() =>
+        readConversation(st, (after) => j(`/sessions/${a.sessionId}/messages?after=${after}`), a.since as number | null | undefined));
+      WEB_CONV_RUN.set(key, run);
+      return (await run) as T;
+    }
     case "conversation_cache": return null as T;
     case "answer_permission": if (WEB) throw new Error(WEB_UNSUPPORTED); return null as T;
     case "send_message": {

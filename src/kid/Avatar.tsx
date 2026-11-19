@@ -26,6 +26,12 @@ export function hash(s: string): number {
 
 export type Role = "parent" | "child" | "grandchild";
 
+/** 世帯の中の深さ（根が 0）から、絵の役を決める */
+export function roleOf(depth: number): Role {
+  return depth === 0 ? "parent" : depth === 1 ? "child" : "grandchild";
+}
+export const ROLE_LABEL = ["親", "子", "孫", "ひ孫", "玄孫"];
+
 /**
  * Rust の割り当て（pick）が無いとき（?mock のブラウザ表示など）の代わりの選び方。
  * Rust と同じ重み（世代の目標に近い点数ほど大きい）で、乱数の代わりに seed の hash で引く。
