@@ -16,6 +16,7 @@ const WEB = !inTauri && import.meta.env.PROD && typeof location !== "undefined";
 const MOCK = !inTauri && typeof location !== "undefined" && location.search.includes("mock")
   ? `http://127.0.0.1:${new URLSearchParams(location.search).get("mockport") ?? "4399"}/api` : WEB ? `${location.origin}/api` : null;
 
+export const IS_WEB = WEB;
 const WEB_UNSUPPORTED = "ブラウザ版ではまだ使えない（会話の表示と承認への返事は、アプリか端末で行う）";
 const LOADED_AT = Date.now();
 // 見た目の確認用: ?offline を付けると、ccn に届かない状態を真似る。一覧は保存した一覧として出し、会話は読めず、
