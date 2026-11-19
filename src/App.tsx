@@ -17,7 +17,10 @@ import { kickTown, otherTownRetryMs, watchTown } from "./town";
 import { SucceedError, kidsOf, startSuccessor, succeedBlock } from "./succeed";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import "./App.css";
-import { Avatar, hash as hashOf, type Role } from "./kid/Avatar";
+import "./mobile/mobile.css";
+import { MobileShell } from "./mobile/MobileShell";
+import { useMobileLayout, useVisualViewport } from "./mobile/useMobile";
+import { Avatar, hash as hashOf, roleOf, ROLE_LABEL, type Role } from "./kid/Avatar";
 import { SkinCtx, saveSkin, savedSkin, type Skin } from "./kid/pokemon";
 import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
@@ -95,6 +98,9 @@ const loadTerminal = () => import("./term/TerminalView");
 const TerminalView = lazy(() => loadTerminal().then((m) => ({ default: m.TerminalView })));
 
 export default function App() {
+  // スマホ専用の画面（src/mobile）。取得・選択・送信の状態はこの App が持ち、下の return の並べ方だけを切り替える
+  const mobile = useMobileLayout();
+  useVisualViewport(mobile);
   useEffect(() => { const t = setTimeout(() => { void loadTerminal(); }, 2000); return () => clearTimeout(t); }, []);
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -138,6 +144,9 @@ export default function App() {
     });
   }, [peers]);
 
+  const selfPeer = peers.find((p) => p.self);
+  /** 町を切り替える（上の帯の選択と、スマホの町の選択で共通） */
+  const changeTown = (v: string) => { touched.current = true; setPeer(v); setSelected(null); if (IS_WEB) saveTown(v || selfPeer?.name || ""); };
   const reload = useRef<() => void>(() => {});
   // 一覧の取得が続けて失敗している数と、失敗し始めた時刻。1回の失敗では町を描き直さない
   // （2026-11-12、ノードが一瞬詰まって一覧の取得が時間切れになり、町が「0世帯・0人」になった）
@@ -453,7 +462,13 @@ export default function App() {
   useEffect(() => { if (fresh && tree.byId.has(fresh.id)) setFresh(null); }, [tree, fresh]);
   useEffect(() => { if (sel) perfMark("listed", sel.id); }, [sel?.id]);
   useBench({ ready: !!snap, select: setSelected, focusId: (id) => { const a = tree.byId.get(id); if (a) focus(a); } });
-  const selfPeer = peers.find((p) => p.self);
+
+  const connView = { cls: (!snap?.ccn_ok ? "bad" : slow ? "slow" : "ok") as "ok" | "slow" | "bad", label: snap ? (!snap.ccn_ok ? "つながらない" : slow ? "つながりにくい" : "接続中") : "よみこみ中", msg: fail?.msg ?? "" };
+  const panelProps = {
+    agent: sel, peer, lineage: sel ? tree.lineage(sel) : [], descendants: sel ? descOf(tree.childrenOf, sel.id) : [], termReq, chatReq, composeReq, peers, sendHook: panelSend,
+    onSent: (a: Agent) => { kickTown(); toast(`${a.name} に届けた`); }, onSent2: (m: string) => { kickTown(); toast(m); }, onError: (m: string) => toast(m, true),
+    needs, onSelect: (a: Agent) => setSelected(a.id),
+  };
 
   return (
     <SkinCtx.Provider value={skinCtx}>
@@ -462,14 +477,19 @@ export default function App() {
     <SendCtx.Provider value={cardSend}>
     <LetterCtx.Provider value={letterMarks.marks}>
     <TownCtx.Provider value={agents}>
-    <div className="app" onContextMenu={(e) => e.preventDefault()}>
+    <div className={`app${mobile ? " mobile" : ""}`} onContextMenu={(e) => e.preventDefault()}>
+      {mobile ? (
+        <MobileShell tree={tree} peers={peers} peer={peer} selfName={selfName} snap={snap} err={err} conn={connView} counts={counts} total={agents.length}
+          open={sel} mails={mails} curTown={curTown} onTown={changeTown} onPick={pick} onMail={(m) => openMail(m, true)} onBack={() => setSelected(null)}
+          chat={(back) => <Panel {...panelProps} mobile onBack={back} />} />
+      ) : (<>
       <header className="top">
         <div className="brand">
           <HouseIcon />
           <h1>Claude Town</h1>
         </div>
         <div className="top-mid">
-          <select className="node" value={peer} onChange={(e) => { touched.current = true; setPeer(e.target.value); setSelected(null); if (IS_WEB) saveTown(e.target.value || selfPeer?.name || ""); }}>
+          <select className="node" value={peer} onChange={(e) => changeTown(e.target.value)}>
             <option value="">{IS_WEB && selfPeer ? selfPeer.name : `このMac${selfPeer ? `（${selfPeer.name}）` : ""}`}</option>
             {peers.filter((p) => !p.self).map((p) => (
               <option key={p.name} value={p.name} disabled={p.status !== "healthy"}>{p.name}{p.status !== "healthy" ? "（つながらない）" : ""}</option>
@@ -545,11 +565,10 @@ export default function App() {
         {/* 町と右パネルの境目。ドラッグで右パネルを 380px からウィンドウ幅の半分まで広げられる。ダブルクリックで既定の幅に戻る */}
         <Separator className="split-handle" />
         <SplitPanel id="side" defaultSize={SIDE_DEFAULT} minSize={SIDE_MIN} maxSize="50%">
-        <Panel agent={sel} peer={peer} lineage={sel ? tree.lineage(sel) : []} descendants={sel ? descOf(tree.childrenOf, sel.id) : []} termReq={termReq} chatReq={chatReq} composeReq={composeReq} peers={peers} sendHook={panelSend}
-          onSent={(a) => { kickTown(); toast(`${a.name} に届けた`); }} onSent2={(m) => { kickTown(); toast(m); }} onError={(m) => toast(m, true)}
-          needs={needs} onSelect={(a) => setSelected(a.id)} />
+        <Panel {...panelProps} />
         </SplitPanel>
       </SplitGroup>
+      </>)}
 
       {killAsk && (
         <KillConfirm agent={killAsk} descendants={countDesc(tree.childrenOf, killAsk.id)}
@@ -846,10 +865,6 @@ function Group({ root, all, count, size, hasNeeds, onRename, children }: {
   );
 }
 
-function roleOf(depth: number): Role {
-  return depth === 0 ? "parent" : depth === 1 ? "child" : "grandchild";
-}
-const ROLE_LABEL = ["親", "子", "孫", "ひ孫", "玄孫"];
 
 /**
  * 家族の木を、配置計算（src/layout）が決めた座標に置いて描く。
@@ -1144,7 +1159,9 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
 
 // ---------- 右のパネル ----------
 
-function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq, peers, sendHook, onSent, onSent2, onError, needs, onSelect }: {
+function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq, peers, sendHook, onSent, onSent2, onError, needs, onSelect, mobile, onBack }: {
+  /** スマホ専用の画面（src/mobile）。見出しを戻るつきの1行にし、転出と細かいボタンは出さない */
+  mobile?: boolean; onBack?: () => void;
   agent: Agent | null; peer: string; lineage: Agent[]; descendants: Agent[]; termReq: number; chatReq: number; composeReq: number; peers: Peer[];
   /** カードのボタン（#63）が、選んでいるセッションへの送信をこのパネルに任せる口。選んでいないセッションなら null を返す */
   sendHook: React.MutableRefObject<((id: string, text: string) => Promise<boolean> | null) | null>;
@@ -1258,6 +1275,15 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
     return lastAssistant && lastIsAssistant ? choicesOf(lastAssistant.text) : [];
   }, [items]);
 
+  // スマホでキーボードが出入りして会話の欄の高さが変わったとき、一番下にいたら下へ送り直す
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!mobile || !vv) return;
+    const on = () => { const el = scroller.current; if (el && stick.current) el.scrollTop = el.scrollHeight; };
+    vv.addEventListener("resize", on);
+    return () => vv.removeEventListener("resize", on);
+  }, [mobile]);
+
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el || !stick.current) return;
@@ -1323,6 +1349,16 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
 
   return (
     <aside className={`panel pm-${mood}`}>
+      {mobile ? (
+        <div className="m-head">
+          <button className="m-back" onClick={onBack} aria-label="一覧へ戻る"><svg width="12" height="20" viewBox="0 0 12 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 2 2 10l8 8" /></svg></button>
+          <div className="p-avatar"><Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(lineage.length - 1)} size={40} /></div>
+          <div className="p-id">
+            <div className="p-name"><span className="pn">{agent.name}</span><span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}</span></div>
+            <div className="p-task">{linkify(taskOf(agent, mood))}</div>
+          </div>
+        </div>
+      ) : (
       <div className="p-head">
         <div className="p-avatar"><Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(lineage.length - 1)} size={64} /></div>
         <div className="p-id">
@@ -1341,7 +1377,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
           {!agent.ghost && <CardActions agent={agent} place="head" />}
         </div>
       </div>
-      {sheet === "teleport" && <Teleport agent={agent} descendants={descendants} peers={peers} onDone={(m) => { setSheet(null); onSent2(m); }} onError={onError} />}
+      )}
+      {!mobile && sheet === "teleport" && <Teleport agent={agent} descendants={descendants} peers={peers} onDone={(m) => { setSheet(null); onSent2(m); }} onError={onError} />}
       <div className="tabs">
         <button className={tab === "talk" ? "on" : ""} onClick={() => setTab("talk")}>チャット</button>
         <button className={tab === "state" ? "on" : ""} onClick={() => setTab("state")}>状態</button>
@@ -1383,7 +1420,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
 
       {tab !== "term" && <div className="composer" ref={composerBox}>
         <div className="to">送信先: {target}</div>
-        <Composer key={agent.id} agent={agent} peer={peer} text={text} setText={setText} busy={busy} running={mood === "working"} onSubmit={send} onError={onError} />
+        <Composer key={agent.id} touch={mobile} agent={agent} peer={peer} text={text} setText={setText} busy={busy} running={mood === "working"} onSubmit={send} onError={onError} />
       </div>}
     </aside>
   );

@@ -1,0 +1,84 @@
+/* スマホ専用の画面（src/mobile）。白地に、線と余白で区切る。枠で包んだ面（カード）は使わない。
+   .app.mobile の下だけに書き、PC と Tauri の画面には触れない。 */
+
+/* キーボードが出たとき、画面の見えている高さに合わせる（src/mobile/useMobile.ts が --vv-h と --vv-top を入れる） */
+html:has(.app.mobile), html:has(.app.mobile) body { overscroll-behavior: none; }
+.app.mobile {
+  position: fixed; left: 0; right: 0; top: var(--vv-top, 0px);
+  height: var(--vv-h, 100dvh);
+  user-select: auto; -webkit-tap-highlight-color: transparent;
+  display: block; font-size: 15px;
+}
+.app.mobile button, .app.mobile select { touch-action: manipulation; }
+.app.mobile .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+/* 2つの画面は重ねて持ち、片方を脇へ送る。チャットは作ったままなので、打ちかけの文も戻っても残る */
+.m-screen { position: absolute; inset: 0; display: flex; flex-direction: column; background: #fff; transition: transform 0.2s ease; }
+.m-list.away { transform: translateX(-24%); visibility: hidden; transition: transform 0.2s ease, visibility 0s 0.2s; }
+.m-chat.away { transform: translateX(100%); visibility: hidden; transition: transform 0.2s ease, visibility 0s 0.2s; }
+@media (prefers-reduced-motion: reduce) { .m-screen { transition: none !important; } }
+
+/* 一覧 */
+.m-top { flex: none; display: flex; align-items: center; gap: 10px; padding: calc(8px + env(safe-area-inset-top)) 16px 8px; border-bottom: 1px solid var(--line); }
+.m-top h1 { flex: 1; margin: 0; font-size: 18px; font-weight: 600; }
+.m-town select { appearance: none; font: inherit; font-size: 16px; min-height: 44px; padding: 0 30px 0 12px; border: 1px solid var(--line); border-radius: 10px; background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='14'%3E%3Cpath d='M1 5l4-4 4 4M1 9l4 4 4-4' stroke='%23777' fill='none'/%3E%3C/svg%3E") no-repeat right 10px center; max-width: 46vw; }
+.m-conn { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--sub); white-space: nowrap; }
+.m-conn i { width: 8px; height: 8px; border-radius: 50%; background: var(--working); }
+.m-conn.bad i { background: #e5574a; } .m-conn.slow i { background: var(--approval); }
+.m-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+.m-note { margin: 12px 16px; font-size: 14px; color: var(--sub); }
+.m-note.bad { color: #b4473a; }
+.m-sum { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin: 0; padding: 12px 16px 4px; font-size: 13px; color: var(--sub); }
+.m-sum .lg { font-size: 13px; }
+.m-h { display: flex; align-items: baseline; gap: 8px; margin: 14px 0 0; padding: 10px 16px 6px; font-size: 13px; font-weight: 600; color: #5d5b66; border-top: 1px solid var(--line); }
+.m-h b { font-weight: 400; color: var(--sub); font-size: 12px; }
+.m-h.need { color: #c98500; }
+.m-h.need b { color: #c98500; }
+section:first-child > .m-h { margin-top: 0; border-top: 0; }
+
+/* 子の行。1行 64px 以上、押せる範囲は行全体 */
+.mr { position: relative; display: flex; align-items: center; gap: 12px; width: 100%; min-height: 64px; padding: 8px 16px; text-align: left; border-bottom: 1px solid #f1efeb; }
+.mr:active { background: #f7f6f3; }
+.mr-av { flex: none; width: 44px; height: 44px; display: grid; place-items: center; }
+.mr-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mr-name { font-size: 16px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mr-name em { font-style: normal; font-weight: 400; font-size: 11px; color: #7a6f95; margin-left: 8px; border: 1px dashed #b9b0d0; border-radius: 6px; padding: 0 5px; }
+.mr-line { font-size: 13px; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mr-st { flex: none; display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: #5d5b66; }
+.mr.m-approval::before, .mr.m-reply::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 2px; }
+.mr.m-approval::before { background: var(--approval); } .mr.m-reply::before { background: var(--reply); }
+.mr.ghost { opacity: 0.6; }
+
+/* チャット。見出し、会話、入力欄の3段。会話だけが伸び縮みする */
+.m-chat > .panel { flex: 1; min-height: 0; }
+.app.mobile .panel { height: 100%; }
+.m-head { flex: none; display: flex; align-items: center; gap: 8px; padding: calc(6px + env(safe-area-inset-top)) 12px 6px 4px; border-bottom: 1px solid var(--line); }
+.m-back { flex: none; width: 44px; height: 44px; display: grid; place-items: center; color: var(--reply); }
+.m-head .p-avatar { margin-right: 0; }
+.m-head .p-name { font-size: 16px; gap: 2px 8px; flex-wrap: nowrap; }
+.m-head .p-name .st { font-size: 12px; }
+.m-head .p-task { font-size: 12px; color: var(--sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.app.mobile .tabs { padding: 0 8px; }
+.app.mobile .tabs button { flex: 1; min-height: 44px; padding: 0 8px; }
+.app.mobile .talk { padding: 12px 14px; }
+.app.mobile .composer { padding: 8px 12px calc(8px + env(safe-area-inset-bottom)); }
+html.kb .app.mobile .composer { padding-bottom: 8px; }
+.app.mobile .composer .to, .app.mobile .composer .hint { display: none; }
+.app.mobile .composer textarea { font-size: 16px; min-height: 48px; max-height: 40vh; padding-right: 56px; }
+.app.mobile .send { width: 44px; height: 44px; right: 4px; bottom: 2px; }
+.app.mobile .choice { min-height: 44px; }
+.app.mobile .toasts { bottom: calc(80px + env(safe-area-inset-bottom)); }
+
+/* 会話。子の発言は枠で包まず、地に直接置く。本人の発言だけ薄い色の面にする */
+.app.mobile .msg.kid { margin-right: 0; gap: 0; }
+.app.mobile .msg.kid .mini-av { display: none; }
+.app.mobile .msg.kid .b { border: 0; background: none; padding: 2px 0; font-size: 15px; }
+.app.mobile .msg .meta { font-size: 12px; }
+.app.mobile .msg.me { margin-left: 32px; }
+.app.mobile .msg.me .b { font-size: 15px; padding: 8px 12px; }
+.app.mobile .tool-line, .app.mobile .live-line { padding-left: 0; font-size: 12px; }
+.app.mobile .choices { margin-left: 0; background: none; padding: 4px 0; }
+.app.mobile .talk { gap: 14px; }
+.app.mobile .md pre { font-size: 12px; }
+.app.mobile .composer textarea { min-height: 56px; }
+.app.mobile .send { right: 6px; bottom: 6px; }

@@ -93,8 +93,7 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     case "stop_session": return j(`/sessions/${a.sessionId}`, { method: "DELETE" }) as T;
     // 会話の整形（Rust の simplify）と、承認の安全確認つきの返事（answer_permission）は、まだ TS に移していない。黙って成功させず、画面に理由を出す
     case "conversation": {
-      if (!WEB) return deltaOf([], a.since as number | null) as T;
-      // ブラウザ版は Rust の代わりに、ここで ccn の messages を読んで縮める（src/webConv.ts）。同じ会話への取得は1本ずつ順に通す
+      // ブラウザ版は Rust の代わりに、ここで ccn の messages を読んで縮める（src/webConv.ts）。?mock のモックも同じ道を通る。同じ会話への取得は1本ずつ順に通す
       const key = `${a.peer ?? ""}|${a.sessionId}`;
       const st = WEB_CONVS.get(key) ?? newConvState();
       WEB_CONVS.set(key, st);

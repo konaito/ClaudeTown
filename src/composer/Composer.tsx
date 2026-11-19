@@ -46,7 +46,9 @@ const HELP: [string, string][] = [
   ["Ctrl+C", "作業を止める（作業中）・打ちかけを消す"],
 ];
 
-export function Composer({ agent, peer, text, setText, busy, running, onSubmit, onError }: {
+export function Composer({ agent, peer, text, setText, busy, running, onSubmit, onError, touch }: {
+  /** スマホ（ソフトキーボード）。Enter は改行にし、送るのは送信ボタンだけにする */
+  touch?: boolean;
   agent: Agent; peer: string; text: string; setText: (v: string) => void; busy: boolean; running: boolean;
   onSubmit: (body: string) => Promise<boolean>; onError: (m: string) => void;
 }) {
@@ -184,6 +186,7 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
 
     // 送ると改行
     if (k === "Enter") {
+      if (touch) return;
       if (e.shiftKey || alt || (e.altKey && !e.metaKey)) { stop(); apply({ ...selRange(), insert: "\n" }); return; }
       if (plain) {
         stop();
