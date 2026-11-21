@@ -891,17 +891,23 @@ fn conversation(session_id: String, since: Option<u64>) -> Result<ConvDelta, Str
 /// cols と rows は、画面のターミナルの今の大きさ。渡せば claude を最初からその大きさで起動し、開いた直後の描き直しを省く（#18）
 fn create_session(cwd: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>) -> Result<Value, String> {
     refuse_if_disabled()?;
-    let cwd = cwd.filter(|c| !c.is_empty()).unwrap_or_else(|| home().join("Documents/meta").to_string_lossy().to_string());
+    let cwd = cwd.filter(|c| !c.is_empty()).unwrap_or_else(default_place);
     let ok = |v: Option<u16>, d: u16| v.filter(|n| (10..=1000).contains(n)).unwrap_or(d);
     let r = pty::spawn(&cwd, name.as_deref(), ok(cols, 120), ok(rows, 40), town_kick)?;
     town_kick();
     Ok(r)
 }
 
-/// 新しい世帯のペイン（#89）の「最近使った場所」の材料。形は画面の src/newHouse/places.ts の PlacesInput
+/// 場所を設定していないときに新しい世帯を立てる場所（本人の指定）
+fn default_place() -> String {
+    home().join("Documents/meta").to_string_lossy().to_string()
+}
+
+/// 新しい世帯のペイン（#89）の「最近使った場所」の材料。形は画面の src/newHouse/places.ts の PlacesInput。
+/// defaultPlace は、画面が設定の場所を持っていないときに、一覧から除く場所（決定 4、2026-11-21）
 fn house_places() -> Result<Value, String> {
     let live: Vec<Value> = town_rows().into_iter().filter(|r| r["kind"] == "terminal").map(|r| json!({ "cwd": r["cwd"], "lastActivityAt": r["lastActivityAt"] })).collect();
-    Ok(json!({ "roots": [], "lobby": null, "sessions": live, "places": places::recent(&native::claude_home()) }))
+    Ok(json!({ "roots": [], "lobby": null, "sessions": live, "places": places::recent(&native::claude_home()), "defaultPlace": default_place() }))
 }
 
 /// このアプリが立てたセッションを止める
