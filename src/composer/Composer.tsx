@@ -1,24 +1,22 @@
 // チャットの入力欄。キーの動きは Claude Code の CLI の入力に合わせる。
 // 何をどう合わせたか、合わせなかったものと理由は docs/research/cli-input.md の表にある。
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { call as invoke } from "../bridge";
 import getCaretCoordinates from "textarea-caret";
 import type { Agent } from "../model";
-import { BUILTINS, type Command } from "./commands";
 import { usePaste, REMOTE_FILES } from "./usePaste";
+import { useCompletion } from "./useCompletion";
 import { useHistory } from "./useHistory";
 import { useHistorySearch } from "./useHistorySearch";
-import { routeOf, tagOf } from "./route";
+import { routeOf } from "./route";
 import { viaCcn, type Support } from "../session/control";
 import {
   backslashNewline, histDown, isSlashCommand, histUp, killToEnd, killToStart, killWordBack, killWordForward,
-  rankCommands, tokenAt, toLineEnd, toLineStart, wordBack, wordForward, type Edit, type Sel,
+  toLineEnd, toLineStart, wordBack, wordForward, type Edit, type Sel,
 } from "./edit";
 
 // セッションごとに持つもの。セッションを切り替えて戻っても残す（CLI の stash と、送った文の履歴）
 const stashes = new Map<string, string>();
-// スキルの一覧は作業フォルダごとに1回だけ読む
-const skillsByCwd = new Map<string, Command[]>();
 
 /** 2回押しの間隔（Esc Esc）。CLI の値は文書に無いので、Ctrl+D の 800ms に合わせた（仮置き） */
 const DOUBLE_MS = 800;
@@ -56,9 +54,6 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
   const hasTerm = !!agent.capabilities?.terminal;
   const canInterrupt = !!agent.capabilities?.interrupt;
   const [caret, setCaret] = useState(text.length);
-  const [skills, setSkills] = useState<Command[]>(() => skillsByCwd.get(agent.cwd) ?? []);
-  const [files, setFiles] = useState<string[]>([]);
-  const [pick, setPick] = useState(0);
   const [dismissed, setDismissed] = useState<string | null>(null);
   const [help, setHelp] = useState(false);
   const kills = useRef<string[]>([]);
@@ -82,32 +77,9 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
 
   const { search, startSearch, searchMatch, runSearch, endSearch, onSearchKey } = useHistorySearch({ searchList, text, ta, replaceAll, submit, loadAll });
 
-  useEffect(() => {
-    if (!local || !agent.cwd || skillsByCwd.has(agent.cwd)) return;
-    invoke<Command[]>("slash_commands", { cwd: agent.cwd }).then((l) => { if (!Array.isArray(l)) return; skillsByCwd.set(agent.cwd, l); setSkills(l); }).catch(() => {});
-  }, [agent.cwd, local]);
-
-  // 補完
-  const token = search ? null : tokenAt({ text, start: caret, end: caret });
-  const commands = useMemo(() => [...BUILTINS, ...skills], [skills]);
   // ccn を通さないセッション（#96）は、コマンドの振り分けでは端末のセッションと同じに扱う
   const ccnKind = viaCcn(agent) ? agent.kind : "terminal";
-  const slashItems = token?.kind === "slash" ? rankCommands(commands, token.query) : [];
-  // 候補の印（#97）。行の頭のコマンドだけが CLI のコマンドになるので、文の途中の / には付けない
-  const tags = slashItems.map((c) => (token?.atStart ? tagOf(c, ccnKind, support) : null));
-  useEffect(() => {
-    if (token?.kind !== "file" || !local || !agent.cwd) { setFiles([]); return; }
-    let alive = true;
-    const t = setTimeout(() => {
-      invoke<string[]>("file_suggestions", { cwd: agent.cwd, query: token.query }).then((l) => { if (alive && Array.isArray(l)) setFiles(l); }).catch(() => {});
-    }, 60);
-    return () => { alive = false; clearTimeout(t); };
-  }, [token?.kind, token?.query, agent.cwd, local]);
-  const menu = dismissed === text ? [] : token?.kind === "slash" ? slashItems : token?.kind === "file" ? files : [];
-  const menuOpen = menu.length > 0;
-  useEffect(() => { setPick(0); }, [token?.kind, token?.query]);
-  const menuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { menuRef.current?.querySelector(".on")?.scrollIntoView({ block: "nearest" }); }, [pick]);
+  const { token, slashItems, tags, files, menu, menuOpen, pick, setPick, menuRef, accept } = useCompletion({ agent, local, text, caret, search, dismissed, ccnKind, support, replaceAll });
 
   const sel = (): Sel => { const el = ta.current!; return { text: el.value, start: el.selectionStart, end: el.selectionEnd }; };
   /** 範囲を置き換える。execCommand を使い、⌘Z で戻せるようにする */
@@ -122,24 +94,6 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
     if (e.killed) { kills.current = [e.killed, ...kills.current.filter((k) => k !== e.killed)].slice(0, 20); }
   };
   const moveTo = (p: number) => { ta.current!.setSelectionRange(p, p); setCaret(p); };
-
-  const accept = (i = pick) => {
-    if (!token) return "";
-    if (token.kind === "slash") {
-      const c = slashItems[i];
-      if (!c) return "";
-      const next = `${text.slice(0, token.from)}/${c.name} ${text.slice(token.to).replace(/^[ \t]+/, "")}`;
-      replaceAll(next, token.from + c.name.length + 2);
-      return next;
-    }
-    const f = files[i];
-    if (!f) return "";
-    // フォルダは続けて中を選べるように空白を付けない
-    const add = f.endsWith("/") ? f : `${f} `;
-    const next = `${text.slice(0, token.from)}@${add}${text.slice(token.to).replace(/^[ \t]+/, "")}`;
-    replaceAll(next, token.from + 1 + add.length);
-    return next;
-  };
 
   const [stopping, setStopping] = useState(false);
   const interrupt = () => invoke("interrupt_session", { sessionId: agent.id, peer: peer || null }).catch((e) => onError(`止められなかった: ${e}`));
