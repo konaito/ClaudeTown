@@ -7,10 +7,10 @@
 // 5. 実際の矩形で重なりを検査し、残れば決まった順序で角度の余白、次に半径を広げてやり直す
 // 6. 兄弟を並べる弧の上限を変えた候補を作り、検査を通るもののうち s が一番小さいものを選ぶ。
 //    前に選んだ候補は引き継がない。同じ顔ぶれなら、どの町で、どの順で増えても同じ配置になる（docs/design/geometric-layout.md の末尾）
-// ただし、子が1〜6人の世帯（根と子がカードの大きさ）は、上の計算をせず childSlots の固定の座標に子を置く。
+// ただし、子が1〜8人の世帯（根と子がカードの大きさ）は、上の計算をせず childSlots の固定の座標に子を置く。
 // 孫がいても子の位置は変えず、孫より下をその子の、親から離れる向きの延長に並べる（placeGrid）。
 // 検査を通らなければ、子の位置はそのままで、違反した枝の孫までの距離を広げる。上の計算には戻さない。
-// 子が7人以上の世帯は上の計算のまま（docs/design/geometric-layout.md の「子1〜4人の固定の座標」「子3人、5人、6人の格子と、孫がいる世帯」）
+// 子が9人以上の世帯は上の計算のまま（docs/design/geometric-layout.md の「子1〜4人の固定の座標」「子3人、5人、6人の格子と、孫がいる世帯」「子4人、7人、8人の格子」）
 
 import { LAYOUT } from "./params";
 
@@ -41,7 +41,7 @@ export type Metrics = {
 export type LayoutResult = {
   nodes: Placed[];
   metrics: Metrics;
-  /** 選んだ弧の候補。-1 は固定の座標（子1〜6人）に置いたこと */
+  /** 選んだ弧の候補。-1 は固定の座標（子1〜8人）に置いたこと */
   arcIndex: number;
   valid: boolean;
   candidates: { arcIndex: number; valid: boolean; s: number; width: number; height: number }[];
@@ -157,10 +157,10 @@ function place(t: Tree, arcLimit: number, gap: number, radialGap: number, pad: n
   return out;
 }
 
-// ---------- 子1〜6人の固定の座標 ----------
+// ---------- 子1〜8人の固定の座標 ----------
 
 /**
- * 子5人と6人の格子で、親と下の段（上の段）の間の縦の距離。h+m（104）を下限にし、親から角の子への紐が、
+ * 角に子がいる格子（子4人、5人、6人、7人、8人）で、親と下の段（上の段）の間の縦の距離。h+m（104）を下限にし、親から角の子への紐が、
  * 左右の子と真下の子の箱（検査では余白 gap/2 だけ膨らませる）をかすめない最小の値にする。カード 176×96 と gap 10 で 108。
  * 紐は親の中心 (0,0) から角 (side, dy) への線分。左右の子の箱の内側の縁 x = side-(w/2+g) で、紐の y が h/2+g 以上になる条件から出す。
  */
@@ -170,12 +170,14 @@ export function gridRowGap(card = LAYOUT.card, m = LAYOUT.cardMargin, gap = LAYO
 }
 
 /**
- * 親1人と子1〜6人の世帯で、子のカードを置く位置。親の中心が (0,0)、y は下が正。
- * 1、2、4人は本人が決めた座標（2026-11-13）。重ならない、余白 m を空ける、左右対称、紐を短く、外接矩形を小さく、の順に優先し、
+ * 親1人と子1〜8人の世帯で、子のカードを置く位置。親の中心が (0,0)、y は下が正。
+ * 1、2人は本人が決めた座標（2026-11-13）。重ならない、余白 m を空ける、左右対称、紐を短く、外接矩形を小さく、の順に優先し、
  * 中心の間の距離をそろえることより詰めることを取る。
- * 3人、5人、6人は本人が決めた格子（2026-11-21）。左右の子は親と同じ高さに置き、上下の段は左右の列（x = ±side）と真ん中（x = 0）にそろえる。
- *   3人: 左、右、真下。5人: 左、右、左下、真下、右下。6人: 左上、右上、左、右、左下、右下。
- *   3人は角に子がいないので、段の間は 1、2、4人と同じ h+m にする。5人と6人は gridRowGap。
+ * 3〜8人は格子（3人、5人、6人は本人が 2026-11-21 に決めた。4人、7人、8人は同じ日に同じ流れで決めた）。
+ * 左右の子は親と同じ高さに置き、上下の段は左右の列（x = ±side）と真ん中（x = 0）にそろえる。
+ *   3人: 左、右、真下。4人: 左、右、左下、右下。5人: 左、右、左下、真下、右下。
+ *   6人: 左上、右上、左、右、左下、右下。7人: 6人の下の段に真下を足す。8人: 7人の上の段に真上を足し、親の周りの8か所を埋める。
+ *   3人は角に子がいないので、段の間は 1、2人と同じ h+m にする。4人から8人は gridRowGap。
  * どの人数も、上の段から下の段へ、同じ段は左から右へ並べる。i 番目の子（兄弟の順は order、次に id）を i 番目の位置に置く。
  */
 export function childSlots(count: number, card = LAYOUT.card, m = LAYOUT.cardMargin): { x: number; y: number }[] | null {
@@ -185,9 +187,11 @@ export function childSlots(count: number, card = LAYOUT.card, m = LAYOUT.cardMar
     case 1: return [{ x: 0, y: dy }];
     case 2: return [{ x: -dx, y: dy }, { x: dx, y: dy }];
     case 3: return [{ x: -side, y: 0 }, { x: side, y: 0 }, { x: 0, y: dy }];
-    case 4: return [{ x: -side, y: 0 }, { x: side, y: 0 }, { x: -dx, y: dy }, { x: dx, y: dy }];
+    case 4: return [{ x: -side, y: 0 }, { x: side, y: 0 }, { x: -side, y: gy }, { x: side, y: gy }];
     case 5: return [{ x: -side, y: 0 }, { x: side, y: 0 }, { x: -side, y: gy }, { x: 0, y: gy }, { x: side, y: gy }];
     case 6: return [{ x: -side, y: -gy }, { x: side, y: -gy }, { x: -side, y: 0 }, { x: side, y: 0 }, { x: -side, y: gy }, { x: side, y: gy }];
+    case 7: return [{ x: -side, y: -gy }, { x: side, y: -gy }, { x: -side, y: 0 }, { x: side, y: 0 }, { x: -side, y: gy }, { x: 0, y: gy }, { x: side, y: gy }];
+    case 8: return [{ x: -side, y: -gy }, { x: 0, y: -gy }, { x: side, y: -gy }, { x: -side, y: 0 }, { x: side, y: 0 }, { x: -side, y: gy }, { x: 0, y: gy }, { x: side, y: gy }];
     default: return null;
   }
 }
@@ -208,7 +212,7 @@ function radialHalfAt(n: LNode, theta: number): number {
 }
 
 /**
- * 子1〜6人の世帯。子を childSlots の位置に置き、孫より下は今の計算と同じ決まりで、その子の外側（親から離れる向きの延長）に並べる。
+ * 子1〜8人の世帯。子を childSlots の位置に置き、孫より下は今の計算と同じ決まりで、その子の外側（親から離れる向きの延長）に並べる。
  * 孫がいなければ、子の位置をそのまま返す。
  * - 子 k の枝の世代 d の半径 R_k[d] は、根から子 k までの距離から始め、子 k の角度の向きで箱の半分の長さと radialGap を足していく
  * - 兄弟は、子 k の角度（孫より下は親の角度）を中心に、重ならない最小の角度 2·arcsin(r/R) で並べる。葉から必要な幅を足し上げる
@@ -349,7 +353,7 @@ function solve(t: Tree, arcLimit: number, gap: number, radialGap: number, view: 
 const passes = (m: Metrics) => !m.overlaps && !m.crossings && !m.edgeThroughNode && !m.interleave;
 
 /**
- * 子1〜6人の世帯を childSlots の位置に置く。子の位置は動かさず、検査に通るまで、違反した枝の孫までの距離を radiusStep ずつ広げる。
+ * 子1〜8人の世帯を childSlots の位置に置く。子の位置は動かさず、検査に通るまで、違反した枝の孫までの距離を radiusStep ずつ広げる。
  * 重なった組は、深いほうの箱の枝（同じ深さなら両方の枝）を広げる。重なりが無く線の検査だけが残るときは、孫のいる枝をすべて広げる。
  * 孫までの距離を広げるほど、兄弟を並べる角度が狭まり、枝どうしが離れるので、いずれ通る。
  * gridMaxAdjust 回で通らなければ、最後の結果を valid: false で返す（画面は「配置が重なっている」を出す）。
