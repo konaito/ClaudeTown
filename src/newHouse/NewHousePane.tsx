@@ -4,6 +4,7 @@ import { lastTermSize } from "../term/size";
 import { perfMark, perfSetId, perfStart } from "../term/perf";
 import { benchName } from "../term/bench";
 import { onVisibleChange } from "../visible";
+import { DEFAULT_PLACE_LABEL, placeFailure } from "./placeSetting";
 import { placeLabel, placeTime, recentPlaces, type PlacesInput, type RecentPlace } from "./places";
 
 /**
@@ -23,9 +24,9 @@ type Load = { state: "loading" } | { state: "ok"; list: RecentPlace[] } | { stat
 
 /**
  * 左のペイン（#89）。新しい世帯を作るためだけのペインで、最近使った場所を新しい順に出し、押した場所で親を立てる。
- * 先頭の「＋ 新しい世帯」は一覧を待たずに押せる（~/Documents/meta）。disabled は別の町を見ているとき（世帯は手元のノードにだけ作る）
+ * 先頭の「＋ 新しい世帯」は一覧を待たずに押せる。立てる場所は設定（place、#92）で、無ければ ~/Documents/meta。disabled は別の町を見ているとき（世帯は手元のノードにだけ作る）
  */
-export function NewHousePane({ disabled, onCreated, onError }: { disabled: boolean; onCreated: (r: any) => void; onError: (m: string) => void }) {
+export function NewHousePane({ disabled, place, onCreated, onError }: { disabled: boolean; place: string | null; onCreated: (r: any) => void; onError: (m: string) => void }) {
   const [load, setLoad] = useState<Load>({ state: "loading" });
   // 立てている場所。"" は先頭のボタン（既定の場所）
   const [busy, setBusy] = useState<string | null>(null);
@@ -37,10 +38,11 @@ export function NewHousePane({ disabled, onCreated, onError }: { disabled: boole
   // 開いたときと、窓が見えるようになったときに読み直す（places は ccn が10秒覚えるので、続けて読んでも走査し直さない）
   useEffect(() => { reload(); return onVisibleChange((v) => { if (v) reload(); }); }, [reload]);
 
-  const go = async (cwd: string | null) => {
-    setBusy(cwd ?? "");
+  const go = async (cwd: string | null, top = false) => {
+    setBusy(top ? "" : cwd);
     try { onCreated(await createHousehold(cwd)); reload(); }
-    catch (e) { onCreated(null); onError(`世帯を作れなかった: ${e}`); }
+    // 先頭のボタン（top）は設定の場所で立てるので、失敗の通知に設定の場所を添える。一覧の行は押した場所そのもの
+    catch (e) { onCreated(null); onError(placeFailure(top ? place : null, e)); }
     finally { setBusy(null); }
   };
   const off = disabled || busy !== null;
@@ -51,7 +53,7 @@ export function NewHousePane({ disabled, onCreated, onError }: { disabled: boole
         <span className="nh-title">新しい世帯</span>
       </div>
       <div className="nh-top">
-        <button className="pane-btn new-house nh-new" disabled={off} onClick={() => go(null)} title="~/Documents/meta で親を立てる">
+        <button className="pane-btn new-house nh-new" disabled={off} onClick={() => go(place, true)} title={`${place ? placeLabel(place) : DEFAULT_PLACE_LABEL} で親を立てる（場所は右上の設定で変えられる）`}>
           {busy === "" ? "立てている…" : "＋ 新しい世帯"}
         </button>
         {disabled && <p className="nh-note">別の町を見ている間は作れない。新しい世帯は、このMacの町にだけ作る</p>}

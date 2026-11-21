@@ -18,7 +18,10 @@
 //
 // 長い会話の試し（#10、#15）: FC_MOCK_CONV=1000 FC_MOCK_CONV_GROW_MS=5000 で、各セッションに 1000 件の会話があり、5秒ごとに1件増える
 
+import { existsSync } from "node:fs";
+
 const PORT = Number(process.env.FC_MOCK_PORT ?? 4399);
+const ROOTS = (process.env.FC_MOCK_ROOTS ?? "").split(",").filter(Boolean);
 const CMD = process.env.FC_MOCK_CMD === "claude" ? ["claude"] : ["bash", "--noprofile", "--norc", "-i"];
 const TAIL = 2 * 1024 * 1024;
 const CONV = Number(process.env.FC_MOCK_CONV ?? 0);
@@ -97,12 +100,18 @@ Bun.serve({
     const p = url.pathname.split("/").filter(Boolean);
     if (p[0] !== "api") return json({ error: "not found" }, 404);
     if (p[1] === "peers") return json([{ name: "mock", url: `http://127.0.0.1:${PORT}`, status: "healthy", self: true }]);
+    // FC_MOCK_ROOTS=/a,/b のとき、本物の ccn と同じ形で roots を返し、作成の cwd を roots の内側の存在するディレクトリだけにする（#92 の確認用）。無ければ今までどおり絞らない
+    if (p[1] === "host" && ROOTS.length) return json({ name: "mock", roots: ROOTS, lobby: null });
     if (p[1] !== "sessions") return json({ error: "not found" }, 404);
     const s = p[2] ? sessions.get(p[2]) : undefined;
     if (!p[2] && req.method === "GET") return json([...sessions.values()].map(summary));
     if (!p[2] && req.method === "POST") {
       const b = (await req.json()) as Record<string, unknown>;
       if (!b.terminal) return json({ error: "mock は terminal: true だけ" }, 400);
+      if (ROOTS.length && typeof b.cwd === "string") {
+        if (!ROOTS.some((r) => b.cwd === r || (b.cwd as string).startsWith(r + "/"))) return json({ error: "cwd is outside roots", roots: ROOTS }, 400);
+        if (!existsSync(b.cwd)) return json({ error: "cwd does not exist" }, 400);
+      }
       const from = req.headers.get("x-ccn-from");
       const n = start({ cwd: String(b.cwd ?? process.env.HOME), prompt: b.prompt as string | undefined, parent: from, name: b.name as string | undefined, cols: b.cols as number, rows: b.rows as number });
       return json({ ...summary(n), parent: from ?? "local" }, 201);

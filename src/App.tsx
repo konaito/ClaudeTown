@@ -18,8 +18,10 @@ import { reuseAgents, reuseSnap } from "./snap";
 import { kickTown, otherTownRetryMs, watchTown } from "./town";
 import { SucceedError, kidsOf, startSuccessor, succeedBlock } from "./succeed";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, usePanelRef, type Layout } from "react-resizable-panels";
-import { PanelLeftClose, PanelLeftOpen, Users, X } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen, Settings, Users, X } from "lucide-react";
 import { NewHousePane, createHousehold } from "./newHouse/NewHousePane";
+import { loadPlace, placeFailure, savePlace } from "./newHouse/placeSetting";
+import { SettingsDialog } from "./settings/SettingsDialog";
 import "./App.css";
 import "./mobile/mobile.css";
 import { MobileShell } from "./mobile/MobileShell";
@@ -502,6 +504,9 @@ export default function App() {
     if (hasSel && r.isCollapsed()) r.expand();
     else if (!hasSel && !r.isCollapsed()) r.collapse();
   }, [hasSel, mobile]);
+  // 設定（#92）。「＋ 新しい世帯」で親を立てる場所。null は既定（~/Documents/meta）
+  const [place, setPlace] = useState<string | null>(loadPlace);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const toggleHouses = () => { const r = housesRef.current; if (!r) return; if (r.isCollapsed()) r.expand(); else r.collapse(); };
 
   return (
@@ -521,7 +526,7 @@ export default function App() {
       <SplitGroup className="body" orientation="horizontal" defaultLayout={savedSplit()} onLayoutChanged={(l) => saveSplit(sideRef.current?.isCollapsed() ? keepSide(l, savedSplit()) : l)}>
         <SplitPanel id="houses" panelRef={housesRef} collapsible collapsedSize={0} defaultSize={HOUSES_DEFAULT} minSize={HOUSES_MIN} maxSize="30%"
           onResize={() => setHousesOpen(!housesRef.current?.isCollapsed())}>
-          <NewHousePane disabled={!local} onCreated={newHousehold} onError={(m) => toast(m, true)} />
+          <NewHousePane disabled={!local} place={place} onCreated={newHousehold} onError={(m) => toast(m, true)} />
         </SplitPanel>
         <Separator className={`split-handle${housesOpen ? "" : " closed"}`} />
         <SplitPanel id="town" minSize={TOWN_MIN}>
@@ -546,7 +551,9 @@ export default function App() {
               </select>
               <span className={`conn ${!snap?.ccn_ok ? "bad" : slow ? "slow" : "ok"}`} title={fail?.msg ?? ""}><i />{snap ? (!snap.ccn_ok ? "つながらない" : slow ? "つながりにくい" : "接続中") : "よみこみ中"}</span>
             </div>
-            <div className="top-right" />
+            <div className="top-right">
+              <button className="side-toggle" onClick={() => setSettingsOpen(true)} aria-label="設定" title="設定" aria-haspopup="dialog"><Settings size={18} strokeWidth={1.8} /></button>
+            </div>
           </header>
 
           {/* 世帯の要約。#89 でお便りの上へ移した（本人の指定） */}
@@ -573,8 +580,8 @@ export default function App() {
 
           {snap && agents.length === 0 && snap.ccn_ok && (
             <div className="empty">
-              <p>町にはまだ誰もいない。最初の世帯を作ると、右にチャットが開いてすぐ打てる（親は ~/Documents/meta で起動する）。</p>
-              <NewHousehold big disabled={!local} onCreated={newHousehold} onError={(m) => toast(m, true)} />
+              <p>町にはまだ誰もいない。最初の世帯を作ると、右にチャットが開いてすぐ打てる（親は {place ? place.replace(/^\/Users\/[^/]+/, "~") : "~/Documents/meta"} で起動する。設定で変えられる）。</p>
+              <NewHousehold big disabled={!local} place={place} onCreated={newHousehold} onError={(m) => toast(m, true)} />
             </div>
           )}
           <Stage zoom={zoom} onBlank={() => setSelected(null)} items={tree.families.map((f) => {
@@ -615,6 +622,8 @@ export default function App() {
         </SplitPanel>
       </SplitGroup>
       </>)}
+
+      {settingsOpen && <SettingsDialog place={place} onSave={(p) => { savePlace(p); setPlace(p); toast(p ? "新しい世帯の場所を変えた" : "新しい世帯の場所を既定に戻した"); }} onClose={() => setSettingsOpen(false)} />}
 
       {killAsk && (
         <KillConfirm agent={killAsk} descendants={countDesc(tree.childrenOf, killAsk.id)}
@@ -1468,14 +1477,14 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
 
 /** 町が空のときの「最初の世帯を作る」。最初の依頼の欄は出さず、すぐ ~/Documents/meta で親（端末のセッション）を立て、右のチャットを開く。
  *  ふだんの作る口は左の新しい世帯のペイン（#89、src/newHouse） */
-function NewHousehold({ big, disabled, onCreated, onError }: { big?: boolean; disabled?: boolean; onCreated: (r: any) => void; onError: (m: string) => void }) {
+function NewHousehold({ big, disabled, place, onCreated, onError }: { big?: boolean; disabled?: boolean; place: string | null; onCreated: (r: any) => void; onError: (m: string) => void }) {
   const [busy, setBusy] = useState(false);
   const go = async () => {
     setBusy(true);
     try {
       // 前に開いたターミナルの大きさで起動する。開いた直後に大きさを変えて、claude が全部描き直すのを省く（createHousehold の中）
-      onCreated(await createHousehold(null));
-    } catch (e) { onCreated(null); onError(`世帯を作れなかった: ${e}`); } finally { setBusy(false); }
+      onCreated(await createHousehold(place));
+    } catch (e) { onCreated(null); onError(placeFailure(place, e)); } finally { setBusy(false); }
   };
   return (
     <button className={big ? "primary new-house big" : "pane-btn new-house"} disabled={disabled || busy} onClick={go}>
