@@ -16,6 +16,8 @@ HOOK = Path(__file__).with_name("fc-report.py")
 SID = "0123abcd-0000-0000-0000-000000000001"
 SID2 = "0123abcd-0000-0000-0000-000000000002"
 CHILD_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+# in-process のチームメイトの印（2026-11-21 の実機の形。session_id はリードのもの）
+MATE = {"agent_id": "abeta-584d11236f35ece0", "agent_type": "beta"}
 
 # src/model.ts の Report。null を許すキーは NoneType も入れる。
 NONE = type(None)
@@ -209,6 +211,92 @@ class StateShape(HookCase):
             self.run_hook("SessionStart", env=env)
         self.run_hook("SessionStart", sid="../evil")
         self.assertFalse(self.state.exists())
+
+
+class TeammateInputs(HookCase):
+    """agent_id の付いた入力（in-process のチームメイトと sub-agent）は、リードの様子に混ぜない"""
+
+    def rested(self):
+        self.run_hook("UserPromptSubmit", prompt="依頼")
+        self.run_hook("PreToolUse", tool_name="Agent", tool_input={"description": "beta を呼ぶ", "name": "beta"})
+        self.run_hook("Stop", last_assistant_message="beta を呼んだ")
+        return self.read()
+
+    def test_tool_use_does_not_touch_lead(self):
+        before = self.rested()
+        tool = dict(tool_name="Bash", tool_input={"command": "touch beta.txt"}, **MATE)
+        self.run_hook("PreToolUse", **tool)
+        self.run_hook("PostToolUse", **tool)
+        self.run_hook("PostToolUseFailure", **tool)
+        self.run_hook("SubagentStop", last_assistant_message="終わった", **MATE)
+        self.run_hook("Stop", last_assistant_message="チームメイトの返事？", **MATE)
+        self.run_hook("UserPromptSubmit", prompt="チームメイトへの文", **MATE)
+        self.run_hook("Notification", notification_type="permission_prompt", message="x", **MATE)
+        st = self.read()
+        self.assertEqual(st, before)
+        self.assertEqual((st["phase"], st["doing"], st["tools"], st["said"]), ("resting", None, 1, "beta を呼んだ"))
+
+    def test_session_end_with_agent_id_keeps_lead_file(self):
+        self.rested()
+        self.run_hook("SessionEnd", **MATE)
+        self.assertTrue((self.state / f"{SID}.json").exists())
+
+    def test_permission_goes_to_lead_queue_and_back_to_resting(self):
+        self.rested()
+        tool = dict(tool_name="Bash", tool_input={"command": "touch beta.txt"})
+        self.run_hook("PreToolUse", **tool, **MATE)
+        self.run_hook("PermissionRequest", **tool, **MATE)
+        st = self.read()
+        self.check_report(st)
+        self.assertEqual((st["phase"], st["needs"], st["pending_count"]), ("needs_you", "承認待ち: コマンド: touch beta.txt", 1))
+        self.assertEqual(st["pending"]["tool"], "Bash")
+        self.assertIsNone(st["doing"])
+        self.assertEqual(st["tools"], 1)
+        # 承認の通知には agent_id が付かない（実機の形）
+        self.run_hook("Notification", notification_type="permission_prompt", message="Claude needs your permission")
+        self.run_hook("PostToolUse", **tool, **MATE)
+        st = self.read()
+        self.check_report(st)
+        self.assertEqual((st["phase"], st["needs"], st["pending_count"], st["pending"]), ("resting", None, 0, None))
+
+    def test_permission_during_lead_turn_returns_to_working(self):
+        self.run_hook("UserPromptSubmit", prompt="依頼")
+        self.run_hook("PreToolUse", tool_name="Read", tool_input={"file_path": "/a/b/c.ts"})
+        tool = dict(tool_name="Bash", tool_input={"command": "touch beta.txt"}, **MATE)
+        self.run_hook("PermissionRequest", **tool)
+        self.assertEqual(self.read()["phase"], "needs_you")
+        self.run_hook("PostToolUse", **tool)
+        st = self.read()
+        self.assertEqual((st["phase"], st["doing"], st["pending_count"]), ("working", "読む: b/c.ts", 0))
+
+    def test_other_items_stay_queued(self):
+        self.rested()
+        mine = dict(tool_name="Write", tool_input={"file_path": "/a/b.txt"})
+        mate = dict(tool_name="Bash", tool_input={"command": "touch beta.txt"}, **MATE)
+        self.run_hook("PermissionRequest", **mine)
+        self.run_hook("PermissionRequest", **mate)
+        self.assertEqual(self.read()["pending_count"], 2)
+        self.run_hook("PostToolUse", **mate)
+        st = self.read()
+        self.check_report(st)
+        self.assertEqual([x["tool"] for x in st["perm_queue"]], ["Write"])
+        self.assertEqual((st["phase"], st["needs"]), ("needs_you", "承認待ち: 書く: a/b.txt"))
+
+    def test_no_letters_or_made_child(self):
+        self.run_hook("SessionStart")
+        self.run_hook("PostToolUse", tool_name="SendMessage", tool_input={"to": "team-lead", "summary": "報告", "message": "x"},
+                      tool_response={"success": True}, **MATE)
+        self.run_hook("PostToolUse", tool_name="mcp__ccn__create_session", tool_input={"prompt": "x"},
+                      tool_response=json.dumps({"id": CHILD_ID}), **MATE)
+        self.run_hook("UserPromptSubmit", prompt='<cross-session-message from="abc">x</cross-session-message>', **MATE)
+        self.assertFalse(self.letters.exists())
+        self.assertNotIn("made_child", self.read())
+
+    def test_empty_agent_id_is_lead(self):
+        self.run_hook("UserPromptSubmit", prompt="a", agent_id="")
+        self.run_hook("PreToolUse", tool_name="Bash", tool_input={"command": "ls"}, agent_id=None, agent_type="general-purpose")
+        st = self.read()
+        self.assertEqual((st["doing"], st["tools"]), ("コマンド: ls", 1))
 
 
 class LettersShape(HookCase):

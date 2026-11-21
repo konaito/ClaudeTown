@@ -15,6 +15,11 @@ ccn から取れる状態は running / waiting_permission / idle の3つだけ�
   Stop              phase=resting か needs_you、said=最後の返事の1行目、next=次の一手
   SessionEnd        状態ファイルを消す
 
+in-process のチームメイトと sub-agent の入力は、session_id がリードのもので、agent_id が付いて届く。
+これはリードの様子ではないので、リードの状態ファイルにもお手紙にも書かない。例外は承認だけにする。
+チームメイトの承認の画面はリードの端末に出て、人はそこで答えるので、並び（perm_queue）には足して外す。
+tmux のチームメイトは自分の session_id で届き、agent_id は付かないので、ふつうのセッションと同じに書く。
+
 LLM は呼ばない。速さを優先し、どんな失敗でも何も出さずに 0 で終わる（本体の動きを止めない）。
 """
 import hashlib
@@ -282,6 +287,31 @@ def sweep():
             pass
 
 
+def from_agent(sid, ev, data):
+    """チームメイトか sub-agent の入力。承認の並びだけを触り、doing、tools、said、asked、お手紙には書かない。
+    2026-11-21 の実機（Claude Code 2.1.330、in-process）では、チームメイトの PermissionRequest と承認後の PostToolUse に
+    agent_id が付き、承認の Notification には付かなかった。承認の画面はリードの端末に出た"""
+    if ev == "PermissionRequest":
+        q = read_queue(sid)
+        item = perm_item(data.get("tool_name", ""), data.get("tool_input"))
+        if not any(x["id"] == item["id"] for x in q):
+            q.append(item)
+        write_queue(sid, q, data, phase="needs_you", needs=f"承認待ち: {item['summary']}")
+    elif ev in ("PostToolUse", "PostToolUseFailure"):
+        # 並びに無い道具（承認の要らなかった道具）では何も書かない
+        done_id = perm_item(data.get("tool_name", ""), data.get("tool_input"))["id"]
+        q = read_queue(sid)
+        rest = [x for x in q if x["id"] != done_id]
+        if len(rest) == len(q):
+            return
+        if rest:
+            write_queue(sid, rest, data, phase="needs_you", needs=f"承認待ち: {rest[0]['summary']}")
+        else:
+            # 並びが空になったら、リードの番の途中（doing がある）なら working、番の外なら resting に戻す。
+            # リードは自分の番の間は doing を必ず持ち、Stop と SessionStart で None にする
+            write_queue(sid, rest, data, phase="working" if cur_field(sid, "doing") else "resting", needs=None)
+
+
 def main():
     # close-check などの裏方の claude -p は数えない
     if os.environ.get("CLOSE_CHECK_CHILD") or os.environ.get("FC_REPORT_OFF"):
@@ -291,6 +321,10 @@ def main():
     if not sid or not re.fullmatch(r"[0-9a-fA-F-]{8,64}", sid):
         return
     ev = data.get("hook_event_name") or (sys.argv[1] if len(sys.argv) > 1 else "")
+    agent = data.get("agent_id")
+    if isinstance(agent, str) and agent:
+        from_agent(sid, ev, data)
+        return
 
     if ev == "UserPromptSubmit":
         prompt = data.get("prompt") or ""
