@@ -589,6 +589,24 @@ pub(crate) fn send_message(session_id: String, text: String, peer: Option<String
     ccn::post_message(&peer, &session_id, &text)
 }
 
+/// 画面から呼ぶ命令の包み。中身の関数は上にある。待つ命令は blocking で別のスレッドへ出す
+pub(crate) mod cmd {
+    use super::*;
+
+    #[tauri::command]
+    pub async fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<super::ConvDelta, String> {
+        blocking(move || super::conversation(session_id, peer, since)).await
+    }
+    #[tauri::command]
+    pub async fn conversation_cache(session_id: String, peer: Option<String>) -> Result<Option<super::offline::ConvCache>, String> {
+        blocking(move || Ok(super::conversation_cache(session_id, peer))).await
+    }
+    #[tauri::command]
+    pub async fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
+        blocking(move || super::send_message(session_id, text, peer)).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
