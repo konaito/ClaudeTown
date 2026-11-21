@@ -44,10 +44,13 @@ export type Flight = {
 export const PAIR_BEFORE_MS = 2_000;
 export const PAIR_AFTER_MS = 10 * 60_000;
 
+/** 宛先や送り手の文字列から、末尾の [ref] を外したもの */
+const bare = (raw: string) => raw.trim().replace(/\s*\[[^\]]*\]$/, "");
+
 /** 宛先や送り手の文字列を、この町のセッション ID に結び付ける。1人に決まらなければ null */
 export function resolve(raw: string | null | undefined, agents: Agent[]): string | null {
   if (!raw) return null;
-  const s = raw.trim().replace(/\s*\[[^\]]*\]$/, "");
+  const s = bare(raw);
   const one = (xs: Agent[]) => (xs.length === 1 ? xs[0].id : null);
   const pid = s.match(/^uds:.*\/(\d+)\.sock$/);
   if (pid) return one(agents.filter((a) => a.pid === Number(pid[1])));
@@ -57,6 +60,54 @@ export function resolve(raw: string | null | undefined, agents: Agent[]): string
     if (hit) return hit;
   }
   return one(agents.filter((a) => a.name === s));
+}
+
+/**
+ * agent teams の相手を、会話を開いているセッション（me）のチームの中で引く。チームの形でなければ undefined（resolve に任せる）。
+ * チームメイトの受信文は conv.rs が from="teammate:<名前>" に直す。teammate の名前は町の一覧の名前と同じ（meta.json の name）。
+ * 別のチームに同じ名前がいることがあるので、町の全員からは引かない:
+ *   team-lead → me の親（リードのセッション）。町でのリードの名前はプロジェクトの名前なので、名前では引けない
+ *   それ以外 → リードの子（sub-agent）のうち名前が一致する1人。リードは、me が sub-agent なら me の親、そうでなければ me 自身
+ * sub-agent が SendMessage に書く宛先の main と team-lead も、親を指す。teammate は両方を使う
+ * （2026-11-21 に ~/.claude/projects の teammate の記録で数えた。main が463件、team-lead が343件）。
+ * teammate: の形で、チームの中に1人に決まらなければ null（町の全員から名前で引くと、別のチームの同名に結ぶ）
+ */
+/**
+ * Claude Code の記録から読んだ sub-agent か teammate か。いまの一覧は teammate も kind: "subagent" で出す。
+ * チームメイトを kind: "teammate" で出す版（ccn を外す作業のブランチ）でも引けるように、両方を受ける
+ */
+const SUB_KINDS: readonly string[] = ["subagent", "teammate"];
+const isSub = (a: Agent) => SUB_KINDS.includes(a.kind);
+
+function resolveTeam(raw: string, me: Agent, agents: Agent[]): string | null | undefined {
+  const s = bare(raw);
+  const tagged = s.startsWith("teammate:");
+  const name = tagged ? s.slice("teammate:".length) : s;
+  const sub = isSub(me);
+  if (name === "team-lead" || (!tagged && name === "main")) {
+    if (sub && me.parent) return agents.some((a) => a.id === me.parent) ? me.parent : null;
+    return tagged ? null : undefined;
+  }
+  const lead = sub ? me.parent : me.id;
+  const hit = agents.filter((a) => isSub(a) && a.parent === lead && a.name === name);
+  if (hit.length === 1) return hit[0].id;
+  return tagged ? null : undefined;
+}
+
+/**
+ * お手紙の相手（受けた文の送り手か、送った文の宛先）を、会話を開いているセッション（me）を起点に、この町のセッション ID に結び付ける。
+ * 生の値、"<ノード>/<sid8>" の sid8、名前の順に引く。生の値と名前は、先にチームの中で引き（resolveTeam）、チームの形でなければ resolve で引く。
+ * 生の値が teammate: の形なら、チームの中だけで引く
+ */
+export function resolvePeer(raw: string | null | undefined, name: string | null | undefined, me: Agent, agents: Agent[]): string | null {
+  if (raw && bare(raw).startsWith("teammate:")) return resolveTeam(raw, me, agents) ?? null;
+  const one = (x: string | null | undefined): string | null => {
+    if (!x) return null;
+    const team = resolveTeam(x, me, agents);
+    return team !== undefined ? team : resolve(x, agents);
+  };
+  const sid8 = raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? null;
+  return one(raw) ?? resolve(sid8, agents) ?? one(name);
 }
 
 /** 記録の並びから、飛ばす封筒の一覧を作る（古い順） */

@@ -5,7 +5,7 @@ import { lastTermSize } from "./term/size";
 import { perfEnd, perfMark, perfStart, perfWaitingPrompt } from "./term/perf";
 import { useBench } from "./term/bench";
 import { collectMail, type Mail } from "./mail";
-import { flightsOf, resolve, type Flight } from "./letters";
+import { flightsOf, resolvePeer, type Flight } from "./letters";
 import { withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Composer } from "./composer/Composer";
@@ -102,6 +102,8 @@ const LEGEND: Mood[] = ["working", "reply", "approval", "done", "idle"];
 
 /** いま見ている町のセッション（お手紙の送り手の名前を引くため） */
 const TownCtx = createContext<Agent[]>([]);
+/** 町の木（転出のゴーストを含む）での世代の深さ。根が0。お手紙の相手の顔を、町と同じ役割（親、子、孫）で描くため */
+const DepthCtx = createContext<(id: string) => number | null>(() => null);
 /** 封筒の印（💌）を頭に出しているセッション */
 const LetterCtx = createContext<Set<string>>(new Set());
 /** 閉じる操作と演出の状態。カードの 🐺 と、倒れる演出が読む */
@@ -288,6 +290,7 @@ export default function App() {
     // 根が転出のゴーストなら、相手の町にいる本物の ID で引く。親の町と子の町で系統をそろえるため
     rootOf: (id: string) => { const t = treeRef.current; const a = t.byId.get(id); const r = a ? t.lineage(a)[0] : null; return r ? r.ghost?.realId ?? r.id : id; },
   }), [skin, shape]);
+  const depthOf = useMemo(() => (id: string) => { const t = treeRef.current; const a = t.byId.get(id); return a ? t.lineage(a).length - 1 : null; }, [shape]);
   /** ゴーストを押したら、本物がいる町に切り替えてその子を選ぶ */
   const pick = useCallback((a: Agent) => {
     if (!a.ghost) { setSelected(a.id); return; }
@@ -518,7 +521,7 @@ export default function App() {
     <SucceedCtx.Provider value={succeedCtx}>
     <SendCtx.Provider value={cardSend}>
     <LetterCtx.Provider value={letterMarks.marks}>
-    <TownCtx.Provider value={agents}>
+    <TownCtx.Provider value={agents}><DepthCtx.Provider value={depthOf}>
     <div className={`app${mobile ? " mobile" : ""}`} onContextMenu={(e) => e.preventDefault()}>
       {mobile ? (
         <MobileShell tree={tree} peers={peers} peer={peer} selfName={selfName} snap={snap} err={err} conn={connView} counts={counts} total={agents.length}
@@ -646,7 +649,7 @@ export default function App() {
       </div>
       <div className="letters-layer" ref={letterMarks.layer} aria-hidden />
     </div>
-    </TownCtx.Provider>
+    </DepthCtx.Provider></TownCtx.Provider>
     </LetterCtx.Provider>
     </SendCtx.Provider>
     </SucceedCtx.Provider>
@@ -1689,7 +1692,7 @@ type BubbleProps = { item: Shown; agent: Agent; lineageDepth: number };
 const Bubble = memo(BubbleView, (a: BubbleProps, b: BubbleProps) =>
   (a.item === b.item || (a.item.n != null && a.item.n === b.item.n && a.item.more === b.item.more && a.item.done === b.item.done && a.item.text === b.item.text && a.item.pending === b.item.pending))
   && a.lineageDepth === b.lineageDepth
-  && a.agent.id === b.agent.id && a.agent.name === b.agent.name && a.agent.cwd === b.agent.cwd
+  && a.agent.id === b.agent.id && a.agent.name === b.agent.name && a.agent.cwd === b.agent.cwd && a.agent.parent === b.agent.parent
   && a.agent.avatar?.char === b.agent.avatar?.char && a.agent.avatar?.hue === b.agent.avatar?.hue);
 
 /**
@@ -1722,7 +1725,7 @@ function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
   if (item.role === "tool") return <ToolLine item={item} />;
   if (item.role === "event") return <div className={`turn-event te-${item.kind ?? "error"}`}>{item.kind === "interrupted" ? "⏹ " : item.kind === "command" ? "" : "⚠️ "}{item.text}<span className="te-at">{timeOf(item.at)}</span></div>;
   if (item.role === "result") return null;
-  if (item.role === "user" && item.letter) return <LetterBubble item={item} />;
+  if (item.role === "user" && item.letter) return <LetterBubble item={item} agent={agent} />;
   if (item.role === "user") {
     const who = item.from ? fromLabel(item.from) : null;
     return (
@@ -1743,29 +1746,37 @@ function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
   );
 }
 
-/** お手紙の相手（送り手か宛先）を町の一覧から引く。見つからなければ null */
-function useLetterPeer(raw: string | null | undefined, name?: string | null): Agent | null {
+/**
+ * お手紙の相手（送り手か宛先）を、会話を開いているセッション（me）を起点に町の一覧から引く（src/letters.ts の resolvePeer）。
+ * 役割は町の木の深さで決める。見つからなければ null
+ */
+function useLetterPeer(raw: string | null | undefined, name: string | null | undefined, me: Agent): { who: Agent; role: Role } | null {
   const town = useContext(TownCtx);
-  const sid8 = raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? null;
-  const id = resolve(raw, town) ?? resolve(sid8, town) ?? resolve(name, town);
-  return (id && town.find((a) => a.id === id)) || null;
+  const depthOf = useContext(DepthCtx);
+  const id = resolvePeer(raw, name, me, town);
+  const who = (id && town.find((a) => a.id === id)) || null;
+  if (!who) return null;
+  const depth = depthOf(who.id);
+  return { who, role: depth != null ? roleOf(depth) : who.parent ? "child" : "parent" };
 }
 
 /**
  * 受け取ったお手紙。並びは普通の発言と同じ（顔、名前と時刻、吹き出し）で、吹き出しの色だけ肌色にする（2026-11-12 本人の指示）。
- * 顔は送り手のキャラ（町と同じ絵）。送り手が町にいなければ、名前から決まる仮の顔
+ * 顔は送り手のキャラ（町と同じ絵と役割）。チームメイトの文の team-lead は、このセッションの親（リード）の顔になる。
+ * 送り手が町にいなければ、名前から決まる仮の顔
  */
-function LetterBubble({ item }: { item: ConvItem }) {
+function LetterBubble({ item, agent }: { item: ConvItem; agent: Agent }) {
   const raw = item.letter?.fromRaw ?? null;
-  const who = useLetterPeer(raw, item.letter?.fromName);
+  const peer = useLetterPeer(raw, item.letter?.fromName, agent);
+  const who = peer?.who;
   const name = who?.name ?? item.letter?.fromName ?? raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? "別のセッション";
-  return <LetterView pick={who?.avatar} seed={who?.id ?? name} role={who?.parent ? "child" : "parent"} name={name} at={item.at} text={item.text} />;
+  return <LetterView pick={who?.avatar} seed={who?.id ?? name} role={peer?.role ?? "parent"} name={name} at={item.at} text={item.text} />;
 }
 
 /** 送ったお手紙。このセッション自身の発言として出し、名前の行に宛先（→ 名前）を添える。吹き出しは肌色 */
 function SentLetter({ item, agent, lineageDepth }: { item: ConvItem; agent: Agent; lineageDepth: number }) {
   const s = item.sent!;
-  const who = useLetterPeer(s.to ?? null, s.to ?? null);
+  const who = useLetterPeer(s.to ?? null, s.to ?? null, agent)?.who;
   const to = s.create ? "新しい子" : who?.name ?? (s.to ? String(s.to).replace(/^uds:.*\/(\d+)\.sock$/, "pid $1") : "相手");
   return <LetterView pick={agent.avatar} seed={agent.id} role={roleOf(lineageDepth)} name={agent.name} to={`→ ${to}${s.peer ? `（${s.peer}）` : ""}`} at={item.at} text={s.text || s.summary || ""} />;
 }
