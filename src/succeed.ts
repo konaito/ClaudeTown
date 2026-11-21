@@ -18,6 +18,7 @@
 // - 新しい ccn の断り方: 409 code: no_account（nextAvailable は { account, at（ms） } か null）、502 code: successor_failed（reason）、
 //   409 code: already_succeeded（successor）。どれも前任と子には触らない
 import type { Agent } from "./model";
+import { canStop } from "./abilities";
 
 /** 古い ccn で、後継が1通目を受け取るのを待つ上限（ms）。落ちる後継は 5.7 秒で落ちたので、その3倍より長く待つ */
 export const SUCCEED_WAIT_MS = 20000;
@@ -37,7 +38,7 @@ export type Kid = { name: string; id: string; town?: string };
 export function succeedBlock(a: Agent, local: boolean): string | null {
   if (!local) return "別の機械のセッションの引き継ぎは、まだ出していない";
   if (a.ghost) return "別の町にいるセッションは、その町で引き継ぐ";
-  if (!a.capabilities?.stop) return "ccn から止められないセッションは引き継げない（前任を止められない）";
+  if (!canStop(a)) return "ccn から止められないセッションは引き継げない（前任を止められない）";
   if (a.state !== "idle") return "作業中か承認待ちのセッションは引き継げない。待機になってから引き継ぐ";
   // 親が転出のゴーストだと、親の ID は相手の町のもの。手元のノードの名前で親を名乗ると、木がつながらない
   if (a.parent?.startsWith("ghost:")) return "親が別の町にいるセッションの引き継ぎは、まだ出していない";

@@ -4,6 +4,7 @@ import type { Agent, buildTree } from "../model";
 import { lastTermSize } from "../term/size";
 import { kickTown } from "../town";
 import { SucceedError, kidsOf, startSuccessor, succeedBlock } from "../succeed";
+import { NEW_HOUSE_CAPS } from "../abilities";
 
 type Tree = ReturnType<typeof buildTree>;
 
@@ -46,7 +47,7 @@ export function useSucceed(h: {
       const show = (term: boolean) => {
         setFresh({
           id: r.id, name: a.name, kind: "terminal", state: "running", cwd: r.cwd, canSend: true, parent: a.parent,
-          startedAt: Date.now(), capabilities: { terminal: true, send: true, stop: true },
+          startedAt: Date.now(), capabilities: NEW_HOUSE_CAPS,
         });
         setSelected(r.id);
         if (term) setTermReq((n) => n + 1);
