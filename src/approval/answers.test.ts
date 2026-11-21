@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { answerText } from "./answers";
+import { answerText, openPlan } from "./answers";
 
 describe("answerText", () => {
   const one = { question: "色は？", options: [{ label: "赤" }, { label: "青" }] };
@@ -13,5 +13,15 @@ describe("answerText", () => {
     expect(answerText(many, { picked: ["赤", "青"], other: "" })).toBe("赤, 青");
     expect(answerText(many, { picked: ["青"], other: "紫" })).toBe("青, 紫");
     expect(answerText(many, { picked: [], other: "" })).toBe("");
+  });
+});
+
+describe("openPlan", () => {
+  test("答えていない最後の計画だけを返す", () => {
+    expect(openPlan([{ role: "tool", id: "a", plan: "古い", result: { text: "x", error: true } }])).toBeNull();
+    expect(openPlan([{ role: "tool", id: "a", plan: "古い" }, { role: "result", id: "a" }])).toBeNull();
+    expect(openPlan([{ role: "tool", id: "a", plan: "古い", result: {} }, { role: "user" }, { role: "tool", id: "b", plan: "新しい" }])).toBe("新しい");
+    expect(openPlan([{ role: "tool", id: "b", plan: "今の" }, { role: "tool", id: "c" }])).toBe("今の");
+    expect(openPlan([])).toBeNull();
   });
 });

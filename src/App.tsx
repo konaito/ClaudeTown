@@ -10,6 +10,7 @@ import { withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Composer } from "./composer/Composer";
 import { Approval } from "./approval/Approval";
+import { openPlan } from "./approval/answers";
 import { BUILTINS, opensDialog } from "./composer/commands";
 import { isSlashCommand } from "./composer/edit";
 import { isVisible, onVisibleChange, pollBackoff, pollWhileVisible, shownAt } from "./visible";
@@ -1270,8 +1271,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   const shown = useMemo(() => collapseTools(withResults([...items, ...pending])), [items, pending]);
   // 保存した履歴の印が出ているか。出ている間は中身の上に余白を足す（下の has-note）
   const hasNote = shown.length > 0 && !!(convErr || cachedAt);
-  // 会話の最後の計画（ExitPlanMode の本文）。承認の hook の入力が空のとき、承認の欄に出す（#83）
-  const lastPlan = useMemo(() => [...items].reverse().find((x) => x.role === "tool" && x.plan)?.plan ?? null, [items]);
+  // 会話の最後のまだ答えていない計画（ExitPlanMode の本文）。承認の hook の入力が空のとき、承認の欄に出す（#83）
+  const lastPlan = useMemo(() => openPlan(items), [items]);
   const lastChoices = useMemo(() => {
     const lastAssistant = [...items].reverse().find((x) => x.role === "assistant");
     const lastIsAssistant = items.filter((x) => x.role === "user" || x.role === "assistant").slice(-1)[0]?.role === "assistant";

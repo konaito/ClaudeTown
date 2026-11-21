@@ -140,6 +140,11 @@ export function simplify(raw: J): Omit<ConvItem, "n">[] {
       if (body) out.push({ role: "user", text: body, from: null, at, letter: { fromName: attr("from-name"), fromRaw: attr("from") } });
       return out;
     }
+    // 止めたときに claude が書く印。吹き出しにせず、止めた印にする（Rust の simplify と同じ）
+    if (text.startsWith("[Request interrupted by user")) {
+      out.push({ role: "event", kind: "interrupted", text: "ここで止めた", at });
+      return out;
+    }
     // 道具の結果だけの user、hook やシステムの差し込み（<...> で始まる）は出さない
     if (!text || text.startsWith("<") || text.startsWith("Caveat:")) return out;
     // 別のセッションからの文は1行目が from 行。端末に貼った画像のパスは先頭に [Image #3] が付き、from 行はその後ろに回る
@@ -209,6 +214,9 @@ async function readMessages(fetchPage: (after: number) => Promise<MessagesPage>,
 function push(s: ConvState, fresh: Omit<ConvItem, "n">[]) {
   const start = s.total;
   for (const x of fresh) {
+    // 止めた印の直後の印は重ねない（Rust の Conv::push と同じ）
+    const last = s.items[s.items.length - 1];
+    if (x.role === "event" && last?.role === "event" && last.kind === "interrupted") continue;
     // 道具の結果は持っている道具の行に付ける。前に渡した道具の行の結果だけ result の項目で送る（Rust の Conv::push と同じ）
     if (x.role === "result") {
       let t: ConvItem | undefined;
