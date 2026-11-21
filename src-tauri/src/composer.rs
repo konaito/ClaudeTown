@@ -8,6 +8,7 @@
 //
 // 手元のファイルを読む命令（履歴、スキル、ファイル）は、この機械のセッションにだけ使う。別の機械の分は ccn の口が無いので返さない。
 
+use super::ccn;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -369,17 +370,10 @@ pub fn send_direct(session_id: String, text: String, peer: Option<String>) -> Re
         return Err("文が空".into());
     }
     let peer = peer.filter(|p| !p.is_empty());
-    let base = super::api(&peer);
-    let d = super::get_json(&format!("{base}/sessions/{session_id}"))?;
+    let d = ccn::session(&peer, &session_id)?;
     check_direct(&d, super::now_ms() as u64)?;
-    let url = format!("{base}/sessions/{session_id}/terminal/input");
     let post = |t: &str| {
-        super::agent()
-            .post(&url)
-            .timeout(Duration::from_secs(5))
-            .send_json(json!({ "text": t }))
-            .map(|_| ())
-            .map_err(|e| format!("ターミナルに書けなかった: {e}"))
+        ccn::post_terminal(&peer, &session_id, "input", json!({ "text": t })).map_err(|e| format!("ターミナルに書けなかった: {e}"))
     };
     post(&format!("\x1b[200~{}\x1b[201~", paste_body(&text)))?;
     // ccn の PTY の send と同じく、貼り付けと Enter の間を空ける（pasteDelayMs の既定 150ms）
@@ -418,11 +412,7 @@ pub fn interrupt_session(session_id: String, peer: Option<String>) -> Result<(),
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
     }
     let peer = peer.filter(|p| !p.is_empty());
-    super::agent()
-        .post(&format!("{}/sessions/{session_id}/interrupt", super::api(&peer)))
-        .send_json(json!({}))
-        .map(|_| ())
-        .map_err(|e| format!("止められなかった: {e}"))
+    ccn::interrupt(&peer, &session_id)
 }
 
 // ---------- モデル、権限モード、組み込みコマンド（#97） ----------
@@ -430,26 +420,13 @@ pub fn interrupt_session(session_id: String, peer: Option<String>) -> Result<(),
 // 断られたときの扱い（409 busy、502 restart_failed など）は画面（src/session/control.ts）が status と code で決めるので、
 // HTTP の応答は status と本文をそのまま返す（{ status, body }）。Err はノードに届かなかったときだけ。
 
-/// ccn に1回要求を出し、HTTP の応答なら状態コードと本文（JSON でなければ文字列）を返す
-fn ccn_request(method: &str, url: &str, body: Value, timeout: Duration) -> Result<Value, String> {
-    let res = super::agent().request(method, url).timeout(timeout).send_json(body);
-    let (status, r) = match res {
-        Ok(r) => (r.status(), r),
-        Err(ureq::Error::Status(code, r)) => (code, r),
-        Err(e) => return Err(format!("ccn に届かない: {e}")),
-    };
-    let text = r.into_string().unwrap_or_default();
-    let body = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
-    Ok(json!({ "status": status, "body": body }))
-}
-
 /// このセッションのノードに、モデルの切り替えと組み込みコマンドの口があるか。
 /// ccn に能力の印は無いので、空の文で command の口を叩く。新しいノードは実行の前に 400（code: not_command）で断り、
 /// 古いノードは口が無いので 404 を返す（2026-11-21、本番の 4323 で実測）。古いノードの PATCH は permissionMode だけを受け、
 /// model を黙って無視して 200 を返すので、PATCH では見分けない。PR #65（PATCH）と #66（command）は同じ日に入ったので、片方だけを見る
 pub fn session_controls(session_id: String, peer: Option<String>) -> Result<Value, String> {
     let peer = peer.filter(|p| !p.is_empty());
-    ccn_request("POST", &format!("{}/sessions/{session_id}/command", super::api(&peer)), json!({ "text": "" }), Duration::from_secs(8))
+    ccn::command(&peer, &session_id, "", Duration::from_secs(8))
 }
 
 /// モデルと権限モードを替える（PATCH /api/sessions/<id>）。pty は claude を起動し直すので（実測 2.9 秒）、待ち時間を長くとる
@@ -464,7 +441,7 @@ pub fn configure_session(session_id: String, model: Option<String>, permission_m
     if body.is_empty() {
         return Err("替えるものが無い".into());
     }
-    ccn_request("PATCH", &format!("{}/sessions/{session_id}", super::api(&peer)), Value::Object(body), Duration::from_secs(30))
+    ccn::patch_session(&peer, &session_id, Value::Object(body), Duration::from_secs(30))
 }
 
 /// 組み込みコマンドを from 行なしで送る（POST /api/sessions/<id>/command）。応答は { delivered }。出力は会話の合成の行で届く
@@ -476,7 +453,7 @@ pub fn run_command(session_id: String, text: String, peer: Option<String>) -> Re
         return Err("/ で始まる文だけを送る".into());
     }
     let peer = peer.filter(|p| !p.is_empty());
-    ccn_request("POST", &format!("{}/sessions/{session_id}/command", super::api(&peer)), json!({ "text": text }), Duration::from_secs(15))
+    ccn::command(&peer, &session_id, &text, Duration::from_secs(15))
 }
 
 #[cfg(test)]

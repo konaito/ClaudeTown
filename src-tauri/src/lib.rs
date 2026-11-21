@@ -13,6 +13,7 @@
 // 別の機械（peer）は手元のノードの中継 /n/<peer>/api/... を通す。
 
 mod attach;
+mod ccn;
 mod avatars;
 mod composer;
 mod naming;
@@ -124,50 +125,6 @@ fn read_json_cached(p: &std::path::Path) -> Option<Value> {
     let v = read_json(&p.to_path_buf());
     cache.lock().unwrap_or_else(|e| e.into_inner()).insert(p.to_path_buf(), (st, v.clone()));
     v
-}
-
-/// 手元の ccn ノードの入口。ccn.json の port を読む（README は 4322、実機は 4323 なので固定しない）。
-fn ccn_base() -> String {
-    if let Ok(u) = std::env::var("FC_CCN_URL") {
-        return u.trim_end_matches('/').to_string();
-    }
-    for rel in [".config/ccn/ccn.json", ".config/cc/cc.json"] {
-        if let Some(port) = read_json_cached(&home().join(rel)).and_then(|v| v.get("port").and_then(|p| p.as_u64())) {
-            return format!("http://127.0.0.1:{port}");
-        }
-    }
-    "http://127.0.0.1:4322".into()
-}
-
-fn api(peer: &Option<String>) -> String {
-    let base = ccn_base();
-    match peer.as_deref().filter(|p| !p.is_empty()) {
-        Some(p) => format!("{base}/n/{p}/api"),
-        None => format!("{base}/api"),
-    }
-}
-
-/// ccn への HTTP。接続を使い回すため、1つの Agent を全部の命令で共有する（呼ぶたびに作ると、毎回つなぎ直す）
-fn agent() -> &'static ureq::Agent {
-    static A: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
-    A.get_or_init(|| ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(3)).timeout(Duration::from_secs(8)).build())
-}
-
-/// 一覧（snapshot、peers）の時間切れ。別の機械への中継は実測 0.42〜0.46 秒（2026-11-12）。
-/// 3秒にしたら、ノードが一瞬詰まった回（/api/sessions が最大 1.4 秒、2026-11-12 の meta-9d の実測）で取りこぼし、町が空になった。
-/// 命令は非同期で画面を止めず、画面は前の回が終わるまで次を始めないので、長めの5秒にする
-const LIST_TIMEOUT: Duration = Duration::from_secs(5);
-
-fn get_json(url: &str) -> Result<Value, String> {
-    get_json_t(url, Duration::from_secs(8))
-}
-
-fn get_json_t(url: &str, timeout: Duration) -> Result<Value, String> {
-    match agent().get(url).timeout(timeout).call() {
-        Ok(r) => r.into_json::<Value>().map_err(|e| format!("応答を読めなかった: {e}")),
-        Err(ureq::Error::Status(code, r)) => Err(format!("ccn が {code} を返した: {}", r.into_string().unwrap_or_default())),
-        Err(e) => Err(format!("ccn につながらない（{url}）: {e}")),
-    }
 }
 
 fn now_ms() -> u128 {
@@ -290,7 +247,7 @@ fn letters_from(path: &std::path::Path, now: u128, tail: &mut Option<LetterTail>
 /// 読めたら保存し、読めなければ保存した一覧を返す（別の機械の status は "cached" にして、裏で取りに行かせない）
 fn peers() -> Result<Value, String> {
     let file = offline::peers_file(&cache_dir());
-    match get_json_t(&format!("{}/api/peers", ccn_base()), LIST_TIMEOUT) {
+    match ccn::peers() {
         Ok(v) => {
             if v.as_array().is_some_and(|a| !a.is_empty()) && offline::read(&file).map(|c| c["peers"] != v).unwrap_or(true) {
                 let _ = offline::write(&file, json!({ "peers": v }));
@@ -372,7 +329,7 @@ fn fetch_agents(peer: &Option<String>) -> (Vec<Value>, Option<String>) {
 
 /// ccn の一覧（GET /sessions）。読めなければ理由
 fn list_sessions(peer: &Option<String>) -> Result<Vec<Value>, String> {
-    match get_json_t(&format!("{}/sessions", api(peer)), LIST_TIMEOUT) {
+    match ccn::sessions(peer) {
         Ok(Value::Array(v)) => Ok(v),
         Ok(_) => Err("一覧の形が想定と違う".into()),
         Err(e) => Err(e),
@@ -548,7 +505,7 @@ fn snapshot_from(peer: Option<String>, got: Result<Vec<Value>, String>) -> Snaps
         cached_at = c["savedAt"].as_u64();
     }
     let sources = if peer.is_none() { LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner()).clone() } else { None };
-    Snapshot { ccn: ccn_base(), peer, ccn_ok: ccn_error.is_none(), ccn_error, agents, letters, fetched_at: now_ms(), cached_at, sources }
+    Snapshot { ccn: ccn::base(), peer, ccn_ok: ccn_error.is_none(), ccn_error, agents, letters, fetched_at: now_ms(), cached_at, sources }
 }
 
 static AVATARS_LOCK: Mutex<()> = Mutex::new(());
@@ -1065,7 +1022,7 @@ fn read_messages(peer: &Option<String>, session_id: &str, start: u64) -> Result<
     let mut evs = vec![];
     let mut epoch = None;
     for page in 0..20 {
-        let v = get_json(&format!("{}/sessions/{session_id}/messages?after={next}", api(peer)))?;
+        let v = ccn::messages(peer, session_id, next)?;
         let e = v["epoch"].as_str().map(String::from);
         if page == 0 {
             epoch = e;
@@ -1174,14 +1131,7 @@ fn send_message(session_id: String, text: String, peer: Option<String>) -> Resul
         return Err("文が空".into());
     }
     let peer = peer.filter(|p| !p.is_empty());
-    match agent()
-        .post(&format!("{}/sessions/{session_id}/messages", api(&peer)))
-        .send_json(json!({ "text": text }))
-    {
-        Ok(r) => Ok(r.into_string().unwrap_or_default()),
-        Err(ureq::Error::Status(code, r)) => Err(format!("ccn が {code} を返した: {}", r.into_string().unwrap_or_default())),
-        Err(e) => Err(format!("ccn に届かない: {e}")),
-    }
+    ccn::post_message(&peer, &session_id, &text)
 }
 
 // ---------- 承認 ----------
@@ -1201,8 +1151,7 @@ fn answer_permission(session_id: String, choice: String, expect_id: Option<Strin
         return Err("choice は allow か deny".into());
     }
     let peer = peer.filter(|p| !p.is_empty());
-    let base = api(&peer);
-    let detail = get_json(&format!("{base}/sessions/{session_id}"))?;
+    let detail = ccn::session(&peer, &session_id)?;
     if detail["state"].as_str() != Some("waiting_permission") {
         return Err("もう承認待ちではない（ほかで答えたか、終わった）".into());
     }
@@ -1213,10 +1162,7 @@ fn answer_permission(session_id: String, choice: String, expect_id: Option<Strin
     let first = pending.first().ok_or("ccn に承認の要求が見当たらない")?;
     let req = first["requestId"].as_str().ok_or("承認の要求に requestId が無い")?.to_string();
     let (body, done) = permission_body(first, &choice, expect_id.as_deref(), answers.as_ref(), message.as_deref(), suggestion)?;
-    agent()
-        .post(&format!("{base}/sessions/{session_id}/permissions/{req}"))
-        .send_json(body)
-        .map_err(|e| format!("ccn に答えを届けられなかった: {e}"))?;
+    ccn::post_permission(&peer, &session_id, &req, body)?;
     Ok(done)
 }
 
@@ -1291,10 +1237,6 @@ fn permission_body(first: &Value, choice: &str, expect_id: Option<&str>, answers
 
 // ---------- 作る・止める・転出 ----------
 
-/// 付け直し（resume）の作成を待つ上限。ccn は `cam usage`（上限5秒）と `cam sync`（上限5秒）の後に claude を起動する。
-/// 引き継ぎでは、さらに後継の起動の印（上限10秒）と前任の停止を待ってから応答する
-const RESUME_TIMEOUT: Duration = Duration::from_secs(45);
-
 /// この機械のノード名（~/.config/ccn/ccn.json の name）。親を名乗るヘッダに使う
 fn node_name() -> String {
     for rel in [".config/ccn/ccn.json", ".config/cc/cc.json"] {
@@ -1340,36 +1282,15 @@ fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<St
     let body = create_body(cwd, prompt, name, cols, rows, resume, fork, succeed);
     // 親を名乗る。一覧の parent に agent:<ノード>/<親の sid 先頭8>/town が入り、木がつながる
     let from = parent.filter(|p| !p.is_empty()).map(|pid| format!("agent:{}/{}/town", node_name(), &pid[..8.min(pid.len())]));
-    post_create(&format!("{}/sessions", api(&peer)), body, from)
-}
-
-/// 作成の要求を送る。from は親を名乗るヘッダ（x-ccn-from）の値
-fn post_create(url: &str, body: Value, from: Option<String>) -> Result<Value, String> {
-    let mut req = agent().post(url);
-    if body.get("resume").is_some() {
-        // 付け直しは、ccn がアカウントを選んでから claude を起動するまで待つ。既定の8秒で切ると、ccn の側では後継が立っているのに
-        // 画面は失敗と見て前任を残し、同じ作業が二重に進む。長めに待つ。引き継ぎ（succeed）では、ccn が後継の起動の印（上限10秒）と
-        // 前任の停止まで済ませてから応答する（実測 3.5〜5.4 秒、2026-11-17）。
-        // 要求ごとの timeout は、共有の Agent の8秒より優先される（ureq 2 の Request::timeout。下の resume_create_waits_longer_than_default で確かめた）
-        req = req.timeout(RESUME_TIMEOUT);
-    }
-    if let Some(f) = from {
-        req = req.set("x-ccn-from", &f);
-    }
-    match req.send_json(body) {
-        Ok(r) => r.into_json::<Value>().map_err(|e| e.to_string()),
-        Err(ureq::Error::Status(code, r)) => Err(format!("ccn が {code} を返した: {}", r.into_string().unwrap_or_default())),
-        Err(e) => Err(format!("ccn に届かない: {e}")),
-    }
+    ccn::create_session(&peer, body, from)
 }
 
 /// 新しい世帯のペイン（#89）の「最近使った場所」の材料。手元のノードの /api/host、/api/sessions、/api/places をそのまま返し、
 /// 合わせ方は画面（src/newHouse/places.ts）で決める。places は走査に最大3秒かかり、古い ccn は 404 を返すので、失敗したら null にする
 fn house_places() -> Result<Value, String> {
-    let base = api(&None);
-    let host = get_json_t(&format!("{base}/host"), LIST_TIMEOUT)?;
-    let sessions = get_json_t(&format!("{base}/sessions"), LIST_TIMEOUT)?;
-    let places = get_json_t(&format!("{base}/places?limit=300"), Duration::from_secs(6)).ok().and_then(|v| v.get("places").cloned());
+    let host = ccn::host()?;
+    let sessions = ccn::sessions(&None)?;
+    let places = ccn::places().ok().and_then(|v| v.get("places").cloned());
     Ok(json!({ "roots": host.get("roots").cloned().unwrap_or(json!([])), "lobby": host.get("lobby").cloned().unwrap_or(Value::Null), "sessions": sessions, "places": places }))
 }
 
@@ -1377,14 +1298,14 @@ fn house_places() -> Result<Value, String> {
 fn session_detail(session_id: String, peer: Option<String>) -> Result<Value, String> {
     native_guard(&session_id, &peer)?;
     let peer = peer.filter(|p| !p.is_empty());
-    get_json(&format!("{}/sessions/{session_id}", api(&peer)))
+    ccn::session(&peer, &session_id)
 }
 
 /// 転出の下見の1段目（移動元の説明）。副作用は無い。2段目の行き先の下見は clone することがあるので、画面からは呼ばない
 fn teleport_info(session_id: String, peer: Option<String>) -> Result<Value, String> {
     native_guard(&session_id, &peer)?;
     let peer = peer.filter(|p| !p.is_empty());
-    get_json(&format!("{}/sessions/{session_id}/teleport", api(&peer)))
+    ccn::teleport_info(&peer, &session_id)
 }
 
 fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> {
@@ -1393,7 +1314,7 @@ fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> 
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
     }
     let peer = peer.filter(|p| !p.is_empty());
-    agent().delete(&format!("{}/sessions/{session_id}", api(&peer))).call().map_err(|e| format!("止められなかった: {e}"))?;
+    ccn::delete_session(&peer, &session_id)?;
     // 止めたセッションの会話の保存は要らない
     offline::remove_conv(&cache_dir(), &peer, &session_id);
     Ok(())
@@ -1408,24 +1329,13 @@ async fn teleport(session_id: String, to: String, fork: bool, subtree: Option<bo
     }
     let peer = peer.filter(|p| !p.is_empty());
     tauri::async_runtime::spawn_blocking(move || {
-        let a = ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).build();
         // subtree は子孫ごと移す口（ccn-pty が作る別 PR）。dry_run は計画だけを返す
         let mut body = json!({ "to": to, "fork": fork });
         if subtree.unwrap_or(false) { body["subtree"] = json!(true); }
         if dry_run.unwrap_or(false) { body["dryRun"] = json!(true); }
-        // 移った先でも親とつながるよう、元の parent（agent:<ノード>/<親の sid8>/<役割>）を from 行として付けて頼む。
+        // 移った先でも親とつながるよう、元の parent（agent:<ノード>/<親の sid8>/<役割>）を from 行として付けて頼む（ccn::teleport）。
         // 付けないと、移った先の parent は local になる（2026-11-12、fc-teleport-test の試験ノードで確かめた）
-        let mut req = a.post(&format!("{}/sessions/{session_id}/teleport", api(&peer)));
-        if let Ok(d) = get_json(&format!("{}/sessions/{session_id}", api(&peer))) {
-            if let Some(p) = d["parent"].as_str().filter(|p| p.starts_with("agent:")) {
-                req = req.set("x-ccn-from", p);
-            }
-        }
-        match req.send_json(body) {
-            Ok(r) => r.into_json::<Value>().map_err(|e| e.to_string()),
-            Err(ureq::Error::Status(code, r)) => Err(format!("転出できなかった（{code}）: {}", r.into_string().unwrap_or_default())),
-            Err(e) => Err(format!("ccn に届かない: {e}")),
-        }
+        ccn::teleport(&peer, &session_id, body)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1540,7 +1450,7 @@ fn term_open(session_id: String, peer: Option<String>, on_event: tauri::ipc::Cha
             old.stop.store(true, Ordering::SeqCst);
         }
     }
-    let url = format!("{}/sessions/{session_id}/terminal", api(&peer));
+    let url = ccn::terminal_url(&peer, &session_id);
     std::thread::spawn(move || {
         use base64::Engine;
         let mut carry: Vec<u8> = vec![];
@@ -1692,7 +1602,7 @@ fn term_send(session_id: &str, peer: Option<String>, cmd: TermCmd) -> Result<(),
 fn spawn_writer(session_id: String, peer: Option<String>) -> std::sync::mpsc::Sender<TermCmd> {
     let (tx, rx) = std::sync::mpsc::channel::<TermCmd>();
     std::thread::spawn(move || {
-        let base = format!("{}/sessions/{session_id}/terminal", api(&peer));
+        let post_term = ccn::terminal_writer(&peer, &session_id);
         while let Ok(first) = rx.recv() {
             // 送っている間にたまった分をまとめる。続けて打った文字は1回で送り、大きさは続いたら最後だけ送る
             let mut merged: Vec<TermCmd> = vec![first];
@@ -1709,7 +1619,7 @@ fn spawn_writer(session_id: String, peer: Option<String>) -> std::sync::mpsc::Se
                     TermCmd::Input(t) => ("input", json!({ "text": t }), "ターミナルに書けなかった"),
                     TermCmd::Resize(cols, rows) => ("resize", json!({ "cols": cols, "rows": rows }), "ターミナルの大きさを変えられなかった"),
                 };
-                if let Err(e) = agent().post(&format!("{base}/{path}")).timeout(Duration::from_secs(5)).send_json(body) {
+                if let Err(e) = post_term(path, body) {
                     term_notice(&session_id, "input_error", json!({ "message": format!("{what}: {e}") }));
                 }
             }
@@ -1937,7 +1847,7 @@ fn watch_loop(peer: Option<String>, tx: std::sync::mpsc::Sender<WatchCmd>, rx: s
     // 次に SSE を試す時刻。None はつないでいる最中
     let mut stream_at = Some(Instant::now());
     let stop = Arc::new(AtomicBool::new(false));
-    let url = format!("{}/sessions/stream?state=live", api(&peer));
+    let url = ccn::sessions_stream_url(&peer);
     loop {
         // 設定で ccn を切ったら SSE を読まない（つないでいたら、受けた一覧を捨てる。agents_from も使わない）
         let ccn_off = peer.is_none() && !ccn_use();
@@ -2131,7 +2041,7 @@ pub fn run() {
         let stop = Arc::new(AtomicBool::new(false));
         let s2 = stop.clone();
         std::thread::spawn(move || { std::thread::sleep(Duration::from_secs(secs)); s2.store(true, Ordering::SeqCst); });
-        let url = format!("{}/api/sessions/{sid}/terminal", ccn_base());
+        let url = ccn::local_terminal_url(&sid);
         read_terminal(&url, &stop, |ev, data| {
             let n = data["b64"].as_str().map(|b| b.len()).unwrap_or(0);
             println!("{ev} {}", if n > 0 { format!("b64 {n}字") } else { data.to_string() });
@@ -2722,12 +2632,12 @@ mod tests {
         let s = |v: &str| Some(v.to_string());
         // resume 無し: 既定の8秒で切れる
         let t = std::time::Instant::now();
-        let plain = post_create(&url, create_body("/w".into(), None, None, None, None, None, None, None), None);
+        let plain = ccn::post_create(&url, create_body("/w".into(), None, None, None, None, None, None, None), None);
         assert!(plain.is_err(), "{plain:?}");
         assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
         // resume あり: 10秒かかる応答を受け取る
         let t = std::time::Instant::now();
-        let got = post_create(&url, create_body("/w".into(), s("続き"), None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), Some(true)), None);
+        let got = ccn::post_create(&url, create_body("/w".into(), s("続き"), None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), Some(true)), None);
         assert_eq!(got.unwrap()["id"], "f7a05063-6d62-40d7-b13c-3604a655dfda");
         assert!(t.elapsed() >= Duration::from_secs(10), "{:?}", t.elapsed());
     }
