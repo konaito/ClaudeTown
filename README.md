@@ -4,7 +4,7 @@ Claude Town は、Claude Code のセッションの親子を、町に住む家�
 
 ## ccn とセットで動く
 
-Claude Town は、ccn（Claude Code Nodes）とセットで動くアプリである。Claude Town だけでは動かない。ccn は作者が作っている別のプロダクトで、[konaito/claude-code-nodes](https://github.com/konaito/claude-code-nodes) で公開している（MIT）。1台で動かす手順は、ccn の README の「1台で動かす」の節にある。Claude Town はノードの名前（`name`）とポート（`port`）を `~/.config/ccn/ccn.json` から読むので、このファイルも作っておく。
+Claude Town は、ccn（Claude Code Nodes）とセットで動くアプリである。ccn を使わなくても、この Mac の町の一覧と会話は Claude Code の記録（`~/.claude`）から読めるが、読むだけで、送信、承認、停止、端末、新しい世帯の作成、別の機械の町は ccn が要る（詳しくは「データの取り方」の「ネイティブの記録」）。ccn は作者が作っている別のプロダクトで、[konaito/claude-code-nodes](https://github.com/konaito/claude-code-nodes) で公開している（MIT）。1台で動かす手順は、ccn の README の「1台で動かす」の節にある。Claude Town はノードの名前（`name`）とポート（`port`）を `~/.config/ccn/ccn.json` から読むので、このファイルも作っておく。
 
 ccn は、機械ごとに常駐するノードである。ノードは、その機械で Claude Code のセッションを立て、一覧にし、文を送り、承認に答える HTTP の口を出す。ノードどうしをつなぐと、別の機械のセッションも同じ口で扱える。
 
@@ -14,12 +14,17 @@ Claude Town は、手元のノード（`127.0.0.1`、ポートは `~/.config/ccn
 | --- | --- |
 | 機械の一覧 | `GET /api/peers` |
 | セッションの一覧、状態、親子 | `GET /api/sessions` |
+| 町の一覧の見張り（SSE） | `GET /api/sessions/stream?state=live`。つながらないときは `GET /api/sessions` を周期で読む |
 | 承認の中身などの詳細 | `GET /api/sessions/<id>` |
 | 新しい世帯を立てる | `POST /api/sessions`（`terminal: true`） |
 | 会話を読む、文を送る | `GET /api/sessions/<id>/messages`、`POST /api/sessions/<id>/messages` |
 | 端末 | `GET /api/sessions/<id>/terminal`（SSE）、`POST /api/sessions/<id>/terminal/input`、`POST /api/sessions/<id>/terminal/resize` |
 | 承認に答える | `POST /api/sessions/<id>/permissions/<requestId>` |
+| 今の作業を止める | `POST /api/sessions/<id>/interrupt` |
+| モデルと権限モードを替える | `PATCH /api/sessions/<id>` |
+| 組み込みコマンドを送る | `POST /api/sessions/<id>/command` |
 | 閉じる | `DELETE /api/sessions/<id>` |
+| 新しい世帯のペインの材料 | `GET /api/host`（roots と lobby）、`GET /api/sessions`、`GET /api/places`（古いノードは 404 で、そのときは places 抜きで一覧を作る） |
 | 引き継ぐ | `POST /api/sessions`（`terminal: true`、`resume`、`fork`、`succeed`）。古い ccn では、続けて `DELETE /api/sessions/<前任の id>` |
 | 別の機械へ移す（転出） | `GET /api/sessions/<id>/teleport`、`POST /api/sessions/<id>/teleport` |
 
@@ -27,7 +32,7 @@ Claude Town は、手元のノード（`127.0.0.1`、ポートは `~/.config/ccn
 
 エージェンティックコーディングでは、1人の人が Claude Code を親、子、孫と何十体も並べて動かす。Claude Town は、この並びを「家族」として扱う。人が開いたセッションが親で、親が作ったセッションが子、子が作ったセッションが孫になる。1つの親とその子孫を1世帯と数え、町は世帯の集まりになる。
 
-画面は左右に分ける。左には世帯（根のセッション1つとその子孫）ごとに、淡い色の角丸の枠を1つ描き、中に親と子と孫を木の形で並べる。右には選んだ子の会話と注文の欄を出す。
+画面は3つのペインに分ける（#89）。左は新しい世帯のペインで、最近使った場所の一覧から親を立てる。中央は町で、世帯（根のセッション1つとその子孫）ごとに、淡い色の角丸の枠を1つ描き、中に親と子と孫を木の形で並べる。右には選んだ子の会話と注文の欄を出す。左のペインはヘッダーのボタンとドラッグで開け閉めでき、右の欄はセッションを選んでいない間は閉じている。スマホの幅では別の画面（`src/mobile/`）になり、この3ペインではない。
 
 世帯の中の配置は、決定論的な幾何の配置で決める（`src/layout/`。方針は `docs/design/geometric-layout.md`、検証の条件は `docs/design/physics-layout.md` の 10）。世帯の一番上の親を中心に、世代ごとの半径に並べる。根の子は下向きを中心に、孫より下は親の角度を中心に、兄弟を重ならない最小の角度（2·arcsin(r/R)）で並べる。子孫の多い枝には、葉から計算した広い角度を割り当てる。実際の箱（キャラと名前）で重なり、親子線の交差、線が箱を通ること、枝の混ざりを検査し、残れば決まった順序で角度の余白、次に半径を広げる。兄弟を並べる弧の上限を4通り試し、検査を通るもののうち s（配置の幅と高さを表示領域で割った大きいほう）が一番小さいものを選ぶ。乱数と時刻は使わない。配置を計算し直すのは世帯の顔ぶれが変わったときだけで、新しい座標へは短いアニメーションで移る。パラメータは `src/layout/params.ts` にまとめた。
 
@@ -64,13 +69,29 @@ Claude Town の違いは3つある。データ源を ccn に寄せること、�
 
 | 知りたいこと | 取り方 |
 | --- | --- |
-| 生きているセッション、状態、親子 | 手元の ccn ノードの `GET /api/sessions`。親は一覧の parent（`agent:<ノード>/<親の sid 先頭8>/<役割>`）から引く。ポートは `~/.config/ccn/ccn.json` の `port` |
+| 生きているセッション、状態、親子 | 手元の ccn ノードの `GET /api/sessions`（見張りは `GET /api/sessions/stream?state=live`）。親は一覧の parent（`agent:<ノード>/<親の sid 先頭8>/<役割>`）から引く。ポートは `~/.config/ccn/ccn.json` の `port`。この Mac の町には、下のネイティブの記録も重ねる |
 | 端末の画面 | `GET /api/sessions/<id>/terminal`（SSE）。最初に size、続けて末尾の replay、以後 data。Rust で読み、Tauri のイベントで xterm.js に流す |
 | 承認の中身 | `GET /api/sessions/<id>` の pending（toolName、input、requestId） |
 | 頼まれたこと、いまやっていること、最後の報告、次の一手 | hook が書く `~/.family-computing/state/<session_id>.json` |
 | 閉じてよいか | close-check-state hook が書く `~/.claude/close-check/<session_id>.json` |
 
-人がターミナルで開いたセッションは、ccn から一覧と送信だけができる。親子は ccn の parent だけから引く。ccn を通さずに作った子は、親とつながらず別の世帯として出る。名前の決め方は、ccn で作ったセッションと同じにする（下の「世帯とカードの名前」）。
+人がターミナルで開いたセッションは、ccn から一覧と送信だけができる。親子は ccn の parent から引く。ccn を通さずに作った子は、ネイティブの記録に最初の文の from 行があれば、その呼び手を親にする。無ければ親とつながらず別の世帯として出る。名前の決め方は、ccn で作ったセッションと同じにする（下の「世帯とカードの名前」）。
+
+### ネイティブの記録（#96、#101）
+
+この Mac の町は、ccn を通らずに `src-tauri/src/native/` が `~/.claude` の記録を読んで作る一覧も重ねる。読むだけで、`~/.claude` の下には書かない。置き場所は環境変数 `FC_CLAUDE_HOME` で差し替えられる。
+
+| 読むもの | 場所 | 使い道 |
+| --- | --- | --- |
+| 生きている対話セッション | `~/.claude/sessions/<pid>.json`（pid が生きているものだけ。`-p` の裏方は外す） | id、cwd、開始時刻、状態（busy、waiting、idle を running、waiting_permission、idle に読み替える）、名前 |
+| 会話 | `~/.claude/projects/<cwd の英数字以外を - にした名前>/<sessionId>.jsonl` | 会話の欄。規則の場所に無いときは `projects/*/` を探す |
+| sub-agent と teammate | `projects/<名前>/<親の sessionId>/subagents/` の `agent-<agentId>.jsonl` と `.meta.json` | 親のセッションの子として出す。様子は hook の報告ではなく、meta.json の説明と jsonl の末尾から作る |
+
+ccn と併用するときの優先関係は、`lib.rs` の `agents_from` が決める。同じ sessionId が ccn の一覧にもあれば ccn の行を使い、ネイティブからは ccn に無いセッションと sub-agent だけを足す。ccn に届かなくても、ネイティブの一覧は読めているので、町は読めたものとして扱う。一覧の出どころ（ccn が on、off、つながらなかった理由、ネイティブの件数）は Snapshot の `sources` に入る。ネイティブだけから読んでいるセッションと sub-agent は、送信、承認、割り込み、停止、端末ができず、操作を求めると断る（`native::refuse_if_native`）。
+
+sub-agent は、jsonl の更新が30秒以内なら実行中とする（meta.json に finished が無い古い記録は10分以内まで実行中）。終わってから10分過ぎたものは出さない。1つのセッションの下に出すのは8体までで、実行中を先に、新しい順に選ぶ。この畳み方は仮置きで、値は `native/subagents.rs` の定数にある。
+
+ccn を使うかは設定で切れる。設定の画面（ヘッダーの歯車）の「ccn を使う」で、既定は使う。切ると ccn の一覧を読まず、どのセッションも読むだけになる。値は、アプリが書く置き場所の `town-settings.json` に `{"ccn": true|false}` の形で保存する。
 
 ccn は Origin 付きの要求を CSRF として断る。このため、HTTP の要求は画面からではなく Tauri の Rust 側から出す。
 
@@ -96,7 +117,7 @@ ccn の messages には末尾から件数を指定する口が無いので、開
 - 子供を右クリックすると、その子を選んで端末を開く。
 - 子は親のセッション自身が ccn の create_session（terminal: true）で作る。画面から子を足す操作は出さない（2026-11-12、本人の判断。使う機会が無いため）。
 - どのセッションを PTY で立てるかの比較と提案は `docs/research/pty-or-headless.md` にある。
-- 上の「＋ 新しい世帯」を押すと、すぐ設定の場所（設定していなければ `~/Documents/meta`）で親のいない端末のセッションを立て、そのノードを選んで右のチャットを開き、入力欄にフォーカスを当てる。最初の依頼の欄は出さない。端末は右クリックか「端末へ」で開く。セッションが0本の空の町でも、ここから最初の世帯を作れる。場所は、ヘッダーの右端の歯車（設定）の「新しい世帯の場所」で変える。最近の場所から選ぶか、絶対パスを入力する（ccn の roots の外は保存できない。存在しない場所は立てるときに ccn が断り、通知に場所を出す）。保存先は localStorage の `claude-town.newHousePlace` で、この Mac のアプリ（ブラウザ版ではそのブラウザ）ごとに1つ。新しい世帯は手元のノードにだけ作るので、ノードごとには分けない。
+- 左のペインの「＋ 新しい世帯」を押すと、すぐ設定の場所（設定していなければ `~/Documents/meta`）で親のいない端末のセッションを立て、そのノードを選んで右のチャットを開き、入力欄にフォーカスを当てる。最初の依頼の欄は出さない。端末は右クリックか「端末へ」で開く。左のペインの下には「最近の場所」の一覧があり、押した場所で親を立てる（一覧は `GET /api/host` の roots、`GET /api/sessions`、`GET /api/places` から `src/newHouse/places.ts` が新しい順に20件まで作る。リポジトリ名は別に読む）。別の町を見ている間は、世帯を作れない。セッションが0本の空の町では、中央にも同じボタンが出る（`App.tsx` の `NewHousehold`）。場所は、ヘッダーの右端の歯車（設定）の「新しい世帯の場所」で変える。最近の場所から選ぶか、絶対パスを入力する（ccn の roots の外は保存できない。存在しない場所は立てるときに ccn が断り、通知に場所を出す）。保存先は localStorage の `claude-town.newHousePlace` で、この Mac のアプリ（ブラウザ版ではそのブラウザ）ごとに1つ。新しい世帯は手元のノードにだけ作るので、ノードごとには分けない。
 - 右パネルの「転出」で、ccn の teleport（PR #18）を呼び、別の機械へ移す（move）か複製する（fork）。下見は移動元の説明（`GET /api/sessions/<id>/teleport`）だけを見せる。行き先の下見は clone することがあるので、実行の中で ccn に任せる。作業中と承認待ちのセッションは転出できない。世帯ごとの転出は出していない。ccn に一括の口が無く、1つずつ移すと子の parent が転出を呼んだ側に変わり、同じリポジトリの子が行き先の同じ作業ツリーを書き換え合うため（`docs/research/ccn-teleport.md`）。
 - カードの右下と右パネルの見出しに、同じ4つのボタンを並べる。閉じる（🐺）、引き継ぐ（🤝）、様子を聞く（🚪）、許可する（👍）の順で、並びと送る文は `src/App.tsx` の `CARD_ACTIONS` で決める。ボタンに乗せると、押せるときは何をするか、押せないときは押せない理由を、WebView の標準のツールチップ（`title`）で出す。
 - 「引き継ぐ」は、利用上限で止まったセッションを、同じ段の後継へ引き継ぐ。止まったプロセスに文を送っても同じアカウントのままなので、ccn に同じ会話を複製した新しいセッションを作らせる。ccn は作るときにアカウントを選び直す。親の後継は世帯の親として立ち、子や孫の後継は同じ親の下に立つ。押せるのは、手元のノードの、待機中で、ccn から止められるセッションだけ。
