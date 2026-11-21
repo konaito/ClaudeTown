@@ -176,4 +176,41 @@ mod tests {
         // 質問でない待ちに答えを付けたら送らない
         assert!(super::permission_body(&bash, "allow", Some("r3"), Some(&serde_json::json!({ "x": "y" })), None, None).is_err());
     }
+
+    #[derive(serde::Deserialize)]
+    struct SharedCase {
+        name: String,
+        #[serde(rename = "fn")]
+        func: String,
+        args: serde_json::Value,
+        expect: serde_json::Value,
+    }
+
+    /// src/perm-cases.json の事例（bun test も src/webPerm.test.ts で同じものを読む）
+    #[test]
+    fn shared_cases() {
+        use serde_json::json;
+        let cases: Vec<SharedCase> = serde_json::from_str(include_str!("../../src/perm-cases.json")).unwrap();
+        assert!(cases.len() >= 30);
+        for c in cases {
+            let a = &c.args;
+            let got = match c.func.as_str() {
+                "const" => match a[0].as_str().unwrap() {
+                    "DENY_DEFAULT" => json!(super::DENY_DEFAULT),
+                    "PLAN_DENY_DEFAULT" => json!(super::PLAN_DENY_DEFAULT),
+                    n => panic!("{}: 知らない文 {n}", c.name),
+                },
+                "allowed_suggestion" => json!(super::allowed_suggestion(&a[0])),
+                "permission_body" => {
+                    let answers = Some(&a["answers"]).filter(|v| !v.is_null());
+                    match super::permission_body(&a["first"], a["choice"].as_str().unwrap(), a["expectId"].as_str(), answers, a["message"].as_str(), a["suggestion"].as_u64().map(|i| i as usize)) {
+                        Ok((body, done)) => json!({ "body": body, "done": done }),
+                        Err(e) => json!({ "error": e }),
+                    }
+                }
+                f => panic!("{}: 知らない関数 {f}", c.name),
+            };
+            assert_eq!(got, c.expect, "{}", c.name);
+        }
+    }
 }

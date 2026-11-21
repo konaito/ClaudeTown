@@ -1026,4 +1026,36 @@ mod tests {
         assert_eq!(unwrap_pasted("<pasted_contents>x"), "<pasted_contents>x");
         assert_eq!(unwrap_pasted("<pasted_content\nx"), "<pasted_content\nx");
     }
+
+    #[derive(serde::Deserialize)]
+    struct SharedCase {
+        name: String,
+        #[serde(rename = "fn")]
+        func: String,
+        args: Vec<Value>,
+        expect: Value,
+    }
+
+    /// src/conv-cases.json の事例（bun test も src/webConv.test.ts で同じものを読む）
+    #[test]
+    fn shared_cases() {
+        let cases: Vec<SharedCase> = serde_json::from_str(include_str!("../../src/conv-cases.json")).unwrap();
+        assert!(cases.len() >= 60);
+        for c in cases {
+            let a = &c.args;
+            let got = match c.func.as_str() {
+                "clip" => json!(clip(a[0].as_str().unwrap(), a[1].as_u64().unwrap() as usize)),
+                "tool_line" => json!(tool_line(a[0].as_str().unwrap(), &a[1])),
+                "result_text" => json!(result_text(&a[0])),
+                "unwrap_pasted" => json!(unwrap_pasted(a[0].as_str().unwrap())),
+                "split_image_marks" => {
+                    let (imgs, rest) = split_image_marks(a[0].as_str().unwrap());
+                    json!([imgs, rest])
+                }
+                "simplify" => json!(simplify(&a[0])),
+                f => panic!("{}: 知らない関数 {f}", c.name),
+            };
+            assert_eq!(got, c.expect, "{}", c.name);
+        }
+    }
 }
