@@ -29,7 +29,7 @@ const MODE_LABELS: [(&str, &str); 5] = [
 ];
 const SHIFT_TAB: &str = "\x1b[Z";
 
-/// 出力の中で最後に出た権限モード
+/// 画面の中で最後に出た権限モード（下の行）
 pub fn last_mode(text: &str) -> Option<&'static str> {
     MODE_LABELS.iter().filter_map(|(l, v)| text.rfind(l).map(|i| (i, *v))).max_by_key(|(i, _)| *i).map(|(_, v)| v)
 }
@@ -186,17 +186,19 @@ fn watch() {
     }
 }
 
-/// 出力に want が出るまで待つ。出たらその時点の出力を返す
-fn wait_out(id: &str, mark: u64, sec: f32, want: impl Fn(&str) -> bool) -> Option<String> {
+/// 画面（vt100 で解いたもの）が want を満たすまで待つ。満たしたらその時の画面を返す
+fn wait_screen(id: &str, sec: f32, want: impl Fn(&str) -> bool) -> Option<String> {
     let t0 = Instant::now();
-    while t0.elapsed() < Duration::from_secs_f32(sec) {
-        let s = super::pty::out_since(id, mark)?;
+    loop {
+        let s = super::pty::screen_text(id)?;
         if want(&s) {
             return Some(s);
         }
+        if t0.elapsed() >= Duration::from_secs_f32(sec) {
+            return None;
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
-    None
 }
 
 /// モデルの別名と、/model のピッカーの行の名前。ピッカーの上の段に無いもの（More models の中、[1m] など）は扱わない
@@ -205,68 +207,29 @@ pub fn picker_name(model: &str) -> Option<&'static str> {
     [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"), ("fable", "Fable")].iter().find(|(k, _)| m == *k || m.starts_with(&format!("{k}-"))).map(|(_, v)| *v)
 }
 
-/// 出力から色や位置の印を外す（ピッカーの行を読むため）
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut it = s.chars().peekable();
-    while let Some(c) = it.next() {
-        if c != '\x1b' {
-            out.push(c);
-            continue;
-        }
-        match it.next() {
-            Some('[') => {
-                // CSI: 引数と中間の文字の後、@〜~ の1文字で終わる
-                for d in it.by_ref() {
-                    if ('@'..='~').contains(&d) {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                // OSC: BEL か ESC \ で終わる
-                while let Some(d) = it.next() {
-                    if d == '\x07' || (d == '\x1b' && it.peek() == Some(&'\\')) {
-                        it.next();
-                        break;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-/// ピッカーで今カーソル（❯）がある行の名前（「❯ 4.  Sonnet 5.5」の Sonnet）。出力の最後のもの
-pub fn picker_cursor(text: &str) -> Option<String> {
-    let t = strip_ansi(text);
-    let mut last = None;
-    let mut rest = t.as_str();
-    while let Some(i) = rest.find('❯') {
-        rest = &rest[i + '❯'.len_utf8()..];
-        let r = rest.trim_start();
+/// ピッカーで今カーソル（❯）がある行の名前（「❯ 4.  Sonnet 5.5」の Sonnet）。入力欄の「❯ /model」は数えない
+pub fn picker_cursor(screen: &str) -> Option<String> {
+    screen.lines().rev().find_map(|line| {
+        let r = line.split_once('❯')?.1.trim_start();
         let digits = r.chars().take_while(|c| c.is_ascii_digit()).count();
         if digits == 0 || !r[digits..].starts_with('.') {
-            continue;
+            return None;
         }
         let name: String = r[digits + 1..].trim_start().chars().take_while(|c| c.is_ascii_alphabetic()).collect();
-        if !name.is_empty() {
-            last = Some(name);
-        }
-    }
-    last
+        (!name.is_empty()).then_some(name)
+    })
 }
 
 const UP: &str = "\x1b[A";
 const DOWN: &str = "\x1b[B";
+const PICKER: &str = "Select model";
+const CONFIRM: &str = "Switch model?";
 
 /// /model でピッカーを開き、目当ての行へ矢印で動かして s を押す（このセッションだけ替える）。
 /// `/model <別名>` と Enter は新しいセッションの既定まで替えるので使わない（2026-11-21、v2.1.330 で確かめた）。
-/// 会話があると「Switch model?」の確認が出る。出たときだけ Enter を送る。「Set model to」が出たら成功
+/// 会話があると「Switch model?」の確認が出る。出たときだけ Enter を送る。ピッカーと確認が閉じ、「Set model to <名前>」が見えたら成功
 fn set_model(id: &str, model: &str) -> Result<(), String> {
     let name = picker_name(model).ok_or(format!("{model} は /model のピッカーの上の段に無いので、ここからは替えられない"))?;
-    let mark = super::pty::out_mark(id).ok_or("このセッションの端末はこのアプリに無い")?;
     // 承認の画面に入力が入らないよう、貼る前と Enter の前に今の状態を読み直す（send_direct と同じ穴）
     if waiting(id) {
         return Err(RETRY.into());
@@ -277,19 +240,17 @@ fn set_model(id: &str, model: &str) -> Result<(), String> {
         return Err("貼った直後に承認の画面が出たので Enter を送らなかった。ターミナルの入力欄に /model が残っているかもしれない".into());
     }
     super::pty::write(id, "\r")?;
-    let s = wait_out(id, mark, 4.0, |s| s.contains("Select model")).ok_or("/model のピッカーが4秒で出なかった。ターミナルで様子を見る")?;
-    // 開いた直後の描画が終わるのを少し待ってから、カーソルの行を読む
-    std::thread::sleep(Duration::from_millis(300));
-    let mut cur = super::pty::out_since(id, mark).as_deref().and_then(picker_cursor).or_else(|| picker_cursor(&s));
+    let s = wait_screen(id, 4.0, |s| s.contains(PICKER) && picker_cursor(s).is_some()).ok_or("/model のピッカーが4秒で出なかった。ターミナルで様子を見る")?;
+    let mut cur = picker_cursor(&s);
     // 上へ、届かなければ下へ。矢印は1つずつ送る（まとめて書くと動かなかった）。カーソルが動かなくなったら端
     'find: for key in [UP, DOWN] {
         for _ in 0..12 {
             if cur.as_deref() == Some(name) {
                 break 'find;
             }
-            let m = super::pty::out_mark(id).ok_or("端末が無くなった")?;
+            let before = cur.clone();
             super::pty::write(id, key)?;
-            match wait_out(id, m, 0.8, |s| picker_cursor(s).is_some()) {
+            match wait_screen(id, 0.8, |s| picker_cursor(s) != before) {
                 Some(s) => cur = picker_cursor(&s),
                 None => continue 'find,
             }
@@ -299,40 +260,39 @@ fn set_model(id: &str, model: &str) -> Result<(), String> {
         super::pty::write(id, "\x1b")?;
         return Err(format!("/model のピッカーに {name} の行が見つからなかったので、閉じた"));
     }
-    let m = super::pty::out_mark(id).ok_or("端末が無くなった")?;
     super::pty::write(id, "s")?;
-    let s = wait_out(id, m, 4.0, |s| s.contains("Switch model?") || s.contains("Set model to")).ok_or("ピッカーで s を押したが、結果が4秒で出なかった。ターミナルで様子を見る")?;
-    if !s.contains("Set model to") {
-        let m2 = super::pty::out_mark(id).unwrap_or(m);
+    let s = wait_screen(id, 4.0, |s| s.contains(CONFIRM) || !s.contains(PICKER)).ok_or("ピッカーで s を押したが、4秒たってもピッカーが閉じなかった。ターミナルで様子を見る")?;
+    if s.contains(CONFIRM) {
         super::pty::write(id, "\r")?;
-        wait_out(id, m2, 4.0, |s| s.contains("Set model to")).ok_or("モデルの切り替えの確認に Enter を送ったが、切り替わった印が出なかった。ターミナルで様子を見る")?;
+        wait_screen(id, 4.0, |s| !s.contains(CONFIRM)).ok_or("モデルの切り替えの確認に Enter を送ったが、確認の画面が閉じなかった。ターミナルで様子を見る")?;
     }
+    let want = format!("Set model to {name}");
+    wait_screen(id, 2.0, |s| s.contains(&want)).ok_or(format!("ピッカーは閉じたが「{want}」が出なかった。ターミナルで様子を見る"))?;
     Ok(())
 }
 
 /// Shift+Tab を、下の行が目当てのモードになるまで送る。1周して元に戻ったら、目当ては順に無い（元のモードのまま）
 fn set_mode(id: &str, mode: &str) -> Result<(), String> {
-    let all = super::pty::out_since(id, 0).ok_or("このセッションの端末はこのアプリに無い")?;
-    let start = last_mode(&all).ok_or("今の権限モードが端末の表示から読めなかった")?;
+    let screen = super::pty::screen_text(id).ok_or("このセッションの端末はこのアプリに無い")?;
+    let start = last_mode(&screen).ok_or("今の権限モードが端末の表示から読めなかった")?;
     if start == mode {
         return Ok(());
     }
+    let mut cur = start;
     for _ in 0..MODE_LABELS.len() + 1 {
-        let mark = super::pty::out_mark(id).ok_or("端末が無くなった")?;
         super::pty::write(id, SHIFT_TAB)?;
-        let s = wait_out(id, mark, 1.5, |s| last_mode(s).is_some()).ok_or("Shift+Tab を送ったが、権限モードの表示が変わらなかった")?;
-        let now = last_mode(&s).unwrap_or("");
-        if now == mode {
+        let s = wait_screen(id, 1.5, |s| last_mode(s).is_some_and(|m| m != cur)).ok_or("Shift+Tab を送ったが、権限モードの表示が変わらなかった")?;
+        cur = last_mode(&s).unwrap_or("");
+        if cur == mode {
             return Ok(());
         }
-        if now == start {
+        if cur == start {
             return Err(format!("Shift+Tab で1周しても {mode} が出なかったので、{start} のままにした（このセッションでは {mode} が使えない）"));
         }
     }
     Err(format!("{mode} に届かなかった。ターミナルで様子を見る"))
 }
 
-/// 会話の jsonl。町の一覧が最後に覚えた場所（native::register）から引く
 fn jsonl_of(id: &str) -> Option<std::path::PathBuf> {
     super::native::path_of(id)
 }
@@ -394,8 +354,8 @@ pub fn status(id: &str) -> Value {
             mode = amode;
         }
     }
-    // アプリの端末なら、権限モードは下の行がいちばん新しい（人がターミナルで Shift+Tab を押した分も入る）
-    if let Some(m) = super::pty::out_since(id, 0).as_deref().and_then(last_mode) {
+    // アプリの端末なら、権限モードは画面の下の行がいちばん新しい（人がターミナルで Shift+Tab を押した分も入る）
+    if let Some(m) = super::pty::screen_text(id).as_deref().and_then(last_mode) {
         mode = Some(m.to_string());
     }
     let (state, ready) = live(id).unwrap_or_default();
@@ -423,15 +383,25 @@ mod tests {
     }
 
     #[test]
-    fn picker_rows_are_read_from_the_raw_output() {
-        // 2026-11-21 の raw の出力の形（ESC を外したときに語がつながる所もある）
-        let open = "\x1b[2C1.  Default\x1b[1C(recommended)\x1b[2COpus 5.5\r  4.  Sonnet 5.5\r\x1b[38;5;2m❯\x1b[39m5.  Haiku 5.5✔Fastest";
-        assert_eq!(picker_cursor(open).as_deref(), Some("Haiku"));
-        assert_eq!(picker_cursor("\x1b[3A\x1b[38;5;2m❯ 4.  Sonnet 5.5\x1b[39m").as_deref(), Some("Sonnet"));
-        assert_eq!(picker_cursor("❯ /model"), None);
+    fn picker_rows_are_read_from_the_screen() {
+        // 2026-11-21 に pyte で解いた画面の形
+        let screen = "❯ /model\n  Select model\n    1.  Default (recommended)  Opus 5.5 · Best for everyday\n  ❯ 4.  Sonnet 5.5             Most efficient\n    5.  Haiku 5.5 ✔";
+        assert_eq!(picker_cursor(screen).as_deref(), Some("Sonnet"));
+        assert_eq!(picker_cursor("❯ /model\n  ⎿  Set model to Sonnet 5.5 for this session only"), None);
         assert_eq!(picker_name("sonnet"), Some("Sonnet"));
         assert_eq!(picker_name("claude-opus-5-5"), Some("Opus"));
         assert_eq!(picker_name("opus[1m]"), None);
+    }
+
+    #[test]
+    fn screen_from_the_raw_picker_output() {
+        // 作業中に開いたピッカーは、行を描き直さず ❯ の1文字だけを書き直す。生の文字列では読めないが、vt100 で解けば読める
+        let mut p = vt100::Parser::new(std::num::NonZeroU16::new(6).unwrap(), std::num::NonZeroU16::new(40).unwrap(), 0);
+        p.process(b"  Select model\r\n\xe2\x9d\xaf 1.  Default\r\n  2.  Opus 5.5\r\n  3.  Sonnet 5.5");
+        p.process(b"\x1b[2;1H \x1b[3;1H\xe2\x9d\xaf");
+        let sc = p.screen();
+        let text = sc.rows(0, sc.size().1.get()).collect::<Vec<_>>().join("\n");
+        assert_eq!(picker_cursor(&text).as_deref(), Some("Opus"));
     }
 
     #[test]

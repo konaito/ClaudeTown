@@ -40,8 +40,9 @@ struct Proc {
     killer: Box<dyn ChildKiller + Send + Sync>,
     /// 出力の末尾
     out: Vec<u8>,
-    /// 起動してから読んだ出力の総量。out の先頭を捨てても、ある時点より後の出力を取り出せるようにする（switch.rs が使う）
-    total: u64,
+    /// 出力を端末として解いた今の画面（vt100、MIT）。モデルのピッカーと権限モードの表示を読むのに使う（switch.rs）。
+    /// 出力の生の文字列は、語の間の空白がカーソルの移動の印になり、ピッカーの行も ❯ の1文字だけを描き直すので、そのままでは読めない
+    screen: vt100::Parser,
     /// 開いている画面（世代、送り口）と、送りかけの文字の残り
     sub: Option<(u64, Sender<TermOut>)>,
     carry: Vec<u8>,
@@ -210,7 +211,7 @@ pub fn spawn(cwd: &str, name: Option<&str>, cols: u16, rows: u16, notice: impl F
     let killer = child.clone_killer();
     let started_at = crate::now_ms() as u64;
     with(|m| {
-        m.insert(pid, Proc { pid, ids: vec![id.clone()], cwd: cwd.to_string(), started_at, size: (cols, rows), master: pair.master, writer: Arc::new(Mutex::new(writer)), killer, out: vec![], total: 0, sub: None, carry: vec![] });
+        m.insert(pid, Proc { pid, ids: vec![id.clone()], cwd: cwd.to_string(), started_at, size: (cols, rows), master: pair.master, writer: Arc::new(Mutex::new(writer)), killer, out: vec![], screen: new_screen(cols, rows), sub: None, carry: vec![] });
     });
     eprintln!("[pty] claude を起動した pid {pid} id {id} cwd {cwd}");
     std::thread::spawn(move || read_loop(pid, reader));
@@ -242,7 +243,7 @@ fn read_loop(pid: u32, mut reader: Box<dyn Read + Send>) {
         let alive = with(|m| {
             let Some(p) = m.get_mut(&pid) else { return false };
             p.out.extend_from_slice(bytes);
-            p.total += bytes.len() as u64;
+            p.screen.process(bytes);
             if p.out.len() > KEEP_BYTES {
                 let cut = p.out.len() - KEEP_BYTES;
                 p.out.drain(..cut);
@@ -316,22 +317,19 @@ pub fn unsubscribe(id: &str, generation: Option<u64>) {
     });
 }
 
-/// 今までに読んだ出力の総量（印）。台帳に無ければ None
-pub fn out_mark(id: &str) -> Option<u64> {
-    with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| p.total))
+fn new_screen(cols: u16, rows: u16) -> vt100::Parser {
+    let nz = |v: u16, d: u16| std::num::NonZeroU16::new(v).unwrap_or(std::num::NonZeroU16::new(d).expect("0 ではない"));
+    vt100::Parser::new(nz(rows, 24), nz(cols, 80), 0)
 }
 
-/// 印より後の出力を文字列で返す。持っている末尾（KEEP_BYTES）より前の分は返せないので、持っている分の頭から返す
-pub fn out_since(id: &str, mark: u64) -> Option<String> {
+/// 今の画面の文字（行ごとに改行で区切る）。台帳に無ければ None
+pub fn screen_text(id: &str) -> Option<String> {
     with(|m| {
         let p = m.get(&pid_of(m, id)?)?;
-        Some(since_text(&p.out, p.total, mark))
+        let sc = p.screen.screen();
+        let cols = sc.size().1.get();
+        Some(sc.rows(0, cols).collect::<Vec<_>>().join("\n"))
     })
-}
-
-fn since_text(out: &[u8], total: u64, mark: u64) -> String {
-    let n = (total.saturating_sub(mark) as usize).min(out.len());
-    replay_text(&out[out.len() - n..])
 }
 
 pub fn write(id: &str, text: &str) -> Result<(), String> {
@@ -357,6 +355,9 @@ pub fn resize(id: &str, cols: u16, rows: u16) -> Result<(), String> {
         }
         p.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| format!("ターミナルの大きさを変えられなかった: {e}"))?;
         p.size = (cols, rows);
+        if let (Some(r), Some(c)) = (std::num::NonZeroU16::new(rows), std::num::NonZeroU16::new(cols)) {
+            p.screen.set_size(r, c);
+        }
         Ok(())
     })
 }
@@ -432,16 +433,6 @@ mod tests {
         let s = "あい".as_bytes();
         assert_eq!(replay_text(&s[1..]), "い");
         assert_eq!(replay_text(b""), "");
-    }
-
-    #[test]
-    fn since_text_returns_output_after_the_mark() {
-        // 総量 10 のうち末尾 6 バイトだけ持っている（先頭の 4 は捨てた）
-        let out = b"efghij";
-        assert_eq!(since_text(out, 10, 7), "hij");
-        assert_eq!(since_text(out, 10, 10), "");
-        // 捨てた分より前の印なら、持っている分を全部返す
-        assert_eq!(since_text(out, 10, 0), "efghij");
     }
 
     #[test]
