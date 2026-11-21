@@ -15,6 +15,7 @@ mod attach;
 mod avatars;
 mod composer;
 mod naming;
+mod native;
 mod offline;
 
 use serde::Serialize;
@@ -1930,6 +1931,29 @@ pub fn run() {
             "avatarsRecent": avatars::recent_path(&avatars_path(&None)),
             "housesShared": houses_shared,
             "houses": houses_own,
+        })).unwrap_or_default());
+        return;
+    }
+    // family-computing --native-list   ~/.claude（FC_CLAUDE_HOME）から一覧を2回作り、件数と時間だけを出す（中身の文は出さない。#96）。
+    // 生きているセッションの会話を末尾から読んだ件数と時間も出す。読むだけで、~/.claude にも ~/.family-computing にも書かない
+    if args.iter().any(|a| a == "--native-list") {
+        let root = native::claude_home();
+        let first = native::list(&root, native::now_ms());
+        let second = native::list(&root, native::now_ms());
+        let convs: Vec<Value> = first.sessions.iter().chain(first.subagents.iter()).filter_map(|r| {
+            let p = PathBuf::from(r["native"]["jsonl"].as_str()?);
+            let t = std::time::Instant::now();
+            let c = native::conv::read(&p, 0).ok()?;
+            let items: usize = c.lines.iter().map(|l| simplify(l).len()).sum();
+            Some(json!({ "kind": r["kind"], "bytes": fs::metadata(&p).map(|m| m.len()).unwrap_or(0), "lines": c.lines.len(), "items": items, "ms": t.elapsed().as_secs_f64() * 1000.0 }))
+        }).collect();
+        let mut odd = first.stats.unexpected.clone();
+        for (k, v) in native::conv::odd_counts() { *odd.entry(k).or_default() += v; }
+        println!("{}", serde_json::to_string_pretty(&json!({
+            "first": first.stats, "second": second.stats,
+            "rows": first.sessions.iter().chain(first.subagents.iter()).map(|r| json!({ "kind": r["kind"], "state": r["state"], "hasParent": !r["parent"].is_null() || !r["native"]["parentId"].is_null() })).collect::<Vec<_>>(),
+            "conversations": convs,
+            "unexpected": odd,
         })).unwrap_or_default());
         return;
     }
