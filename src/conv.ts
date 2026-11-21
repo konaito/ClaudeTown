@@ -93,6 +93,22 @@ export function deltaOf(all: ConvItem[], since: number | null | undefined): Conv
 export type PendingItem = ConvItem & { after: number };
 
 /**
+ * 画面だけで出す印（チャットからコマンドを実行した、#97）。会話の保存（conversation_cache）には入れない。
+ * after は実行したときに持っていた最後の番号で、それより後の項目（と、番号の無い送ったばかりの項目）の前に置く
+ */
+export function withNotes(items: ConvItem[], notes: PendingItem[]): ConvItem[] {
+  if (!notes.length) return items;
+  const out: ConvItem[] = [];
+  let k = 0;
+  for (const x of items) {
+    while (k < notes.length && (x.n === undefined || x.n > notes[k].after)) out.push(notes[k++]);
+    out.push(x);
+  }
+  while (k < notes.length) out.push(notes[k++]);
+  return out;
+}
+
+/**
  * 画像のファイルのパス。文の頭か空白の直後で、/ か ~ から始まるもの（空白は \ 付きか、引用符で囲んだもの）。
  * CLI は読める画像のパスを [Image #3] の添付に置き換える
  */

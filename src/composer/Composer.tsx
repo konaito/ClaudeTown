@@ -5,6 +5,8 @@ import { call as invoke, onFileDrop } from "../bridge";
 import getCaretCoordinates from "textarea-caret";
 import type { Agent } from "../model";
 import { BUILTINS, type Command } from "./commands";
+import { routeOf, tagOf } from "./route";
+import type { Support } from "../session/control";
 import {
   backslashNewline, histDown, insertPaths, isSlashCommand, histUp, killToEnd, killToStart, killWordBack, killWordForward, mergeHistory, pushHistory,
   rankCommands, searchHistory, tokenAt, toLineEnd, toLineStart, wordBack, wordForward, type Edit, type HistState, type Sel,
@@ -46,7 +48,9 @@ const HELP: [string, string][] = [
   ["Ctrl+C", "作業を止める（作業中）・打ちかけを消す"],
 ];
 
-export function Composer({ agent, peer, text, setText, busy, running, onSubmit, onError, touch }: {
+export function Composer({ agent, peer, text, setText, busy, running, support = "no", onSubmit, onError, touch }: {
+  /** ノードに command の口があるか（#97）。/ のコマンドの振り分けと、補完の印に使う */
+  support?: Support;
   /** スマホ（ソフトキーボード）。Enter は改行にし、送るのは送信ボタンだけにする */
   touch?: boolean;
   agent: Agent; peer: string; text: string; setText: (v: string) => void; busy: boolean; running: boolean;
@@ -101,6 +105,8 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
   const token = search ? null : tokenAt({ text, start: caret, end: caret });
   const commands = useMemo(() => [...BUILTINS, ...skills], [skills]);
   const slashItems = token?.kind === "slash" ? rankCommands(commands, token.query) : [];
+  // 候補の印（#97）。行の頭のコマンドだけが CLI のコマンドになるので、文の途中の / には付けない
+  const tags = slashItems.map((c) => (token?.atStart ? tagOf(c, agent.kind, support) : null));
   useEffect(() => {
     if (token?.kind !== "file" || !local || !agent.cwd) { setFiles([]); return; }
     let alive = true;
@@ -374,7 +380,11 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
 
   const shell = text.startsWith("!");
   const cmdAtStart = isSlashCommand(text);
-  const note = (shell || cmdAtStart) && !hasTerm
+  // 組み込みのコマンドの振り分け（#97）。送る前に、どうなるかを入力欄の下に出す
+  const route = cmdAtStart ? routeOf(text, agent.kind, support) : null;
+  const note = route?.kind === "blocked" ? route.reason
+    : route?.kind === "command" ? `Enter でコマンドとして実行する${route.note ? `（${route.note}）` : ""}`
+    : (shell || cmdAtStart) && !hasTerm
     ? "端末の無いセッション（-p の子）なので、CLI のコマンドとしては動かず、Claude が文として読む"
     : shell ? "! シェルモード: 端末のセッションで、そのまま実行する"
     : search ? "Ctrl+R で古いほうへ・Enter で送る・Tab か Esc で直す・Ctrl+C でやめる"
@@ -394,8 +404,9 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
               ? slashItems.map((c, i) => (
                 <button key={c.source + c.name} className={i === pick ? "on" : ""} role="option" aria-selected={i === pick}
                   onMouseDown={(e) => { e.preventDefault(); setPick(i); accept(i); }}>
-                  <span className="cm-name">/{c.name}{c.argumentHint ? <em> {c.argumentHint}</em> : null}</span>
+                  <span className={`cm-name${tags[i]?.off ? " off" : ""}`}>/{c.name}{c.argumentHint ? <em> {c.argumentHint}</em> : null}</span>
                   <span className="cm-desc">{c.description}{c.source !== "builtin" ? ` (${c.source})` : ""}</span>
+                  {tags[i] && <span className={`cm-tag${tags[i]!.off ? " off" : ""}`} title={tags[i]!.title}>{tags[i]!.text}</span>}
                 </button>
               ))
               : files.map((f, i) => (
@@ -449,7 +460,7 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
           </button>
         )}
       </div>
-      <div className="hint">{note}</div>
+      <div className={`hint${route?.kind === "blocked" ? " bad" : ""}`}>{note}</div>
     </>
   );
 }

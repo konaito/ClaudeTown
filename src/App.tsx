@@ -9,7 +9,9 @@ import { flightsOf, resolve, type Flight } from "./letters";
 import { withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Composer } from "./composer/Composer";
-import { SessionControls } from "./session/SessionControls";
+import { SessionControls, useNodeSupport } from "./session/SessionControls";
+import { commandError, routeOf } from "./composer/route";
+import { isHttp } from "./session/control";
 import { Approval } from "./approval/Approval";
 import { openPlan } from "./approval/answers";
 import { BUILTINS, opensDialog } from "./composer/commands";
@@ -35,7 +37,7 @@ import {
 } from "./model";
 import { Markdown, linkify } from "./Markdown";
 import { chatPerf } from "./chatPerf";
-import { elapsedText, liveSummary, mergeConv, msOf, sameLive, savedLabel, settlePending, type PendingItem, type ConvCache, type ConvDelta, type Live } from "./conv";
+import { elapsedText, liveSummary, mergeConv, msOf, sameLive, savedLabel, settlePending, withNotes, type PendingItem, type ConvCache, type ConvDelta, type Live } from "./conv";
 import { layoutFamily, type LNode } from "./layout/layout";
 import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
@@ -1249,6 +1251,10 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   // モデルか権限モードを替えている間（#97）。pty は claude を起動し直すので、その間は送らない
   const [switching, setSwitching] = useState(false);
   useEffect(() => { setSwitching(false); }, [agent?.id]);
+  // ノードにモデルの切り替えとコマンドの口があるか（#97）
+  const [support, markNoSupport] = useNodeSupport(agent, peer);
+  // チャットからコマンドを実行した印（#97）。画面だけで出し、セッションを替えたら消す
+  const [notes, setNotes] = useState<PendingItem[]>([]);
   // カードのボタンからの送信（#63）。描くたびに今の send に差し替える。パネルが消えたら口を外す
   const quickSend = useRef<((id: string, text: string) => Promise<boolean> | null) | null>(null);
   useEffect(() => {
@@ -1272,7 +1278,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   // 以前は stick を読み込みの effect でしか戻さず、タブの切り替えでは前の値が残り、容れ物も作り直されるのに items が変わらないので下へ送られなかった
   useLayoutEffect(() => { stick.current = true; }, [id, tab, chatReq]);
   useEffect(() => {
-    setItems([]); setPending([]); setLive(null); setConvErr(null); setCachedAt(null); stick.current = true;
+    setItems([]); setPending([]); setNotes([]); setLive(null); setConvErr(null); setCachedAt(null); stick.current = true;
     if (!id) return;
     let alive = true;
     // ccn から一度でも読めたか。読めたあとに保存分が届いても出さない
@@ -1314,7 +1320,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   useEffect(() => { setPending((p) => settlePending(items, p)); }, [items, pending.length]);
 
   // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
-  const shown = useMemo(() => collapseTools(withResults([...items, ...pending])), [items, pending]);
+  const shown = useMemo(() => collapseTools(withResults(withNotes([...items, ...pending], notes))), [items, pending, notes]);
   // 保存した履歴の印が出ているか。出ている間は中身の上に余白を足す（下の has-note）
   const hasNote = shown.length > 0 && !!(convErr || cachedAt);
   // 会話の最後のまだ答えていない計画（ExitPlanMode の本文）。承認の hook の入力が空のとき、承認の欄に出す（#83）
@@ -1365,13 +1371,25 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   /** quick はカードのボタンから送るとき。入力欄の下書きは消さない */
   const send = async (body: string, quick = false) => {
     if (!body.trim() || busy || switching) return false;
+    // / で始まる組み込みのコマンドの振り分け（#97、src/composer/route.ts）。使えないものは送らずに理由を出す
+    const route = routeOf(body, agent.kind, support);
+    if (route?.kind === "blocked") { onError(route.reason); return false; }
     setBusy(true);
     const after = items[items.length - 1]?.n ?? -1;
     // 先頭が / か ! の文は、端末のあるセッションなら入力欄へ直接貼る。ccn の send_message は from の1行を前に付けるので、
     // CLI のコマンドやシェルモードとして動かない（docs/research/cli-input.md）
     const direct = hasTerm && (body.startsWith("!") || isSlashCommand(body));
     try {
-      if (direct) {
+      if (route?.kind === "command") {
+        const r = await invoke<unknown>("run_command", { sessionId: agent.id, text: route.text, peer: peer || null });
+        if (!isHttp(r)) throw new Error("ccn の応答が読めなかった");
+        const err = commandError(r);
+        if (err) {
+          if (r.status === 404 || r.status === 405) markNoSupport();
+          throw new Error(err);
+        }
+        setNotes((xs) => [...xs, { role: "event", kind: "command", text: `/${route.name} を実行した${route.note ? `。${route.note}` : ""}`, at: new Date().toISOString(), after }]);
+      } else if (direct) {
         await invoke("send_direct", { sessionId: agent.id, text: body, peer: peer || null });
         // 画面を開くコマンド（/model など）は、ターミナルで操作してもらう
         if (opensDialog(body, BUILTINS)) setTab("term");
@@ -1471,9 +1489,9 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
 
       {tab !== "term" && <div className="composer" ref={composerBox}>
         <div className="to"><span className="to-name">送信先: {target}</span>
-          {!agent.ghost && <SessionControls key={agent.id} agent={agent} peer={peer} onSwitching={setSwitching} onDone={onSent2} onError={onError} />}
+          {!agent.ghost && <SessionControls key={agent.id} agent={agent} peer={peer} support={support} onNoSupport={markNoSupport} onSwitching={setSwitching} onDone={onSent2} onError={onError} />}
         </div>
-        <Composer key={agent.id} touch={mobile} agent={agent} peer={peer} text={text} setText={setText} busy={busy || switching} running={mood === "working"} onSubmit={send} onError={onError} />
+        <Composer key={agent.id} touch={mobile} agent={agent} peer={peer} text={text} setText={setText} busy={busy || switching} running={mood === "working"} support={support} onSubmit={send} onError={onError} />
       </div>}
     </aside>
   );
@@ -1696,7 +1714,7 @@ function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
   chatPerf.bubble++;
   if (item.role === "tool" && item.sent) return <SentLetter item={item} agent={agent} lineageDepth={lineageDepth} />;
   if (item.role === "tool") return <ToolLine item={item} />;
-  if (item.role === "event") return <div className={`turn-event te-${item.kind ?? "error"}`}>{item.kind === "interrupted" ? "⏹" : "⚠️"} {item.text}<span className="te-at">{timeOf(item.at)}</span></div>;
+  if (item.role === "event") return <div className={`turn-event te-${item.kind ?? "error"}`}>{item.kind === "interrupted" ? "⏹ " : item.kind === "command" ? "" : "⚠️ "}{item.text}<span className="te-at">{timeOf(item.at)}</span></div>;
   if (item.role === "result") return null;
   if (item.role === "user" && item.letter) return <LetterBubble item={item} />;
   if (item.role === "user") {

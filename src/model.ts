@@ -92,8 +92,8 @@ export type ConvItem = {
   result?: { text: string; error: boolean };
   /** role が result のとき、結果が失敗か */
   error?: boolean;
-  /** role が event のときの種類 */
-  kind?: "interrupted" | "error";
+  /** role が event のときの種類。command は、チャットからコマンドを実行した印（画面だけで出す、#97） */
+  kind?: "interrupted" | "error" | "command";
 };
 
 /**

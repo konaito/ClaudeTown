@@ -12,36 +12,51 @@ const RECHECK_NO_MS = 60_000;
 
 type Cur = { model: string | null; mode: string | null };
 
-export function SessionControls({ agent, peer, onSwitching, onDone, onError }: {
+const cachedSupport = (kind: Agent["kind"], nodeKey: string): Support => {
+  if (kind === "terminal") return "no";
+  const c = supportByNode.get(nodeKey);
+  return c && (c.v === "yes" || Date.now() - c.at < RECHECK_NO_MS) ? c.v : "unknown";
+};
+
+/**
+ * このセッションのノードに、モデルの切り替えとコマンドの口があるか（ノードごとに1回確かめる）。
+ * 2つ目の戻り値は、使ったときに 404 が返ったら「無い」に直す口
+ */
+export function useNodeSupport(agent: Agent | null, peer: string): [Support, () => void] {
+  const nodeKey = peer || "";
+  const id = agent?.id ?? "";
+  const kind = agent?.kind ?? "terminal";
+  const [support, setSupport] = useState<Support>(() => cachedSupport(kind, nodeKey));
+  useEffect(() => {
+    const v = cachedSupport(kind, nodeKey);
+    setSupport(v);
+    if (!id || v !== "unknown") return;
+    let on = true;
+    invoke<unknown>("session_controls", { sessionId: id, peer: peer || null })
+      .then((r) => {
+        const got = supportOf(r);
+        if (got !== "unknown") supportByNode.set(nodeKey, { v: got, at: Date.now() });
+        // 分からなかったとき（ブラウザ表示、中継の失敗）は、使えないものとして出す。次にセッションを開いたときに確かめ直す
+        if (on) setSupport(got === "unknown" ? "no" : got);
+      })
+      .catch(() => { if (on) setSupport("no"); });
+    return () => { on = false; };
+  }, [id, kind, nodeKey]);
+  const markNo = () => { supportByNode.set(nodeKey, { v: "no", at: Date.now() }); setSupport("no"); };
+  return [support, markNo];
+}
+
+export function SessionControls({ agent, peer, support, onNoSupport, onSwitching, onDone, onError }: {
   agent: Agent; peer: string;
+  support: Support; onNoSupport: () => void;
   /** 替えている間（pty は起動し直しの約3秒）。この間はチャットの送信も止める */
   onSwitching: (on: boolean) => void;
   onDone: (m: string) => void; onError: (m: string) => void;
 }) {
-  const nodeKey = peer || "";
-  const [support, setSupport] = useState<Support>(() => {
-    if (agent.kind === "terminal" || !viaCcn(agent)) return "no";
-    const c = supportByNode.get(nodeKey);
-    return c && (c.v === "yes" || Date.now() - c.at < RECHECK_NO_MS) ? c.v : "unknown";
-  });
   const [cur, setCur] = useState<Cur>({ model: null, mode: null });
   const [switching, setSwitching] = useState(false);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
-
-  // 口があるか（ノードごとに1回）
-  useEffect(() => {
-    if (agent.kind === "terminal" || !viaCcn(agent) || support !== "unknown") return;
-    let on = true;
-    invoke<unknown>("session_controls", { sessionId: agent.id, peer: peer || null })
-      .then((r) => {
-        const v = supportOf(r);
-        if (v !== "unknown") supportByNode.set(nodeKey, { v, at: Date.now() });
-        if (on) setSupport(v === "unknown" ? "no" : v);
-      })
-      .catch(() => { if (on) setSupport("no"); });
-    return () => { on = false; };
-  }, [agent.id, nodeKey]);
 
   // 今の値。開いたとき、状態が変わったとき（承認に答えた後、計画の承認でモードが替わる）に読み直す
   useEffect(() => {
@@ -62,7 +77,7 @@ export function SessionControls({ agent, peer, onSwitching, onDone, onError }: {
       if (!isHttp(r)) throw new Error("ccn の応答が読めなかった");
       const err = configureError(r);
       if (err) {
-        if (noRoute(r)) { supportByNode.set(nodeKey, { v: "no", at: Date.now() }); if (alive.current) setSupport("no"); }
+        if (noRoute(r)) onNoSupport();
         onError(`${agent.name}: ${err}`);
         return;
       }

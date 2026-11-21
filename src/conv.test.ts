@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, settlePending, type Live, type PendingItem } from "./conv";
+import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, settlePending, withNotes, type Live, type PendingItem } from "./conv";
 import type { ConvItem } from "./model";
 
 const item = (n: number): ConvItem => ({ role: "assistant", text: `t${n}`, n });
@@ -123,5 +123,21 @@ describe("settlePending（#69）", () => {
     const pend = [p("/tmp/a.png これ見て", 4), p("先に送ったやつ", 4), p("三通目", 4)];
     const items = [item(4), u(5, "[Image #1] これ見て"), item(6), u(7, "先に送ったやつ")];
     expect(settlePending(items, pend)).toEqual([pend[2]]);
+  });
+});
+
+describe("withNotes（#97）", () => {
+  const it = (n: number) => ({ role: "assistant" as const, text: `a${n}`, n });
+  const note = (after: number) => ({ role: "event" as const, kind: "command" as const, text: `/x ${after}`, after, at: `t${after}` });
+  test("実行したときの最後の番号の後ろに置く", () => {
+    expect(withNotes([it(1), it(2), it(3)], [note(2)]).map((x) => x.text)).toEqual(["a1", "a2", "/x 2", "a3"]);
+  });
+  test("後ろに何も無ければ末尾、送ったばかりの項目の前", () => {
+    expect(withNotes([it(1)], [note(1)]).map((x) => x.text)).toEqual(["a1", "/x 1"]);
+    expect(withNotes([it(1), { role: "user", text: "仮", pending: true }], [note(1)]).map((x) => x.text)).toEqual(["a1", "/x 1", "仮"]);
+  });
+  test("印が無ければ同じ配列を返す", () => {
+    const xs = [it(1)];
+    expect(withNotes(xs, [])).toBe(xs);
   });
 });
