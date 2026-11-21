@@ -79,7 +79,17 @@ fn place(home: &std::path::Path, app_id: Option<&str>, app_home: Option<String>,
 
 /// オフラインのキャッシュの置き場所（src-tauri/src/offline.rs）。開発版と安定版で分かれる
 fn cache_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(p) = TEST_CACHE.with(|c| c.borrow().clone()) {
+        return p;
+    }
     fc_path(Scope::App, "cache")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 試験のスレッドごとの会話の保存先（本物の ~/.family-computing に書かない）
+    static TEST_CACHE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 fn read_json(p: &PathBuf) -> Option<Value> {
@@ -175,6 +185,53 @@ struct Snapshot {
     fetched_at: u128,
     /// 一覧を読めず、保存してあった一覧（offline.rs）を agents に入れたときの、保存した時刻（ms）
     cached_at: Option<u64>,
+    /// 一覧の出どころ（#96）。この機械の町だけ。ccn は on、off（設定で切った）、つながらなかった理由。native は件数
+    sources: Option<Value>,
+}
+
+// ---------- ccn を使うかの設定（#96） ----------
+// 既定は使う（ネイティブの一覧に、ccn に接続できるときだけ ccn の一覧を重ねる）。切ると ccn の一覧を読まない。
+// 読むのは Rust の見張りのスレッドなので、アプリ側の置き場所（開発版は dev/ の下）のファイルに置く。形は {"ccn": true|false}
+
+const SETTINGS_FILE: &str = "town-settings.json";
+/// 0 はまだ読んでいない、1 は使う、2 は使わない
+static CCN_USE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn ccn_use() -> bool {
+    match CCN_USE.load(Ordering::SeqCst) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = read_json(&fc_path(Scope::App, SETTINGS_FILE)).and_then(|v| v["ccn"].as_bool()).unwrap_or(true);
+            CCN_USE.store(if on { 1 } else { 2 }, Ordering::SeqCst);
+            on
+        }
+    }
+}
+
+#[tauri::command]
+fn town_settings() -> Value {
+    json!({ "ccn": ccn_use() })
+}
+
+#[tauri::command]
+fn set_town_settings(ccn: bool) -> Result<Value, String> {
+    let p = fc_path(Scope::App, SETTINGS_FILE);
+    if let Some(d) = p.parent() {
+        fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    fs::write(&p, json!({ "ccn": ccn }).to_string()).map_err(|e| format!("設定を保存できなかった: {e}"))?;
+    CCN_USE.store(if ccn { 1 } else { 2 }, Ordering::SeqCst);
+    town_kick();
+    Ok(town_settings())
+}
+
+/// 設定で ccn を切ったときの、ccn の一覧の代わりの理由
+const CCN_OFF: &str = "ccn を使わない設定";
+
+/// ネイティブの記録から読んでいるだけのセッションへの操作を断る（この機械の町だけ）
+fn native_guard(session_id: &str, peer: &Option<String>) -> Result<(), String> {
+    if peer.as_deref().unwrap_or("").is_empty() { native::refuse_if_native(session_id) } else { Ok(()) }
 }
 
 /// お手紙の記録のうち、直近 LETTERS_WINDOW_MS のものを古い順に返す（多くても LETTERS_MAX 件）
@@ -323,14 +380,45 @@ fn list_sessions(peer: &Option<String>) -> Result<Vec<Value>, String> {
 
 /// ccn の一覧を、画面に渡すセッションの形に直す（fetch_agents の中身）。一覧は GET /sessions でも、一覧の SSE（#5）でもよい
 fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<Value>, Option<String>) {
-    let (sessions, ccn_error) = match got {
+    let local = peer.is_none();
+    let (sessions, mut ccn_error) = match got {
+        // 設定で ccn を切ったら、SSE で受けた一覧が残っていても使わない
+        Ok(_) if local && !ccn_use() => (vec![], Some(CCN_OFF.to_string())),
         Ok(v) => (v, None),
         Err(e) => (vec![], Some(e)),
     };
-    let live: Vec<&Value> = sessions
+    let mut live: Vec<&Value> = sessions
         .iter()
         .filter(|s| s.get("state").and_then(|x| x.as_str()) != Some("exited"))
         .collect();
+    // この機械の町は、ネイティブの記録（~/.claude）の一覧を重ねる（#96）。同じ sessionId が ccn にもあれば ccn の行を使う。
+    // ccn の行は、送信や承認の口（capabilities）、from 行の親、アカウントを持つ。ネイティブからは、ccn に無いセッションと sub-agent を足す
+    let native_rows: Vec<Value> = if local {
+        let n = native::list(&native::claude_home(), native::now_ms());
+        let ccn_ids: HashSet<&str> = live.iter().filter_map(|s| s["id"].as_str()).collect();
+        let rows: Vec<Value> = n.sessions.into_iter().filter(|r| !r["id"].as_str().is_some_and(|id| ccn_ids.contains(id))).chain(n.subagents).collect();
+        native::register(native::paths_of(&rows.iter().collect::<Vec<_>>()));
+        let mut odd = n.stats.unexpected.clone();
+        for (k, v) in native::conv::odd_counts() {
+            *odd.entry(k).or_default() += v;
+        }
+        let mut st = serde_json::to_value(&n.stats).unwrap_or(Value::Null);
+        st["unexpected"] = json!(odd);
+        // 時間は毎回変わるので、一覧が変わったかの比べ（snapshot_key）に入れない
+        if let Some(o) = st.as_object_mut() {
+            o.remove("ms");
+        }
+        *LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!({
+            "ccn": match &ccn_error { None => "on".to_string(), Some(e) if e == CCN_OFF => "off".to_string(), Some(e) => e.clone() },
+            "native": st,
+        }));
+        // ccn につながらなくても、ネイティブの一覧は読めているので、町は読めたものとして扱う（保存した一覧に差し替えない）
+        ccn_error = None;
+        rows
+    } else {
+        vec![]
+    };
+    live.extend(native_rows.iter());
     let live_ids: HashSet<String> = live.iter().filter_map(|s| s["id"].as_str().map(String::from)).collect();
 
     // ccn の parent は from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）
@@ -342,7 +430,6 @@ fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<V
 
     // 名前は、そのセッションが作業しているプロジェクトの名前（src-tauri/src/naming.rs）。
     // .git を読むのはこの機械の町だけ。別の機械の cwd はパスの形だけで決める
-    let local = peer.is_none();
     let whos: Vec<naming::Who> = live.iter().map(|s| {
         let id = s["id"].as_str().unwrap_or_default().to_string();
         let cwd = s["cwd"].as_str().filter(|c| !c.is_empty());
@@ -358,9 +445,14 @@ fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<V
     let mut agents = vec![];
     for s in &live {
         let id = s["id"].as_str().unwrap_or_default().to_string();
-        // 親は ccn の parent（from 行の呼び手）だけから引く。親が生きていなければ根として扱う
-        let parent = parent_from_ccn(s).filter(|p| *p != id);
-        let (report, close_check) = if peer.is_none() {
+        // 親は ccn の parent（from 行の呼び手）から引く。sub-agent は置き場所で決めた親（#96）。親が生きていなければ根として扱う
+        let native_parent = s["native"]["parentId"].as_str().filter(|p| live_ids.contains(*p)).map(String::from);
+        let parent = native_parent.or_else(|| parent_from_ccn(s)).filter(|p| *p != id);
+        let sub = s["kind"] == "subagent";
+        let (report, close_check) = if sub {
+            // sub-agent の様子は hook の報告ではなく、meta.json の説明と jsonl の末尾から作る（hook の報告は親のセッションの分しか無い）
+            (Some(s["native"]["report"].clone()), None)
+        } else if peer.is_none() {
             (
                 read_json_cached(&fc_path(Scope::Shared, &format!("state/{id}.json"))),
                 read_json_cached(&home().join(format!(".claude/close-check/{id}.json"))),
@@ -370,7 +462,10 @@ fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<V
         };
         agents.push(json!({
             "id": id,
-            "name": name_of.get(&id),
+            // sub-agent は、親と同じプロジェクトの名前になって見分けられないので、teammate の名前か種類（Explore など）にする
+            "name": if sub { s["title"].clone() } else { json!(name_of.get(&id)) },
+            // 一覧の出どころ（#96）。native は Claude Code の記録から読んでいるだけで、操作はできない
+            "source": if s.get("native").is_some() { "native" } else { "ccn" },
             // cwd のプロジェクトの名前（worktree なら本体の名前）。振り分けの場所でも cwd の分を入れる
             "project": project_of.get(id.as_str()).copied().flatten(),
             "kind": s["kind"],
@@ -398,9 +493,13 @@ fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<V
     (agents, ccn_error)
 }
 
+/// 最後に作ったこの機械の町の一覧の出どころ（Snapshot の sources）
+static LAST_SOURCES: Mutex<Option<Value>> = Mutex::new(None);
+
 fn snapshot(peer: Option<String>) -> Snapshot {
     let peer = peer.filter(|p| !p.is_empty());
-    let got = list_sessions(&peer);
+    // 設定で ccn を切ったら、ccn に一覧を取りに行かない
+    let got = if peer.is_none() && !ccn_use() { Err(CCN_OFF.to_string()) } else { list_sessions(&peer) };
     snapshot_from(peer, got)
 }
 
@@ -447,7 +546,8 @@ fn snapshot_from(peer: Option<String>, got: Result<Vec<Value>, String>) -> Snaps
         agents = c["agents"].as_array().cloned().unwrap_or_default();
         cached_at = c["savedAt"].as_u64();
     }
-    Snapshot { ccn: ccn_base(), peer, ccn_ok: ccn_error.is_none(), ccn_error, agents, letters, fetched_at: now_ms(), cached_at }
+    let sources = if peer.is_none() { LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner()).clone() } else { None };
+    Snapshot { ccn: ccn_base(), peer, ccn_ok: ccn_error.is_none(), ccn_error, agents, letters, fetched_at: now_ms(), cached_at, sources }
 }
 
 static AVATARS_LOCK: Mutex<()> = Mutex::new(());
@@ -515,6 +615,8 @@ struct Conv {
     used: u128,
     /// 今の動き（#59）
     live: Live,
+    /// ネイティブの jsonl から読んだか（#96）。同じ id が ccn とネイティブの間で入れ替わったら、読み位置の数え方が違うので頭から読み直す
+    native: bool,
 }
 
 /// 今の動き（#59）。会話を頭から読みながら、結果がまだ無い道具、最後の出来事、ターンの始まりを持つ。
@@ -1006,18 +1108,43 @@ fn cursor_is_stale(from: u64, seen: &Option<String>, got: &Option<String>) -> bo
     from > 0 && got.is_some() && got != seen
 }
 
+/// ネイティブの jsonl（#96）を読み位置 from から読む。read_messages と同じ形で返す。読み位置はバイト、印は native:<inode>。
+/// ファイルが読み位置より短くなったら、印を変えて返し、conversation が頭から読み直した扱いにする
+fn read_native(path: &std::path::Path, from: u64) -> Result<(u64, Vec<Value>, Vec<LiveEv>, Option<String>), String> {
+    let c = native::conv::read(path, from)?;
+    let fresh = c.lines.iter().flat_map(simplify).collect();
+    let evs = c.lines.iter().flat_map(live_events).collect();
+    let epoch = if c.restarted { format!("{}:restarted", c.epoch) } else { c.epoch };
+    Ok((c.next, fresh, evs, Some(epoch)))
+}
+
 fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<ConvDelta, String> {
     let peer = peer.filter(|p| !p.is_empty());
+    // ネイティブのセッションと sub-agent（一覧に出したもので、ccn に無いもの）は jsonl から読む（#96）
+    let native_path = if peer.is_none() { native::path_of(&session_id) } else { None };
+    let is_native = native_path.is_some();
     let key = format!("{}|{session_id}", peer.clone().unwrap_or_default());
-    let (from, seen) = {
+    let (from, seen, was_native) = {
         let g = CONVS.lock().map_err(|e| e.to_string())?;
-        g.as_ref().and_then(|m| m.get(&key)).map(|c| (c.next, c.epoch.clone())).unwrap_or((0, None))
+        g.as_ref().and_then(|m| m.get(&key)).map(|c| (c.next, c.epoch.clone(), Some(c.native))).unwrap_or((0, None, None))
     };
-    let (mut next, mut fresh, mut evs, mut epoch) = read_messages(&peer, &session_id, from)?;
-    let stale = cursor_is_stale(from, &seen, &epoch);
-    if stale {
+    // 出どころが ccn とネイティブの間で入れ替わった（ccn が落ちた、戻った、設定を切り替えた）。読み位置は使えないので、
+    // 頭から読んで置き換える。置き換えは通し番号を1つ空けるので、画面には必ず reset で届き、2つの出どころの項目が混ざらない
+    let switched = was_native.is_some_and(|w| w != is_native);
+    let start = if switched { 0 } else { from };
+    let read = |from: u64| match &native_path {
+        Some(p) => read_native(p, from),
+        None => read_messages(&peer, &session_id, from),
+    };
+    let (mut next, mut fresh, mut evs, mut epoch) = read(start)?;
+    let restarted = epoch.as_deref().is_some_and(|e| e.ends_with(":restarted"));
+    let stale = switched || restarted || cursor_is_stale(start, &seen, &epoch);
+    if restarted {
+        // ネイティブで頭から読み直した分は、そのまま置き換えに使う。印は元の形に戻す
+        epoch = epoch.map(|e| e.trim_end_matches(":restarted").to_string());
+    } else if stale && start > 0 {
         // 読んだページは捨て、after=0 から読み直して置き換える。読み直しに失敗したら何も変えない（次の呼び出しでもう一度気づく）
-        (next, fresh, evs, epoch) = read_messages(&peer, &session_id, 0)?;
+        (next, fresh, evs, epoch) = read(0)?;
     }
     let mut g = CONVS.lock().map_err(|e| e.to_string())?;
     let map = g.get_or_insert_with(HashMap::new);
@@ -1032,6 +1159,9 @@ fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) ->
     } else {
         c.absorb(from, next, fresh, evs, epoch)
     };
+    if !stale || changed {
+        c.native = is_native;
+    }
     // 増えたか置き換えたら、画面に出す分（最後の KEEP_MESSAGES 件）を保存する。ネットが切れたときは画面が conversation_cache で読む。
     // 書くのは錠を持ったまま（同じセッションの取得が重なっても、古い中身があとから上書きしない）。80件の JSON なので短い
     if changed {
@@ -1047,6 +1177,7 @@ fn conversation_cache(session_id: String, peer: Option<String>) -> Option<offlin
 }
 
 fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
+    native_guard(&session_id, &peer)?;
     if send_disabled() {
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
     }
@@ -1073,6 +1204,7 @@ fn send_message(session_id: String, text: String, peer: Option<String>) -> Resul
 /// 中身の組み立ては permission_body（試験あり）。
 /// 人が端末で開いたセッション（kind=terminal）は ccn から答えられないので断る。
 fn answer_permission(session_id: String, choice: String, expect_id: Option<String>, answers: Option<Value>, message: Option<String>, suggestion: Option<usize>, peer: Option<String>) -> Result<String, String> {
+    native_guard(&session_id, &peer)?;
     if send_disabled() {
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
     }
@@ -1254,17 +1386,20 @@ fn house_places() -> Result<Value, String> {
 
 /// セッションの詳細（承認の pending を含む）
 fn session_detail(session_id: String, peer: Option<String>) -> Result<Value, String> {
+    native_guard(&session_id, &peer)?;
     let peer = peer.filter(|p| !p.is_empty());
     get_json(&format!("{}/sessions/{session_id}", api(&peer)))
 }
 
 /// 転出の下見の1段目（移動元の説明）。副作用は無い。2段目の行き先の下見は clone することがあるので、画面からは呼ばない
 fn teleport_info(session_id: String, peer: Option<String>) -> Result<Value, String> {
+    native_guard(&session_id, &peer)?;
     let peer = peer.filter(|p| !p.is_empty());
     get_json(&format!("{}/sessions/{session_id}/teleport", api(&peer)))
 }
 
 fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> {
+    native_guard(&session_id, &peer)?;
     if send_disabled() {
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
     }
@@ -1278,6 +1413,7 @@ fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> 
 /// 転出（ccn の teleport。PR #18）。移動元のノードが下見から取り込みまで1回の要求で進め、結果を返す（最大95秒）
 #[tauri::command]
 async fn teleport(session_id: String, to: String, fork: bool, subtree: Option<bool>, dry_run: Option<bool>, peer: Option<String>) -> Result<Value, String> {
+    native_guard(&session_id, &peer)?;
     if send_disabled() {
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
     }
@@ -1403,6 +1539,7 @@ fn spawn_term_sender(ch: tauri::ipc::Channel<Value>) -> std::sync::mpsc::Sender<
 /// ターミナルを開く。出力は on_event に送る。戻り値は世代の番号で、閉じるときに term_close に渡す
 #[tauri::command]
 fn term_open(session_id: String, peer: Option<String>, on_event: tauri::ipc::Channel<Value>) -> Result<u64, String> {
+    native_guard(&session_id, &peer)?;
     let peer = peer.filter(|p| !p.is_empty());
     let stop = Arc::new(AtomicBool::new(false));
     let generation = TERM_GEN.fetch_add(1, Ordering::SeqCst);
@@ -1512,6 +1649,7 @@ fn term_close(session_id: String, generation: Option<u64>) -> Result<(), String>
 /// 打ったキーと大きさの変更。送るのはセッションごとの書き手のスレッド（term_send）で、命令はすぐ返る
 #[tauri::command]
 fn term_input(session_id: String, text: String, peer: Option<String>) -> Result<(), String> {
+    native_guard(&session_id, &peer)?;
     if send_disabled() {
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
     }
@@ -1520,6 +1658,7 @@ fn term_input(session_id: String, text: String, peer: Option<String>) -> Result<
 
 #[tauri::command]
 fn term_resize(session_id: String, cols: u16, rows: u16, peer: Option<String>) -> Result<(), String> {
+    native_guard(&session_id, &peer)?;
     term_send(&session_id, peer.filter(|p| !p.is_empty()), TermCmd::Resize(cols, rows))
 }
 
@@ -1662,10 +1801,12 @@ mod cmd {
     }
     #[tauri::command]
     pub async fn send_direct(session_id: String, text: String, peer: Option<String>) -> Result<(), String> {
+        super::native_guard(&session_id, &peer)?;
         blocking(move || super::composer::send_direct(session_id, text, peer)).await
     }
     #[tauri::command]
     pub async fn interrupt_session(session_id: String, peer: Option<String>) -> Result<(), String> {
+        super::native_guard(&session_id, &peer)?;
         blocking(move || super::composer::interrupt_session(session_id, peer)).await
     }
     /// 入力欄への貼り付け（#64）。クリップボードのファイルのパスか、保存した画像のパスを返す
@@ -1794,7 +1935,12 @@ fn watch_loop(peer: Option<String>, tx: std::sync::mpsc::Sender<WatchCmd>, rx: s
     let stop = Arc::new(AtomicBool::new(false));
     let url = format!("{}/sessions/stream?state=live", api(&peer));
     loop {
-        if stream_at.is_some_and(|at| Instant::now() >= at) {
+        // 設定で ccn を切ったら SSE を読まない（つないでいたら、受けた一覧を捨てる。agents_from も使わない）
+        let ccn_off = peer.is_none() && !ccn_use();
+        if ccn_off {
+            list = None;
+        }
+        if !ccn_off && stream_at.is_some_and(|at| Instant::now() >= at) {
             stream_at = None;
             let (u, st, t) = (url.clone(), stop.clone(), tx.clone());
             std::thread::spawn(move || {
@@ -2030,7 +2176,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::conversation_cache, cmd::send_message, cmd::answer_permission,
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, cmd::house_places, cmd::place_repos, term_open, term_close, term_input, term_resize,
-            perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
+            perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick, town_settings, set_town_settings,
             cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::paste_clipboard, cmd::stage_files
         ])
         .run(context)
@@ -2464,7 +2610,7 @@ mod tests {
 
     #[test]
     fn snapshot_key_ignores_fetched_at() {
-        let mk = |at: u128, n: usize| Snapshot { ccn: "x".into(), peer: None, ccn_ok: true, ccn_error: None, agents: vec![json!({"id": n})], letters: vec![], fetched_at: at, cached_at: None };
+        let mk = |at: u128, n: usize| Snapshot { ccn: "x".into(), peer: None, ccn_ok: true, ccn_error: None, agents: vec![json!({"id": n})], letters: vec![], fetched_at: at, cached_at: None, sources: None };
         assert_eq!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(2, 1)));
         assert_ne!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(1, 2)));
     }
@@ -2600,6 +2746,97 @@ mod tests {
         assert_eq!(agents[0]["accountEmail"], "a@example.invalid");
         assert!(agents[1]["account"].is_null());
         assert!(agents[1]["accountEmail"].is_null());
+    }
+
+    #[test]
+    fn local_town_merges_native_sessions_and_subagents() {
+        // 会話を読む先の登録（native::register）はプロセスで1つなので、使う試験を1本ずつ動かす
+        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use native::testtree::*;
+        // 合成の ~/.claude: ccn にもあるセッション A（sub-agent 1体）と、ccn に無いセッション B
+        let root = tmp("merge");
+        let a = "aaaaaaaa-0000-4000-8000-00000000000a";
+        let b = "bbbbbbbb-0000-4000-8000-00000000000b";
+        session(&root, a, "/tmp/合成/a", "busy");
+        let pid2 = 1; // launchd。生きている pid として使う（読むだけ）
+        write(&root.join(format!("sessions/{pid2}.json")), &json!({ "pid": pid2, "sessionId": b, "cwd": "/tmp/合成/b", "startedAt": 5, "kind": "interactive", "status": "idle" }).to_string());
+        write(&root.join(format!("projects/{}/{a}.jsonl", enc("/tmp/合成/a"))), "{\"type\":\"user\",\"message\":{\"content\":\"やって\"}}\n");
+        write(&root.join(format!("projects/{}/{b}.jsonl", enc("/tmp/合成/b"))), &format!("{{\"type\":\"user\",\"message\":{{\"content\":\"from agent:n/{}/r via n\\n\\nやって\"}}}}\n", &a[..8]));
+        let sub = root.join(format!("projects/{}/{a}/subagents", enc("/tmp/合成/a")));
+        write(&sub.join("agent-x1.jsonl"), "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"見た\"}]}}\n");
+        write(&sub.join("agent-x1.meta.json"), &json!({ "agentType": "Explore", "description": "探す" }).to_string());
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        CCN_USE.store(1, Ordering::SeqCst);
+        let ccn = vec![json!({ "id": a, "kind": "pty", "state": "running", "cwd": "/tmp/合成/a", "capabilities": { "send": true, "stop": true }, "parent": "local" })];
+        let (agents, err) = agents_from(&None, Ok(ccn));
+        assert!(err.is_none());
+        let by = |id: &str| agents.iter().find(|x| x["id"] == id).cloned().unwrap_or(Value::Null);
+        // A は ccn の行（送れる）、B はネイティブの行（読むだけ）で、from 行から A の子になる
+        assert_eq!(by(a)["source"], "ccn");
+        assert_eq!(by(a)["canSend"], true);
+        assert_eq!(by(b)["source"], "native");
+        assert_eq!(by(b)["canSend"], false);
+        assert_eq!(by(b)["capabilities"]["permissions"], false);
+        assert_eq!(by(b)["parent"], a);
+        let x1 = native::subagents::sub_id("x1", a);
+        assert_eq!(by(&x1)["kind"], "subagent");
+        assert_eq!(by(&x1)["parent"], a);
+        assert_eq!(by(&x1)["name"], "Explore");
+        assert_eq!(by(&x1)["report"]["asked"], "探す");
+        assert_eq!(agents.len(), 3);
+        // 操作は、ネイティブの id だけ断る
+        assert!(native_guard(b, &None).is_err());
+        assert!(native_guard(&x1, &None).is_err());
+        assert!(native_guard(a, &None).is_ok());
+        assert!(native_guard(b, &Some("vm".into())).is_ok());
+        // 会話は jsonl から読む（印は native:）。conversation() は会話の保存（~/.family-computing の cache）を書くので、試験では読む関数だけを通す
+        let path = native::path_of(b).unwrap();
+        let (next, items, _, epoch) = read_native(&path, 0).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["text"], "やって");
+        assert!(epoch.unwrap().starts_with("native:"));
+        assert_eq!(next, fs::metadata(&path).unwrap().len());
+        // ccn につながらなくても、ネイティブで読めたら町は読めたことにする
+        let (agents, err) = agents_from(&None, Err("つながらない".into()));
+        assert!(err.is_none());
+        assert_eq!(agents.len(), 3);
+        assert_eq!(LAST_SOURCES.lock().unwrap().as_ref().unwrap()["ccn"], "つながらない");
+    }
+
+    static NATIVE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn switching_between_ccn_and_native_always_resets_the_screen() {
+        // 会話を読む先の登録（native::register）はプロセスで1つなので、使う試験を1本ずつ動かす
+        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use native::testtree::*;
+        let root = tmp("switch");
+        TEST_CACHE.with(|c| *c.borrow_mut() = Some(root.join("cache")));
+        let id = "cccccccc-0000-4000-8000-00000000000c";
+        let path = root.join("c.jsonl");
+        write(&path, "{\"type\":\"user\",\"message\":{\"content\":\"ネイティブ\"}}\n");
+        // ccn から読んだ会話が 10 件ある（読み位置 7、印 e1）
+        {
+            let mut g = CONVS.lock().unwrap();
+            let map = g.get_or_insert_with(HashMap::new);
+            let mut c = Conv { next: 7, epoch: Some("e1".into()), used: now_ms(), ..Default::default() };
+            c.push((0..10).map(|i| json!({ "role": "user", "text": format!("ccn {i}") })).collect());
+            map.insert(format!("|{id}"), c);
+        }
+        // 同じ id がネイティブの行になった（ccn が落ちた）。画面は 8 件目まで持っている
+        let mut reg = HashMap::new();
+        reg.insert(id.to_string(), path.clone());
+        native::register(reg);
+        let d = conversation(id.into(), None, Some(8)).unwrap();
+        assert!(d.reset, "出どころが変わったら必ず reset");
+        assert_eq!(d.items.len(), 1);
+        assert_eq!(d.items[0]["text"], "ネイティブ");
+        // 続きはネイティブの読み位置で読む（もう reset しない）
+        let d2 = conversation(id.into(), None, Some(d.total)).unwrap();
+        assert!(!d2.reset);
+        assert!(d2.items.is_empty());
+        native::register(HashMap::new());
+        CONVS.lock().unwrap().as_mut().unwrap().remove(&format!("|{id}"));
     }
 
     #[test]

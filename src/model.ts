@@ -20,7 +20,10 @@ export type Report = {
 export type Agent = {
   id: string;
   name: string;
-  kind: "terminal" | "node";
+  /** subagent は Claude Code の記録から読んだ sub-agent と teammate（#96）。親のセッションの子として出す */
+  kind: "terminal" | "node" | "subagent";
+  /** 一覧の出どころ（#96）。native は Claude Code の記録（~/.claude）から読んでいるだけで、capabilities が全部 false。古い一覧には無い */
+  source?: "ccn" | "native";
   state: "running" | "waiting_permission" | "idle";
   cwd: string;
   /** cwd のプロジェクトの名前（worktree なら本体の名前。Rust が .git を読んで出す）。モックと古い一覧には無い */
@@ -65,6 +68,8 @@ export type Snapshot = {
   fetched_at: number;
   /** 一覧を読めず、保存してあった一覧を agents に入れたときの、保存した時刻（ms）。src-tauri/src/offline.rs */
   cached_at?: number | null;
+  /** 一覧の出どころ（#96）。ccn は "on"、"off"（設定で切った）、つながらなかった理由。native は件数（src-tauri/src/native/mod.rs の Stats） */
+  sources?: { ccn: string; native: Record<string, unknown> } | null;
 };
 
 export type Peer = { name: string; url: string; status: string; self: boolean };

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { call as invoke } from "../bridge";
+import { call as invoke, HAS_CCN_SETTING } from "../bridge";
 import { checkPlace, DEFAULT_PLACE_LABEL } from "../newHouse/placeSetting";
 import { placeLabel, recentPlaces, type PlacesInput, type RecentPlace } from "../newHouse/places";
 
@@ -11,6 +11,13 @@ export function SettingsDialog({ place, onSave, onClose }: { place: string | nul
   // 入力欄の文字。空は「設定しない（既定）」
   const [text, setText] = useState(place ?? "");
   const [src, setSrc] = useState<{ roots: string[]; lobby: string | null; recent: RecentPlace[] } | "error" | null>(null);
+  // ccn を使うか（#96）。アプリの中だけの設定で、Rust のファイルに置く（読むのは一覧の見張りのスレッド）。null は読み込み中
+  const [ccn, setCcn] = useState<boolean | null>(null);
+  const [ccnSaved, setCcnSaved] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!HAS_CCN_SETTING) return;
+    invoke<{ ccn: boolean }>("town_settings").then((v) => { setCcn(v.ccn); setCcnSaved(v.ccn); }).catch(() => {});
+  }, []);
   useEffect(() => {
     let live = true;
     invoke<PlacesInput>("house_places")
@@ -32,6 +39,7 @@ export function SettingsDialog({ place, onSave, onClose }: { place: string | nul
   const save = () => {
     if (bad) return;
     onSave(check && check.ok ? check.path : null);
+    if (ccn !== null && ccn !== ccnSaved) invoke("set_town_settings", { ccn }).catch(() => {});
     onClose();
   };
 
@@ -59,6 +67,18 @@ export function SettingsDialog({ place, onSave, onClose }: { place: string | nul
             ))}
           </div>
         </section>
+        {HAS_CCN_SETTING && (
+          <section className="set-sec">
+            <label className="set-label set-check">
+              <input type="checkbox" checked={ccn ?? true} disabled={ccn === null} onChange={(e) => setCcn(e.target.checked)} />
+              ccn を使う
+            </label>
+            <p className="hint">
+              町の一覧と会話は、この Mac の Claude Code の記録から読む。ccn を使うと、ccn につながるときだけ ccn の一覧を重ね、送信、承認、停止、ターミナル、別の機械の町を使える。
+              切ると ccn に取りに行かず、どのセッションも読むだけになる（新しい世帯も作れない）。
+            </p>
+          </section>
+        )}
         <div className="modal-btns">
           <button className="pane-btn" onClick={onClose}>やめる（Esc）</button>
           <button className="primary" disabled={!!bad} onClick={save}>保存</button>
