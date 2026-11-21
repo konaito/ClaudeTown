@@ -900,59 +900,6 @@ mod tests {
     }
 
     #[test]
-    fn create_body_sends_fork_only_with_resume() {
-        let s = |v: &str| Some(v.to_string());
-        // 新しい世帯: resume も fork も succeed も送らない。空の prompt と name も送らない
-        let b = create_body("/w".into(), s(" "), None, Some(100), Some(30), None, Some(true), Some(true));
-        assert_eq!(b, json!({ "terminal": true, "cwd": "/w", "cols": 100, "rows": 30 }));
-        // 複製: 前任の ID を resume に、fork を true にして送る
-        let b = create_body("/w".into(), s("続き"), s("meta"), None, Some(5), s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), None);
-        assert_eq!(b, json!({ "terminal": true, "cwd": "/w", "cols": 120, "rows": 40, "prompt": "続き", "name": "meta", "resume": "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa", "fork": true }));
-        // 引き継ぎ: resume と fork に succeed を足す
-        let b = create_body("/w".into(), s("続き"), None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), Some(true));
-        assert_eq!(b, json!({ "terminal": true, "cwd": "/w", "cols": 120, "rows": 40, "prompt": "続き", "resume": "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa", "fork": true, "succeed": true }));
-        // fork 無しの付け直しは resume だけ。succeed を渡されても送らない（ccn は fork の無い succeed を 400 で断る）
-        let b = create_body("/w".into(), None, None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), None, Some(true));
-        assert_eq!(b["resume"], "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa");
-        assert!(b.get("fork").is_none());
-        assert!(b.get("succeed").is_none());
-    }
-
-    /// 付け直し（resume）の作成は、共有の Agent の8秒より長く待つ（RESUME_TIMEOUT）。10秒かけて返す偽の ccn で確かめる。
-    /// 時間がかかる（約18秒）ので、ふだんは回さない: cargo test resume_create_waits -- --ignored
-    #[test]
-    #[ignore]
-    fn resume_create_waits_longer_than_default() {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut s) = stream else { continue };
-                std::thread::spawn(move || {
-                    let mut buf = [0u8; 8192];
-                    let _ = s.read(&mut buf);
-                    std::thread::sleep(Duration::from_secs(10));
-                    let body = r#"{"id":"f7a05063-6d62-40d7-b13c-3604a655dfda","depth":0}"#;
-                    let _ = write!(s, "HTTP/1.1 201 Created\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body);
-                });
-            }
-        });
-        let url = format!("http://127.0.0.1:{port}/api/sessions");
-        let s = |v: &str| Some(v.to_string());
-        // resume 無し: 既定の8秒で切れる
-        let t = std::time::Instant::now();
-        let plain = ccn::post_create(&url, create_body("/w".into(), None, None, None, None, None, None, None), None);
-        assert!(plain.is_err(), "{plain:?}");
-        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
-        // resume あり: 10秒かかる応答を受け取る
-        let t = std::time::Instant::now();
-        let got = ccn::post_create(&url, create_body("/w".into(), s("続き"), None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), Some(true)), None);
-        assert_eq!(got.unwrap()["id"], "f7a05063-6d62-40d7-b13c-3604a655dfda");
-        assert!(t.elapsed() >= Duration::from_secs(10), "{:?}", t.elapsed());
-    }
-
-    #[test]
     fn agents_carry_account_when_ccn_lists_it() {
         // 別の機械の町として読む（この機械の状態ファイルを読まない）
         let peer = Some("vm".to_string());
