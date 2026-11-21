@@ -72,17 +72,24 @@ export function resolve(raw: string | null | undefined, agents: Agent[]): string
  * （2026-11-21 に ~/.claude/projects の teammate の記録で数えた。main が463件、team-lead が343件）。
  * teammate: の形で、チームの中に1人に決まらなければ null（町の全員から名前で引くと、別のチームの同名に結ぶ）
  */
+/**
+ * Claude Code の記録から読んだ sub-agent か teammate か。いまの一覧は teammate も kind: "subagent" で出す。
+ * チームメイトを kind: "teammate" で出す版（ccn を外す作業のブランチ）でも引けるように、両方を受ける
+ */
+const SUB_KINDS: readonly string[] = ["subagent", "teammate"];
+const isSub = (a: Agent) => SUB_KINDS.includes(a.kind);
+
 function resolveTeam(raw: string, me: Agent, agents: Agent[]): string | null | undefined {
   const s = bare(raw);
   const tagged = s.startsWith("teammate:");
   const name = tagged ? s.slice("teammate:".length) : s;
-  const sub = me.kind === "subagent";
+  const sub = isSub(me);
   if (name === "team-lead" || (!tagged && name === "main")) {
     if (sub && me.parent) return agents.some((a) => a.id === me.parent) ? me.parent : null;
     return tagged ? null : undefined;
   }
   const lead = sub ? me.parent : me.id;
-  const hit = agents.filter((a) => a.kind === "subagent" && a.parent === lead && a.name === name);
+  const hit = agents.filter((a) => isSub(a) && a.parent === lead && a.name === name);
   if (hit.length === 1) return hit[0].id;
   return tagged ? null : undefined;
 }

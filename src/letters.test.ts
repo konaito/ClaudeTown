@@ -106,6 +106,13 @@ describe("会話を開いているセッションを起点にした結び付け�
     expect(resolvePeer("teammate:team-lead", "team-lead", sub("s", "orphan", "gone"), team)).toBeNull();
   });
 
+  test("チームメイトを kind: teammate で出す一覧でも引ける", () => {
+    const t = (a: Agent) => ({ ...a, kind: "teammate" }) as unknown as Agent;
+    const team2 = team.map((a) => (a === A || a === B ? t(a) : a));
+    expect(resolvePeer("teammate:team-lead", "team-lead", t(A), team2)).toBe(LEAD);
+    expect(resolvePeer("teammate:letter-lead-avatar", "letter-lead-avatar", t(A), team2)).toBe(B.id);
+  });
+
   test("送ったお手紙の宛先: main と team-lead はリード、名前はチームの中から", () => {
     expect(resolvePeer("main", "main", B, team)).toBe(LEAD);
     expect(resolvePeer("team-lead", "team-lead", B, team)).toBe(LEAD);
