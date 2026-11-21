@@ -104,7 +104,7 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     }
     case "conversation_cache": return null as T;
     // ブラウザ版は Rust の代わりに、同じ確認をここで行う（src/webPerm.ts）
-    case "answer_permission": if (WEB) return answerPermission((path) => j(path), (path, body) => post(path, body), String(a.sessionId), String(a.choice), (a.expectId as string | null) ?? null, (a.answers as Record<string, string> | null) ?? null, (a.message as string | null) ?? null) as T; return null as T;
+    case "answer_permission": if (WEB) return answerPermission((path) => j(path), (path, body) => post(path, body), String(a.sessionId), String(a.choice), (a.expectId as string | null) ?? null, (a.answers as Record<string, string> | null) ?? null, (a.message as string | null) ?? null, (a.suggestion as number | null) ?? null) as T; return null as T;
     case "send_message": {
       if (!WEB) return null as T; // ?mock の試験では送らない（今までどおり）
       if (!String(a.text ?? "").trim()) throw new Error("文が空");
