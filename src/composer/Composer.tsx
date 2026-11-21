@@ -160,6 +160,7 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
     if (ok) { remember(body); histSt.current = { index: -1, draft: "" }; setHelp(false); setTimeout(loadHistory, 1500); }
   };
 
+  const [stopping, setStopping] = useState(false);
   const interrupt = () => invoke("interrupt_session", { sessionId: agent.id, peer: peer || null }).catch((e) => onError(`止められなかった: ${e}`));
   const clearDraft = () => { if (text.trim()) remember(text); histSt.current = { index: -1, draft: "" }; replaceAll(""); };
 
@@ -436,9 +437,17 @@ export function Composer({ agent, peer, text, setText, busy, running, onSubmit, 
           onKeyDown={onKeyDown}
           onPaste={onPaste}
         />
-        <button className="send" disabled={!agent.canSend || busy || !text.trim()} onClick={() => submit(text)} title="送る（Enter）">
-          <SendIcon />
-        </button>
+        {/* 作業中で入力が空なら、送るボタンを止めるボタンにする。Esc と Ctrl+C を押せないスマホでも止められる（#83）。
+            文を打てば送るボタンに戻り、送った文は今の作業のあとに読まれる */}
+        {running && canInterrupt && !text.trim() && !search ? (
+          <button className="send stop" disabled={stopping} onClick={() => { setStopping(true); interrupt().finally(() => setStopping(false)); }} title="今の作業を止める（Esc）" aria-label="止める">
+            <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden><rect x="1" y="1" width="12" height="12" rx="2.5" fill="currentColor" /></svg>
+          </button>
+        ) : (
+          <button className="send" disabled={!agent.canSend || busy || !text.trim()} onClick={() => submit(text)} title="送る（Enter）">
+            <SendIcon />
+          </button>
+        )}
       </div>
       <div className="hint">{note}</div>
     </>
