@@ -1,16 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IS_WEB, call as invoke, setFullscreen } from "./bridge";
 import { pickTown, savedTown, saveTown } from "./webTown";
-import { lastTermSize } from "./term/size";
-import { perfMark, perfStart } from "./term/perf";
+import { perfMark } from "./term/perf";
 import { loadTerminal } from "./term/lazyTerminal";
 import { useBench } from "./term/bench";
 import { collectMail, type Mail } from "./mail";
 import { flightsOf } from "./letters";
 import { withGhosts } from "./ghost";
-import { pollWhileVisible } from "./visible";
 import { kickTown } from "./town";
-import { SucceedError, kidsOf, startSuccessor, succeedBlock } from "./succeed";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import { PanelLeftClose, PanelLeftOpen, Settings, Users } from "lucide-react";
 import { NewHousePane } from "./newHouse/NewHousePane";
@@ -22,6 +19,12 @@ import { useToasts } from "./hooks/useToasts";
 import { useTown } from "./hooks/useTown";
 import { useOtherTowns } from "./hooks/useOtherTowns";
 import { usePanes } from "./hooks/usePanes";
+import { useSelection } from "./hooks/useSelection";
+import { useZoom } from "./hooks/useZoom";
+import { useHidden } from "./hooks/useHidden";
+import { useKill } from "./hooks/useKill";
+import { useSucceed } from "./hooks/useSucceed";
+import { useCardSend } from "./hooks/useCardSend";
 import { Stage } from "./canvas/Stage";
 import { FamilyCanvas, Group, layoutOf } from "./canvas/FamilyCanvas";
 import { Confirm, KillConfirm, SucceedConfirm } from "./confirm/Confirm";
@@ -66,11 +69,6 @@ function keepSide(l: Layout, prev: Layout | undefined): Layout {
   return { houses: l.houses, town: Math.max(0, 100 - l.houses - side), side };
 }
 function saveSplit(l: Layout) { try { localStorage.setItem(SPLIT_KEY, JSON.stringify(l)); } catch { /* 保存できなくても動きは変えない */ } }
-/** 閉じる演出の長さ（ms）。CSS の kill-* と合わせる */
-const KILL_MS = 1150;
-/** 子孫を葉から順に倒すときのずらし（ms） */
-const KILL_STAGGER = 140;
-
 /** 世帯の要約の凡例に並べる順 */
 const LEGEND: Mood[] = ["working", "reply", "approval", "done", "idle"];
 
@@ -82,9 +80,9 @@ export default function App() {
   const [peer, setPeer] = useState<string>("");
   const { snap, err, fail, reload } = useTown(peer);
   const [peers, setPeers] = useState<Peer[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
+  const { selected, setSelected, selectedNow, fresh, setFresh, termReq, setTermReq, chatReq, setChatReq, composeReq, setComposeReq, focus } = useSelection();
   const { toasts, toast } = useToasts();
-  const [zoom, setZoom] = useState<number | "fit">("fit");
+  const { zoom, zoomOut, zoomIn, zoomFit } = useZoom();
 
   useEffect(() => {
     invoke<Peer[]>("peers").then((p) => setPeers(Array.isArray(p) ? p : [])).catch(() => {});
@@ -118,24 +116,7 @@ export default function App() {
   /** 町を切り替える（上の帯の選択と、スマホの町の選択で共通） */
   const changeTown = (v: string) => { touched.current = true; setPeer(v); setSelected(null); if (IS_WEB) saveTown(v || selfPeer?.name || ""); };
   // 閉じたセッション。演出が終わったら隠し、ccn の一覧から消えたら忘れる（10秒たっても消えなければ戻して失敗を出す）
-  const [dying, setDying] = useState<Map<string, number>>(new Map());
-  const [hidden, setHidden] = useState<Map<string, number>>(new Map());
-  const [killAsk, setKillAsk] = useState<Agent | null>(null);
-  const agents = useMemo(() => (snap?.agents ?? []).filter((a) => !hidden.has(a.id)), [snap, hidden]);
-  // 隠したセッションがある間だけ、1秒ごとに下の判定を回す。一覧が前回と同じなら snap は変わらず（#4）、判定が動かないため
-  const [sweep, setSweep] = useState(0);
-  const hasHidden = hidden.size > 0;
-  useEffect(() => (hasHidden ? pollWhileVisible(() => setSweep((n) => n + 1), 1000) : undefined), [hasHidden]);
-  useEffect(() => {
-    if (!snap || hidden.size === 0) return;
-    const present = new Set(snap.agents.map((a) => a.id));
-    const now = Date.now();
-    const stuck = [...hidden].filter(([id, at]) => present.has(id) && now - at > 10000).map(([id]) => id);
-    const gone = [...hidden.keys()].filter((id) => !present.has(id));
-    if (!stuck.length && !gone.length) return;
-    setHidden((h) => { const n = new Map(h); for (const id of [...stuck, ...gone]) n.delete(id); return n; });
-    if (stuck.length) toast(`止まらなかった: ${stuck.map((id) => snap.agents.find((a) => a.id === id)?.name ?? id.slice(0, 8)).join("、")}`, true);
-  }, [snap, sweep]);
+  const { setHidden, agents } = useHidden(snap, toast);
   // 別の町のお便り。町の表示はいま選んだノードだけで、お便りは全部の町から集める
   const selfName = peers.find((p) => p.self)?.name ?? "このMac";
   const curTown = peer || selfName;
@@ -161,143 +142,15 @@ export default function App() {
     setSelected(a.ghost.realId);
   }, [selfName]);
 
-  /**
-   * a とその子孫を、葉から順に止める。倒れる演出も葉から少しずつずらして出す。
-   * alone なら a だけを止め、子孫は残す（引き継ぎで前任を止めるとき）。このときの知らせと選択の切り替えは呼び手が行う。全部止まったら true
-   */
-  const kill = useCallback(async (a: Agent, alone = false) => {
-    const order: Agent[] = [];
-    // ゴースト（別の町にいる本物の影）は閉じない
-    const walk = (x: Agent) => { for (const k of tree.childrenOf.get(x.id) ?? []) if (!k.ghost) walk(k); order.push(x); };
-    if (alone) order.push(a); else walk(a);
-    const targets = order.filter((x) => x.capabilities?.stop);
-    const skipped = order.filter((x) => !x.capabilities?.stop);
-    setDying((m) => { const n = new Map(m); targets.forEach((x, i) => n.set(x.id, i * KILL_STAGGER)); return n; });
-    if (!alone && selected && targets.some((x) => x.id === selected)) setSelected(null);
-    const failed: Agent[] = [];
-    for (const x of targets) {
-      try { await invoke("stop_session", { sessionId: x.id, peer: peer || null }); }
-      catch { failed.push(x); }
-    }
-    const ok = targets.filter((x) => !failed.includes(x));
-    // 一覧から消えたのをすぐ拾う。見張りは変化が無いと間隔を延ばしているため（#5）
-    kickTown();
-    // 止まらなかった分は演出を戻す。止まった分は演出が終わったら隠す
-    setDying((m) => { const n = new Map(m); for (const x of failed) n.delete(x.id); return n; });
-    const last = (targets.length - 1) * KILL_STAGGER + KILL_MS;
-    setTimeout(() => {
-      setHidden((h) => { const n = new Map(h); for (const x of ok) n.set(x.id, Date.now()); return n; });
-      setDying((m) => { const n = new Map(m); for (const x of ok) n.delete(x.id); return n; });
-    }, last);
-    if (alone) return failed.length === 0 && skipped.length === 0;
-    if (failed.length) toast(`止められなかった: ${failed.map((x) => x.name).join("、")}`, true);
-    else toast(`${a.name}${order.length > 1 ? ` と子孫 ${order.length - 1} 人` : ""}を閉じた`);
-    if (skipped.length) toast(`ccn から止められないので残した: ${skipped.map((x) => x.name).join("、")}`, true);
-    return failed.length === 0 && skipped.length === 0;
-  }, [tree, selected, peer, toast]);
+  const { kill, killAsk, setKillAsk, killCtx } = useKill({ tree, selected, setSelected, peer, toast, setHidden });
   // お手紙。この機械の町を見ているときだけ（記録はこの機械の hook が書く）
   const flights = useMemo(() => (peer ? [] : flightsOf(snap?.letters ?? [], agents)), [snap, agents, peer]);
   const letterMarks = useLetterMarks(flights);
-  const askKill = useCallback((a: Agent, instant: boolean) => { if (instant) kill(a); else setKillAsk(a); }, [kill]);
-  const killCtx = useMemo(() => ({ dying, ask: askKill }), [dying, askKill]);
-  // 引き継ぎ（src/succeed.ts）。確認を挟んでから、ccn に後継を立てさせる。新しい ccn は前任の停止と子の付け替えまで行う。
-  // 古い ccn では、後継が1通目を受け取ったら、ここで前任だけを止める
-  const [succeedAsk, setSucceedAsk] = useState<Agent | null>(null);
-  // 引き継げなかったときの、閉じるまで残る知らせ（枠の残るアカウントが無いとき。次に空く時刻を読めるように、消えるトーストにしない）
-  const [succeedNote, setSucceedNote] = useState<{ title: string; text: string } | null>(null);
-  const [succeeding, setSucceeding] = useState<Set<string>>(new Set());
-  // 同じ前任で二重に走らせない（確認の Enter の連打、カードと見出しの両方からの操作）。後継が2人立つと、同じ作業が二重に進む
-  const succeedRun = useRef<Set<string>>(new Set());
-  // 後継が立つまでの間に本人がほかを選んだら、選択を後継へ移さない。待った後の値を読むので ref で持つ
-  const selectedNow = useRef(selected);
-  selectedNow.current = selected;
-  const succeed = async (a0: Agent) => {
-    if (succeedRun.current.has(a0.id)) return;
-    // 確認を出している間に一覧が変わることがあるので、今の木の姿で見直す
-    const a = tree.byId.get(a0.id) ?? a0;
-    const why = succeedBlock(a, !peer);
-    if (why) { toast(`${a.name} を引き継げない: ${why}`, true); return; }
-    const mark = (on: boolean) => {
-      if (on) succeedRun.current.add(a.id); else succeedRun.current.delete(a.id);
-      setSucceeding(new Set(succeedRun.current));
-    };
-    mark(true);
-    toast(`${a.name} の後継を立てている…`);
-    try {
-      const { cols, rows } = lastTermSize() ?? { cols: null, rows: null };
-      const r = await startSuccessor({ agent: a, kids: kidsOf(tree.childrenOf.get(a.id) ?? []), cols, rows }, {
-        call: invoke, sleep: (ms) => new Promise((ok) => setTimeout(ok, ms)), now: Date.now,
-      });
-      // 一覧に載るまでは、作成の応答から作った仮の姿で右パネルを出す（新しい世帯と同じ）
-      const show = (term: boolean) => {
-        setFresh({
-          id: r.id, name: a.name, kind: "terminal", state: "running", cwd: r.cwd, canSend: true, parent: a.parent,
-          startedAt: Date.now(), capabilities: { terminal: true, send: true, stop: true },
-        });
-        setSelected(r.id);
-        if (term) setTermReq((n) => n + 1);
-      };
-      kickTown();
-      if (r.kind === "waiting") {
-        // 後継は生きているが、1通目をまだ受け取っていない。端末で確認の画面に止まっていることがあるので、端末を開いて見せる。前任は止めない
-        show(true);
-        toast(`${a.name} の後継（${r.id.slice(0, 8)}）は起動したが、引き継ぎの文をまだ受け取っていない。ターミナルを見る。${a.name} は止めていないので、後継が動いたら閉じる`, true);
-        return;
-      }
-      // 前任を選んでいたら、選択を後継へ移す（右パネルを空にしない）
-      if (selectedNow.current === a.id) show(false);
-      const id8 = r.id.slice(0, 8);
-      if (r.kind === "ccn") {
-        // 新しい ccn。後継の起動、子の付け替え、前任の停止まで ccn が済ませている
-        let stopped = r.stopped;
-        // 止まった前任は、一覧から消えるまで隠す。10秒たっても残っていれば、上の見張りが「止まらなかった」と出す。
-        // ccn が止められなかったときだけ、ここから1回止める
-        if (stopped) setHidden((h) => new Map(h).set(a.id, Date.now()));
-        else stopped = await kill(a, true);
-        kickTown();
-        // 付け替わった子の数は、町に出ていた子で数える（ccn の adopted には、止まって30分以内の子も入る）。
-        // 済んでいた引き継ぎ（already が付く）は、どの子が付け替わったかが分からないので書かない
-        const before = (tree.childrenOf.get(a.id) ?? []).filter((k) => !k.ghost);
-        const moved = before.filter((k) => r.adopted.includes(k.id)).length;
-        const left = r.already === undefined ? before.length - moved : 0;
-        const kids = `${moved ? `。子 ${moved} 人も後継の下に付けた` : ""}${left ? `。子 ${left} 人は付け替わらず、別の世帯に分かれる` : ""}`;
-        if (r.already) toast(`${a.name} は、すでに後継（${id8}）に引き継がれている`);
-        else if (stopped) toast(`${a.name} を後継（${id8}）へ引き継いだ${kids}${r.account ? `（アカウント: ${r.account}）` : ""}`, left > 0);
-        else toast(`${a.name} の後継（${id8}）は立ったが、${a.name} を止められなかった。手で閉じる`, true);
-        return;
-      }
-      // 古い ccn。後継が1通目を受け取ったので、前任だけを止める（子孫は止めない）
-      const stopped = await kill(a, true);
-      const note = r.depthChecked ? "" : "（前任の深さが ccn に無く、深さは比べていない）";
-      if (stopped) toast(`${a.name} を後継（${id8}）へ引き継いだ${note}`);
-      else toast(`${a.name} の後継（${id8}）は立ったが、${a.name} を止められなかった。手で閉じる${note}`, true);
-    } catch (e) {
-      if (e instanceof SucceedError && e.kind === "no_account") setSucceedNote({ title: `${a.name} を引き継げなかった`, text: e.message });
-      else toast(`${a.name} を引き継げなかった: ${e instanceof Error ? e.message : e}`, true);
-    } finally {
-      mark(false);
-    }
-  };
+  const { succeed, succeedAsk, setSucceedAsk, succeedNote, setSucceedNote, succeedCtx } = useSucceed({
+    tree, peer, toast, selectedNow, setSelected, setFresh, setTermReq, setHidden, kill,
+  });
   const local = !peer;
-  const succeedCtx = useMemo(() => ({ local, busy: succeeding, ask: setSucceedAsk }), [local, succeeding]);
-  // カードのボタンから文を送る（#63）。選んでいるセッションなら、右パネルの送信（仮の吹き出しと会話の取り直し）に任せる。
-  // ほかのセッションは send_message で送り、トーストを出す。参照を変えないよう ref を通し、町を描き直させない（#10）
-  const panelSend = useRef<((id: string, text: string) => Promise<boolean> | null) | null>(null);
-  const sendImpl = useRef<(a: Agent, text: string) => Promise<boolean>>(async () => false);
-  sendImpl.current = async (a, text) => {
-    const viaPanel = panelSend.current?.(a.id, text);
-    if (viaPanel) return viaPanel;
-    try {
-      await invoke("send_message", { sessionId: a.id, text, peer: peer || null });
-      kickTown();
-      toast(`${a.name} に届けた`);
-      return true;
-    } catch (e) {
-      toast(`${a.name} に届かなかった: ${e}`, true);
-      return false;
-    }
-  };
-  const cardSend = useCallback((a: Agent, text: string) => sendImpl.current(a, text), []);
+  const { panelSend, cardSend } = useCardSend(peer, toast);
   const counts = useMemo(() => {
     const c: Record<Mood, number> = { approval: 0, reply: 0, working: 0, done: 0, idle: 0 };
     for (const a of agents) c[moodOf(a)]++;
@@ -320,9 +173,6 @@ export default function App() {
     if (chat) setChatReq((n) => n + 1);
   }, [curTown, selfName]);
 
-  // 作った直後のセッション。一覧（snapshot）に載るまでは、create の応答から作った仮の姿で右パネルを出す（#18）。
-  // 一覧の取り直しを待つと、ccn が遅いときにその分だけ右パネルが出ない
-  const [fresh, setFresh] = useState<Agent | null>(null);
   // 作ったらチャットを開いて入力欄にフォーカスする（本人の指定）。端末は右クリックや「端末へ」で開く
   const newHousehold = useCallback((r: CreatedSession | null) => {
     if (!r?.id) return;
@@ -336,13 +186,6 @@ export default function App() {
     reload.current();
   }, []);
 
-  // 右クリックや「端末へ」で、その子を選んで右パネルの端末を開く
-  const [termReq, setTermReq] = useState(0);
-  // お便りの「チャットへ」で、その子を選んで右パネルのチャットを開く
-  const [chatReq, setChatReq] = useState(0);
-  // 新しい世帯を作ったとき、右パネルのチャットを開いて入力欄にフォーカスする
-  const [composeReq, setComposeReq] = useState(0);
-  const focus = useCallback((a: Agent) => { perfStart("open", a.id); setSelected(a.id); setTermReq((n) => n + 1); }, []);
   // 前回の町を出したまま、3回続けて、または10秒以上失敗している
   const slow = !!fail && (fail.n >= 3 || Date.now() - fail.since > 10000);
   const sel = selected ? tree.byId.get(selected) ?? (fresh?.id === selected ? fresh : null) : null;
@@ -456,11 +299,11 @@ export default function App() {
 
           <div className="left-foot">
             <div className="zoom">
-              <button onClick={() => setZoom((z) => Math.max(0.4, +(((z === "fit" ? 1 : z) - 0.1).toFixed(2))))}>−</button>
-              <button className="zval" onClick={() => setZoom("fit")} title="全体が入る大きさにする">
+              <button onClick={zoomOut}>−</button>
+              <button className="zval" onClick={zoomFit} title="全体が入る大きさにする">
                 {zoom === "fit" ? "全体" : `${Math.round(zoom * 100)}%`}
               </button>
-              <button onClick={() => setZoom((z) => Math.min(1.6, +(((z === "fit" ? 1 : z) + 0.1).toFixed(2))))}>＋</button>
+              <button onClick={zoomIn}>＋</button>
               <button className="fs" title="全画面" onClick={() => setFullscreen()}>⛶</button>
             </div>
             <span className="hint">クリックでチャット・右クリックでターミナル</span>
