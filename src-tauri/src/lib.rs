@@ -580,6 +580,44 @@ mod cmd {
     pub async fn town_agents(peer: Option<String>) -> Result<Vec<Value>, String> { blocking(move || super::town_agents(peer)).await }
 }
 
+/// 開発用の引数 --paths。identifier と、状態ファイルの置き場所を出す
+fn print_paths() {
+    println!("{}", serde_json::to_string_pretty(&json!({
+        "identifier": APP_ID.get(),
+        "shared": fc_path(Scope::Shared, ""),
+        "app": fc_path(Scope::App, ""),
+        "avatars": avatars_path(&None),
+        "avatarsRecent": avatars::recent_path(&avatars_path(&None)),
+    })).unwrap_or_default());
+}
+
+/// 開発用の引数 --native-list。~/.claude（FC_CLAUDE_HOME）から一覧を2回作り、件数と時間だけを出す
+fn print_native_list() {
+    let root = native::claude_home();
+    let first = native::list(&root, native::now_ms());
+    let second = native::list(&root, native::now_ms());
+    let convs: Vec<Value> = first.sessions.iter().chain(first.subagents.iter()).filter_map(|r| {
+        let p = PathBuf::from(r["native"]["jsonl"].as_str()?);
+        let t = std::time::Instant::now();
+        let c = native::conv::read(&p, 0).ok()?;
+        let items: usize = c.lines.iter().map(|l| simplify(l).len()).sum();
+        Some(json!({ "kind": r["kind"], "bytes": fs::metadata(&p).map(|m| m.len()).unwrap_or(0), "lines": c.lines.len(), "items": items, "ms": t.elapsed().as_secs_f64() * 1000.0 }))
+    }).collect();
+    let mut odd = first.stats.unexpected.clone();
+    for (k, v) in native::conv::odd_counts() { *odd.entry(k).or_default() += v; }
+    println!("{}", serde_json::to_string_pretty(&json!({
+        "first": first.stats, "second": second.stats,
+        "rows": first.sessions.iter().chain(first.subagents.iter()).map(|r| json!({ "kind": r["kind"], "state": r["state"], "hasParent": !r["parent"].is_null() || !r["native"]["parentId"].is_null() })).collect::<Vec<_>>(),
+        "conversations": convs,
+        "unexpected": odd,
+    })).unwrap_or_default());
+}
+
+/// 開発用の引数 --snapshot。画面に渡すのと同じ一覧の JSON を出す
+fn print_snapshot(peer: Option<String>) {
+    println!("{}", serde_json::to_string_pretty(&snapshot(peer)).unwrap_or_default());
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 開発用: 画面に渡すのと同じ JSON を出して終わる（ブラウザでの見た目の確認に使う）
@@ -598,40 +636,17 @@ pub fn run() {
     let arg_after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     // family-computing --paths   identifier と、状態ファイルの置き場所を出す（両版で分かれているかの確認に使う）
     if args.iter().any(|a| a == "--paths") {
-        println!("{}", serde_json::to_string_pretty(&json!({
-            "identifier": APP_ID.get(),
-            "shared": fc_path(Scope::Shared, ""),
-            "app": fc_path(Scope::App, ""),
-            "avatars": avatars_path(&None),
-            "avatarsRecent": avatars::recent_path(&avatars_path(&None)),
-        })).unwrap_or_default());
+        print_paths();
         return;
     }
     // family-computing --native-list   ~/.claude（FC_CLAUDE_HOME）から一覧を2回作り、件数と時間だけを出す（中身の文は出さない。#96）。
     // 生きているセッションの会話を末尾から読んだ件数と時間も出す。読むだけで、~/.claude にも ~/.family-computing にも書かない
     if args.iter().any(|a| a == "--native-list") {
-        let root = native::claude_home();
-        let first = native::list(&root, native::now_ms());
-        let second = native::list(&root, native::now_ms());
-        let convs: Vec<Value> = first.sessions.iter().chain(first.subagents.iter()).filter_map(|r| {
-            let p = PathBuf::from(r["native"]["jsonl"].as_str()?);
-            let t = std::time::Instant::now();
-            let c = native::conv::read(&p, 0).ok()?;
-            let items: usize = c.lines.iter().map(|l| simplify(l).len()).sum();
-            Some(json!({ "kind": r["kind"], "bytes": fs::metadata(&p).map(|m| m.len()).unwrap_or(0), "lines": c.lines.len(), "items": items, "ms": t.elapsed().as_secs_f64() * 1000.0 }))
-        }).collect();
-        let mut odd = first.stats.unexpected.clone();
-        for (k, v) in native::conv::odd_counts() { *odd.entry(k).or_default() += v; }
-        println!("{}", serde_json::to_string_pretty(&json!({
-            "first": first.stats, "second": second.stats,
-            "rows": first.sessions.iter().chain(first.subagents.iter()).map(|r| json!({ "kind": r["kind"], "state": r["state"], "hasParent": !r["parent"].is_null() || !r["native"]["parentId"].is_null() })).collect::<Vec<_>>(),
-            "conversations": convs,
-            "unexpected": odd,
-        })).unwrap_or_default());
+        print_native_list();
         return;
     }
     if args.iter().any(|a| a == "--snapshot") {
-        println!("{}", serde_json::to_string_pretty(&snapshot(arg_after("--peer"))).unwrap_or_default());
+        print_snapshot(arg_after("--peer"));
         return;
     }
     if let Some(id) = arg_after("--conversation") {
