@@ -171,7 +171,7 @@ export function SessionControls({ agent, support, onNoSupport, onSwitching, onDo
     const when = p.kind === "wait" ? `いまは替えられないので予約する（${p.when}）` : "すぐ替える";
     if (route === "app") {
       return what === "model"
-        ? `${label}を替える（${when}）。端末に /model を打つのと同じで、新しいセッションの既定にもなる（Claude Code の動き）`
+        ? `${label}を替える（${when}）。端末で /model のピッカーを開いて s を押すのと同じで、このセッションだけに効く（新しいセッションの既定は変えない）`
         : `${label}を替える（${when}）。端末で Shift+Tab を押すのと同じ。dontAsk は端末からは選べない`;
     }
     return `${label}を替える（${when}）。` + (agent.kind === "pty" ? "端末のセッションは claude を起動し直す（約3秒。裏のシェルとサブエージェントは止まる）" : "このセッションだけに効き、設定ファイルは書き換えない");

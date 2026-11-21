@@ -1,8 +1,9 @@
 // チャット欄からモデルと権限モードを替える（アプリが PTY で立てた claude だけ）。画面の決まりは src/session/control.ts。
 // CLI に人が打つのと同じ入力を端末に書く。2026-11-21 に v2.1.330 の本物の claude で確かめたこと（PR の本文に記録を付けた）:
-// - `/model <別名>` は作業中に打っても待たされず、すぐ効く。同じターンの次の要求から新しいモデルになる（transcript の assistant の model で確認）。
+// - `/model` は作業中に打っても待たされず、すぐ効く。同じターンの次の要求から新しいモデルになる（transcript の assistant の model で確認）。
+//   `/model <別名>` と Enter は新しいセッションの既定も替える（settings.json の model の行を消しても戻らない）。だから /model のピッカーを開き、
+//   目当ての行で s を押す（「for this session only」と出て、settings.json も既定も変わらなかった）。
 //   会話があると「Switch model?」の確認が出る（既定は Yes）。出たときだけ Enter を送る。会話が無いと確認は出ない。
-//   /model は「saved as your default for new sessions」と出し、新しいセッションの既定も替える。settings.json の model の行を消しても既定は戻らない（ここでは戻さない）
 // - 権限モードを直接決めるコマンドは /plan だけ。ほかは Shift+Tab で順に回す。順は default → acceptEdits → plan →（bypassPermissions）→（auto）。
 //   括弧の2つは使えるときだけ出る。dontAsk は出ない。作業中に回してもすぐ効くが、途中のモード（bypassPermissions など）を通るので、作業中は待つ。
 //   今のモードは、端末の下の行（「⏸ manual mode on」など）でしか分からない。待機中に回しても hook も transcript も書かれない（次の文から書かれる）
@@ -88,8 +89,8 @@ pub fn request(id: &str, model: Option<String>, mode: Option<String>) -> Result<
         return Err(super::native::READ_ONLY.into());
     }
     if let Some(m) = &model {
-        if m.is_empty() || !m.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '[' | ']' | '_')) {
-            return Err(format!("モデルの名前が変: {m}"));
+        if picker_name(m).is_none() {
+            return Err(format!("{m} は /model のピッカーの上の段に無いので、ここからは替えられない。ターミナルで /model を開いて選ぶ"));
         }
     }
     if let Some(m) = &mode {
@@ -198,22 +199,111 @@ fn wait_out(id: &str, mark: u64, sec: f32, want: impl Fn(&str) -> bool) -> Optio
     None
 }
 
-/// `/model <別名>` を貼って Enter。確認が出たら Enter で Yes を選ぶ。「Set model to」が出たら成功
+/// モデルの別名と、/model のピッカーの行の名前。ピッカーの上の段に無いもの（More models の中、[1m] など）は扱わない
+pub fn picker_name(model: &str) -> Option<&'static str> {
+    let m = model.strip_prefix("claude-").unwrap_or(model);
+    [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"), ("fable", "Fable")].iter().find(|(k, _)| m == *k || m.starts_with(&format!("{k}-"))).map(|(_, v)| *v)
+}
+
+/// 出力から色や位置の印を外す（ピッカーの行を読むため）
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('[') => {
+                // CSI: 引数と中間の文字の後、@〜~ の1文字で終わる
+                for d in it.by_ref() {
+                    if ('@'..='~').contains(&d) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                // OSC: BEL か ESC \ で終わる
+                while let Some(d) = it.next() {
+                    if d == '\x07' || (d == '\x1b' && it.peek() == Some(&'\\')) {
+                        it.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// ピッカーで今カーソル（❯）がある行の名前（「❯ 4.  Sonnet 5.5」の Sonnet）。出力の最後のもの
+pub fn picker_cursor(text: &str) -> Option<String> {
+    let t = strip_ansi(text);
+    let mut last = None;
+    let mut rest = t.as_str();
+    while let Some(i) = rest.find('❯') {
+        rest = &rest[i + '❯'.len_utf8()..];
+        let r = rest.trim_start();
+        let digits = r.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 || !r[digits..].starts_with('.') {
+            continue;
+        }
+        let name: String = r[digits + 1..].trim_start().chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+        if !name.is_empty() {
+            last = Some(name);
+        }
+    }
+    last
+}
+
+const UP: &str = "\x1b[A";
+const DOWN: &str = "\x1b[B";
+
+/// /model でピッカーを開き、目当ての行へ矢印で動かして s を押す（このセッションだけ替える）。
+/// `/model <別名>` と Enter は新しいセッションの既定まで替えるので使わない（2026-11-21、v2.1.330 で確かめた）。
+/// 会話があると「Switch model?」の確認が出る。出たときだけ Enter を送る。「Set model to」が出たら成功
 fn set_model(id: &str, model: &str) -> Result<(), String> {
+    let name = picker_name(model).ok_or(format!("{model} は /model のピッカーの上の段に無いので、ここからは替えられない"))?;
     let mark = super::pty::out_mark(id).ok_or("このセッションの端末はこのアプリに無い")?;
     // 承認の画面に入力が入らないよう、貼る前と Enter の前に今の状態を読み直す（send_direct と同じ穴）
     if waiting(id) {
         return Err(RETRY.into());
     }
-    super::pty::write(id, &format!("\x1b[200~/model {model}\x1b[201~"))?;
+    super::pty::write(id, "\x1b[200~/model\x1b[201~")?;
     std::thread::sleep(Duration::from_millis(150));
     if waiting(id) {
-        return Err(format!("貼った直後に承認の画面が出たので Enter を送らなかった。ターミナルの入力欄に /model {model} が残っているかもしれない"));
+        return Err("貼った直後に承認の画面が出たので Enter を送らなかった。ターミナルの入力欄に /model が残っているかもしれない".into());
     }
     super::pty::write(id, "\r")?;
-    let s = wait_out(id, mark, 4.0, |s| s.contains("Switch model?") || s.contains("Set model to")).ok_or("/model の結果が4秒で出なかった。ターミナルで様子を見る")?;
+    let s = wait_out(id, mark, 4.0, |s| s.contains("Select model")).ok_or("/model のピッカーが4秒で出なかった。ターミナルで様子を見る")?;
+    // 開いた直後の描画が終わるのを少し待ってから、カーソルの行を読む
+    std::thread::sleep(Duration::from_millis(300));
+    let mut cur = super::pty::out_since(id, mark).as_deref().and_then(picker_cursor).or_else(|| picker_cursor(&s));
+    // 上へ、届かなければ下へ。矢印は1つずつ送る（まとめて書くと動かなかった）。カーソルが動かなくなったら端
+    'find: for key in [UP, DOWN] {
+        for _ in 0..12 {
+            if cur.as_deref() == Some(name) {
+                break 'find;
+            }
+            let m = super::pty::out_mark(id).ok_or("端末が無くなった")?;
+            super::pty::write(id, key)?;
+            match wait_out(id, m, 0.8, |s| picker_cursor(s).is_some()) {
+                Some(s) => cur = picker_cursor(&s),
+                None => continue 'find,
+            }
+        }
+    }
+    if cur.as_deref() != Some(name) {
+        super::pty::write(id, "\x1b")?;
+        return Err(format!("/model のピッカーに {name} の行が見つからなかったので、閉じた"));
+    }
+    let m = super::pty::out_mark(id).ok_or("端末が無くなった")?;
+    super::pty::write(id, "s")?;
+    let s = wait_out(id, m, 4.0, |s| s.contains("Switch model?") || s.contains("Set model to")).ok_or("ピッカーで s を押したが、結果が4秒で出なかった。ターミナルで様子を見る")?;
     if !s.contains("Set model to") {
-        let m2 = super::pty::out_mark(id).unwrap_or(mark);
+        let m2 = super::pty::out_mark(id).unwrap_or(m);
         super::pty::write(id, "\r")?;
         wait_out(id, m2, 4.0, |s| s.contains("Set model to")).ok_or("モデルの切り替えの確認に Enter を送ったが、切り替わった印が出なかった。ターミナルで様子を見る")?;
     }
@@ -330,6 +420,18 @@ mod tests {
         assert_eq!(last_mode(s), Some("acceptEdits"));
         assert_eq!(last_mode("⏵⏵ bypass permissions on (shift+tab to cycle) ⏸ plan mode on"), Some("plan"));
         assert_eq!(last_mode("nothing"), None);
+    }
+
+    #[test]
+    fn picker_rows_are_read_from_the_raw_output() {
+        // 2026-11-21 の raw の出力の形（ESC を外したときに語がつながる所もある）
+        let open = "\x1b[2C1.  Default\x1b[1C(recommended)\x1b[2COpus 5.5\r  4.  Sonnet 5.5\r\x1b[38;5;2m❯\x1b[39m5.  Haiku 5.5✔Fastest";
+        assert_eq!(picker_cursor(open).as_deref(), Some("Haiku"));
+        assert_eq!(picker_cursor("\x1b[3A\x1b[38;5;2m❯ 4.  Sonnet 5.5\x1b[39m").as_deref(), Some("Sonnet"));
+        assert_eq!(picker_cursor("❯ /model"), None);
+        assert_eq!(picker_name("sonnet"), Some("Sonnet"));
+        assert_eq!(picker_name("claude-opus-5-5"), Some("Opus"));
+        assert_eq!(picker_name("opus[1m]"), None);
     }
 
     #[test]
