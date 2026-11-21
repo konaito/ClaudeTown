@@ -809,6 +809,77 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Report（src/model.ts）の形。hook が足すだけで Report には無いキーは HOOK_ONLY に分ける。
+    /// deny_unknown_fields なので、見本に知らないキーが出たら読めずに落ちる
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct ReportShape {
+        phase: Option<String>,
+        asked: Option<String>,
+        doing: Option<String>,
+        said: Option<String>,
+        next: Option<String>,
+        needs: Option<String>,
+        tools: Option<u64>,
+        turn_started_at: Option<u64>,
+        updated_at: Option<u64>,
+        pending: Option<PermShape>,
+        pending_count: Option<u64>,
+        perm_queue: Option<Vec<PermShape>>,
+        session_id: Option<String>,
+        asked_by: Option<String>,
+        cwd: Option<String>,
+    }
+    /// Report に無く、hook だけが書くキー
+    const HOOK_ONLY: [&str; 3] = ["session_id", "asked_by", "cwd"];
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct PermShape {
+        tool: String,
+        summary: String,
+        detail: String,
+        id: Option<String>,
+    }
+
+    /// src/report-cases.json（hooks/test_report_fixture.py が fc-report.py の実出力と突き合わせる。bun test は src/report.test.ts で同じものを読む）
+    #[test]
+    fn report_cases() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            state: Value,
+        }
+        let cases: Vec<Case> = serde_json::from_str(include_str!("../../src/report-cases.json")).unwrap();
+        assert!(cases.len() >= 8);
+        // src/model.ts の Report のキー（型の本体の行から拾う）
+        let model = include_str!("../../src/model.ts");
+        let body = model.split("export type Report = {").nth(1).and_then(|s| s.split("\n};").next()).unwrap();
+        let keys: Vec<&str> = body
+            .lines()
+            .filter(|l| l.starts_with("  ") && !l.trim_start().starts_with("/**"))
+            .filter_map(|l| l.trim_start().split(['?', ':']).next())
+            .collect();
+        assert_eq!(keys.len(), 12, "Report のキー: {keys:?}");
+        let dir = std::env::temp_dir().join(format!("fc-report-cases-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        for (i, c) in cases.iter().enumerate() {
+            // snapshot が使う読み方（read_json_cached）で読んだ中身を、Report の形で解釈する
+            let p = dir.join(format!("{i}.json"));
+            fs::write(&p, c.state.to_string()).unwrap();
+            let got = read_json_cached(&p).unwrap();
+            assert_eq!(got, c.state, "{}", c.name);
+            let shape: ReportShape = serde_json::from_value(got).unwrap_or_else(|e| panic!("{}: {e}", c.name));
+            assert!(matches!(shape.phase.as_deref(), Some("working" | "needs_you" | "resting")), "{}", c.name);
+            for k in c.state.as_object().unwrap().keys() {
+                assert!(keys.contains(&k.as_str()) || HOOK_ONLY.contains(&k.as_str()), "{}: model.ts の Report に無いキー {k}", c.name);
+            }
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn dev_keeps_app_files_apart_from_stable() {
         let h = std::path::Path::new("/h");
