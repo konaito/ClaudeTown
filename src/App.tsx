@@ -1,4 +1,4 @@
-import { Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { IS_WEB, call as invoke, setFullscreen } from "./bridge";
 import { pickTown, savedTown, saveTown } from "./webTown";
 import { lastTermSize } from "./term/size";
@@ -22,8 +22,14 @@ import { kickTown, otherTownRetryMs, watchTown } from "./town";
 import { SucceedError, kidsOf, startSuccessor, succeedBlock } from "./succeed";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, usePanelRef, type Layout } from "react-resizable-panels";
 import { PanelLeftClose, PanelLeftOpen, Settings, Users, X } from "lucide-react";
-import { NewHousePane, createHousehold } from "./newHouse/NewHousePane";
-import { loadPlace, placeFailure, savePlace } from "./newHouse/placeSetting";
+import { NewHousePane } from "./newHouse/NewHousePane";
+import { NewHousehold } from "./newHouse/NewHousehold";
+import { Teleport } from "./teleport/Teleport";
+import { Credits } from "./credits/Credits";
+import { DocIcon, HouseIcon, SuitcaseIcon } from "./icons";
+import { Since } from "./Since";
+import { KillCtx, LetterCtx, SendCtx, SucceedCtx, TownCtx } from "./contexts";
+import { loadPlace, savePlace } from "./newHouse/placeSetting";
 import { SettingsDialog } from "./settings/SettingsDialog";
 import "./App.css";
 import "./mobile/mobile.css";
@@ -33,7 +39,7 @@ import { Avatar, hash as hashOf, roleOf, ROLE_LABEL, type Role } from "./kid/Ava
 import { SkinCtx, saveSkin, savedSkin, type Skin } from "./kid/pokemon";
 import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
-  MOOD_LABEL, NEEDS_YOU, accountText, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, targetLabel, taskOf,
+  MOOD_LABEL, NEEDS_YOU, accountText, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, targetLabel, taskOf,
 } from "./model";
 import { Markdown, linkify } from "./Markdown";
 import { chatPerf } from "./chatPerf";
@@ -41,7 +47,7 @@ import { elapsedText, liveSummary, mergeConv, msOf, sameLive, savedLabel, settle
 import { layoutFamily, type LNode } from "./layout/layout";
 import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
-import type { CreatedSession, TeleportInfo, TeleportPlan, TeleportResult } from "./types";
+import type { CreatedSession } from "./types";
 
 /**
  * 別の町（いま見ていない ccn のノード）のお便りを取りに行く間隔。町を1つずつ順に取り、前の回が終わるまで次の回を始めない。
@@ -101,16 +107,6 @@ const CARD_ACT_FLASH_MS = 700;
 /** 世帯の要約の凡例に並べる順 */
 const LEGEND: Mood[] = ["working", "reply", "approval", "done", "idle"];
 
-/** いま見ている町のセッション（お手紙の送り手の名前を引くため） */
-const TownCtx = createContext<Agent[]>([]);
-/** 封筒の印（💌）を頭に出しているセッション */
-const LetterCtx = createContext<Set<string>>(new Set());
-/** 閉じる操作と演出の状態。カードの 🐺 と、倒れる演出が読む */
-const KillCtx = createContext<{ dying: Map<string, number>; ask: (a: Agent, instant: boolean) => void }>({ dying: new Map(), ask: () => {} });
-/** 引き継ぎの操作（🤝）。local は手元のノードの町を見ているか。busy は、いま引き継いでいる前任の ID */
-const SucceedCtx = createContext<{ local: boolean; busy: Set<string>; ask: (a: Agent) => void }>({ local: false, busy: new Set(), ask: () => {} });
-/** カードのボタンから文を送る口（#63）。値は App で一度だけ作り、町の描き直しの合図にしない（#10） */
-const SendCtx = createContext<(a: Agent, text: string) => Promise<boolean>>(async () => false);
 const CONV_POLL_MS = 2500;
 /** 会話に新しい発言が無い回が続いたときの間隔の上限（#5）。新しい発言が来るか、文を送ったら CONV_POLL_MS に戻す */
 const CONV_POLL_MAX_MS = 10000;
@@ -1144,30 +1140,6 @@ const GhostCard = memo(function GhostCard({ agent, depth, onSelect }: { agent: A
   );
 });
 
-function SuitcaseIcon() {
-  return (<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" aria-hidden><rect x="3" y="7" width="18" height="13" rx="2.5" /><path d="M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2M8 7v13M16 7v13" /></svg>);
-}
-
-/**
- * 作業中の経過時間（sinceText）。この部品の中だけで時計を回し、町全体は描き直さない（#4）。
- * 1分までは1秒ごと、1時間までは30秒ごと、それより後は6分ごとに描き直す。ウィンドウが見えていない間は止め、見えたらすぐ描き直す（#6）
- */
-function Since({ at }: { at: number }) {
-  const [, bump] = useState(0);
-  useEffect(() => {
-    let t: ReturnType<typeof setTimeout> | null = null;
-    const plan = () => {
-      const age = Date.now() - at;
-      t = setTimeout(() => { t = null; bump((x) => x + 1); plan(); }, age < 60_000 ? 1000 : age < 3_600_000 ? 30_000 : 360_000);
-    };
-    const stop = () => { if (t !== null) { clearTimeout(t); t = null; } };
-    const off = onVisibleChange((v) => { stop(); if (v) { bump((x) => x + 1); plan(); } });
-    if (isVisible()) plan();
-    return () => { off(); stop(); };
-  }, [at]);
-  return <>{sinceText(at)}</>;
-}
-
 function FullCard({ agent, depth, selected, onSelect, onFocus }: {
   agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;
 }) {
@@ -1506,114 +1478,6 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
 
 // ---------- 新しい世帯・転出 ----------
 
-/** 町が空のときの「最初の世帯を作る」。最初の依頼の欄は出さず、すぐ ~/Documents/meta で親（端末のセッション）を立て、右のチャットを開く。
- *  ふだんの作る口は左の新しい世帯のペイン（#89、src/newHouse） */
-function NewHousehold({ disabled, place, onCreated, onError }: { disabled?: boolean; place: string | null; onCreated: (r: CreatedSession | null) => void; onError: (m: string) => void }) {
-  const [busy, setBusy] = useState(false);
-  const go = async () => {
-    setBusy(true);
-    try {
-      // 前に開いたターミナルの大きさで起動する。開いた直後に大きさを変えて、claude が全部描き直すのを省く（createHousehold の中）
-      onCreated(await createHousehold(place));
-    } catch (e) { onCreated(null); onError(placeFailure(place, e)); } finally { setBusy(false); }
-  };
-  return (
-    <button className="primary new-house big" disabled={disabled || busy} onClick={go}>
-      {busy ? "立てている…" : "最初の世帯を作る"}
-    </button>
-  );
-}
-
-/**
- * 転出（ccn の teleport）。行き先のノードと move / fork を選び、下見（移動元の説明）を見てから実行する。
- * 実行は1回の要求で最大95秒かかる。行き先の下見（clone することがある）は実行の中で ccn が行う。
- */
-function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent; descendants: Agent[]; peers: Peer[]; onDone: (m: string) => void; onError: (m: string) => void }) {
-  // 子孫がいれば、子孫ごと移す（2026-11-12 本人の判断）。ccn の部分木の口（subtree）を使い、先に計画（dryRun）を見せる
-  const subtree = descendants.length > 0;
-  const [plan, setPlan] = useState<TeleportPlan | null>(null);
-  const dests = peers.filter((p) => !p.self && p.status === "healthy");
-  const [to, setTo] = useState(dests[0]?.name ?? "");
-  const [fork, setFork] = useState(false);
-  const [info, setInfo] = useState<TeleportInfo | null>(null);
-  const [infoErr, setInfoErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<TeleportResult | null>(null);
-  useEffect(() => {
-    invoke<TeleportInfo>("teleport_info", { sessionId: agent.id, peer: null }).then(setInfo).catch((e) => setInfoErr(String(e)));
-  }, [agent.id]);
-  useEffect(() => {
-    if (!subtree || !to) { setPlan(null); return; }
-    invoke<TeleportPlan>("teleport", { sessionId: agent.id, to, fork, subtree: true, dryRun: true, peer: null })
-      .then(setPlan).catch((e) => setPlan({ error: String(e) }));
-  }, [agent.id, to, fork, subtree]);
-  // 作業中か承認待ちの人が1人でもいたら押せなくする。ccn は動いているセッションを移さず、全員が止まるまで待つと終わりが読めないため
-  const busyOnes = [agent, ...descendants].filter((x) => x.state === "running" || x.state === "waiting_permission");
-  const running = busyOnes.length > 0;
-  const go = async () => {
-    setBusy(true);
-    try {
-      const r = await invoke<TeleportResult>("teleport", { sessionId: agent.id, to, fork, subtree, dryRun: false, peer: null });
-      setResult(r);
-      if (subtree) {
-        const moved = r?.moved?.length ?? 0, failed = r?.failed?.length ?? 0;
-        onDone(`${agent.name} の世帯を ${to} へ${fork ? "複製" : "移動"}した（${moved}人${failed ? `、失敗 ${failed}人` : ""}）`);
-      } else {
-        onDone(`${agent.name} を ${r?.node ?? to} へ${fork ? "複製" : "移動"}した（新しい id ${String(r?.id ?? "").slice(0, 8)}）`);
-      }
-    } catch (e) { onError(`${agent.name} を転出できなかった: ${e}`); } finally { setBusy(false); }
-  };
-  return (
-    <div className="sheet">
-      <div className="sheet-title">{agent.name} を別の機械へ転出する</div>
-      <div className="tp-row">
-        <label>行き先</label>
-        <select value={to} onChange={(e) => setTo(e.target.value)}>
-          {dests.length === 0 && <option value="">（つながっている機械が無い）</option>}
-          {dests.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
-        </select>
-        <label className="tp-radio"><input type="radio" checked={!fork} onChange={() => setFork(false)} />移す（ここは止める）</label>
-        <label className="tp-radio"><input type="radio" checked={fork} onChange={() => setFork(true)} />複製（ここも残す）</label>
-      </div>
-      <div className="tp-info">
-        {infoErr ? <span className="bad-text">下見できない: {infoErr}</span> : !info ? "下見している…" : (
-          <>
-            <div>状態: {info.state}{info.live ? "（動いている）" : ""}・作業場所: {String(info.from?.cwd ?? "").replace(/^\/Users\/[^/]+/, "~")}</div>
-            <div>git: {info.git ? `${info.git.repoName}（${info.git.branch}）` : "git のリポジトリではない"}</div>
-          </>
-        )}
-        {subtree && (
-          <div className="tp-plan">
-            <div><b>子孫 {descendants.length} 人も一緒に移る</b>（親子の関係は行き先でも保つ）</div>
-            {plan?.error ? <div className="bad-text">計画を出せない: {plan.error}</div> : !plan ? <div className="hint">計画を出している…</div> : (
-              <ul>{(plan.plan ?? []).map((m) => <li key={m.sourceId}>{m.title ?? m.sourceId.slice(0, 8)} → {String(m.cwd ?? "").replace(/^\/Users\/[^/]+/, "~")}</li>)}
-                {(plan.skipped ?? []).map((m) => <li key={m.sourceId} className="bad-text">{m.sourceId.slice(0, 8)}: 対象外（{m.reason}）</li>)}</ul>
-            )}
-          </div>
-        )}
-        {running && <div className="bad-text">作業中か承認待ちの人がいるので転出できない（{busyOnes.map((x) => x.name).join("、")}）。全員が待機になってから転出する。</div>}
-        <div className="hint">行き先に同じリポジトリが無ければ、ccn が行き先の ~/Documents に clone する。実行には最大95秒かかる。{agent.capabilities?.terminal ? "ターミナルのセッションは、行き先ではまだターミナルとして再開しない（ccn 側の対応待ち）。" : ""}</div>
-      </div>
-      {result ? (
-        subtree ? (
-          <div className="tp-result">
-            {to} へ移した: {(result.moved ?? []).length}人。
-            {(result.failed ?? []).length > 0 && <span className="bad-text"> 失敗: {(result.failed ?? []).map((f) => `${f.sourceId.slice(0, 8)}（${f.error}）`).join("、")}</span>}
-            画面上のノードを {to} に切り替えると見える。
-          </div>
-        ) : (
-          <div className="tp-result">行き先 {result.node} の新しい id: {result.id}{result.cloned ? "（clone した）" : ""}。画面上のノードを {result.node} に切り替えると見える。</div>
-        )
-      ) : (
-        <div className="sheet-foot">
-          <span className="hint">{subtree ? "全員を下見してから止めるので、下見で落ちたら何も変わらない" : ""}</span>
-          <button className="primary" disabled={busy || !to || running || !info} onClick={go}>{busy ? "転出している…（最大95秒）" : fork ? "複製する" : "移す"}</button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 /**
  * 作業中の末尾の1行（#59）。結果がまだ無い道具か「考え中」と、その動きを始めてからの経過、ターン全体の経過を出す。
  * 1秒の時計はこの部品の中だけで回す。ほかの吹き出しは描き直さない。ウィンドウが見えていない間は止める（#6）
@@ -1822,39 +1686,4 @@ function StateTab({ agent, mood }: { agent: Agent; mood: Mood }) {
 
 // ---------- 素材のクレジット ----------
 
-/** 素材の表示と、キャラの見た目（いつもの / ポケモン）の切り替え。見た目で使う素材が変わるので同じ所に置く */
-function Credits({ skin, onSkin }: { skin: Skin; onSkin: (s: Skin) => void }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <span className="credits">
-      <button className="credit-btn" onClick={() => setOpen((o) => !o)}>素材</button>
-      {open && (
-        <span className="credit-pop" onMouseLeave={() => setOpen(false)}>
-          <span className="skin-pick" title="ポケモンでは、親を最終進化、子を2段目、孫を1段目で描く">
-            キャラの見た目
-            {([["default", "いつもの"], ["pokemon", "ポケモン"]] as const).map(([v, label]) => (
-              <button key={v} className={skin === v ? "on" : ""} onClick={() => onSkin(v)}>{label}</button>
-            ))}
-          </span>
-          <b>キャラ</b>: Ninja Adventure Asset Pack（Pixel-boy、AAA）、CC0 1.0。
-          <br /><b>状態の印、幽霊、お手紙</b>: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0
-          （creativecommons.org/licenses/by/4.0）。Source: googlefonts.github.io/noto-emoji-animation
-          <br />キャラは配布元のファイルのまま表示のときに縮めている。Noto は 64px に縮め、コマを半分に間引いた。
-          {skin === "pokemon" && (<>
-            <br /><b>ポケモン（キャラの見た目で選んだとき）</b>: ブラック・ホワイトの形の2Dのドット絵（アニメ GIF と止め絵）を、PokeAPI/sprites（github.com/PokeAPI/sprites）の配布から
-            {"表示中のキャラの分だけ実行時に読む。このアプリには画像を含めない。Pokémon © Nintendo / Creatures Inc. / GAME FREAK inc."}
-          </>)}
-        </span>
-      )}
-    </span>
-  );
-}
-
 // ---------- 小さい絵 ----------
-
-function HouseIcon() {
-  return (<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round"><path d="M3 11 12 3l9 8" /><path d="M5 10v10h14V10" /><path d="M10 20v-5h4v5" /></svg>);
-}
-function DocIcon() {
-  return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M6 3h8l4 4v14H6z" /><path d="M9 12h6M9 16h6" /></svg>);
-}
