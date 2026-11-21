@@ -86,11 +86,16 @@ export function Panel({ agent, peer, lineage, descendants, termReq, chatReq, com
   // チャットを開いたとき（セッションを選んだ、タブを切り替えた）は、必ず一番下から始める。
   // 以前は stick を読み込みの effect でしか戻さず、タブの切り替えでは前の値が残り、容れ物も作り直されるのに items が変わらないので下へ送られなかった
   useLayoutEffect(() => { stick.current = true; }, [id, tab, chatReq]);
-  const { items, live, pending, setPending, convErr, cachedAt, convKick } = useConversation(id, peer, isFast, working, stick);
+  const { items, live, pending, setPending, convErr, cachedAt, convKick } = useConversation(id, peer, isFast, working, stick, agent?.kind !== "node");
   const { busy, send } = usePanelSend({ agent, peer, hasTerm, items, switching, support, markNoSupport, addNote, setTab, setPending, setText, stick, convKick, onSent, onError });
 
   // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
-  const shown = useMemo(() => collapseTools(withResults(withNotes([...items, ...pending], notes))), [items, pending, notes]);
+  // -p の子は返事が出ると、送った文の仮の印が外れる（#55、answerPending）。外れた分は after の位置に置く（withNotes）
+  const shown = useMemo(() => {
+    const waiting = pending.filter((x) => x.pending);
+    const placed = pending.length === waiting.length ? notes : [...notes, ...pending.filter((x) => !x.pending)].sort((a, b) => a.after - b.after);
+    return collapseTools(withResults(withNotes([...items, ...waiting], placed)));
+  }, [items, pending, notes]);
   // 保存した履歴の印が出ているか。出ている間は中身の上に余白を足す（下の has-note）
   const hasNote = shown.length > 0 && !!(convErr || cachedAt);
   // 会話の最後のまだ答えていない計画（ExitPlanMode の本文）。承認の hook の入力が空のとき、承認の欄に出す（#83）
