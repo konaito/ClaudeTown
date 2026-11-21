@@ -373,10 +373,6 @@ export default function App() {
         toast(`${a.name} の後継（${r.id.slice(0, 8)}）は起動したが、引き継ぎの文をまだ受け取っていない。ターミナルを見る。${a.name} は止めていないので、後継が動いたら閉じる`, true);
         return;
       }
-      // 本人が付けた世帯の名前は根の ID で持っているので、後継の ID にも付ける
-      if (!a.parent && a.house?.by === "human" && a.house.name) {
-        await invoke("set_house_name", { sessionId: r.id, name: a.house.name }).catch(() => toast("世帯の名前を後継に移せなかった", true));
-      }
       // 前任を選んでいたら、選択を後継へ移す（右パネルを空にしない）
       if (selectedNow.current === a.id) show(false);
       const id8 = r.id.slice(0, 8);
@@ -587,11 +583,7 @@ export default function App() {
             return {
               id: f.root.id, ...size,
               node: (
-                <Group root={f.root} all={f.all} count={f.all.length} size={size}
-                  onRename={async (name) => {
-                    try { await invoke("set_house_name", { sessionId: f.root.id, name }); kickTown(); toast(name ? `世帯の名前を「${name}」にした` : "世帯の名前を戻した"); }
-                    catch (e) { toast(`世帯の名前を変えられなかった: ${e}`, true); }
-                  }}
+                <Group root={f.root} count={f.all.length} size={size}
                   hasNeeds={f.all.some((a) => NEEDS_YOU.includes(moodOf(a)))}>
                   <FamilyCanvas all={f.all} result={r} selected={selected} onSelect={pick} onFocus={focus} />
                 </Group>
@@ -889,28 +881,15 @@ function Stage({ zoom, items, onBlank }: { zoom: number | "fit"; items: { id: st
 const GROUP_TINTS = ["#f3f7ff", "#fff6ec", "#f1faf3", "#f8f3ff", "#fff2f5", "#eff9f9", "#fbf8ec"];
 const GROUP_LINES = ["#d9e4fb", "#f6dfc4", "#d3ecd9", "#e4d8f6", "#f6d6df", "#cfe9e9", "#ece4c2"];
 
-function Group({ root, all, count, size, hasNeeds, onRename, children }: {
-  root: Agent; all: Agent[]; count: number; size: { w: number; h: number }; hasNeeds: boolean; onRename: (name: string) => void; children: React.ReactNode;
+function Group({ root, count, size, hasNeeds, children }: {
+  root: Agent; count: number; size: { w: number; h: number }; hasNeeds: boolean; children: React.ReactNode;
 }) {
-  const house = houseNameOf(root, all);
-  const [editing, setEditing] = useState(false);
   const tint = hashOf(root.id) % GROUP_TINTS.length;
   return (
     <section className={`group ${hasNeeds ? "has-needs" : ""}`}
       style={{ width: size.w, height: size.h, background: GROUP_TINTS[tint], borderColor: hasNeeds ? undefined : GROUP_LINES[tint] }}>
-      <div className="g-head" onDoubleClick={() => setEditing(true)}
-        title={`ダブルクリックで名前を変える（${house.by === "human" ? "あなたが付けた名前" : "作業ディレクトリの名前"}）`}>
-        {editing ? (
-          <input className="g-input" autoFocus defaultValue={house.by === "human" ? house.name : ""} placeholder={house.name}
-            maxLength={24}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") { onRename(e.currentTarget.value); setEditing(false); }
-              if (e.key === "Escape") setEditing(false);
-            }}
-            onBlur={() => setEditing(false)} />
-        ) : (
-          <span className={`g-name `}>{house.name}</span>
-        )}
+      <div className="g-head" title="親のプロジェクトのディレクトリの名前">
+        <span className="g-name">{houseNameOf(root)}</span>
         <span className="g-sub">{count}人</span>
         {hasNeeds && <span className="g-needs">あなたの番</span>}
       </div>

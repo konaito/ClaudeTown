@@ -76,7 +76,7 @@ def strip(data):
 
 def name_house(args):
     """世帯の名前（作業しているプロジェクトのディレクトリの名前）を付ける。
-    本人がアプリで付けた名前（by=human）があれば、エージェントからは上書きしない"""
+    アプリは by=agent の名前だけを使う。旧版で本人が付けた by=human の記録があっても、この呼び出しで by=agent に置き換わる"""
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("FC_SESSION_ID")
     if not sid:
         sys.exit("セッション ID が分からない。Claude Code の中（Bash）で実行する")
@@ -86,14 +86,11 @@ def name_house(args):
         houses = {}
     cur = houses.get(sid) or {}
     if not args:
-        print(f"今の世帯の名前: {cur.get('name') or '（まだ無い）'}" + ("（本人が付けた）" if cur.get("by") == "human" else ""))
+        print(f"今の世帯の名前: {cur.get('name') if cur.get('by') == 'agent' and cur.get('name') else '（まだ無い）'}")
         return
     name = " ".join(args).strip()[:24]
     if not name:
         sys.exit("名前が空")
-    if cur.get("by") == "human":
-        print(f"本人が付けた名前「{cur.get('name')}」があるので変えなかった")
-        return
     houses[sid] = {"name": name, "by": "agent", "at": int(time.time() * 1000)}
     HOUSES.parent.mkdir(parents=True, exist_ok=True)
     tmp = HOUSES.with_suffix(".tmp")

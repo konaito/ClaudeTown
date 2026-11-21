@@ -213,7 +213,8 @@ def house_nudge(sid, own_cwd, child_cwd):
     except Exception:
         houses = {}
     cur = houses.get(sid) or {}
-    if cur.get("by") == "human" or cur.get("name"):
+    # 旧版で本人が付けた名前（by=human）は、アプリが使わないので無いものとして扱う
+    if cur.get("by") == "agent" and cur.get("name"):
         return None
     nudged = cur_field(sid, "house_nudged_projects") or []
     if not isinstance(nudged, list) or nudged:
@@ -223,7 +224,6 @@ def house_nudge(sid, own_cwd, child_cwd):
     head = "Claude Town: この世帯の名前は、作業しているプロジェクトのディレクトリの名前にします。依頼の文の要約は名前にしません。"
     return (
         f"{head}子を {project} で動かしたので、Bash で {cmd} を1回実行してください。"
-        "本人が付けた名前があるときは変わりません。"
     )
 
 

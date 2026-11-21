@@ -503,7 +503,7 @@ fn houses_paths() -> (PathBuf, PathBuf) {
     }
 }
 
-/// 世帯の名前を読む。共有の分を下地にして、アプリの分（開発版なら開発版で付けた名前）を上に重ねる
+/// houses.json を読む。共有の分を下地にして、アプリの分（開発版の dev/ の下）を上に重ねる。使うのは by=agent の名前だけ（by=human は旧版の名残で、読んでも使わない）
 fn read_houses() -> Value {
     let (shared, own) = houses_paths();
     let mut out = read_json_cached(&shared).filter(Value::is_object).unwrap_or(json!({}));
@@ -513,27 +513,6 @@ fn read_houses() -> Value {
         }
     }
     out
-}
-
-/// 本人が画面で家の名前を付ける。空なら本人の名前を消す（親が付けた名前か仮の名前に戻る）。
-/// 開発版では開発版の分にだけ書く。開発版で消しても、共有の分にある名前は残って見える
-#[tauri::command]
-fn set_house_name(session_id: String, name: String) -> Result<(), String> {
-    let p = houses_paths().1;
-    let mut houses = read_json(&p).unwrap_or(json!({}));
-    let obj = houses.as_object_mut().ok_or("houses.json の形が想定と違う")?;
-    let name: String = name.trim().chars().take(24).collect();
-    if name.is_empty() {
-        obj.remove(&session_id);
-    } else {
-        obj.insert(session_id, json!({ "name": name, "by": "human", "at": now_ms() as u64 }));
-    }
-    if let Some(dir) = p.parent() {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let tmp = p.with_extension("tmp");
-    fs::write(&tmp, serde_json::to_string_pretty(&houses).unwrap_or_default()).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, &p).map_err(|e| e.to_string())
 }
 
 // ---------- 会話 ----------
@@ -1972,11 +1951,6 @@ pub fn run() {
         })).unwrap_or_default());
         return;
     }
-    // family-computing --house-name <sessionId> <名前>   世帯の名前を付ける（画面で名前を付けるのと同じ処理）。空にすると消す
-    if let Some(i) = args.iter().position(|a| a == "--house-name") {
-        println!("{:?}", set_house_name(args.get(i + 1).cloned().unwrap_or_default(), args.get(i + 2).cloned().unwrap_or_default()));
-        return;
-    }
     if args.iter().any(|a| a == "--snapshot") {
         println!("{}", serde_json::to_string_pretty(&snapshot(arg_after("--peer"))).unwrap_or_default());
         return;
@@ -2044,7 +2018,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::conversation_cache, cmd::send_message, set_house_name, cmd::answer_permission,
+            cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::conversation_cache, cmd::send_message, cmd::answer_permission,
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, cmd::house_places, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
             cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::paste_clipboard, cmd::stage_files

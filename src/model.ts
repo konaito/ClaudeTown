@@ -40,7 +40,7 @@ export type Agent = {
   closeCheck?: { status: "working" | "checking" | "ok" | "ng" | "error"; short?: string | null } | null;
   /** キャラの絵（Rust が町の中で被らないように割り当てる）。hue は色相のずらし（度） */
   avatar?: { char: string; hue: number } | null;
-  /** 世帯の名前（根のセッションだけ意味がある）。by=human は本人がアプリで付けた名前 */
+  /** houses.json の記録（読むだけ。名前には使わない）。by=human は旧版で本人が付けた名前の残り */
   house?: { name: string; by: "agent" | "human" } | null;
   /**
    * このセッションの claude が動いているアカウント。cam のコマンド名と、その email（ccn の PR #56 から一覧に載る）。
@@ -296,13 +296,9 @@ export function choicesOf(text: string): string[] {
   return opts.length >= 2 && opts.length <= 5 ? opts : [];
 }
 
-/**
- * 世帯の名前。本人が画面で付けた名前（by=human）を優先し、無ければ根のカードの名前（cardNames と同じ決め方。
- * Rust の snapshot が name に入れてある）。
- */
-export function houseNameOf(root: Agent, _all?: Agent[]): { name: string; by: "human" | "project" } {
-  if (root.house?.by === "human" && root.house.name) return { name: root.house.name, by: "human" };
-  return { name: root.name, by: "project" };
+/** 世帯の名前。根のカードの名前（cardNames と同じ決め方。Rust の snapshot が name に入れてある）。保存された名前は見ない */
+export function houseNameOf(root: Agent): string {
+  return root.name;
 }
 
 /**

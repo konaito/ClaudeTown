@@ -110,7 +110,7 @@ export function MobileShell(p: Props) {
           {p.snap?.ccn_ok && p.total === 0 && <p className="m-note">この町にはまだ誰もいません。</p>}
           {p.tree.families.map((f) => (
             <section key={f.root.id}>
-              <h2 className="m-h">{houseNameOf(f.root).name}<b>{f.all.length}人</b></h2>
+              <h2 className="m-h">{houseNameOf(f.root)}<b>{f.all.length}人</b></h2>
               {flatten(f.root, p.tree.childrenOf).map(({ a, depth }) => <Row key={a.id} a={a} depth={depth} onPick={p.onPick} />)}
             </section>
           ))}

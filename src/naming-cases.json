@@ -100,5 +100,14 @@
       { "id": "bbbb0001", "cwd": "/Users/x/Documents/meta", "parent": "aaaa0001" }
     ],
     "expect": { "aaaa0001": "meta", "bbbb0001": "meta" }
+  },
+  {
+    "name": "親が worktree にいて、子が別のプロジェクトにいる。世帯の名前は親の本体のプロジェクト",
+    "sessions": [
+      { "id": "root0001", "cwd": "/Users/x/Documents/family-computing.wt/chat", "startedAt": 1 },
+      { "id": "kid00001", "cwd": "/Users/x/Documents/voice-clone", "parent": "root0001", "startedAt": 2 },
+      { "id": "kid00002", "cwd": "/Users/x/Documents/voice-clone", "parent": "root0001", "startedAt": 3 }
+    ],
+    "expect": { "root0001": "family-computing", "kid00001": "voice-clone" }
   }
 ]

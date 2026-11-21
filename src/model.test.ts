@@ -33,17 +33,15 @@ describe("振り分けの場所とプロジェクトの名前", () => {
 });
 
 describe("houseNameOf", () => {
-  test("根のカードの名前（プロジェクトの名前）", () => {
-    const root = ag("r", "/Users/x/Documents/meta", { name: "family-computing" });
-    expect(houseNameOf(root, [root])).toEqual({ name: "family-computing", by: "project" });
+  test("根のカードの名前（親のプロジェクトの名前）", () => {
+    const root = ag("r", "/Users/x/Documents/family-computing", { name: "family-computing" });
+    expect(houseNameOf(root)).toBe("family-computing");
   });
-  test("本人が付けた名前が最優先", () => {
-    const root = ag("r", "/Users/x/Documents/meta", { name: "family-computing", house: { name: "うち", by: "human" } });
-    expect(houseNameOf(root, [root])).toEqual({ name: "うち", by: "human" });
-  });
-  test("エージェントが付けた名前は、根のカードの名前を通してだけ使う", () => {
-    const root = ag("r", "/Users/x/Documents/family-computing", { name: "family-computing", house: { name: "ファミコン作り", by: "agent" } });
-    expect(houseNameOf(root, [root]).name).toBe("family-computing");
+  test("保存された名前（本人、エージェントのどちらも）は見ない", () => {
+    for (const by of ["human", "agent"] as const) {
+      const root = ag("r", "/Users/x/Documents/family-computing", { name: "family-computing", house: { name: "うち", by } });
+      expect(houseNameOf(root)).toBe("family-computing");
+    }
   });
 });
 
