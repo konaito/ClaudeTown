@@ -98,7 +98,22 @@ Claude Town の違いは3つある。データ源をこの Mac の Claude Code �
 - 会話の道具の行は、結果が届いたら押して開ける。開くと、まとめた道具ごとに1行と結果の頭（40行、1500字まで）を出し、失敗した道具には「失敗」と付ける（#83）。止めたターンと失敗したターンは、会話の中に「ここで止めた」「ターンが失敗で終わった」の印を出す。
 - `~/.family-computing/send-disabled` があると、注文、端末への入力、新しい世帯の作成、停止を全部断る（送信の非常停止）。
 
-ccn を外したときに、別の機械の町、転出、引き継ぎ、チャットの欄からの承認、モデルと権限モードの切り替え、オフラインの保存をやめた（2026-11-21）。どれも ccn の口を使っていた。
+ccn を外したときに、別の機械の町、転出、引き継ぎ、チャットの欄からの承認、オフラインの保存をやめた（2026-11-21）。どれも ccn の口を使っていた。モデルと権限モードの切り替えは、端末に書く作りで戻した（下の「モデルと権限モード」）。
+
+### モデルと権限モード
+
+チャット欄の「送信先」の行に、モデルと権限モードの選択を置く。選択はいつでも押せる（2026-11-21、本人の依頼）。決まりは `src/session/control.ts` の `planOf`、端末に書く処理は `src-tauri/src/switch.rs` にある。
+
+- アプリが立てたセッションは、端末に CLI と同じ入力を書いて替える。モデルは `/model <別名>`、権限モードは Shift+Tab である。
+- モデルは作業中でもすぐ替える。`/model` は作業中に打っても待たされず、同じターンの次の要求から効く。
+- 権限モードは待機中に替える。Shift+Tab は default、acceptEdits、plan、bypassPermissions、auto の順に回るので、作業中に回すと途中のモードで道具が走りうる。
+- 承認待ちの間は、モデルも権限モードも替えない。端末に書いた入力が承認の画面に入り、Enter が許可になるためである。
+- 今は替えられないときに選んだ値は予約になる。選択は破線の枠で予約の値を出し、下に「承認に答えたら替える」「このターンが終わったら替える」と出す。今の値を選び直すと予約を取り消す。
+- 予約は Rust が持ち、0.5秒ごとに `sessions/<pid>.json` の status を見て当てる。窓が隠れていても当たる。アプリを終えると予約は消える。アプリが立てた claude もアプリと一緒に止まるので、持ち越す先が無い。
+- 今の値は transcript の `permission-mode` の行と、assistant の行の `message.model` から読む。アプリの端末の権限モードは、端末の下の行（「⏸ manual mode on」など）を優先する。待機中に Shift+Tab で替えたモードは、次の文を送るまで transcript に書かれないためである。
+- `/model` は、Claude Code が `~/.claude/settings.json` に model を書き、新しいセッションの既定にもする。アプリは書き戻さない。
+- dontAsk は Shift+Tab の順に出ないので、端末からは替えられない。bypassPermissions と auto は、そのセッションで使えるときだけ順に出る。順に出なければ、1周して元のモードに戻し、理由を通知に出す。
+- アプリの外で起動したセッション、チームメイト、sub-agent には、外からモデルや権限モードを届ける口が無い。選ぶと、代わりの手（そのターミナルで `/model` を打つ、など）を出す。理由は2026-11-21 に公式の文書で確かめた。設定ファイルの model は起動のときに1回だけ読まれる。hook の出力で権限モードを替えられるのは PermissionRequest の `setMode` だけで、その承認を許可するのと一緒にしか使えない。チームメイトのモデルは起動のときに決まる。
 
 ## hook
 
@@ -220,7 +235,7 @@ Claude Town は、ブラウザから開けるインストール可能な PWA と
 
 仕組みは次のとおり。
 
-- 画面は Tauri 版と同じ `src/` である。Tauri の外でビルドした版（`import.meta.env.PROD`）は、`invoke` の代わりに、同じオリジンの `/api` へ HTTP で話す（`src/bridge.ts` の `WEB`）。ccn の行は source が ccn で、承認の欄、モデルと権限モードの切り替え、コマンドの振り分けはこの行にだけ出る。
+- 画面は Tauri 版と同じ `src/` である。Tauri の外でビルドした版（`import.meta.env.PROD`）は、`invoke` の代わりに、同じオリジンの `/api` へ HTTP で話す（`src/bridge.ts` の `WEB`）。ccn の行は source が ccn で、承認の欄とコマンドの振り分けはこの行にだけ出る。モデルと権限モードの切り替えは、ccn の行では ccn の PATCH で替え、予約は画面が持つ（`src/session/reserve.ts`）。
 - ccn は別オリジンからの要求を 403 で断るので、ブラウザは ccn に直接つなげない。`web/` の Worker（Void アプリ）が画面を配り、`/api` と `/n/` を `https://ccn.fybe.jp` に中継する。
 - 中継は、受け取った Access の JWT を `Cf-Access-Token` で渡す（Linked App Token）。ccn の Access アプリ `ccn` に、`claude-town` からの Linked App Token を通すポリシー `town-linked` を足してある。ccn には人（email）の呼び手として届き、サービストークンの秘密は持たない。
 - Service Worker（`public/sw.js`）は何もキャッシュしない。ホーム画面に追加するためだけに置いた。manifest は `public/manifest.webmanifest`、アイコンは `public/app-icon.svg` から `bun run pwa:icons` で作る。
