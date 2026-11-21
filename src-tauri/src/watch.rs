@@ -184,11 +184,10 @@ pub(crate) fn town_watch(peer: Option<String>, on_event: tauri::ipc::Channel<Val
 #[tauri::command]
 pub(crate) fn town_unwatch(generation: u64) {
     let mut w = WATCH.lock().unwrap_or_else(|e| e.into_inner());
-    if w.as_ref().map(|(g, _)| *g) == Some(generation) {
-        if let Some((_, tx)) = w.take() {
+    if w.as_ref().map(|(g, _)| *g) == Some(generation)
+        && let Some((_, tx)) = w.take() {
             let _ = tx.send(WatchCmd::Stop);
         }
-    }
 }
 
 /// 見張りに、すぐ取り直させる

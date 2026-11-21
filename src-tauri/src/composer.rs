@@ -32,14 +32,13 @@ const HISTORY_PROJECT_MAX: usize = 1000;
 
 /// ccn が本文の前に付ける1行（from <誰> via <ノード>）を外す。人が打ったのは、その後ろの文だから
 pub fn strip_from_line(s: &str) -> &str {
-    if let Some(rest) = s.strip_prefix("from ") {
-        if let Some(nl) = rest.find('\n') {
+    if let Some(rest) = s.strip_prefix("from ")
+        && let Some(nl) = rest.find('\n') {
             let w: Vec<&str> = rest[..nl].split(' ').collect();
             if w.len() == 3 && w[1] == "via" && !w[0].is_empty() && !w[2].is_empty() {
                 return rest[nl..].trim_start_matches('\n');
             }
         }
-    }
     s
 }
 
@@ -58,11 +57,10 @@ fn expand_pastes(display: &str, pasted: Option<&Value>, home: &Path) -> String {
         });
         let Some(body) = body else { continue };
         let tag = format!("[Pasted text #{k}");
-        if let Some(start) = out.find(&tag) {
-            if let Some(end) = out[start..].find(']') {
+        if let Some(start) = out.find(&tag)
+            && let Some(end) = out[start..].find(']') {
                 out.replace_range(start..start + end + 1, &body);
             }
-        }
     }
     out
 }
@@ -82,11 +80,10 @@ pub fn history_from(lines: &str, cwd: Option<&str>, all: bool, home: &Path) -> H
             break;
         }
         // project で先に絞る（JSON を開く前に、文字列で見て外れる行を飛ばす）
-        if let (false, Some(c)) = (all, cwd) {
-            if !line.contains(&format!("\"project\":{}", Value::String(c.to_string()))) {
+        if let (false, Some(c)) = (all, cwd)
+            && !line.contains(&format!("\"project\":{}", Value::String(c.to_string()))) {
                 continue;
             }
-        }
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         if !all && v.get("project").and_then(|p| p.as_str()) != cwd {
             continue;

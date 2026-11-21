@@ -182,11 +182,10 @@ pub fn teleport_info(peer: &Option<String>, id: &str) -> Result<Value, String> {
 pub fn teleport(peer: &Option<String>, id: &str, body: Value) -> Result<Value, String> {
     let a = ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).build();
     let mut req = a.post(&teleport_url(&api(peer), id));
-    if let Ok(d) = session(peer, id) {
-        if let Some(p) = d["parent"].as_str().filter(|p| p.starts_with("agent:")) {
+    if let Ok(d) = session(peer, id)
+        && let Some(p) = d["parent"].as_str().filter(|p| p.starts_with("agent:")) {
             req = req.set("x-ccn-from", p);
         }
-    }
     match req.send_json(body) {
         Ok(r) => r.into_json::<Value>().map_err(|e| e.to_string()),
         Err(ureq::Error::Status(code, r)) => Err(format!("転出できなかった（{code}）: {}", r.into_string().unwrap_or_default())),

@@ -45,11 +45,10 @@ fn remote_url(config: &str) -> Option<String> {
         let t = line.trim();
         if t.starts_with('[') {
             cur = t.strip_prefix("[remote \"").and_then(|r| r.strip_suffix("\"]")).map(|n| n.to_string());
-        } else if let (Some(name), Some((k, v))) = (&cur, t.split_once('=')) {
-            if k.trim().eq_ignore_ascii_case("url") && !v.trim().is_empty() {
+        } else if let (Some(name), Some((k, v))) = (&cur, t.split_once('='))
+            && k.trim().eq_ignore_ascii_case("url") && !v.trim().is_empty() {
                 found.push((name.clone(), v.trim().to_string()));
             }
-        }
     }
     found.iter().find(|(n, _)| n == "origin").or(found.first()).map(|(_, u)| u.clone())
 }

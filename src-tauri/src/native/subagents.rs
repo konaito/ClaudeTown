@@ -57,11 +57,10 @@ fn read_meta(p: &Path) -> Option<Value> {
     let st = stamp(&m);
     let mut g = METAS.lock().unwrap_or_else(|e| e.into_inner());
     let map = g.get_or_insert_with(HashMap::new);
-    if let Some((s, v)) = map.get(p) {
-        if *s == st {
+    if let Some((s, v)) = map.get(p)
+        && *s == st {
             return Some(v.clone());
         }
-    }
     let v: Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
     map.insert(p.to_path_buf(), (st, v.clone()));
     Some(v)
@@ -70,11 +69,10 @@ fn read_meta(p: &Path) -> Option<Value> {
 fn tail_of(p: &Path, st: (u64, u64)) -> Tail {
     let mut g = TAILS.lock().unwrap_or_else(|e| e.into_inner());
     let map = g.get_or_insert_with(HashMap::new);
-    if let Some((s, t)) = map.get(p) {
-        if *s == st {
+    if let Some((s, t)) = map.get(p)
+        && *s == st {
             return t.clone();
         }
-    }
     let t = read_tail(p, st.0);
     map.insert(p.to_path_buf(), (st, t.clone()));
     t

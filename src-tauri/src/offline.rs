@@ -106,11 +106,10 @@ pub fn prune_conv(dir: &Path, max_age: Duration, max_files: usize) -> usize {
     for (i, (t, p)) in files.iter().enumerate() {
         let old = now.duration_since(*t).map(|d| d > max_age).unwrap_or(false);
         // 書きかけで残った一時ファイル（.tmp…）も、古ければ消える
-        if old || i >= max_files {
-            if fs::remove_file(p).is_ok() {
+        if (old || i >= max_files)
+            && fs::remove_file(p).is_ok() {
                 n += 1;
             }
-        }
     }
     n
 }

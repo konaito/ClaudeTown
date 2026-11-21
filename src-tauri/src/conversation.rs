@@ -452,11 +452,10 @@ pub(crate) fn simplify(m: &Value) -> Vec<Value> {
                             let mut item = json!({ "role": "tool", "text": tool_line(name, inp), "at": at, "sent": sent, "id": c["id"] });
                             // 計画の確認（ExitPlanMode）の本文。承認の hook の tool_input は、計画ファイルが無いと空で来るので、
                             // 承認の欄は会話の最後の計画で補う（#83、2026-11-21 に PTY の子で見た）
-                            if name == "ExitPlanMode" {
-                                if let Some(p) = inp["plan"].as_str().filter(|p| !p.trim().is_empty()) {
+                            if name == "ExitPlanMode"
+                                && let Some(p) = inp["plan"].as_str().filter(|p| !p.trim().is_empty()) {
                                     item["plan"] = json!(p);
                                 }
-                            }
                             out.push(item);
                         }
                         _ => {}

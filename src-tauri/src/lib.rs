@@ -129,11 +129,10 @@ fn read_json_cached(p: &std::path::Path) -> Option<Value> {
         return None;
     };
     let st = stamp_of(&meta);
-    if let Some((s, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(p) {
-        if *s == st && st.modified.is_some() {
+    if let Some((s, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(p)
+        && *s == st && st.modified.is_some() {
             return v.clone();
         }
-    }
     let v = read_json(&p.to_path_buf());
     cache.lock().unwrap_or_else(|e| e.into_inner()).insert(p.to_path_buf(), (st, v.clone()));
     v
@@ -320,11 +319,10 @@ fn save_town_to(file: &std::path::Path, agents: &[Value], now: u128, prev: &mut 
     }
     let key = town_key(agents);
     let ids = town_ids(agents);
-    if let Some(p) = prev.as_ref() {
-        if p.key == key || (p.ids == ids && now.saturating_sub(p.at) < TOWN_SAVE_GAP_MS) {
+    if let Some(p) = prev.as_ref()
+        && (p.key == key || (p.ids == ids && now.saturating_sub(p.at) < TOWN_SAVE_GAP_MS)) {
             return false;
         }
-    }
     // 書けたときだけ覚える（書けなかったら、次の回にまた書く）
     if offline::write(file, json!({ "agents": agents })).is_err() {
         return false;
