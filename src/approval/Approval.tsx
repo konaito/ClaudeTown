@@ -138,10 +138,10 @@ function PlanForm({ plan, busy, answer }: { plan: string; busy: "allow" | "deny"
   const [note, setNote] = useState("");
   return (
     <>
-      {plan ? <ScrollEdgeGradient className="ap-plan"><Markdown text={plan} /></ScrollEdgeGradient> : <div className="hint">計画の本文が無い</div>}
+      {plan ? <ScrollEdgeGradient className="ap-plan"><Markdown text={plan} /></ScrollEdgeGradient> : <div className="hint">計画の本文を読んでいる…（読めるまで承認は押せない。ターミナルでも答えられる）</div>}
       <textarea className="ap-note" rows={2} placeholder="直してほしいこと（「続けて計画する」で送る。空でもよい）" value={note} disabled={!!busy} onChange={(e) => setNote(e.target.value)} />
       <div className="ap-btns">
-        <button className="ap-allow" disabled={!!busy} title="計画を承認して、作業に進ませる" onClick={() => answer("allow")}>{busy === "allow" ? "送っている…" : "計画を承認する"}</button>
+        <button className="ap-allow" disabled={!!busy || !plan} title={plan ? "計画を承認して、作業に進ませる" : "計画の本文が読めるまで押せない"} onClick={() => answer("allow")}>{busy === "allow" ? "送っている…" : "計画を承認する"}</button>
         <button className="ap-deny" disabled={!!busy} title="承認せず、上に書いたことを伝えて計画を続けさせる" onClick={() => answer("deny", { message: note })}>{busy === "deny" ? "送っている…" : "続けて計画する"}</button>
       </div>
     </>

@@ -13,3 +13,16 @@ export function answerText(q: Question, p: Pick): string {
   if (!q.multiSelect) return other || p.picked[0] || "";
   return [...p.picked, ...(other ? [other] : [])].join(", ");
 }
+
+/**
+ * 承認の欄で補いに使う計画の本文。会話で最後の ExitPlanMode の道具の行の plan で、まだ答えていない（結果が無い）ときだけ返す。
+ * 見直しを頼んだあとの再確認では、新しい道具の行を読むまで前の計画が最後に残っている。前の計画には結果が付くので、それは出さない（#83）
+ */
+export function openPlan(items: { role: string; id?: string | null; plan?: string; result?: unknown }[]): string | null {
+  const answered = new Set(items.filter((x) => x.role === "result" && x.id).map((x) => x.id));
+  for (let i = items.length - 1; i >= 0; i--) {
+    const x = items[i];
+    if (x.role === "tool" && x.plan) return x.result || (x.id && answered.has(x.id)) ? null : x.plan;
+  }
+  return null;
+}
