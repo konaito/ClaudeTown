@@ -578,27 +578,9 @@ mod cmd {
     pub async fn snapshot(peer: Option<String>) -> Result<Snapshot, String> { blocking(move || Ok(super::snapshot(peer))).await }
     #[tauri::command]
     pub async fn town_agents(peer: Option<String>) -> Result<Vec<Value>, String> { blocking(move || super::town_agents(peer)).await }
-    #[tauri::command]
-    pub async fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, succeed: Option<bool>, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::create_session(cwd, prompt, parent, name, cols, rows, resume, fork, succeed, peer)).await
-    }
-    #[tauri::command]
-    pub async fn house_places() -> Result<Value, String> { blocking(super::house_places).await }
     /// 新しい世帯の一覧の各場所に連携しているリポジトリ名（owner/repo）。.git/config を読むだけ（#99）
     #[tauri::command]
     pub async fn place_repos(paths: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> { blocking(move || Ok(super::repo::repos_of(&paths))).await }
-    #[tauri::command]
-    pub async fn session_detail(session_id: String, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::session_detail(session_id, peer)).await
-    }
-    #[tauri::command]
-    pub async fn teleport_info(session_id: String, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::teleport_info(session_id, peer)).await
-    }
-    #[tauri::command]
-    pub async fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> {
-        blocking(move || super::stop_session(session_id, peer)).await
-    }
     #[tauri::command]
     pub async fn prompt_history(cwd: Option<String>, all: Option<bool>) -> Result<super::composer::History, String> {
         blocking(move || super::composer::prompt_history(cwd, all.unwrap_or(false))).await
@@ -766,7 +748,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             cmd::snapshot, cmd::town_agents, cmd::peers, conversation::cmd::conversation, conversation::cmd::conversation_cache, conversation::cmd::send_message, permission::cmd::answer_permission,
-            cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, cmd::house_places, cmd::place_repos, term_open, term_close, term_input, term_resize,
+            session_ops::cmd::create_session, session_ops::cmd::stop_session, teleport, session_ops::cmd::teleport_info, session_ops::cmd::session_detail, session_ops::cmd::house_places, cmd::place_repos, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick, town_settings, set_town_settings,
             cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::session_controls, cmd::configure_session, cmd::run_command, cmd::paste_clipboard, cmd::stage_files
         ])

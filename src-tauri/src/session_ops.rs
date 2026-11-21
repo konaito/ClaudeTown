@@ -106,6 +106,30 @@ pub(crate) async fn teleport(session_id: String, to: String, fork: bool, subtree
     .map_err(|e| e.to_string())?
 }
 
+/// 画面から呼ぶ命令の包み。中身の関数は上にある。待つ命令は blocking で別のスレッドへ出す
+pub(crate) mod cmd {
+    use super::*;
+
+    #[tauri::command]
+    pub async fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, succeed: Option<bool>, peer: Option<String>) -> Result<Value, String> {
+        blocking(move || super::create_session(cwd, prompt, parent, name, cols, rows, resume, fork, succeed, peer)).await
+    }
+    #[tauri::command]
+    pub async fn house_places() -> Result<Value, String> { blocking(super::house_places).await }
+    #[tauri::command]
+    pub async fn session_detail(session_id: String, peer: Option<String>) -> Result<Value, String> {
+        blocking(move || super::session_detail(session_id, peer)).await
+    }
+    #[tauri::command]
+    pub async fn teleport_info(session_id: String, peer: Option<String>) -> Result<Value, String> {
+        blocking(move || super::teleport_info(session_id, peer)).await
+    }
+    #[tauri::command]
+    pub async fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> {
+        blocking(move || super::stop_session(session_id, peer)).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
