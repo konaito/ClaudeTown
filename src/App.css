@@ -537,5 +537,18 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 /* 中央のペインが細いときは、ヘッダーの左右を折り返す（3枚にしたので、町の幅は 240px まで細くなる） */
 @container (max-width: 560px) {
   .left > .top { display: flex; flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; }
-  .left > .top .top-right { display: none; }
+  .left > .top .top-right { margin-left: auto; }
 }
+
+/* 設定の画面（#92）。.modal と .modal-scrim は確認の画面と同じ */
+.set-modal { width: min(460px, 92vw); }
+.set-sec { display: flex; flex-direction: column; gap: 6px; }
+.set-sec .hint { margin: 0; }
+.set-label { font-size: 13px; font-weight: 600; }
+.set-input { font: inherit; font-size: 13px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px; background: #fff; user-select: text; }
+.set-input:focus { outline: none; border-color: #b9b3a8; }
+.set-input[aria-invalid="true"] { border-color: #c2410c; }
+.set-bad { margin: 0; font-size: 12px; color: #c2410c; }
+.set-sub { margin-top: 4px; font-size: 11.5px; color: var(--sub); }
+.set-list { max-height: 220px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; padding: 4px; }
+.set-list .nh-row.on { background: #efece7; font-weight: 600; }
