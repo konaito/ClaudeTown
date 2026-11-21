@@ -1,5 +1,5 @@
-// 右パネルの端末。ccn の PTY の出力を xterm.js に流し、打ったキーを PTY に書く。
-// 開いている間だけ繋ぎ、閉じたら切る（30本を同時に描かない）。開いたときに自分の大きさを ccn に伝える（後勝ち）。
+// 右パネルの端末。このアプリが立てた claude の PTY（src-tauri/src/pty.rs）の出力を xterm.js に流し、打ったキーを PTY に書く。
+// ブラウザ版（PWA）では ccn の端末の口を読む。開いている間だけ繋ぎ、閉じたら切る（30本を同時に描かない）。開いたときに自分の大きさを PTY に伝える。
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -22,8 +22,8 @@ const FOREIGN_RECLAIM_MS = 5000;
  */
 type Shared = { term: Terminal; fit: FitAddon; el: HTMLDivElement; gl: WebglAddon | null };
 let shared: Shared | null = null;
-// 開発の計測用: ?renderer=dom（scripts/bench.ts では VITE_FC_BENCH の renderer=dom）で DOM の描き方のまま比べる
-const forceDom = () => (import.meta.env.DEV && benchParams.get("renderer") === "dom") || import.meta.env.VITE_FC_SOAK_RENDERER === "dom";
+// 開発の計測用: ?renderer=dom（VITE_FC_BENCH では renderer=dom）で DOM の描き方のまま比べる
+const forceDom = () => import.meta.env.DEV && benchParams.get("renderer") === "dom";
 
 /**
  * GPU で描く（#8）。何も指定しないと xterm.js は DOM で描き、claude の書き換えのたびに WebContent の負荷になる。
@@ -69,7 +69,7 @@ function sharedTerm(): Shared {
   return shared;
 }
 
-export function TerminalView({ sessionId, peer, onError }: { sessionId: string; peer: string | null; onError: (m: string) => void }) {
+export function TerminalView({ sessionId, onError }: { sessionId: string; onError: (m: string) => void }) {
   const box = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<string>("起動中…");
 
@@ -130,7 +130,7 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
         perfCounters.resizes++;
         perfCounters.lastResizeAt = performance.now();
         sentSize = `${term.cols}x${term.rows}`;
-        call("term_resize", { sessionId, cols: term.cols, rows: term.rows, peer }).catch((e) => onError(`ターミナルの大きさを変えられなかった: ${e}`));
+        call("term_resize", { sessionId, cols: term.cols, rows: term.rows }).catch((e) => onError(`ターミナルの大きさを変えられなかった: ${e}`));
       }, 150);
     };
     // 本人がここで打ったら（キー、貼り付け、IME の確定）、こちらの大きさに戻す。onData では見ない。
@@ -140,10 +140,10 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
     for (const ev of ["keydown", "paste", "compositionend"]) ta?.addEventListener(ev, reclaim);
     const disposeInput = term.onData((text) => {
       if (replaying > 0) return;
-      call("term_input", { sessionId, text, peer }).catch((e) => onError(`ターミナルに書けなかった: ${e}`));
+      call("term_input", { sessionId, text }).catch((e) => onError(`ターミナルに書けなかった: ${e}`));
     });
     let close = () => {};
-    openTerminal(sessionId, peer, (e) => {
+    openTerminal(sessionId, (e) => {
       if (closed) return;
       switch (e.ev) {
         case "size":
@@ -209,7 +209,7 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
       // ターミナルは使い回すので dispose しない。要素を外すだけ
       el.remove();
     };
-  }, [sessionId, peer]);
+  }, [sessionId]);
 
   return (
     <div className="term-wrap">

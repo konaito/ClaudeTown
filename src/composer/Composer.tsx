@@ -1,7 +1,7 @@
 // チャットの入力欄。キーの動きは Claude Code の CLI の入力に合わせる。
 // 何をどう合わせたか、合わせなかったものと理由は docs/research/cli-input.md の表にある。
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { call as invoke, onFileDrop } from "../bridge";
+import { IS_WEB, call as invoke, onFileDrop } from "../bridge";
 import getCaretCoordinates from "textarea-caret";
 import type { Agent } from "../model";
 import { BUILTINS, type Command } from "./commands";
@@ -24,7 +24,7 @@ const skillsByCwd = new Map<string, Command[]>();
 const DOUBLE_MS = 800;
 
 /** 別の機械のセッションには手元のパスが届かないので、画像とファイルは断る */
-const REMOTE_FILES = "別の機械のセッションには画像やファイルを渡せない（手元のパスは届かない）";
+const REMOTE_FILES = "ブラウザ版からは画像やファイルを渡せない（手元のパスは届かない）";
 
 type Pasted = { files: string[]; image: string | null };
 
@@ -48,16 +48,17 @@ const HELP: [string, string][] = [
   ["Ctrl+C", "作業を止める（作業中）・打ちかけを消す"],
 ];
 
-export function Composer({ agent, peer, text, setText, busy, running, support = "no", onSubmit, onError, touch }: {
+export function Composer({ agent, text, setText, busy, running, support = "no", onSubmit, onError, touch }: {
   /** ノードに command の口があるか（#97）。/ のコマンドの振り分けと、補完の印に使う */
   support?: Support;
   /** スマホ（ソフトキーボード）。Enter は改行にし、送るのは送信ボタンだけにする */
   touch?: boolean;
-  agent: Agent; peer: string; text: string; setText: (v: string) => void; busy: boolean; running: boolean;
+  agent: Agent; text: string; setText: (v: string) => void; busy: boolean; running: boolean;
   onSubmit: (body: string) => Promise<boolean>; onError: (m: string) => void;
 }) {
   const ta = useRef<HTMLTextAreaElement>(null);
-  const local = !peer;
+  // 手元のファイル（履歴、@ の候補、ドロップしたファイルのパス）を使えるか。アプリでは使える。ブラウザ版（PWA）には手元のファイルの口が無い
+  const local = !IS_WEB;
   const hasTerm = !!agent.capabilities?.terminal;
   const canInterrupt = !!agent.capabilities?.interrupt;
   const [caret, setCaret] = useState(text.length);
@@ -104,7 +105,7 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
   // 補完
   const token = search ? null : tokenAt({ text, start: caret, end: caret });
   const commands = useMemo(() => [...BUILTINS, ...skills], [skills]);
-  // ccn を通さないセッション（#96）は、コマンドの振り分けでは端末のセッションと同じに扱う
+  // ブラウザ版（PWA）の ccn の行のほかは、コマンドの振り分けでは端末のセッションと同じに扱う
   const ccnKind = viaCcn(agent) ? agent.kind : "terminal";
   const slashItems = token?.kind === "slash" ? rankCommands(commands, token.query) : [];
   // 候補の印（#97）。行の頭のコマンドだけが CLI のコマンドになるので、文の途中の / には付けない
@@ -169,7 +170,7 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
   };
 
   const [stopping, setStopping] = useState(false);
-  const interrupt = () => invoke("interrupt_session", { sessionId: agent.id, peer: peer || null }).catch((e) => onError(`止められなかった: ${e}`));
+  const interrupt = () => invoke("interrupt_session", { sessionId: agent.id }).catch((e) => onError(`止められなかった: ${e}`));
   const clearDraft = () => { if (text.trim()) remember(text); histSt.current = { index: -1, draft: "" }; replaceAll(""); };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -323,7 +324,7 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
     if (e.key === "Backspace" && !search?.query) { e.preventDefault(); endSearch(false); }
   };
 
-  // 画像とファイル（#64）。ccn の送信は文しか受けないので、手元のファイルのパスを文として入れる。受け手の Claude はパスを読む
+  // 画像とファイル（#64）。端末への送信は文しか運べないので、手元のファイルのパスを文として入れる。受け手の Claude はパスを読む
   const putText = (t: string) => {
     if (!alive.current || !ta.current) return;
     const s = sel();

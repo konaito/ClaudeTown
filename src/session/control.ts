@@ -60,7 +60,7 @@ export const NO_SUPPORT = "このノードでは使えません（ccn が古く�
  * switching は、こちらが替えている最中（pty は起動し直しを待っている）
  */
 export function lockReason(a: Pick<Agent, "kind" | "state" | "source">, support: Support, switching: boolean): string | null {
-  if (!viaCcn(a)) return "Claude Code の記録から読んでいるだけのセッションなので、ここからは替えられない";
+  if (!viaCcn(a)) return "ccn の行ではない（Claude Code の記録から読んでいるだけか、アプリが立てた端末）ので、ここからは替えられない。ターミナルで /model を打つ";
   if (a.kind === "terminal") return "端末で起動したセッションなので、ここからは替えられない";
   if (support === "no") return NO_SUPPORT;
   if (support === "unknown") return "このノードで使えるかを確かめている";
@@ -71,9 +71,9 @@ export function lockReason(a: Pick<Agent, "kind" | "state" | "source">, support:
   return null;
 }
 
-/** ccn が動かしているセッションか。ネイティブの記録だけから読んだもの（#96）と sub-agent は ccn の口が使えない */
+/** ccn が動かしているセッションか。ブラウザ版（PWA）が ccn から読む行だけで、アプリ（Tauri）の行はどれも当たらない */
 export function viaCcn(a: Pick<Agent, "kind" | "source">): boolean {
-  return a.source !== "native" && a.kind !== "subagent";
+  return a.source === "ccn";
 }
 
 /** 理由のうち、画面にいつも出しておくもの（確かめている最中は出さない） */

@@ -23,28 +23,29 @@ describe("supportOf", () => {
 
 describe("lockReason", () => {
   test("node はいつでも替えられる（作業中も）", () => {
-    expect(lockReason({ kind: "node", state: "idle" }, "yes", false)).toBeNull();
-    expect(lockReason({ kind: "node", state: "running" }, "yes", false)).toBeNull();
+    expect(lockReason({ kind: "node", state: "idle", source: "ccn" }, "yes", false)).toBeNull();
+    expect(lockReason({ kind: "node", state: "running", source: "ccn" }, "yes", false)).toBeNull();
   });
   test("pty は待機中だけ", () => {
-    expect(lockReason({ kind: "pty", state: "idle" }, "yes", false)).toBeNull();
-    expect(lockReason({ kind: "pty", state: "running" }, "yes", false)).toContain("作業中は替えられない");
+    expect(lockReason({ kind: "pty", state: "idle", source: "ccn" }, "yes", false)).toBeNull();
+    expect(lockReason({ kind: "pty", state: "running", source: "ccn" }, "yes", false)).toContain("作業中は替えられない");
   });
   test("承認待ちは、計画の確認を壊さないよう node も止める", () => {
-    expect(lockReason({ kind: "node", state: "waiting_permission" }, "yes", false)).toContain("承認待ち");
-    expect(lockReason({ kind: "pty", state: "waiting_permission" }, "yes", false)).toContain("承認待ち");
+    expect(lockReason({ kind: "node", state: "waiting_permission", source: "ccn" }, "yes", false)).toContain("承認待ち");
+    expect(lockReason({ kind: "pty", state: "waiting_permission", source: "ccn" }, "yes", false)).toContain("承認待ち");
   });
-  test("ネイティブの記録だけのセッションと sub-agent は替えられない（#96）", () => {
+  test("ブラウザ版の ccn の行のほか（記録から読む行、アプリが立てた行、sub-agent）は替えられない", () => {
     expect(lockReason({ kind: "terminal", state: "idle", source: "native" }, "no", false)).toContain("記録から読んでいる");
+    expect(lockReason({ kind: "terminal", state: "idle", source: "app" }, "yes", false)).toContain("記録から読んでいる");
     expect(lockReason({ kind: "subagent", state: "idle" }, "no", false)).toContain("記録から読んでいる");
   });
   test("端末のセッションと古いノードは替えられない", () => {
-    expect(lockReason({ kind: "terminal", state: "idle" }, "yes", false)).toContain("端末で起動");
-    expect(lockReason({ kind: "node", state: "idle" }, "no", false)).toBe(NO_SUPPORT);
+    expect(lockReason({ kind: "terminal", state: "idle", source: "ccn" }, "yes", false)).toContain("端末で起動");
+    expect(lockReason({ kind: "node", state: "idle", source: "ccn" }, "no", false)).toBe(NO_SUPPORT);
   });
   test("替えている最中は、pty だけ起動し直しと出す", () => {
-    expect(lockReason({ kind: "pty", state: "idle" }, "yes", true)).toContain("起動し直している");
-    expect(lockReason({ kind: "node", state: "idle" }, "yes", true)).toBe("替えている");
+    expect(lockReason({ kind: "pty", state: "idle", source: "ccn" }, "yes", true)).toContain("起動し直している");
+    expect(lockReason({ kind: "node", state: "idle", source: "ccn" }, "yes", true)).toBe("替えている");
   });
 });
 

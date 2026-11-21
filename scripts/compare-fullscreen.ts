@@ -1,9 +1,9 @@
-// Claude Code の描き方を2通りで比べる（#20）。ccn の PTY と同じ形（bun の PTY、TERM=xterm-256color）で claude を起動し、
+// Claude Code の描き方を2通りで比べる（#20）。端末（bun の PTY、TERM=xterm-256color）で claude を起動し、
 // 同じ依頼を出して、送られてくるバイト数とかたまりの数、claude の CPU 時間、幅を変えたときの崩れを数える。
 //   bun run scripts/compare-fullscreen.ts [出力の置き場所]      既定 /tmp/ct-term-fullscreen
 // 比べるのは、何も付けない起動（default）と、CLAUDE_CODE_NO_FLICKER=1 を付けた起動（fullscreen）。
 // /tui fullscreen は設定を保存して以後の全部のセッションを変えるので使わない（公式の説明 terminal-config の「Switch to fullscreen rendering」）。
-// 出力は <置き場所>/<方式>.jsonl に {t, b64} で残す。scripts/mock-ccn-flood.ts の FC_FLOOD_REPLAY で同じ速さで流し直せる。
+// 出力は <置き場所>/<方式>.jsonl に {t, b64} で残す。
 import { Terminal } from "@xterm/headless";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -74,7 +74,7 @@ async function run(name: string, extra: Record<string, string>) {
       },
     },
   });
-  // 入力欄が読み始める（ESC[?2004h）まで待つ。早く書くと Enter が捨てられる（ccn #26 で ccn-term が確かめた）
+  // 入力欄が読み始める（ESC[?2004h）まで待つ。早く書くと Enter が捨てられる（2026-11 に ccn の #26 で確かめた）
   for (let i = 0; i < 300 && !text.includes("\x1b[?2004h"); i++) await sleep(100);
   await sleep(1000);
   const cpu0 = await cpuOf(proc.pid);
