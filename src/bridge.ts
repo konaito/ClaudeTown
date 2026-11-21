@@ -44,6 +44,13 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     if (!r.ok) throw new Error(await r.text());
     return r.status === 204 ? null : r.json();
   };
+  const raw = async (path: string, method: string, body: unknown) => {
+    const r = await fetch(`${base}${path}`, { credentials: "same-origin", method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const t = await r.text();
+    let parsed: unknown = t;
+    try { parsed = JSON.parse(t); } catch { /* 文字列のまま */ }
+    return { status: r.status, body: parsed };
+  };
   const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
     j(path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   switch (cmd) {
@@ -101,6 +108,15 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
       return post(`/sessions/${a.sessionId}/terminal/input`, { text: "\r" }) as T;
     }
     case "interrupt_session": return post(`/sessions/${a.sessionId}/interrupt`, {}) as T;
+    // モデルと権限モード（#97）。Rust と同じく、HTTP の応答を { status, body } で返す（断られた理由は画面が status と code で決める）
+    case "session_controls": return raw(`/sessions/${a.sessionId}/command`, "POST", { text: "" }) as T;
+    case "configure_session": {
+      const body: Record<string, unknown> = {};
+      if (a.model) body.model = a.model;
+      if (a.permissionMode) body.permissionMode = a.permissionMode;
+      if (!Object.keys(body).length) throw new Error("替えるものが無い");
+      return raw(`/sessions/${a.sessionId}`, "PATCH", body) as T;
+    }
     case "teleport_info": return j(`/sessions/${a.sessionId}/teleport`) as T;
     case "teleport": return post(`/sessions/${a.sessionId}/teleport`, { to: a.to, fork: a.fork, subtree: a.subtree, dryRun: a.dryRun }) as T;
     case "stop_session": return j(`/sessions/${a.sessionId}`, { method: "DELETE" }) as T;
