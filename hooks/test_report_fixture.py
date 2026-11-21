@@ -25,6 +25,8 @@ def prompt(text):
 TOOL = {"tool_name": "Bash", "tool_input": {"command": "rm x"}}
 WRITE = {"tool_name": "Write", "tool_input": {"file_path": "/a/b.txt"}}
 ASK = {"hook_event_name": "PermissionRequest"}
+STOP = {"hook_event_name": "Stop", "last_assistant_message": "beta を呼んだ"}
+MATE_TOOL = {"agent_id": "abeta-584d11236f35ece0", "agent_type": "beta", "tool_name": "Bash", "tool_input": {"command": "touch beta.txt"}}
 
 SCENARIOS = [
     ("依頼を受けて考え中", [prompt("試し\n2行目")]),
@@ -35,6 +37,10 @@ SCENARIOS = [
     ("終わって休む（次の一手つき）", [prompt("a"), {"hook_event_name": "Stop", "last_assistant_message": "# 終わった\n詳細\n次: PRを出す"}]),
     ("問いかけで止まる", [prompt("a"), {"hook_event_name": "Stop", "last_assistant_message": "どうする？"}]),
     ("セッションが始まったところ", [{"hook_event_name": "SessionStart", "cwd": "/tmp/y"}]),
+    # in-process のチームメイトの入力は session_id がリードと同じで、agent_id が付く（2026-11-21 の実機の形）
+    ("休んだリードは、チームメイトが道具を使っても休んだまま", [prompt("a"), STOP, {"hook_event_name": "PreToolUse", **MATE_TOOL}, {"hook_event_name": "PostToolUse", **MATE_TOOL}]),
+    ("チームメイトの承認待ちはリードの承認待ちになる（画面はリードの端末に出る）", [prompt("a"), STOP, {**ASK, **MATE_TOOL}]),
+    ("チームメイトの承認が済むと、休んだリードは休みに戻る", [prompt("a"), STOP, {**ASK, **MATE_TOOL}, {"hook_event_name": "PostToolUse", **MATE_TOOL}]),
 ]
 
 
