@@ -2,7 +2,7 @@
 // CLI に人が打つのと同じ入力を端末に書く。2026-11-21 に v2.1.330 の本物の claude で確かめたこと（PR の本文に記録を付けた）:
 // - `/model <別名>` は作業中に打っても待たされず、すぐ効く。同じターンの次の要求から新しいモデルになる（transcript の assistant の model で確認）。
 //   会話があると「Switch model?」の確認が出る（既定は Yes）。出たときだけ Enter を送る。会話が無いと確認は出ない。
-//   /model は「saved as your default for new sessions」と出し、~/.claude/settings.json に model を書く（Claude Code の動き。ここでは戻さない）
+//   /model は「saved as your default for new sessions」と出し、新しいセッションの既定も替える。settings.json の model の行を消しても既定は戻らない（ここでは戻さない）
 // - 権限モードを直接決めるコマンドは /plan だけ。ほかは Shift+Tab で順に回す。順は default → acceptEdits → plan →（bypassPermissions）→（auto）。
 //   括弧の2つは使えるときだけ出る。dontAsk は出ない。作業中に回してもすぐ効くが、途中のモード（bypassPermissions など）を通るので、作業中は待つ。
 //   今のモードは、端末の下の行（「⏸ manual mode on」など）でしか分からない。待機中に回しても hook も transcript も書かれない（次の文から書かれる）
@@ -68,6 +68,13 @@ fn live(id: &str) -> Option<(String, bool)> {
     let hooked = super::fc_path(super::Scope::Shared, &format!("state/{id}.json")).exists();
     let ready = super::composer::check_direct(row.as_ref(), hooked, started, super::now_ms() as u64).is_ok() || status == "waiting";
     Some((status, ready))
+}
+
+/// 当てる直前に承認待ちになっていたときの印。予約に戻して、次の回に当て直す
+const RETRY: &str = "承認待ちになったので待つ";
+
+fn waiting(id: &str) -> bool {
+    live(id).map(|(st, _)| st == "waiting").unwrap_or(false)
 }
 
 /// いま当ててよいか。モデルは承認待ちのほかはいつでも、モードは待機中だけ
@@ -142,6 +149,9 @@ fn watch() {
                 }
                 let r = if what == "model" { set_model(&id, &val) } else { set_mode(&id, &val) };
                 eprintln!("[switch] {id} {what}={val}: {r:?}");
+                if r.as_ref().err().map(String::as_str) == Some(RETRY) {
+                    break;
+                }
                 with(|b| {
                     if let Some(q) = b.pending.get_mut(&id) {
                         // 当てている間に別の値で予約し直されていたら、そちらを残す
@@ -191,8 +201,15 @@ fn wait_out(id: &str, mark: u64, sec: f32, want: impl Fn(&str) -> bool) -> Optio
 /// `/model <別名>` を貼って Enter。確認が出たら Enter で Yes を選ぶ。「Set model to」が出たら成功
 fn set_model(id: &str, model: &str) -> Result<(), String> {
     let mark = super::pty::out_mark(id).ok_or("このセッションの端末はこのアプリに無い")?;
+    // 承認の画面に入力が入らないよう、貼る前と Enter の前に今の状態を読み直す（send_direct と同じ穴）
+    if waiting(id) {
+        return Err(RETRY.into());
+    }
     super::pty::write(id, &format!("\x1b[200~/model {model}\x1b[201~"))?;
     std::thread::sleep(Duration::from_millis(150));
+    if waiting(id) {
+        return Err(format!("貼った直後に承認の画面が出たので Enter を送らなかった。ターミナルの入力欄に /model {model} が残っているかもしれない"));
+    }
     super::pty::write(id, "\r")?;
     let s = wait_out(id, mark, 4.0, |s| s.contains("Switch model?") || s.contains("Set model to")).ok_or("/model の結果が4秒で出なかった。ターミナルで様子を見る")?;
     if !s.contains("Set model to") {
