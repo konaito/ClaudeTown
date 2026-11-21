@@ -253,7 +253,9 @@ pub fn slash_commands(cwd: Option<String>) -> Vec<SlashCommand> {
 // ---------- @ の候補（ファイル） ----------
 
 /// cwd のファイルとフォルダの一覧。git の中なら ls-files（.gitignore に従う）、外なら浅く歩く。30秒は前の一覧を使う
-static FILES_CACHE: Mutex<Option<HashMap<String, (Instant, Vec<String>)>>> = Mutex::new(None);
+/// 覚えた時刻と一覧
+type FilesEntry = (Instant, Vec<String>);
+static FILES_CACHE: Mutex<Option<HashMap<String, FilesEntry>>> = Mutex::new(None);
 const FILES_MAX: usize = 30000;
 
 fn list_files(cwd: &str) -> Vec<String> {

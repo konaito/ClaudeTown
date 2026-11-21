@@ -71,7 +71,8 @@ fn normalize(p: &Path) -> PathBuf {
 /// snapshot は一覧を取るたびに、セッションごとに `.git` と commondir を読んでいた。
 /// worktree を作り直すと `.git` も書き直されるので、commondir だけが変わる場合は考えない
 fn project_from_git_cached(cwd: &str) -> Option<String> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (super::FileStamp, Option<String>)>>> = std::sync::OnceLock::new();
+    type Entry = (super::FileStamp, Option<String>);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Entry>>> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     // .git がファイルでなければ（無い、本体のディレクトリ）、project_from_git も読まずに None を返す
     let Some(meta) = fs::metadata(Path::new(cwd).join(".git")).ok().filter(|m| m.is_file()) else {

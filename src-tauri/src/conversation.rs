@@ -468,9 +468,12 @@ pub(crate) fn simplify(m: &Value) -> Vec<Value> {
     out
 }
 
+/// 読んだ結果。(次の after, 縮めた項目, 今の動きの出来事, 最初のページの epoch)
+type MessagesRead = (u64, Vec<Value>, Vec<LiveEv>, Option<String>);
+
 /// ccn の messages を after=start から読む。1回で読むのは最大20ページ（4000件）。続きは次の呼び出しで読む。
 /// 返すのは (次の after, 縮めた項目, 今の動きの出来事, 最初のページの epoch)
-pub(crate) fn read_messages(peer: &Option<String>, session_id: &str, start: u64) -> Result<(u64, Vec<Value>, Vec<LiveEv>, Option<String>), String> {
+pub(crate) fn read_messages(peer: &Option<String>, session_id: &str, start: u64) -> Result<MessagesRead, String> {
     let mut next = start;
     let mut fresh = vec![];
     let mut evs = vec![];
@@ -510,7 +513,7 @@ pub(crate) fn cursor_is_stale(from: u64, seen: &Option<String>, got: &Option<Str
 
 /// ネイティブの jsonl（#96）を読み位置 from から読む。read_messages と同じ形で返す。読み位置はバイト、印は native:<inode>。
 /// ファイルが読み位置より短くなったら、印を変えて返し、conversation が頭から読み直した扱いにする
-pub(crate) fn read_native(path: &std::path::Path, from: u64) -> Result<(u64, Vec<Value>, Vec<LiveEv>, Option<String>), String> {
+pub(crate) fn read_native(path: &std::path::Path, from: u64) -> Result<MessagesRead, String> {
     let c = native::conv::read(path, from)?;
     let fresh = c.lines.iter().flat_map(simplify).collect();
     let evs = c.lines.iter().flat_map(live_events).collect();
@@ -555,7 +558,7 @@ pub(crate) fn conversation(session_id: String, peer: Option<String>, since: Opti
     let changed = if stale {
         // 読み直しが0件で、前に中身があったときは置き換えない。ccn は jsonl を読めなかったときも空で返すので、保存分まで消さない。
         // 置き換えたら、増えたかに関係なく保存し直す（保存分は前の中身のままなので）
-        !(fresh.is_empty() && !c.items.is_empty()) && c.replace(from, &seen, next, fresh, evs, epoch)
+        (!fresh.is_empty() || c.items.is_empty()) && c.replace(from, &seen, next, fresh, evs, epoch)
     } else {
         c.absorb(from, next, fresh, evs, epoch)
     };
@@ -809,7 +812,7 @@ mod tests {
                         screen = d.items.clone();
                     } else {
                         let last = screen.last().and_then(|x| x["n"].as_u64());
-                        screen.extend(d.items.iter().filter(|x| last.map_or(true, |l| x["n"].as_u64().unwrap_or(u64::MAX) > l)).cloned());
+                        screen.extend(d.items.iter().filter(|x| last.is_none_or(|l| x["n"].as_u64().unwrap_or(u64::MAX) > l)).cloned());
                     }
                     let prev = since;
                     since = Some(if d.reset { d.total } else { since.unwrap_or(0).max(d.total) });

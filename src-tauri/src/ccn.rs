@@ -194,18 +194,18 @@ pub fn teleport(peer: &Option<String>, id: &str, body: Value) -> Result<Value, S
 }
 
 /// POST /sessions/<id>/terminal/<path>（path は input か resize）。5秒で切る
-pub fn post_terminal(peer: &Option<String>, id: &str, path: &str, body: Value) -> Result<(), ureq::Error> {
+pub fn post_terminal(peer: &Option<String>, id: &str, path: &str, body: Value) -> Result<(), Box<ureq::Error>> {
     post_terminal_at(&terminal_base(&api(peer), id), path, body)
 }
 
 /// 端末へ続けて書く側のために、URL を1回だけ組み立てて持つ書き手を返す
-pub fn terminal_writer(peer: &Option<String>, id: &str) -> impl Fn(&str, Value) -> Result<(), ureq::Error> {
+pub fn terminal_writer(peer: &Option<String>, id: &str) -> impl Fn(&str, Value) -> Result<(), Box<ureq::Error>> {
     let base = terminal_base(&api(peer), id);
     move |path, body| post_terminal_at(&base, path, body)
 }
 
-fn post_terminal_at(base: &str, path: &str, body: Value) -> Result<(), ureq::Error> {
-    agent().post(&format!("{base}/{path}")).timeout(Duration::from_secs(5)).send_json(body).map(|_| ())
+fn post_terminal_at(base: &str, path: &str, body: Value) -> Result<(), Box<ureq::Error>> {
+    agent().post(&format!("{base}/{path}")).timeout(Duration::from_secs(5)).send_json(body).map(|_| ()).map_err(Box::new)
 }
 
 /// POST /sessions/<id>/interrupt

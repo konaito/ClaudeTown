@@ -45,8 +45,10 @@ struct Tail {
     said: Option<String>,
     doing: Option<String>,
 }
-static TAILS: Mutex<Option<HashMap<PathBuf, ((u64, u64), Tail)>>> = Mutex::new(None);
-static METAS: Mutex<Option<HashMap<PathBuf, ((u64, u64), Value)>>> = Mutex::new(None);
+/// ファイルの (更新時刻, 大きさ)
+type Stamp = (u64, u64);
+static TAILS: Mutex<Option<HashMap<PathBuf, (Stamp, Tail)>>> = Mutex::new(None);
+static METAS: Mutex<Option<HashMap<PathBuf, (Stamp, Value)>>> = Mutex::new(None);
 
 fn stamp(m: &fs::Metadata) -> (u64, u64) {
     (m.len(), mtime_ms(m))

@@ -160,7 +160,7 @@ fn prune(dir: &Path, now: SystemTime) -> Vec<PathBuf> {
     for e in rd.flatten() {
         let name = e.file_name();
         let name = name.to_string_lossy();
-        if !(name.starts_with(PREFIX) && name.ends_with(".png")) && !name.starts_with(DROP_PREFIX) {
+        if !((name.starts_with(PREFIX) && name.ends_with(".png")) || name.starts_with(DROP_PREFIX)) {
             continue;
         }
         let old = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| now.duration_since(t).ok()).map(|age| age > keep).unwrap_or(false);
