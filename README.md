@@ -249,7 +249,7 @@ hook が書く状態ファイルとお手紙の形は、`python3 -m unittest dis
 
 - アプリが書くファイル（avatars.json、avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json）は、安定版は `~/.family-computing/` に、開発版は `~/.family-computing/dev/` に置く。開発版でキャラの割り当てを変えても、安定版のファイルは変わらない。
 - どちらに置くかは、ビルドに入った identifier で決める。安定版の identifier なら今までの場所、それ以外（開発版）なら dev/ にする。環境変数を付け忘れても、開発版が安定版のファイルに書かない。
-- 置き場所を決める関数は `src-tauri/src/lib.rs` の `fc_path` だけにしてある。`FC_APP_HOME` を付けると、アプリが書くファイルの置き場所だけを差し替えられる。`FC_AVATARS` と `FC_HOUSES` は今までどおり使える。
+- 置き場所を決める関数は `src-tauri/src/lib.rs` の `fc_path` だけにしてある。`FC_APP_HOME` を付けると、アプリが書くファイルの置き場所だけを差し替えられる。`FC_AVATARS` は今までどおり使える。`FC_HOUSES` は、`houses.json` を読まなくなったので効かない。
 - 置き場所は `src-tauri/target/debug/family-computing --paths` で確かめられる。identifier と、各ファイルの置き場所を出す。
 - 開発版の dev/ は、初めて起動したときは空なので、キャラは安定版と違う顔ぶれで振り直される。avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json の3つは、キャラの選び方の変更（feat/char-age）が入った版から使う。
 
