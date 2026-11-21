@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { call as invoke } from "../bridge";
 import type { Agent } from "../model";
-import { configureError, isHttp, lockReason, modelOptions, modeOptions, showReason, supportOf, type Support } from "./control";
+import { configureError, isHttp, lockReason, noRoute, modelOptions, modeOptions, showReason, supportOf, type Support } from "./control";
 
 // ノードごとに、口があるかを覚える。あれば以後は確かめない。無ければ1分たったら確かめ直す（ノードを新しくしたとき）
 const supportByNode = new Map<string, { v: Support; at: number }>();
@@ -62,7 +62,7 @@ export function SessionControls({ agent, peer, onSwitching, onDone, onError }: {
       if (!isHttp(r)) throw new Error("ccn の応答が読めなかった");
       const err = configureError(r);
       if (err) {
-        if (r.status === 404 || r.status === 405) { supportByNode.set(nodeKey, { v: "no", at: Date.now() }); if (alive.current) setSupport("no"); }
+        if (noRoute(r)) { supportByNode.set(nodeKey, { v: "no", at: Date.now() }); if (alive.current) setSupport("no"); }
         onError(`${agent.name}: ${err}`);
         return;
       }

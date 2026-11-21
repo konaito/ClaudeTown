@@ -11,6 +11,9 @@ describe("supportOf", () => {
   test("古いノードは口が無いので 404（2026-11-21 に本番の 4323 で実測した本文）", () => {
     expect(supportOf({ status: 404, body: { error: "not found" } })).toBe("no");
   });
+  test("新しいノードでセッションが無い 404 は、ノードの印にしない（ccn の must() の本文）", () => {
+    expect(supportOf({ status: 404, body: { error: "unknown session" } })).toBe("unknown");
+  });
   test("中継の失敗やブラウザ表示の仮の値は、分からないとする", () => {
     expect(supportOf({ status: 502, body: { error: "peer unreachable" } })).toBe("unknown");
     expect(supportOf("ブラウザ表示")).toBe("unknown");
@@ -53,6 +56,7 @@ describe("configureError", () => {
     expect(configureError({ status: 502, body: { error: "x", code: "restart_failed", rolledBack: false } })).toContain("ターミナル");
     expect(configureError({ status: 400, body: { error: "model must be a model name" } })).toContain("model must be");
     expect(configureError({ status: 404, body: { error: "not found" } })).toBe(NO_SUPPORT);
+    expect(configureError({ status: 404, body: { error: "unknown session" } })).toContain("見つからなかった");
   });
 });
 

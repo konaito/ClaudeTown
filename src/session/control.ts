@@ -31,15 +31,21 @@ export type Support = "unknown" | "yes" | "no";
 /**
  * session_controls（空の文で command の口を叩いた応答）から、ノードに口があるかを決める。
  * 新しいノードは 400（code: not_command）で断る。終わったセッションなら 409 になるが、409 を返すのは新しいコードだけ。
- * 古いノードは口が無いので 404（{"error":"not found"}）。セッションが無いときも 404 だが、本文で見分けない（どちらも使えない）。
+ * 古いノードは口が無いので 404 の {"error":"not found"}（2026-11-21、本番の 4323 で実測）。
+ * 新しいノードでもセッションが無ければ 404 になるが、本文は {"error":"unknown session"}（ccn の must()）なので、ノードの印にしない。
  * それ以外（中継の 502 など）は分からないので、あとで確かめ直す
  */
 export function supportOf(r: unknown): Support {
   if (!isHttp(r)) return "unknown";
   if (r.status === 400 && r.body?.code === "not_command") return "yes";
   if (r.status === 409) return "yes";
-  if (r.status === 404 || r.status === 405) return "no";
+  if (noRoute(r)) return "no";
   return "unknown";
+}
+
+/** 口そのものが無い（古いノード）。セッションが無い 404 とは本文で見分ける */
+export function noRoute(r: Http): boolean {
+  return r.status === 405 || (r.status === 404 && r.body?.error === "not found");
 }
 
 export function isHttp(r: unknown): r is Http {
@@ -74,7 +80,8 @@ export function configureError(r: Http): string | null {
   if (r.status >= 200 && r.status < 300) return null;
   const b = typeof r.body === "object" && r.body ? r.body : {};
   const msg = typeof b.error === "string" ? b.error : typeof r.body === "string" ? r.body : JSON.stringify(r.body);
-  if (r.status === 404 || r.status === 405) return NO_SUPPORT;
+  if (noRoute(r)) return NO_SUPPORT;
+  if (r.status === 404) return "セッションが見つからなかった（終わったか、別のノードに移った）";
   if (r.status === 400) return `ccn が値を受け付けなかった: ${msg}`;
   if (r.status === 409 && b.code === "busy") return "作業中か承認待ちなので替えられなかった。終わるのを待つか、止めてから替える";
   if (r.status === 409 && b.hint === "resume") return "セッションが終わっているので替えられなかった";
