@@ -544,6 +544,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .set-sec { display: flex; flex-direction: column; gap: 6px; }
 .set-sec .hint { margin: 0; }
 .set-label { font-size: 13px; font-weight: 600; }
+.set-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .set-input { font: inherit; font-size: 13px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 10px; background: #fff; user-select: text; }
 .set-input:focus { outline: none; border-color: #b9b3a8; }
 .set-input[aria-invalid="true"] { border-color: #c2410c; }

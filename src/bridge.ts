@@ -19,6 +19,8 @@ const MOCK = !inTauri && typeof location !== "undefined" && location.search.incl
   ? `http://127.0.0.1:${new URLSearchParams(location.search).get("mockport") ?? "4399"}/api` : WEB ? `${location.origin}/api` : null;
 
 export const IS_WEB = WEB;
+/** ccn を使うかの設定（#96）を出すか。アプリの中と、見た目の確認用の ?mock（保存はしない）で出す。ブラウザ版はいつも ccn を使う */
+export const HAS_CCN_SETTING = inTauri || (!!MOCK && !WEB);
 const LOADED_AT = Date.now();
 // 見た目の確認用: ?offline を付けると、ccn に届かない状態を真似る。一覧は保存した一覧として出し、会話は読めず、
 // 保存してあった会話（?longconv と同じ仮の会話）を出す。Rust の保存（src-tauri/src/offline.rs）は通らない
@@ -62,7 +64,8 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
         // 名前は Rust の snapshot と同じ決め方（src/model.ts の cardNames）。モックでは .git を読まないので、パスの形だけで決める
         agents: (() => {
           const names = cardNames(live.map((s) => ({ id: s.id, cwd: s.cwd, title: s.title })));
-          return live.map((s) => ({ id: s.id, name: names.get(s.id), project: s.cwd ? projectFromPath(s.cwd) : null, kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities, account: s.account ?? null, accountEmail: s.accountEmail ?? null }));
+          const rows = live.map((s) => ({ id: s.id, name: names.get(s.id), project: s.cwd ? projectFromPath(s.cwd) : null, kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities, account: s.account ?? null, accountEmail: s.accountEmail ?? null }));
+          return location.search.includes("native") ? [...rows, ...mockNative(rows)] : rows;
         })(),
       } as T;
     }
@@ -100,6 +103,14 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     case "stop_session": return j(`/sessions/${a.sessionId}`, { method: "DELETE" }) as T;
     // 会話の整形（Rust の simplify）と、承認の安全確認つきの返事（answer_permission）は、まだ TS に移していない。黙って成功させず、画面に理由を出す
     case "conversation": {
+      // ?mock&native の合成の行（mockNative）は ccn に無いので、合成の会話を返す
+      if (!WEB && (String(a.sessionId).startsWith("sub-") || String(a.sessionId).startsWith("9e9e9e9e"))) {
+        return deltaOf([
+          { role: "user", text: "（合成）ログの置き場所を探して", at: Date.now() - 50_000 },
+          { role: "tool", text: "探す: *.jsonl", at: Date.now() - 40_000, id: "t1", result: { text: "3件", error: false } },
+          { role: "assistant", text: "（合成）3件見つかった", at: Date.now() - 30_000 },
+        ], a.since as number | null) as T;
+      }
       // ブラウザ版は Rust の代わりに、ここで ccn の messages を読んで縮める（src/webConv.ts）。?mock のモックも同じ道を通る。同じ会話への取得は1本ずつ順に通す
       const key = `${a.peer ?? ""}|${a.sessionId}`;
       const st = WEB_CONVS.get(key) ?? newConvState();
@@ -110,6 +121,9 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
       return (await run) as T;
     }
     case "conversation_cache": return null as T;
+    // ccn を使うかの設定（#96）はアプリにだけある。ブラウザ版はいつも ccn を使う
+    case "town_settings": return { ccn: true } as T;
+    case "set_town_settings": console.info("[モックでは保存しない]", cmd, a); return { ccn: a.ccn } as T;
     // ブラウザ版は Rust の代わりに、同じ確認をここで行う（src/webPerm.ts）
     case "answer_permission": if (WEB) return answerPermission((path) => j(path), (path, body) => post(path, body), String(a.sessionId), String(a.choice), (a.expectId as string | null) ?? null, (a.answers as Record<string, string> | null) ?? null, (a.message as string | null) ?? null, (a.suggestion as number | null) ?? null) as T; return null as T;
     case "send_message": {
@@ -120,6 +134,30 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     }
     default: console.info("[モックでは実行しない]", cmd, a); return null as T;
   }
+}
+
+/**
+ * 見た目の確認用（?mock&native）: Claude Code の記録から読んだ形の合成の行（#96）。最初の世帯の親の下に sub-agent を2体、
+ * 子の下に teammate を1体、ccn に無い人のセッションを1つ足す。中身は合成で、本物の記録は読まない
+ */
+function mockNative(rows: { id: string; parent: string | null; cwd: string }[]) {
+  const root = rows.find((r) => !r.parent);
+  if (!root) return [];
+  const kid = rows.find((r) => r.parent === root.id) ?? root;
+  const ro = { send: false, permissions: false, interrupt: false, stop: false, terminal: false };
+  const now = Date.now();
+  const sub = (id: string, parent: string, name: string, state: string, asked: string, said: string | null, doing: string | null) => ({
+    id, name, project: projectFromPath(root.cwd), kind: "subagent", source: "native", state, cwd: root.cwd, startedAt: now - 60_000, lastActivityAt: now,
+    canSend: false, parent, capabilities: ro, account: null, accountEmail: null,
+    report: { phase: state === "running" ? "working" : "resting", asked, said, doing },
+  });
+  return [
+    sub(`sub-a1@${root.id.slice(0, 8)}`, root.id, "Explore", "running", "ログの置き場所を探す", null, "探す: *.jsonl"),
+    sub(`sub-a2@${root.id.slice(0, 8)}`, root.id, "general-purpose", "idle", "型を確かめる", "型は合っていた", null),
+    sub(`sub-tm@${kid.id.slice(0, 8)}`, kid.id, "reviewer", "running", "差分を読む", null, "読む: src/model.ts"),
+    { id: "9e9e9e9e-0000-4000-8000-000000000001", name: "notes", project: "notes", kind: "terminal", source: "native", state: "idle", cwd: "/tmp/notes",
+      startedAt: now - 3_600_000, canSend: false, parent: null, capabilities: ro, account: null, accountEmail: null },
+  ];
 }
 
 export async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {

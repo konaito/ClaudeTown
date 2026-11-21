@@ -19,8 +19,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+#[cfg(test)]
+thread_local! {
+    /// 試験のスレッドごとの置き場所（環境変数は試験の間で共有されるので使わない）
+    pub static TEST_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Claude Code の記録の置き場所。FC_CLAUDE_HOME があればそこ、無ければ ~/.claude
 pub fn claude_home() -> PathBuf {
+    #[cfg(test)]
+    if let Some(p) = TEST_HOME.with(|h| h.borrow().clone()) {
+        return p;
+    }
     match std::env::var("FC_CLAUDE_HOME") {
         Ok(p) if !p.is_empty() => PathBuf::from(p),
         _ => PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into())).join(".claude"),
