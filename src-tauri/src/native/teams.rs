@@ -76,8 +76,10 @@ pub fn members(root: &Path, live: &[Session], stats: &mut Stats) -> Vec<Member> 
             stats.odd("teams: leadSessionId が無い");
             continue;
         };
-        // 死んだチーム（リードがいない、pid が別のプロセスに使い回された）は見ない
-        if lead_pid.get(lead).copied() != v["leadProcess"]["pid"].as_u64().map(|p| p as u32) {
+        // 死んだチーム（リードがいない、pid が別のプロセスに使い回された）は見ない。
+        // leadProcess の無い古いチームもある（2026-11-21 に12件）。両方が無いのを「同じ」と見ないよう、両方あるときだけ比べる
+        let (Some(live_pid), Some(cfg_pid)) = (lead_pid.get(lead).copied(), v["leadProcess"]["pid"].as_u64()) else { continue };
+        if live_pid != cfg_pid as u32 {
             continue;
         }
         let team = v["name"].as_str().unwrap_or_default().to_string();
@@ -245,6 +247,8 @@ mod tests {
         write(&root.join("teams/dead/config.json"), &cfg("dead", "00000000-dead", 44, "tmux"));
         write(&root.join("teams/odd/config.json"), &cfg("odd", sid, 42, "iterm2"));
         write(&root.join("teams/broken/config.json"), "{");
+        // leadProcess の無い古いチーム（リードは生きていない）。members の backendType も無い
+        write(&root.join("teams/old/config.json"), &json!({ "name": "old", "leadSessionId": "11111111-gone", "members": [{ "agentId": "team-lead@old", "name": "team-lead" }] }).to_string());
         let live = vec![lead(&root, sid, 42)];
         let mut st = Stats::default();
         let ms = members(&root, &live, &mut st);
@@ -253,6 +257,7 @@ mod tests {
         assert_eq!(ms[0].lead, sid);
         assert_eq!(st.unexpected.get("teams: 知らない backendType Some(\"iterm2\")"), Some(&1));
         assert_eq!(st.unexpected.get("teams: 読めない config.json"), Some(&1));
+        assert_eq!(st.unexpected.len(), 2, "{:?}", st.unexpected);
     }
 
     #[test]
