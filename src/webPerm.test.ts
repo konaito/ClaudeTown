@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { answerPermission } from "./webPerm";
+import { answerPermission, PLAN_DENY_DEFAULT } from "./webPerm";
 
 const detail = (o: Record<string, unknown> = {}) => ({ state: "waiting_permission", capabilities: { permissions: true }, pending: [{ requestId: "r1", toolName: "Bash", input: {} }], ...o });
 const run = (d: unknown, choice: string, expect: string | null) => {
@@ -24,10 +24,32 @@ describe("answerPermission", () => {
     expect(await p).toBe("拒否した（Bash）");
     expect(sent[0][1]).toMatchObject({ behavior: "deny" });
   });
-  test("質問と計画の確認の待ちには、許可を送らない", async () => {
-    const { p, sent } = run(detail({ pending: [{ requestId: "r1", toolName: "AskUserQuestion" }] }), "allow", "r1");
-    await expect(p).rejects.toThrow("道具の承認ではない");
-    expect(sent).toEqual([]);
+  test("質問は、全部に答えがあるときだけ updatedInput の answers で送る", async () => {
+    const input = { questions: [{ question: "色は？", options: [{ label: "赤" }] }, { question: "数は？", multiSelect: true, options: [] }] };
+    const d = detail({ pending: [{ requestId: "r1", toolName: "AskUserQuestion", input }] });
+    const none = run(d, "allow", "r1");
+    await expect(none.p).rejects.toThrow("答えが無い");
+    const part = answerPermission(async () => d, async () => null, "s1", "allow", "r1", { "色は？": "赤" });
+    await expect(part).rejects.toThrow("数は？");
+    const sent: unknown[] = [];
+    const ok = await answerPermission(async () => d, async (_p, b) => { sent.push(b); return null; }, "s1", "allow", "r1", { "色は？": " 赤 ", "数は？": "1, 2" });
+    expect(ok).toBe("質問に答えた");
+    expect(sent).toEqual([{ behavior: "allow", updatedInput: { ...input, answers: { "色は？": "赤", "数は？": "1, 2" } } }]);
+  });
+  test("計画は許可で承認し、拒否で理由を付けて見直しを頼む", async () => {
+    const d = detail({ pending: [{ requestId: "r1", toolName: "ExitPlanMode", input: { plan: "p" } }] });
+    const a = run(d, "allow", "r1");
+    expect(await a.p).toBe("計画を承認した");
+    expect(a.sent[0][1]).toEqual({ behavior: "allow" });
+    const sent: unknown[] = [];
+    await answerPermission(async () => d, async (_p, b) => { sent.push(b); return null; }, "s1", "deny", null, null, "テストも");
+    expect(sent).toEqual([{ behavior: "deny", message: "テストも" }]);
+    const dflt = run(d, "deny", null);
+    await dflt.p;
+    expect(dflt.sent[0][1]).toEqual({ behavior: "deny", message: PLAN_DENY_DEFAULT });
+  });
+  test("質問でない待ちに答えを付けたら送らない", async () => {
+    await expect(answerPermission(async () => detail(), async () => null, "s1", "allow", "r1", { x: "y" })).rejects.toThrow("質問ではない");
   });
   test("もう承認待ちでない、答えられないセッション、要求なしは送らない", async () => {
     await expect(run(detail({ state: "idle" }), "deny", null).p).rejects.toThrow("もう承認待ちではない");

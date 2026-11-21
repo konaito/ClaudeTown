@@ -9,6 +9,7 @@ import { flightsOf, resolve, type Flight } from "./letters";
 import { withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Composer } from "./composer/Composer";
+import { Approval } from "./approval/Approval";
 import { BUILTINS, opensDialog } from "./composer/commands";
 import { isSlashCommand } from "./composer/edit";
 import { isVisible, onVisibleChange, pollBackoff, pollWhileVisible, shownAt } from "./visible";
@@ -1269,6 +1270,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   const shown = useMemo(() => collapseTools([...items, ...pending]), [items, pending]);
   // 保存した履歴の印が出ているか。出ている間は中身の上に余白を足す（下の has-note）
   const hasNote = shown.length > 0 && !!(convErr || cachedAt);
+  // 会話の最後の計画（ExitPlanMode の本文）。承認の hook の入力が空のとき、承認の欄に出す（#83）
+  const lastPlan = useMemo(() => [...items].reverse().find((x) => x.role === "tool" && x.plan)?.plan ?? null, [items]);
   const lastChoices = useMemo(() => {
     const lastAssistant = [...items].reverse().find((x) => x.role === "assistant");
     const lastIsAssistant = items.filter((x) => x.role !== "tool").slice(-1)[0]?.role === "assistant";
@@ -1385,7 +1388,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
         {hasTerm && <button className={tab === "term" ? "on" : ""} onClick={() => setTab("term")}>ターミナル</button>}
       </div>
       {mood === "approval" && (tab === "term" || tab === "state") && (
-        <div className="ap-float"><Approval agent={agent} peer={peer} onDone={(m) => onSent2(m)} onError={onError} /></div>
+        <div className="ap-float"><Approval agent={agent} peer={peer} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} /></div>
       )}
 
       {tab === "term" ? (
@@ -1406,7 +1409,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
           {shown.map((x, i) => <Bubble key={x.n ?? `p${x.at ?? i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "working" && live && <LiveLine live={live} turnAt={agent.report?.turn_started_at ?? null} />}
           {mood === "approval" && (
-            <Approval agent={agent} peer={peer} onDone={(m) => onSent2(m)} onError={onError} />
+            <Approval agent={agent} peer={peer} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} />
           )}
           {choices.length > 0 && (
             <div className="choices">
@@ -1423,66 +1426,6 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
         <Composer key={agent.id} touch={mobile} agent={agent} peer={peer} text={text} setText={setText} busy={busy} running={mood === "working"} onSubmit={send} onError={onError} />
       </div>}
     </aside>
-  );
-}
-
-/**
- * 承認待ちに画面から答える。中身は ccn の pending（toolName、input、requestId）。
- * 押すと Rust が、今も承認待ちで requestId が同じかを確かめてから、ccn の permissions の口で答える。
- * 人が端末で開いたセッション（ccn から答えられない）は、その端末で答える。
- */
-function Approval({ agent, peer, onDone, onError }: {
-  agent: Agent; peer: string; onDone: (m: string) => void; onError: (m: string) => void;
-}) {
-  const [busy, setBusy] = useState<"allow" | "deny" | null>(null);
-  const [pending, setPending] = useState<{ requestId: string; toolName: string; input: Record<string, unknown> }[] | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const canAnswer = !!agent.capabilities?.permissions;
-  useEffect(() => {
-    let alive = true;
-    const load = () => invoke<any>("session_detail", { sessionId: agent.id, peer: peer || null })
-      .then((d) => { if (alive) { setPending(Array.isArray(d?.pending) ? d.pending : []); setErr(null); } })
-      .catch((e) => { if (alive) setErr(String(e)); });
-    const stop = pollWhileVisible(load, 2000);
-    return () => { alive = false; stop(); };
-  }, [agent.id, peer]);
-  const p = pending?.[0];
-  // 質問や計画の確認の待ちは道具の承認ではないので、許可のボタンを出さない（Rust 側でも断る）
-  const notTool = !!p && ["AskUserQuestion", "ExitPlanMode"].includes(p.toolName);
-  const detail = p ? String((p.input as any)?.command ?? (p.input as any)?.file_path ?? (p.input as any)?.url ?? JSON.stringify(p.input)) : "";
-  const answer = async (choice: "allow" | "deny") => {
-    setBusy(choice);
-    try {
-      const r = await invoke<string>("answer_permission", { sessionId: agent.id, choice, expectId: p?.requestId ?? null, peer: peer || null });
-      onDone(`${agent.name}: ${r}`);
-    } catch (e) {
-      onError(`${agent.name} に答えられなかった: ${e}`);
-    } finally {
-      setBusy(null);
-    }
-  };
-  return (
-    <div className="approval">
-      <div className="ap-title">✋ {agent.name} が承認を待っている</div>
-      {!canAnswer ? (
-        <div className="hint">このセッションは人がターミナルで開いたもので、ここからは答えられない。そのターミナルで答える。</div>
-      ) : p ? (
-        <div>
-          <div className="ap-tool">{p.toolName}</div>
-          {detail && <ScrollEdgeGradient className="ap-detail"><span>{linkify(detail)}</span></ScrollEdgeGradient>}
-          {(pending?.length ?? 0) > 1 && <div className="hint">ほかに{pending!.length - 1}件の承認が待っている。1件ずつ答える。</div>}
-        </div>
-      ) : (
-        <div className="hint">{err ?? "承認の中身を読んでいる…"}</div>
-      )}
-      {canAnswer && (
-        <div className="ap-btns">
-          {notTool && <div className="hint">これは質問か計画の確認の待ち。選択肢はターミナルで選ぶ。</div>}
-          <button className="ap-allow" disabled={!p || notTool || !!busy} onClick={() => answer("allow")}>{busy === "allow" ? "送っている…" : "許可する"}</button>
-          <button className="ap-deny" disabled={!p || !!busy} onClick={() => answer("deny")}>{busy === "deny" ? "送っている…" : "拒否する"}</button>
-        </div>
-      )}
-    </div>
   );
 }
 
