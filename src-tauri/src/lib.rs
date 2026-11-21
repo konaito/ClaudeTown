@@ -581,16 +581,6 @@ mod cmd {
     /// 新しい世帯の一覧の各場所に連携しているリポジトリ名（owner/repo）。.git/config を読むだけ（#99）
     #[tauri::command]
     pub async fn place_repos(paths: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> { blocking(move || Ok(super::repo::repos_of(&paths))).await }
-    /// 入力欄への貼り付け（#64）。クリップボードのファイルのパスか、保存した画像のパスを返す
-    #[tauri::command]
-    pub async fn paste_clipboard(save_image: bool) -> Result<super::attach::Pasted, String> {
-        blocking(move || super::attach::clipboard(&super::fc_path(Scope::App, "attachments"), save_image)).await
-    }
-    /// ドロップと貼り付けで受けたファイルのうち、一時の場所のものを attachments に写し、入力欄に入れるパスを返す（#69）
-    #[tauri::command]
-    pub async fn stage_files(paths: Vec<String>) -> Result<Vec<String>, String> {
-        blocking(move || super::attach::stage(&super::fc_path(Scope::App, "attachments"), paths)).await
-    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -713,7 +703,7 @@ pub fn run() {
             cmd::snapshot, cmd::town_agents, cmd::peers, conversation::cmd::conversation, conversation::cmd::conversation_cache, conversation::cmd::send_message, permission::cmd::answer_permission,
             session_ops::cmd::create_session, session_ops::cmd::stop_session, teleport, session_ops::cmd::teleport_info, session_ops::cmd::session_detail, session_ops::cmd::house_places, cmd::place_repos, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick, town_settings, set_town_settings,
-            composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::interrupt_session, composer::cmd::session_controls, composer::cmd::configure_session, composer::cmd::run_command, cmd::paste_clipboard, cmd::stage_files
+            composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::interrupt_session, composer::cmd::session_controls, composer::cmd::configure_session, composer::cmd::run_command, attach::cmd::paste_clipboard, attach::cmd::stage_files
         ])
         .run(context)
         .expect("error while running tauri application");
