@@ -117,6 +117,7 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
       if (!Object.keys(body).length) throw new Error("替えるものが無い");
       return raw(`/sessions/${a.sessionId}`, "PATCH", body) as T;
     }
+    case "run_command": return raw(`/sessions/${a.sessionId}/command`, "POST", { text: a.text }) as T;
     case "teleport_info": return j(`/sessions/${a.sessionId}/teleport`) as T;
     case "teleport": return post(`/sessions/${a.sessionId}/teleport`, { to: a.to, fork: a.fork, subtree: a.subtree, dryRun: a.dryRun }) as T;
     case "stop_session": return j(`/sessions/${a.sessionId}`, { method: "DELETE" }) as T;

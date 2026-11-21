@@ -6,7 +6,7 @@
 // - create_session / stop_session / teleport / teleport_info / session_detail: ccn の口をそのまま呼ぶ
 // - term_open / term_close / term_input / term_resize: ccn の端末（PTY）の口を読み書きし、開いた画面の Channel へ流す
 // - prompt_history / slash_commands / file_suggestions / send_direct / interrupt_session: チャットの入力欄を CLI と同じ動きにする（composer.rs）
-// - session_controls / configure_session: チャット欄からモデルと権限モードを替える（composer.rs、#97）
+// - session_controls / configure_session / run_command: チャット欄からモデルと権限モードを替え、組み込みコマンドを送る（composer.rs、#97）
 // HTTP を待つ命令は spawn_blocking で動かし、メインスレッドを止めない（下の「画面から呼ぶ命令」）
 //
 // ccn は Origin 付きの要求を CSRF として断るので、HTTP は必ずこちら（webview ではなく Rust）から出す。
@@ -1820,6 +1820,11 @@ mod cmd {
     pub async fn configure_session(session_id: String, model: Option<String>, permission_mode: Option<String>, peer: Option<String>) -> Result<Value, String> {
         blocking(move || super::composer::configure_session(session_id, model, permission_mode, peer)).await
     }
+    /// 組み込みコマンドを command の口へ送る（#97）。{ status, body } を返す
+    #[tauri::command]
+    pub async fn run_command(session_id: String, text: String, peer: Option<String>) -> Result<Value, String> {
+        blocking(move || super::composer::run_command(session_id, text, peer)).await
+    }
     /// 入力欄への貼り付け（#64）。クリップボードのファイルのパスか、保存した画像のパスを返す
     #[tauri::command]
     pub async fn paste_clipboard(save_image: bool) -> Result<super::attach::Pasted, String> {
@@ -2188,7 +2193,7 @@ pub fn run() {
             cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::conversation_cache, cmd::send_message, cmd::answer_permission,
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, cmd::house_places, cmd::place_repos, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick, town_settings, set_town_settings,
-            cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::session_controls, cmd::configure_session, cmd::paste_clipboard, cmd::stage_files
+            cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::session_controls, cmd::configure_session, cmd::run_command, cmd::paste_clipboard, cmd::stage_files
         ])
         .run(context)
         .expect("error while running tauri application");

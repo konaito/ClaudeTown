@@ -281,7 +281,14 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .cmp-menu, .cmp-help { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); background: #fff; border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1); z-index: 20; max-height: 260px; overflow: auto; padding: 4px; }
 .cmp-menu button { display: flex; gap: 12px; width: 100%; text-align: left; padding: 5px 8px; border-radius: 8px; font-size: 13px; align-items: baseline; }
 .cmp-menu button.on { background: #eef3fb; }
-.cmp-menu .cm-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; color: var(--ink); }
+/* 補完の候補の印（#97）。使えないものは名前を薄くし、右に「ここでは使えません」と出す */
+.cmp-menu .cm-name.off { color: var(--sub); }
+/* 説明を先に縮め、名前は入らないときだけ縮める */
+.cmp-menu .cm-desc { flex: 1 1 0; }
+.cmp-menu .cm-tag { margin-left: auto; flex: none; font-size: 11px; color: var(--sub); border: 1px solid var(--line); border-radius: 6px; padding: 0 6px; white-space: nowrap; }
+.cmp-menu .cm-tag.off { color: #b4473a; border-color: #f1d4cf; background: #fdf6f4; }
+.composer .hint.bad { color: #b4473a; }
+.cmp-menu .cm-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
 .cmp-menu .cm-name em { font-style: normal; color: var(--sub); }
 .cmp-menu .cm-desc { color: var(--sub); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .cmp-help { padding: 8px 10px; display: grid; gap: 3px; font-size: 12px; }

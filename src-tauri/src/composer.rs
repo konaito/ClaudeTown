@@ -467,6 +467,18 @@ pub fn configure_session(session_id: String, model: Option<String>, permission_m
     ccn_request("PATCH", &format!("{}/sessions/{session_id}", super::api(&peer)), Value::Object(body), Duration::from_secs(30))
 }
 
+/// 組み込みコマンドを from 行なしで送る（POST /api/sessions/<id>/command）。応答は { delivered }。出力は会話の合成の行で届く
+pub fn run_command(session_id: String, text: String, peer: Option<String>) -> Result<Value, String> {
+    if super::send_disabled() {
+        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
+    }
+    if !text.trim_start().starts_with('/') {
+        return Err("/ で始まる文だけを送る".into());
+    }
+    let peer = peer.filter(|p| !p.is_empty());
+    ccn_request("POST", &format!("{}/sessions/{session_id}/command", super::api(&peer)), json!({ "text": text }), Duration::from_secs(15))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
