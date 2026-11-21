@@ -1204,6 +1204,8 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
 
 // ---------- 右のパネル ----------
 
+const NO_NOTES: PendingItem[] = [];
+
 function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq, peers, sendHook, onSent, onSent2, onError, needs, onSelect, mobile, onBack, onClose }: {
   /** スマホ専用の画面（src/mobile）。見出しを戻るつきの1行にし、転出と細かいボタンは出さない */
   mobile?: boolean; onBack?: () => void;
@@ -1253,8 +1255,11 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   useEffect(() => { setSwitching(false); }, [agent?.id]);
   // ノードにモデルの切り替えとコマンドの口があるか（#97）
   const [support, markNoSupport] = useNodeSupport(agent, peer);
-  // チャットからコマンドを実行した印（#97）。画面だけで出し、セッションを替えたら消す
-  const [notes, setNotes] = useState<PendingItem[]>([]);
+  // チャットからコマンドを実行した印（#97）。画面だけで出す。セッションごとに持ち、ほかのセッションを見て戻っても残す（アプリを閉じたら消える）
+  const notesBy = useRef(new Map<string, PendingItem[]>());
+  const [, bumpNotes] = useState(0);
+  const notes = (agent && notesBy.current.get(agent.id)) || NO_NOTES;
+  const addNote = (sid: string, n: PendingItem) => { notesBy.current.set(sid, [...(notesBy.current.get(sid) ?? []), n].slice(-20)); bumpNotes((x) => x + 1); };
   // カードのボタンからの送信（#63）。描くたびに今の send に差し替える。パネルが消えたら口を外す
   const quickSend = useRef<((id: string, text: string) => Promise<boolean> | null) | null>(null);
   useEffect(() => {
@@ -1278,7 +1283,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   // 以前は stick を読み込みの effect でしか戻さず、タブの切り替えでは前の値が残り、容れ物も作り直されるのに items が変わらないので下へ送られなかった
   useLayoutEffect(() => { stick.current = true; }, [id, tab, chatReq]);
   useEffect(() => {
-    setItems([]); setPending([]); setNotes([]); setLive(null); setConvErr(null); setCachedAt(null); stick.current = true;
+    setItems([]); setPending([]); setLive(null); setConvErr(null); setCachedAt(null); stick.current = true;
     if (!id) return;
     let alive = true;
     // ccn から一度でも読めたか。読めたあとに保存分が届いても出さない
@@ -1388,7 +1393,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
           if (r.status === 404 || r.status === 405) markNoSupport();
           throw new Error(err);
         }
-        setNotes((xs) => [...xs, { role: "event", kind: "command", text: `/${route.name} を実行した${route.note ? `。${route.note}` : ""}`, at: new Date().toISOString(), after }]);
+        addNote(agent.id, { role: "event", kind: "command", text: `/${route.name} を実行した${route.note ? `。${route.note}` : ""}`, at: new Date().toISOString(), after });
       } else if (direct) {
         await invoke("send_direct", { sessionId: agent.id, text: body, peer: peer || null });
         // 画面を開くコマンド（/model など）は、ターミナルで操作してもらう
