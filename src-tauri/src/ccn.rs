@@ -182,11 +182,10 @@ pub fn teleport_info(peer: &Option<String>, id: &str) -> Result<Value, String> {
 pub fn teleport(peer: &Option<String>, id: &str, body: Value) -> Result<Value, String> {
     let a = ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).build();
     let mut req = a.post(&teleport_url(&api(peer), id));
-    if let Ok(d) = session(peer, id) {
-        if let Some(p) = d["parent"].as_str().filter(|p| p.starts_with("agent:")) {
+    if let Ok(d) = session(peer, id)
+        && let Some(p) = d["parent"].as_str().filter(|p| p.starts_with("agent:")) {
             req = req.set("x-ccn-from", p);
         }
-    }
     match req.send_json(body) {
         Ok(r) => r.into_json::<Value>().map_err(|e| e.to_string()),
         Err(ureq::Error::Status(code, r)) => Err(format!("転出できなかった（{code}）: {}", r.into_string().unwrap_or_default())),
@@ -195,18 +194,18 @@ pub fn teleport(peer: &Option<String>, id: &str, body: Value) -> Result<Value, S
 }
 
 /// POST /sessions/<id>/terminal/<path>（path は input か resize）。5秒で切る
-pub fn post_terminal(peer: &Option<String>, id: &str, path: &str, body: Value) -> Result<(), ureq::Error> {
+pub fn post_terminal(peer: &Option<String>, id: &str, path: &str, body: Value) -> Result<(), Box<ureq::Error>> {
     post_terminal_at(&terminal_base(&api(peer), id), path, body)
 }
 
 /// 端末へ続けて書く側のために、URL を1回だけ組み立てて持つ書き手を返す
-pub fn terminal_writer(peer: &Option<String>, id: &str) -> impl Fn(&str, Value) -> Result<(), ureq::Error> {
+pub fn terminal_writer(peer: &Option<String>, id: &str) -> impl Fn(&str, Value) -> Result<(), Box<ureq::Error>> {
     let base = terminal_base(&api(peer), id);
     move |path, body| post_terminal_at(&base, path, body)
 }
 
-fn post_terminal_at(base: &str, path: &str, body: Value) -> Result<(), ureq::Error> {
-    agent().post(&format!("{base}/{path}")).timeout(Duration::from_secs(5)).send_json(body).map(|_| ())
+fn post_terminal_at(base: &str, path: &str, body: Value) -> Result<(), Box<ureq::Error>> {
+    agent().post(&format!("{base}/{path}")).timeout(Duration::from_secs(5)).send_json(body).map(|_| ()).map_err(Box::new)
 }
 
 /// POST /sessions/<id>/interrupt

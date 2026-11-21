@@ -122,18 +122,18 @@ fn stamp_of(meta: &fs::Metadata) -> FileStamp {
 /// snapshot は一覧を取るたびに、セッションごとの state/{id}.json と close-check/{id}.json、houses.json、ccn.json を読んでいた。
 /// 無いファイルは覚えない（できたら次の回に読む）
 fn read_json_cached(p: &std::path::Path) -> Option<Value> {
-    static CACHE: std::sync::OnceLock<Mutex<HashMap<PathBuf, (FileStamp, Option<Value>)>>> = std::sync::OnceLock::new();
+    type Entry = (FileStamp, Option<Value>);
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<PathBuf, Entry>>> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let Ok(meta) = fs::metadata(p) else {
         cache.lock().unwrap_or_else(|e| e.into_inner()).remove(p);
         return None;
     };
     let st = stamp_of(&meta);
-    if let Some((s, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(p) {
-        if *s == st && st.modified.is_some() {
+    if let Some((s, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(p)
+        && *s == st && st.modified.is_some() {
             return v.clone();
         }
-    }
     let v = read_json(&p.to_path_buf());
     cache.lock().unwrap_or_else(|e| e.into_inner()).insert(p.to_path_buf(), (st, v.clone()));
     v
@@ -320,11 +320,10 @@ fn save_town_to(file: &std::path::Path, agents: &[Value], now: u128, prev: &mut 
     }
     let key = town_key(agents);
     let ids = town_ids(agents);
-    if let Some(p) = prev.as_ref() {
-        if p.key == key || (p.ids == ids && now.saturating_sub(p.at) < TOWN_SAVE_GAP_MS) {
+    if let Some(p) = prev.as_ref()
+        && (p.key == key || (p.ids == ids && now.saturating_sub(p.at) < TOWN_SAVE_GAP_MS)) {
             return false;
         }
-    }
     // 書けたときだけ覚える（書けなかったら、次の回にまた書く）
     if offline::write(file, json!({ "agents": agents })).is_err() {
         return false;
@@ -677,7 +676,7 @@ pub fn run() {
     }
     // family-computing --create [cwd] [prompt] [parentId]   端末のセッションを立てる（画面の「子を足す」「新しい世帯」と同じ処理）
     if let Some(i) = args.iter().position(|a| a == "--create") {
-        println!("{:?}", create_session(args.get(i + 1).cloned(), args.get(i + 2).cloned(), args.get(i + 3).cloned(), None, None, None, None, None, None, None));
+        println!("{:?}", create_session(session_ops::CreateReq { cwd: args.get(i + 1).cloned(), prompt: args.get(i + 2).cloned(), parent: args.get(i + 3).cloned(), ..Default::default() }));
         return;
     }
     // family-computing --send <sessionId> <文>   注文を送る（画面の送信と同じ処理）

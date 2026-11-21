@@ -29,11 +29,10 @@ pub(crate) static TERM_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 
 /// 開いたターミナルの画面に知らせる（書き手の送りそびれなど）。開いていなければ捨てる
 pub(crate) fn term_notice(session_id: &str, ev: &str, data: Value) {
-    if let Ok(g) = TERMS.lock() {
-        if let Some(c) = g.as_ref().and_then(|m| m.get(session_id)) {
+    if let Ok(g) = TERMS.lock()
+        && let Some(c) = g.as_ref().and_then(|m| m.get(session_id)) {
             let _ = c.out.send(TermOut::Event(ev.into(), data));
         }
-    }
 }
 
 /// 続きのあるバイト列を UTF-8 の文字列に直す。末尾で途中まで来た文字は carry に残し、次の分の頭に付ける。壊れたバイトは U+FFFD にする
@@ -163,11 +162,10 @@ pub(crate) fn read_terminal(url: &str, stop: &AtomicBool, mut emit: impl FnMut(&
                 if !ev.is_empty() || !data.is_empty() {
                     let v: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
                     if let Some(p) = id { after = Some(p); }
-                    if ev == "size" {
-                        if let Some(e) = v.get("epoch").filter(|e| !e.is_null()) {
+                    if ev == "size"
+                        && let Some(e) = v.get("epoch").filter(|e| !e.is_null()) {
                             epoch = Some(e.as_str().map(String::from).unwrap_or_else(|| e.to_string()));
                         }
-                    }
                     if ev != "ping" { emit(&ev, v); }
                     if ev == "exit" { return; }
                 }
@@ -198,9 +196,8 @@ pub(crate) fn term_close(session_id: String, generation: Option<u64>) -> Result<
     }
     drop(g);
     // 書き手の送り口を落とす。たまっている分を送り切ってからスレッドが終わる
-    if let Ok(mut w) = WRITERS.lock() {
-        if let Some(m) = w.as_mut() { m.retain(|k, _| !k.ends_with(&format!("|{session_id}"))); }
-    }
+    if let Ok(mut w) = WRITERS.lock()
+        && let Some(m) = w.as_mut() { m.retain(|k, _| !k.ends_with(&format!("|{session_id}"))); }
     Ok(())
 }
 
@@ -249,9 +246,8 @@ pub(crate) fn term_send(session_id: &str, peer: Option<String>, cmd: TermCmd) ->
             Err(std::sync::mpsc::SendError(c)) => {
                 // 書き手が終わっていた。作り直してもう1回
                 cmd = c;
-                if let Ok(mut g) = WRITERS.lock() {
-                    if let Some(m) = g.as_mut() { m.remove(&key); }
-                }
+                if let Ok(mut g) = WRITERS.lock()
+                    && let Some(m) = g.as_mut() { m.remove(&key); }
             }
         }
     }

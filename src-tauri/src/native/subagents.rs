@@ -45,8 +45,10 @@ struct Tail {
     said: Option<String>,
     doing: Option<String>,
 }
-static TAILS: Mutex<Option<HashMap<PathBuf, ((u64, u64), Tail)>>> = Mutex::new(None);
-static METAS: Mutex<Option<HashMap<PathBuf, ((u64, u64), Value)>>> = Mutex::new(None);
+/// ファイルの (更新時刻, 大きさ)
+type Stamp = (u64, u64);
+static TAILS: Mutex<Option<HashMap<PathBuf, (Stamp, Tail)>>> = Mutex::new(None);
+static METAS: Mutex<Option<HashMap<PathBuf, (Stamp, Value)>>> = Mutex::new(None);
 
 fn stamp(m: &fs::Metadata) -> (u64, u64) {
     (m.len(), mtime_ms(m))
@@ -57,11 +59,10 @@ fn read_meta(p: &Path) -> Option<Value> {
     let st = stamp(&m);
     let mut g = METAS.lock().unwrap_or_else(|e| e.into_inner());
     let map = g.get_or_insert_with(HashMap::new);
-    if let Some((s, v)) = map.get(p) {
-        if *s == st {
+    if let Some((s, v)) = map.get(p)
+        && *s == st {
             return Some(v.clone());
         }
-    }
     let v: Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
     map.insert(p.to_path_buf(), (st, v.clone()));
     Some(v)
@@ -70,11 +71,10 @@ fn read_meta(p: &Path) -> Option<Value> {
 fn tail_of(p: &Path, st: (u64, u64)) -> Tail {
     let mut g = TAILS.lock().unwrap_or_else(|e| e.into_inner());
     let map = g.get_or_insert_with(HashMap::new);
-    if let Some((s, t)) = map.get(p) {
-        if *s == st {
+    if let Some((s, t)) = map.get(p)
+        && *s == st {
             return t.clone();
         }
-    }
     let t = read_tail(p, st.0);
     map.insert(p.to_path_buf(), (st, t.clone()));
     t
