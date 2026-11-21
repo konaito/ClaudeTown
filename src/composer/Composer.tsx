@@ -6,11 +6,12 @@ import getCaretCoordinates from "textarea-caret";
 import type { Agent } from "../model";
 import { BUILTINS, type Command } from "./commands";
 import { useHistory } from "./useHistory";
+import { useHistorySearch } from "./useHistorySearch";
 import { routeOf, tagOf } from "./route";
 import { viaCcn, type Support } from "../session/control";
 import {
   backslashNewline, histDown, insertPaths, isSlashCommand, histUp, killToEnd, killToStart, killWordBack, killWordForward,
-  rankCommands, searchHistory, tokenAt, toLineEnd, toLineStart, wordBack, wordForward, type Edit, type Sel,
+  rankCommands, tokenAt, toLineEnd, toLineStart, wordBack, wordForward, type Edit, type Sel,
 } from "./edit";
 
 // セッションごとに持つもの。セッションを切り替えて戻っても残す（CLI の stash と、送った文の履歴）
@@ -64,9 +65,6 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
   const [pick, setPick] = useState(0);
   const [dismissed, setDismissed] = useState<string | null>(null);
   const [help, setHelp] = useState(false);
-  const [search, setSearch] = useState<{ query: string; idx: number; original: string } | null>(null);
-  // 検索を閉じたあと、検索欄の blur でもう一度閉じない（Ctrl+C でやめたのに、一致した文で上書きしないように）
-  const searchEnding = useRef(false);
   const kills = useRef<string[]>([]);
   const yank = useRef<{ from: number; to: number; i: number } | null>(null);
   const lastEsc = useRef(0);
@@ -76,6 +74,21 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const { loadHistory, loadAll, remember, histSt, upList, searchList } = useHistory(agent, local);
+
+  // 文をまるごと替えたあと、カーソルを置く
+  useLayoutEffect(() => {
+    const el = ta.current;
+    if (el && caretAfter.current != null) { const p = Math.min(caretAfter.current, el.value.length); el.setSelectionRange(p, p); setCaret(p); caretAfter.current = null; }
+  });
+  const replaceAll = (t: string, at = t.length) => { caretAfter.current = at; setText(t); };
+
+  const submit = async (body: string) => {
+    if (!body.trim() || busy || !agent.canSend) return;
+    const ok = await onSubmit(body);
+    if (ok) { remember(body); histSt.current = { index: -1, draft: "" }; setHelp(false); setTimeout(loadHistory, 1500); }
+  };
+
+  const { search, startSearch, searchMatch, runSearch, endSearch, onSearchKey } = useHistorySearch({ searchList, text, ta, replaceAll, submit, loadAll });
 
   useEffect(() => {
     if (!local || !agent.cwd || skillsByCwd.has(agent.cwd)) return;
@@ -103,13 +116,6 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
   useEffect(() => { setPick(0); }, [token?.kind, token?.query]);
   const menuRef = useRef<HTMLDivElement>(null);
   useEffect(() => { menuRef.current?.querySelector(".on")?.scrollIntoView({ block: "nearest" }); }, [pick]);
-
-  // 文をまるごと替えたあと、カーソルを置く
-  useLayoutEffect(() => {
-    const el = ta.current;
-    if (el && caretAfter.current != null) { const p = Math.min(caretAfter.current, el.value.length); el.setSelectionRange(p, p); setCaret(p); caretAfter.current = null; }
-  });
-  const replaceAll = (t: string, at = t.length) => { caretAfter.current = at; setText(t); };
 
   const sel = (): Sel => { const el = ta.current!; return { text: el.value, start: el.selectionStart, end: el.selectionEnd }; };
   /** 範囲を置き換える。execCommand を使い、⌘Z で戻せるようにする */
@@ -141,12 +147,6 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
     const next = `${text.slice(0, token.from)}@${add}${text.slice(token.to).replace(/^[ \t]+/, "")}`;
     replaceAll(next, token.from + 1 + add.length);
     return next;
-  };
-
-  const submit = async (body: string) => {
-    if (!body.trim() || busy || !agent.canSend) return;
-    const ok = await onSubmit(body);
-    if (ok) { remember(body); histSt.current = { index: -1, draft: "" }; setHelp(false); setTimeout(loadHistory, 1500); }
   };
 
   const [stopping, setStopping] = useState(false);
@@ -200,7 +200,7 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
       if (!r) return true;
       stop(); histSt.current = r.st; setDismissed(r.text); replaceAll(r.text); return true;
     }
-    if (ctrl && k === "r") { stop(); loadAll(); searchEnding.current = false; setSearch({ query: "", idx: -1, original: text }); return true; }
+    if (ctrl && k === "r") { stop(); startSearch(); return true; }
     return false;
   };
 
@@ -296,31 +296,6 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
     const el = ta.current!;
     if (!el.value || el.selectionEnd === el.value.length) return true;
     return getCaretCoordinates(el, el.selectionEnd).top >= getCaretCoordinates(el, el.value.length).top - 1;
-  };
-
-  // Ctrl+R の検索
-  const searchMatch = search && search.idx >= 0 ? searchList[search.idx] : null;
-  const runSearch = (query: string, from: number) => {
-    const idx = searchHistory(searchList, query, from);
-    setSearch((s) => (s ? { ...s, query, idx: idx >= 0 ? idx : query === s.query ? s.idx : -1 } : s));
-  };
-  const endSearch = (keep: boolean) => {
-    if (!search || searchEnding.current) return;
-    searchEnding.current = true;
-    const t = keep && searchMatch != null ? searchMatch : search.original;
-    setSearch(null);
-    replaceAll(t);
-    requestAnimationFrame(() => ta.current?.focus());
-    return t;
-  };
-  const onSearchKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-    const ctrl = e.ctrlKey && !e.metaKey && !e.altKey;
-    if (ctrl && e.key === "r") { e.preventDefault(); if (search) runSearch(search.query, search.idx + 1); return; }
-    if (e.key === "Enter") { e.preventDefault(); const t = endSearch(true); if (t) submit(t); return; }
-    if (e.key === "Tab" || e.key === "Escape") { e.preventDefault(); endSearch(true); return; }
-    if (ctrl && e.key === "c") { e.preventDefault(); endSearch(false); return; }
-    if (e.key === "Backspace" && !search?.query) { e.preventDefault(); endSearch(false); }
   };
 
   // 画像とファイル（#64）。ccn の送信は文しか受けないので、手元のファイルのパスを文として入れる。受け手の Claude はパスを読む
