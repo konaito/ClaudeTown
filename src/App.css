@@ -271,6 +271,8 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .sc-sel:disabled { color: var(--sub); background: #f7f6f3; }
 /* 替えられない理由は select の下に全文で出す */
 .sc-why { order: 1; flex-basis: 100%; text-align: right; font-size: 11.5px; color: var(--sub); }
+/* 予約中の選択（always-switch）。今の値ではなく、予約した値を出している */
+.sc-sel.sc-pend { border-style: dashed; border-color: var(--reply); }
 .composer .box { position: relative; }
 .composer textarea { width: 100%; min-height: 78px; resize: none; border: 1px solid var(--line); border-radius: 12px; padding: 10px 52px 10px 12px; font: inherit; font-size: 14px; outline: none; }
 .composer textarea:focus { border-color: #b9c9e6; }

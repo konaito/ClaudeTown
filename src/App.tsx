@@ -6,7 +6,8 @@ import { collectMail, type Mail } from "./mail";
 import { flightsOf, resolve, type Flight } from "./letters";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Composer } from "./composer/Composer";
-import { SessionControls, useNodeSupport } from "./session/SessionControls";
+import { SessionControls, supportFor, useNodeSupport } from "./session/SessionControls";
+import { useCcnReservations } from "./session/reserve";
 import { commandError, routeOf } from "./composer/route";
 import { isHttp, noRoute, viaCcn } from "./session/control";
 import { Approval } from "./approval/Approval";
@@ -202,6 +203,8 @@ export default function App() {
   }, [tree, selected, toast]);
   // お手紙（記録はこの機械の hook が書く）
   const flights = useMemo(() => flightsOf(snap?.letters ?? [], agents), [snap, agents]);
+  // ブラウザ版の ccn の行で予約したモデルと権限モードを、替えられるようになったら替える（always-switch）。アプリの端末の予約は Rust が当てる
+  useCcnReservations(agents, supportFor, (m) => toast(m), (m) => toast(m, true));
   const letterMarks = useLetterMarks(flights);
   const askKill = useCallback((a: Agent, instant: boolean) => { if (instant) kill(a); else setKillAsk(a); }, [kill]);
   const killCtx = useMemo(() => ({ dying, ask: askKill }), [dying, askKill]);
@@ -1189,7 +1192,7 @@ function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, onSent,
 
       {tab !== "term" && <div className="composer" ref={composerBox}>
         <div className="to"><span className="to-name">送信先: {target}</span>
-          {viaCcn(agent) && <SessionControls key={agent.id} agent={agent} support={support} onNoSupport={markNoSupport} onSwitching={setSwitching} onDone={onSent2} onError={onError} />}
+          <SessionControls key={agent.id} agent={agent} support={support} onNoSupport={markNoSupport} onSwitching={setSwitching} onDone={onSent2} onError={onError} />
         </div>
         <Composer key={agent.id} touch={mobile} agent={agent} text={text} setText={setText} busy={busy || switching} running={mood === "working"} support={support} onSubmit={send} onError={onError} />
       </div>}

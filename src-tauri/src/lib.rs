@@ -15,6 +15,7 @@ mod naming;
 mod places;
 mod pty;
 mod repo;
+mod switch;
 mod native;
 
 use serde::Serialize;
@@ -1043,6 +1044,23 @@ mod cmd {
         super::app_guard(&session_id)?;
         blocking(move || super::composer::interrupt_session(session_id)).await
     }
+    /// モデルと権限モード（always-switch）。今の値、予約、最後の結果。アプリの外のセッションは transcript から読んだ今の値だけ
+    #[tauri::command]
+    pub async fn session_settings(session_id: String) -> Result<Value, String> {
+        blocking(move || Ok(super::switch::status(&session_id))).await
+    }
+    /// モデルか権限モードを替える。今は替えられなければ予約し、替えられるようになったら替える（switch.rs）
+    #[tauri::command]
+    pub async fn switch_session(session_id: String, model: Option<String>, permission_mode: Option<String>) -> Result<Value, String> {
+        super::app_guard(&session_id)?;
+        super::refuse_if_disabled()?;
+        blocking(move || super::switch::request(&session_id, model, permission_mode)).await
+    }
+    /// 予約を取り消す。what は model か mode
+    #[tauri::command]
+    pub async fn cancel_switch(session_id: String, what: String) -> Result<Value, String> {
+        blocking(move || Ok(super::switch::cancel(&session_id, &what))).await
+    }
     /// 入力欄への貼り付け（#64）。クリップボードのファイルのパスか、保存した画像のパスを返す
     #[tauri::command]
     pub async fn paste_clipboard(save_image: bool) -> Result<super::attach::Pasted, String> {
@@ -1263,7 +1281,8 @@ pub fn run() {
             cmd::snapshot, cmd::conversation, cmd::create_session, cmd::stop_session, cmd::house_places, cmd::place_repos,
             term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
-            cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::paste_clipboard, cmd::stage_files
+            cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::paste_clipboard, cmd::stage_files,
+            cmd::session_settings, cmd::switch_session, cmd::cancel_switch
         ])
         .build(context)
         .expect("error while building tauri application")
