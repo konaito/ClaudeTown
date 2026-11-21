@@ -11,7 +11,7 @@ import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Composer } from "./composer/Composer";
 import { SessionControls, useNodeSupport } from "./session/SessionControls";
 import { commandError, routeOf } from "./composer/route";
-import { isHttp, noRoute } from "./session/control";
+import { isHttp, noRoute, viaCcn } from "./session/control";
 import { Approval } from "./approval/Approval";
 import { openPlan } from "./approval/answers";
 import { BUILTINS, opensDialog } from "./composer/commands";
@@ -1377,7 +1377,8 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   const send = async (body: string, quick = false) => {
     if (!body.trim() || busy || switching) return false;
     // / で始まる組み込みのコマンドの振り分け（#97、src/composer/route.ts）。使えないものは送らずに理由を出す
-    const route = routeOf(body, agent.kind, support);
+    // ccn を通さないセッション（#96）は端末のセッションと同じく振り分けない（送る口のほうが断る）
+    const route = routeOf(body, viaCcn(agent) ? agent.kind : "terminal", support);
     if (route?.kind === "blocked") { onError(route.reason); return false; }
     setBusy(true);
     const after = items[items.length - 1]?.n ?? -1;

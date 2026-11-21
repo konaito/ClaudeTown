@@ -6,7 +6,7 @@ import getCaretCoordinates from "textarea-caret";
 import type { Agent } from "../model";
 import { BUILTINS, type Command } from "./commands";
 import { routeOf, tagOf } from "./route";
-import type { Support } from "../session/control";
+import { viaCcn, type Support } from "../session/control";
 import {
   backslashNewline, histDown, insertPaths, isSlashCommand, histUp, killToEnd, killToStart, killWordBack, killWordForward, mergeHistory, pushHistory,
   rankCommands, searchHistory, tokenAt, toLineEnd, toLineStart, wordBack, wordForward, type Edit, type HistState, type Sel,
@@ -104,9 +104,11 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
   // 補完
   const token = search ? null : tokenAt({ text, start: caret, end: caret });
   const commands = useMemo(() => [...BUILTINS, ...skills], [skills]);
+  // ccn を通さないセッション（#96）は、コマンドの振り分けでは端末のセッションと同じに扱う
+  const ccnKind = viaCcn(agent) ? agent.kind : "terminal";
   const slashItems = token?.kind === "slash" ? rankCommands(commands, token.query) : [];
   // 候補の印（#97）。行の頭のコマンドだけが CLI のコマンドになるので、文の途中の / には付けない
-  const tags = slashItems.map((c) => (token?.atStart ? tagOf(c, agent.kind, support) : null));
+  const tags = slashItems.map((c) => (token?.atStart ? tagOf(c, ccnKind, support) : null));
   useEffect(() => {
     if (token?.kind !== "file" || !local || !agent.cwd) { setFiles([]); return; }
     let alive = true;
@@ -381,7 +383,7 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
   const shell = text.startsWith("!");
   const cmdAtStart = isSlashCommand(text);
   // 組み込みのコマンドの振り分け（#97）。送る前に、どうなるかを入力欄の下に出す
-  const route = cmdAtStart ? routeOf(text, agent.kind, support) : null;
+  const route = cmdAtStart ? routeOf(text, ccnKind, support) : null;
   const note = route?.kind === "blocked" ? route.reason
     : route?.kind === "command" ? `Enter でコマンドとして実行する${route.note ? `（${route.note}）` : ""}`
     : (shell || cmdAtStart) && !hasTerm

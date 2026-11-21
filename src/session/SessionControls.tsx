@@ -26,7 +26,8 @@ export function useNodeSupport(agent: Agent | null, peer: string): [Support, () 
   const nodeKey = peer || "";
   const id = agent?.id ?? "";
   // 転出のゴースト（別の町の本物の写し）は、この町のノードにいないので確かめない
-  const kind = agent && !agent.ghost ? agent.kind : "terminal";
+  // ネイティブの記録だけのセッションと sub-agent（#96）も、ccn の口が使えないので確かめない
+  const kind = agent && !agent.ghost && viaCcn(agent) ? agent.kind : "terminal";
   const [support, setSupport] = useState<Support>(() => cachedSupport(kind, nodeKey));
   useEffect(() => {
     const v = cachedSupport(kind, nodeKey);
