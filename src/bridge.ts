@@ -244,14 +244,16 @@ function fakeConv(): ConvItem[] {
  * 端末のイベント。ev は size / replay / data / exit / error / input_error。
  * replay と data は { s }（出力を UTF-8 の文字列に戻したもの）。Tauri では Rust が base64 を外し、16ms ごとにまとめて送る（#9）
  */
-export type TermEvent = { id: string; ev: string; data: any };
+/** 端末のイベントの中身。ev ごとに入るものが違い、無いこともあるので全部省略可能にしてある */
+export type TermData = { cols?: number; rows?: number; s?: string; reason?: string; code?: number; message?: string };
+export type TermEvent = { id: string; ev: string; data: TermData };
 
 /** 1つのセッションの端末を開き、イベントを受ける。戻り値で閉じる */
 export async function openTerminal(sessionId: string, peer: string | null, on: (e: TermEvent) => void): Promise<() => void> {
   if (inTauri) {
     // このターミナルだけに送る口（Channel）。前は全部のウィンドウへの emit を受けて、セッションの ID で選んでいた
     let open = true;
-    const ch = new Channel<{ ev: string; data: any }>((m) => {
+    const ch = new Channel<{ ev: string; data: TermData }>((m) => {
       perfCounters.ipc++;
       perfCounters.bytes += m.data?.s?.length ?? 0;
       if (open) on({ id: sessionId, ev: m.ev, data: m.data });

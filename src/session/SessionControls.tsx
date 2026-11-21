@@ -4,7 +4,8 @@
 import { useEffect, useRef, useState } from "react";
 import { call as invoke } from "../bridge";
 import type { Agent } from "../model";
-import { configureError, isHttp, lockReason, noRoute, viaCcn, modelOptions, modeOptions, showReason, supportOf, type Support } from "./control";
+import type { SessionDetail } from "../types";
+import { bodyObj, configureError, isHttp, lockReason, noRoute, viaCcn, modelOptions, modeOptions, showReason, supportOf, type Support } from "./control";
 
 // ノードごとに、口があるかを覚える。あれば以後は確かめない。無ければ1分たったら確かめ直す（ノードを新しくしたとき）
 const supportByNode = new Map<string, { v: Support; at: number }>();
@@ -63,7 +64,7 @@ export function SessionControls({ agent, peer, support, onNoSupport, onSwitching
   // 今の値。開いたとき、状態が変わったとき（承認に答えた後、計画の承認でモードが替わる）に読み直す
   useEffect(() => {
     let on = true;
-    invoke<any>("session_detail", { sessionId: agent.id, peer: peer || null })
+    invoke<SessionDetail | null>("session_detail", { sessionId: agent.id, peer: peer || null })
       .then((d) => { if (on && d && typeof d === "object") setCur({ model: str(d.model), mode: str(d.permissionMode) }); })
       .catch(() => {});
     return () => { on = false; };
@@ -83,7 +84,7 @@ export function SessionControls({ agent, peer, support, onNoSupport, onSwitching
         onError(`${agent.name}: ${err}`);
         return;
       }
-      if (alive.current) setCur({ model: str(r.body?.model), mode: str(r.body?.permissionMode) });
+      if (alive.current) setCur({ model: str(bodyObj(r.body).model), mode: str(bodyObj(r.body).permissionMode) });
       onDone(change.model ? `${agent.name} のモデルを ${change.model} にした` : `${agent.name} の権限モードを ${change.permissionMode} にした`);
     } catch (e) {
       onError(`${agent.name}: 替えられなかった: ${e}`);

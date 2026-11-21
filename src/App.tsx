@@ -41,6 +41,7 @@ import { elapsedText, liveSummary, mergeConv, msOf, sameLive, savedLabel, settle
 import { layoutFamily, type LNode } from "./layout/layout";
 import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
 import { packHouseholds } from "./layout/pack";
+import type { CreatedSession, TeleportInfo, TeleportPlan, TeleportResult } from "./types";
 
 /**
  * 別の町（いま見ていない ccn のノード）のお便りを取りに行く間隔。町を1つずつ順に取り、前の回が終わるまで次の回を始めない。
@@ -458,7 +459,7 @@ export default function App() {
   // 一覧の取り直しを待つと、ccn が遅いときにその分だけ右パネルが出ない
   const [fresh, setFresh] = useState<Agent | null>(null);
   // 作ったらチャットを開いて入力欄にフォーカスする（本人の指定）。端末は右クリックや「端末へ」で開く
-  const newHousehold = useCallback((r: any) => {
+  const newHousehold = useCallback((r: CreatedSession | null) => {
     if (!r?.id) return;
     setFresh({
       // 名前は一覧と同じ決め方（cardNames）。一覧に載ったときに名前が変わって見えないようにする
@@ -1007,7 +1008,7 @@ const FamilyCanvas = memo(function FamilyCanvas({ all, result, selected, onSelec
 
 /** 描き直しの回数（開発版だけ数える）。待機中に増えないことを確かめる（#4）。ブラウザでは window.__fcRenders で読む */
 const renders = { canvas: 0, card: 0 };
-if (import.meta.env.DEV && typeof window !== "undefined") (window as any).__fcRenders = renders;
+if (import.meta.env.DEV && typeof window !== "undefined") (window as unknown as { __fcRenders?: typeof renders }).__fcRenders = renders;
 
 const Card = memo(function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void }) {
   const { agent, depth, selected, onSelect, onFocus } = props;
@@ -1507,7 +1508,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
 
 /** 町が空のときの「最初の世帯を作る」。最初の依頼の欄は出さず、すぐ ~/Documents/meta で親（端末のセッション）を立て、右のチャットを開く。
  *  ふだんの作る口は左の新しい世帯のペイン（#89、src/newHouse） */
-function NewHousehold({ disabled, place, onCreated, onError }: { disabled?: boolean; place: string | null; onCreated: (r: any) => void; onError: (m: string) => void }) {
+function NewHousehold({ disabled, place, onCreated, onError }: { disabled?: boolean; place: string | null; onCreated: (r: CreatedSession | null) => void; onError: (m: string) => void }) {
   const [busy, setBusy] = useState(false);
   const go = async () => {
     setBusy(true);
@@ -1530,20 +1531,20 @@ function NewHousehold({ disabled, place, onCreated, onError }: { disabled?: bool
 function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent; descendants: Agent[]; peers: Peer[]; onDone: (m: string) => void; onError: (m: string) => void }) {
   // 子孫がいれば、子孫ごと移す（2026-11-12 本人の判断）。ccn の部分木の口（subtree）を使い、先に計画（dryRun）を見せる
   const subtree = descendants.length > 0;
-  const [plan, setPlan] = useState<any>(null);
+  const [plan, setPlan] = useState<TeleportPlan | null>(null);
   const dests = peers.filter((p) => !p.self && p.status === "healthy");
   const [to, setTo] = useState(dests[0]?.name ?? "");
   const [fork, setFork] = useState(false);
-  const [info, setInfo] = useState<any>(null);
+  const [info, setInfo] = useState<TeleportInfo | null>(null);
   const [infoErr, setInfoErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<TeleportResult | null>(null);
   useEffect(() => {
-    invoke<any>("teleport_info", { sessionId: agent.id, peer: null }).then(setInfo).catch((e) => setInfoErr(String(e)));
+    invoke<TeleportInfo>("teleport_info", { sessionId: agent.id, peer: null }).then(setInfo).catch((e) => setInfoErr(String(e)));
   }, [agent.id]);
   useEffect(() => {
     if (!subtree || !to) { setPlan(null); return; }
-    invoke<any>("teleport", { sessionId: agent.id, to, fork, subtree: true, dryRun: true, peer: null })
+    invoke<TeleportPlan>("teleport", { sessionId: agent.id, to, fork, subtree: true, dryRun: true, peer: null })
       .then(setPlan).catch((e) => setPlan({ error: String(e) }));
   }, [agent.id, to, fork, subtree]);
   // 作業中か承認待ちの人が1人でもいたら押せなくする。ccn は動いているセッションを移さず、全員が止まるまで待つと終わりが読めないため
@@ -1552,7 +1553,7 @@ function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent
   const go = async () => {
     setBusy(true);
     try {
-      const r = await invoke<any>("teleport", { sessionId: agent.id, to, fork, subtree, dryRun: false, peer: null });
+      const r = await invoke<TeleportResult>("teleport", { sessionId: agent.id, to, fork, subtree, dryRun: false, peer: null });
       setResult(r);
       if (subtree) {
         const moved = r?.moved?.length ?? 0, failed = r?.failed?.length ?? 0;
@@ -1585,8 +1586,8 @@ function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent
           <div className="tp-plan">
             <div><b>子孫 {descendants.length} 人も一緒に移る</b>（親子の関係は行き先でも保つ）</div>
             {plan?.error ? <div className="bad-text">計画を出せない: {plan.error}</div> : !plan ? <div className="hint">計画を出している…</div> : (
-              <ul>{(plan.plan ?? []).map((m: any) => <li key={m.sourceId}>{m.title ?? m.sourceId.slice(0, 8)} → {String(m.cwd ?? "").replace(/^\/Users\/[^/]+/, "~")}</li>)}
-                {(plan.skipped ?? []).map((m: any) => <li key={m.sourceId} className="bad-text">{m.sourceId.slice(0, 8)}: 対象外（{m.reason}）</li>)}</ul>
+              <ul>{(plan.plan ?? []).map((m) => <li key={m.sourceId}>{m.title ?? m.sourceId.slice(0, 8)} → {String(m.cwd ?? "").replace(/^\/Users\/[^/]+/, "~")}</li>)}
+                {(plan.skipped ?? []).map((m) => <li key={m.sourceId} className="bad-text">{m.sourceId.slice(0, 8)}: 対象外（{m.reason}）</li>)}</ul>
             )}
           </div>
         )}
@@ -1597,7 +1598,7 @@ function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent
         subtree ? (
           <div className="tp-result">
             {to} へ移した: {(result.moved ?? []).length}人。
-            {(result.failed ?? []).length > 0 && <span className="bad-text"> 失敗: {(result.failed ?? []).map((f: any) => `${f.sourceId.slice(0, 8)}（${f.error}）`).join("、")}</span>}
+            {(result.failed ?? []).length > 0 && <span className="bad-text"> 失敗: {(result.failed ?? []).map((f) => `${f.sourceId.slice(0, 8)}（${f.error}）`).join("、")}</span>}
             画面上のノードを {to} に切り替えると見える。
           </div>
         ) : (
