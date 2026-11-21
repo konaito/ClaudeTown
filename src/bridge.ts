@@ -91,6 +91,9 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
       const [host, sessions, places] = await Promise.all([opt("/host"), fetch(`${MOCK}/sessions`, { credentials: "same-origin" }).then((r) => r.json()), opt("/places?limit=300")]);
       return { roots: host?.roots ?? [], lobby: host?.lobby ?? null, sessions, places: places?.places ?? null } as T;
     }
+    // 場所のリポジトリ名（#99）は .git を読む Rust にしか取れない。ブラウザ版（PWA）では空にして、ディレクトリ名だけを出す。
+    // ?mock では見た目の確認用に public/dev-place-repos.json（{"/path": "owner/repo"}）を読む
+    case "place_repos": return (WEB ? {} : await devJson("dev-place-repos.json", {})) as T;
     // Rust の send_direct と同じく、貼り付けてから Enter を押す
     case "send_direct": {
       await post(`/sessions/${a.sessionId}/terminal/input`, { text: `\x1b[200~${String(a.text)}\x1b[201~` });
@@ -186,6 +189,7 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   if (cmd === "peers") return devJson<T>("dev-peers.json", [] as T);
   // 見た目の確認用: public/dev-house-places.json（Rust の house_places の出力）。無ければ空の一覧
   if (cmd === "house_places") return devJson<T>("dev-house-places.json", { roots: [], lobby: null, sessions: [], places: null } as T);
+  if (cmd === "place_repos") return devJson<T>("dev-place-repos.json", {} as T);
   // ブラウザ表示では本物の会話を読めない。別のセッションの会話を見せて取り違えに見えないよう、仮の1件だけ返す
   // 見た目の確認用: ?longconv を付けると、スクロールが要る長さの仮の会話を返す
   // 見た目の確認用: ?conv を付けると public/dev-conversation.json（`--conversation <id>` の出力の Ok）を返す

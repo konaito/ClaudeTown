@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { placeLabel, placeTime, recentPlaces } from "./places";
+import { placeLabel, placeName, placeTime, recentPlaces } from "./places";
 
 const H = "/Users/k";
 const base = { roots: [H], lobby: `${H}/.local/share/ccn/lobby` };
@@ -78,4 +78,14 @@ test("placeTime は月-日 時:分", () => {
 test("placeLabel はホームを ~ にする", () => {
   expect(placeLabel("/Users/konaito/Documents/meta")).toBe("~/Documents/meta");
   expect(placeLabel("/private/tmp")).toBe("/private/tmp");
+});
+
+describe("placeName（#99）", () => {
+  test("パスの最後のディレクトリ名。ホームは ~、ルートは /", () => {
+    expect(placeName("/Users/me/Documents/app")).toBe("app");
+    expect(placeName("/Users/me/Documents/app/")).toBe("app");
+    expect(placeName("/private/tmp")).toBe("tmp");
+    expect(placeName("/Users/me")).toBe("~");
+    expect(placeName("/")).toBe("/");
+  });
 });

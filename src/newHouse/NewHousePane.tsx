@@ -5,7 +5,7 @@ import { perfMark, perfSetId, perfStart } from "../term/perf";
 import { benchName } from "../term/bench";
 import { onVisibleChange } from "../visible";
 import { DEFAULT_PLACE_LABEL, placeFailure } from "./placeSetting";
-import { placeLabel, placeTime, recentPlaces, type PlacesInput, type RecentPlace } from "./places";
+import { placeLabel, placeName, placeTime, recentPlaces, type PlaceRepos, type PlacesInput, type RecentPlace } from "./places";
 
 /**
  * 新しい世帯（親なしの端末のセッション）を手元のノードに立てる。cwd が null なら ~/Documents/meta（Rust の create_session の既定）。
@@ -30,9 +30,15 @@ export function NewHousePane({ disabled, place, onCreated, onError }: { disabled
   const [load, setLoad] = useState<Load>({ state: "loading" });
   // 立てている場所。"" は先頭のボタン（既定の場所）
   const [busy, setBusy] = useState<string | null>(null);
+  // 連携しているリポジトリ名（#99）。一覧とは別に読み、読めなくても（ブラウザ版など）ディレクトリ名だけで出す
+  const [repos, setRepos] = useState<PlaceRepos>({});
   const reload = useCallback(() => {
     invoke<PlacesInput>("house_places")
-      .then((v) => setLoad({ state: "ok", list: v ? recentPlaces(v) : [] }))
+      .then((v) => {
+        const list = v ? recentPlaces(v) : [];
+        setLoad({ state: "ok", list });
+        invoke<PlaceRepos>("place_repos", { paths: list.map((p) => p.path) }).then((r) => setRepos(r ?? {})).catch(() => setRepos({}));
+      })
       .catch((e) => setLoad((l) => (l.state === "ok" ? l : { state: "error", msg: String(e) })));
   }, []);
   // 開いたときと、窓が見えるようになったときに読み直す（places は ccn が10秒覚えるので、続けて読んでも走査し直さない）
@@ -66,9 +72,10 @@ export function NewHousePane({ disabled, place, onCreated, onError }: { disabled
         )}
         {load.state === "ok" && load.list.length === 0 && <p className="nh-note">最近使った場所が無い</p>}
         {load.state === "ok" && load.list.map((p) => (
-          <button key={p.path} className="nh-row" disabled={off} onClick={() => go(p.path)} title={`${p.path} で親を立てる`}>
+          <button key={p.path} className="nh-row" disabled={off} onClick={() => go(p.path)} title={`${placeLabel(p.path)}${repos[p.path] ? `\n${repos[p.path]}` : ""}\nで親を立てる`}>
+            <span className="nh-name">{placeName(p.path)}</span>
+            {repos[p.path] && <span className="nh-repo">{repos[p.path]}</span>}
             <span className="nh-time">{busy === p.path ? "立てている…" : placeTime(p.at)}</span>
-            <span className="nh-path">{placeLabel(p.path)}</span>
           </button>
         ))}
       </div>

@@ -15,6 +15,7 @@ mod attach;
 mod avatars;
 mod composer;
 mod naming;
+mod repo;
 mod native;
 mod offline;
 
@@ -1771,6 +1772,9 @@ mod cmd {
     }
     #[tauri::command]
     pub async fn house_places() -> Result<Value, String> { blocking(super::house_places).await }
+    /// 新しい世帯の一覧の各場所に連携しているリポジトリ名（owner/repo）。.git/config を読むだけ（#99）
+    #[tauri::command]
+    pub async fn place_repos(paths: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> { blocking(move || Ok(super::repo::repos_of(&paths))).await }
     #[tauri::command]
     pub async fn session_detail(session_id: String, peer: Option<String>) -> Result<Value, String> {
         blocking(move || super::session_detail(session_id, peer)).await
@@ -2171,7 +2175,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::conversation_cache, cmd::send_message, cmd::answer_permission,
-            cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, cmd::house_places, term_open, term_close, term_input, term_resize,
+            cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, cmd::house_places, cmd::place_repos, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick, town_settings, set_town_settings,
             cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::paste_clipboard, cmd::stage_files
         ])
