@@ -1,22 +1,16 @@
 import { Suspense, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
-import { call as invoke } from "../bridge";
 import { perfEnd, perfMark, perfWaitingPrompt } from "../term/perf";
 import { TerminalView } from "../term/lazyTerminal";
 import { ScrollEdgeGradient } from "../ScrollEdgeGradient";
 import { Composer } from "../composer/Composer";
 import { SessionControls, useNodeSupport } from "../session/SessionControls";
-import { commandError, routeOf } from "../composer/route";
-import { isHttp, noRoute, viaCcn } from "../session/control";
 import { Approval } from "../approval/Approval";
 import { openPlan } from "../approval/answers";
-import { BUILTINS, opensDialog } from "../composer/commands";
-import { isSlashCommand } from "../composer/edit";
-import { pollBackoff } from "../visible";
 import { Avatar, roleOf } from "../kid/Avatar";
-import { type Agent, type ConvItem, type Peer, MOOD_LABEL, accountText, choicesOf, moodOf, targetLabel, taskOf } from "../model";
+import { type Agent, type Peer, MOOD_LABEL, accountText, choicesOf, moodOf, targetLabel, taskOf } from "../model";
 import { linkify } from "../Markdown";
-import { mergeConv, sameLive, savedLabel, settlePending, withNotes, type PendingItem, type ConvCache, type ConvDelta, type Live } from "../conv";
+import { savedLabel, withNotes, type PendingItem } from "../conv";
 import { Bubble, collapseTools, withResults } from "../chat/Bubble";
 import { LiveLine } from "../chat/LiveLine";
 import { TownCtx } from "../contexts";
@@ -24,14 +18,8 @@ import { DocIcon } from "../icons";
 import { Teleport } from "../teleport/Teleport";
 import { CardActions } from "../card/CardActions";
 import { StateTab } from "./StateTab";
-
-const CONV_POLL_MS = 2500;
-
-/** 会話に新しい発言が無い回が続いたときの間隔の上限（#5）。新しい発言が来るか、文を送ったら CONV_POLL_MS に戻す */
-const CONV_POLL_MAX_MS = 10000;
-
-/** 相手が作業中のあいだの会話の取り直しの間隔（#59）。延ばさずに、この間隔で取り続ける */
-const CONV_POLL_LIVE_MS = 1000;
+import { useConversation } from "./useConversation";
+import { usePanelSend } from "./usePanelSend";
 
 const NO_NOTES: PendingItem[] = [];
 
@@ -66,19 +54,10 @@ export function Panel({ agent, peer, lineage, descendants, termReq, chatReq, com
     el.focus();
     if (agent) { perfMark("composer", agent.id); if (perfWaitingPrompt(agent.id)) perfEnd(); }
   });
-  const [items, setItems] = useState<ConvItem[]>([]);
-  // 今の動き（#59）。中身が変わったときだけ入れ替え、末尾の行のほかは描き直さない
-  const [live, setLive] = useState<Live | null>(null);
-  // 送ったばかりの文。after は送り始めたときに持っていた最後の番号で、これより後に届いた発言とだけ比べる
-  const [pending, setPending] = useState<PendingItem[]>([]);
-  const [convErr, setConvErr] = useState<string | null>(null);
-  // 保存してあった会話を出しているときの、保存した時刻。ccn から読めたら null に戻す
-  const [cachedAt, setCachedAt] = useState<number | null>(null);
   // 下書きは宛先ごとに持つ。宛先を切り替えたとき、打ちかけの文が次の宛先に送られないようにする
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const text = agent ? drafts[agent.id] ?? "" : "";
   const setText = (v: string) => { if (agent) setDrafts((d) => ({ ...d, [agent.id]: v })); };
-  const [busy, setBusy] = useState(false);
   // モデルか権限モードを替えている間（#97）。pty は claude を起動し直すので、その間は送らない
   const [switching, setSwitching] = useState(false);
   useEffect(() => { setSwitching(false); }, [agent?.id]);
@@ -97,61 +76,17 @@ export function Panel({ agent, peer, lineage, descendants, termReq, chatReq, com
   }, [sendHook]);
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
-  // 会話をすぐ取り直させる口（文を送った直後に使う）
-  const convKick = useRef<() => void>(() => {});
   const id = agent?.id;
   // 作業中でチャットを開いているあいだは、会話を CONV_POLL_LIVE_MS ごとに取る。取り直しの間隔は回るたびにこの値を読む（#59）。
   // 作業中になったときも終わったときも、すぐ取り直す（終わった直後の答えを待たせない）
   const working = !!agent && moodOf(agent) === "working";
   const isFast = working && tab === "talk";
-  const fast = useRef(false);
-  fast.current = isFast;
-  useEffect(() => { convKick.current(); }, [working, isFast]);
 
   // チャットを開いたとき（セッションを選んだ、タブを切り替えた）は、必ず一番下から始める。
   // 以前は stick を読み込みの effect でしか戻さず、タブの切り替えでは前の値が残り、容れ物も作り直されるのに items が変わらないので下へ送られなかった
   useLayoutEffect(() => { stick.current = true; }, [id, tab, chatReq]);
-  useEffect(() => {
-    setItems([]); setPending([]); setLive(null); setConvErr(null); setCachedAt(null); stick.current = true;
-    if (!id) return;
-    let alive = true;
-    // ccn から一度でも読めたか。読めたあとに保存分が届いても出さない
-    let live = false;
-    // 画面が持っている数。Rust は、これより後の発言だけを返す（#10）。増えていなければ items を変えず、描き直さない。
-    // 保存分を出している間は null のままにし、読めた最初の回は全部（reset）で差し替える（保存分の番号 n と混ぜない）
-    let since: number | null = null;
-    // 開いた直後に保存分を出す。ネットが切れていると ccn の時間切れまで数秒かかるので、失敗を待たない
-    invoke<ConvCache | null>("conversation_cache", { sessionId: id, peer: peer || null }).then((c) => {
-      if (!alive || live || !c?.items.length) return;
-      setItems(c.items);
-      setCachedAt(c.savedAt);
-    }).catch(() => {});
-    const load = async () => {
-      try {
-        const d = await invoke<ConvDelta>("conversation", { sessionId: id, peer: peer || null, since });
-        if (!alive) return false;
-        live = true;
-        since = Math.max(since ?? 0, d.total);
-        if (d.reset) since = d.total;
-        setConvErr(null);
-        setCachedAt(null);
-        if (d.reset || d.items.length) setItems((prev) => mergeConv(prev, d));
-        const nextLive = d.live ?? null;
-        setLive((prev) => (sameLive(prev, nextLive) ? prev : nextLive));
-        return d.reset || d.items.length > 0;
-      } catch (e) {
-        if (alive) setConvErr(String(e));
-        return false;
-      }
-    };
-    const p = pollBackoff(load, () => (fast.current ? CONV_POLL_LIVE_MS : CONV_POLL_MS), () => (fast.current ? CONV_POLL_LIVE_MS : CONV_POLL_MAX_MS));
-    convKick.current = p.kick;
-    return () => { alive = false; p.stop(); convKick.current = () => {}; };
-  }, [id, peer]);
-
-  // 送ったばかりの文は、送り始めたあとに会話に出たら仮の項目を消す（前の同じ文、「はい」や選択肢では消さない）。
-  // 後に送った文が出たら、前に送った仮の項目も消す（#69、送った順と並びを入れ替えない）
-  useEffect(() => { setPending((p) => settlePending(items, p)); }, [items, pending.length]);
+  const { items, live, pending, setPending, convErr, cachedAt, convKick } = useConversation(id, peer, isFast, working, stick);
+  const { busy, send } = usePanelSend({ agent, peer, hasTerm, items, switching, support, markNoSupport, addNote, setTab, setPending, setText, stick, convKick, onSent, onError });
 
   // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
   const shown = useMemo(() => collapseTools(withResults(withNotes([...items, ...pending], notes))), [items, pending, notes]);
@@ -202,50 +137,6 @@ export function Panel({ agent, peer, lineage, descendants, termReq, chatReq, com
   const mood = moodOf(agent);
   // 同じ名前の人が町にいたら、送信先に ID の先頭8字を添える（#36）。見出しは幅が足りず ID が切れるので名前だけにする
   const target = targetLabel(agent, town);
-  /** quick はカードのボタンから送るとき。入力欄の下書きは消さない */
-  const send = async (body: string, quick = false) => {
-    if (!body.trim() || busy || switching) return false;
-    // / で始まる組み込みのコマンドの振り分け（#97、src/composer/route.ts）。使えないものは送らずに理由を出す
-    // ccn を通さないセッション（#96）は端末のセッションと同じく振り分けない（送る口のほうが断る）
-    const route = routeOf(body, viaCcn(agent) ? agent.kind : "terminal", support);
-    if (route?.kind === "blocked") { onError(route.reason); return false; }
-    setBusy(true);
-    const after = items[items.length - 1]?.n ?? -1;
-    // 先頭が / か ! の文は、端末のあるセッションなら入力欄へ直接貼る。ccn の send_message は from の1行を前に付けるので、
-    // CLI のコマンドやシェルモードとして動かない（docs/research/cli-input.md）
-    const direct = hasTerm && (body.startsWith("!") || isSlashCommand(body));
-    try {
-      if (route?.kind === "command") {
-        const r = await invoke<unknown>("run_command", { sessionId: agent.id, text: route.text, peer: peer || null });
-        if (!isHttp(r)) throw new Error("ccn の応答が読めなかった");
-        const err = commandError(r);
-        if (err) {
-          if (noRoute(r)) markNoSupport();
-          throw new Error(err);
-        }
-        addNote(agent.id, { role: "event", kind: "command", text: `/${route.name} を実行した${route.note ? `。${route.note}` : ""}`, at: new Date().toISOString(), after });
-      } else if (direct) {
-        await invoke("send_direct", { sessionId: agent.id, text: body, peer: peer || null });
-        // 画面を開くコマンド（/model など）は、ターミナルで操作してもらう
-        if (opensDialog(body, BUILTINS)) setTab("term");
-      } else {
-        await invoke("send_message", { sessionId: agent.id, text: body, peer: peer || null });
-        setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
-      }
-      if (!quick) setText("");
-      stick.current = true;
-      // 返事が来るまでは間隔を縮めて取る（#5）
-      convKick.current();
-      onSent(agent);
-      return true;
-    } catch (e) {
-      onError(`${agent.name} に届かなかった: ${e}`);
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  };
-
   quickSend.current = (to, body) => (to === agent.id ? send(body, true) : null);
 
   const choices = mood !== "working" ? lastChoices : [];
