@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { CircleQuestionMark, ClipboardList, Hand } from "lucide-react";
+import { ICON, STROKE } from "../icons";
 import { call as invoke } from "../bridge";
 import { pollWhileVisible } from "../visible";
 import { ScrollEdgeGradient } from "../ScrollEdgeGradient";
@@ -53,7 +55,7 @@ export function Approval({ agent, peer, planHint, onDone, onError }: {
   const title = kind === "ask" ? `${agent.name} が質問している` : kind === "plan" ? `${agent.name} が計画の確認を待っている` : `${agent.name} が承認を待っている`;
   return (
     <div className={`approval ap-${kind}`}>
-      <div className="ap-title">{kind === "ask" ? "❓" : kind === "plan" ? "📝" : "✋"} {title}</div>
+      <div className="ap-title">{(() => { const I = kind === "ask" ? CircleQuestionMark : kind === "plan" ? ClipboardList : Hand; return <I size={ICON.md} strokeWidth={STROKE} aria-hidden />; })()}{title}</div>
       {!canAnswer ? (
         <div className="hint">このセッションは人がターミナルで開いたもので、ここからは答えられない。そのターミナルで答える。</div>
       ) : !p ? (

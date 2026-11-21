@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
+import { Plus } from "lucide-react";
+import { ICON, STROKE } from "../icons";
 import { call as invoke } from "../bridge";
 import { lastTermSize } from "../term/size";
 import { perfMark, perfSetId, perfStart } from "../term/perf";
@@ -10,7 +12,7 @@ import type { CreatedSession } from "../types";
 
 /**
  * 新しい世帯（親なしの端末のセッション）を手元のノードに立てる。cwd が null なら ~/Documents/meta（Rust の create_session の既定）。
- * 町の「＋ 新しい世帯」（#89 より前）と同じ呼び方で、前に開いたターミナルの大きさで起動する
+ * 町の「新しい世帯」（#89 より前）と同じ呼び方で、前に開いたターミナルの大きさで起動する
  */
 export async function createHousehold(cwd: string | null): Promise<CreatedSession> {
   perfStart("new");
@@ -25,7 +27,7 @@ type Load = { state: "loading" } | { state: "ok"; list: RecentPlace[] } | { stat
 
 /**
  * 左のペイン（#89）。新しい世帯を作るためだけのペインで、最近使った場所を新しい順に出し、押した場所で親を立てる。
- * 先頭の「＋ 新しい世帯」は一覧を待たずに押せる。立てる場所は設定（place、#92）で、無ければ ~/Documents/meta。disabled は別の町を見ているとき（世帯は手元のノードにだけ作る）
+ * 先頭の「新しい世帯」は一覧を待たずに押せる。立てる場所は設定（place、#92）で、無ければ ~/Documents/meta。disabled は別の町を見ているとき（世帯は手元のノードにだけ作る）
  */
 export function NewHousePane({ disabled, place, onCreated, onError }: { disabled: boolean; place: string | null; onCreated: (r: CreatedSession | null) => void; onError: (m: string) => void }) {
   const [load, setLoad] = useState<Load>({ state: "loading" });
@@ -61,7 +63,7 @@ export function NewHousePane({ disabled, place, onCreated, onError }: { disabled
       </div>
       <div className="nh-top">
         <button className="pane-btn new-house nh-new" disabled={off} onClick={() => go(place, true)} title={`${place ? placeLabel(place) : DEFAULT_PLACE_LABEL} で親を立てる（場所は右上の設定で変えられる）`}>
-          {busy === "" ? "立てている…" : "＋ 新しい世帯"}
+          {busy === "" ? "立てている…" : <><Plus size={ICON.md} strokeWidth={STROKE} aria-hidden />新しい世帯</>}
         </button>
         {disabled && <p className="nh-note">別の町を見ている間は作れない。新しい世帯は、このMacの町にだけ作る</p>}
       </div>

@@ -3,6 +3,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { call as invoke, onFileDrop } from "../bridge";
 import getCaretCoordinates from "textarea-caret";
+import { SendHorizontal, Square } from "lucide-react";
+import { ICON, STROKE } from "../icons";
 import type { Agent } from "../model";
 import { BUILTINS, type Command } from "./commands";
 import { routeOf, tagOf } from "./route";
@@ -454,19 +456,15 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
             文を打てば送るボタンに戻り、送った文は今の作業のあとに読まれる */}
         {running && canInterrupt && !text.trim() && !search ? (
           <button className="send stop" disabled={stopping} onClick={() => { setStopping(true); interrupt().finally(() => setStopping(false)); }} title="今の作業を止める（Esc）" aria-label="止める">
-            <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden><rect x="1" y="1" width="12" height="12" rx="2.5" fill="currentColor" /></svg>
+            <Square size={ICON.sm} strokeWidth={STROKE} fill="currentColor" aria-hidden />
           </button>
         ) : (
-          <button className="send" disabled={!agent.canSend || busy || !text.trim()} onClick={() => submit(text)} title="送る（Enter）">
-            <SendIcon />
+          <button className="send" disabled={!agent.canSend || busy || !text.trim()} onClick={() => submit(text)} title="送る（Enter）" aria-label="送る">
+            <SendHorizontal size={ICON.lg} strokeWidth={STROKE} aria-hidden />
           </button>
         )}
       </div>
       <div className={`hint${route?.kind === "blocked" ? " bad" : ""}`}>{note}</div>
     </>
   );
-}
-
-function SendIcon() {
-  return (<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M3 11.5 20.5 4l-5 17-3.6-7.2z" /><path d="M11.9 13.8 20.5 4" stroke="#fff" strokeWidth="1.4" /></svg>);
 }
