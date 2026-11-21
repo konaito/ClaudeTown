@@ -61,6 +61,12 @@ const SPLIT_KEY = "claude-town.split3";
 function savedSplit(): Layout | undefined {
   try { const v = JSON.parse(localStorage.getItem(SPLIT_KEY) ?? "null"); return v && typeof v === "object" ? v : undefined; } catch { return undefined; }
 }
+/** チャット（side）が閉じている間の並び l に、前に保存したチャットの幅を戻す。町（town）の幅で釣り合わせる。前の値が無ければ l のまま */
+function keepSide(l: Layout, prev: Layout | undefined): Layout {
+  const side = prev?.side ?? 0;
+  if (!side || l.houses === undefined) return l;
+  return { houses: l.houses, town: Math.max(0, 100 - l.houses - side), side };
+}
 function saveSplit(l: Layout) { try { localStorage.setItem(SPLIT_KEY, JSON.stringify(l)); } catch { /* 保存できなくても動きは変えない */ } }
 /** 閉じる演出の長さ（ms）。CSS の kill-* と合わせる */
 const KILL_MS = 1150;
@@ -515,8 +521,8 @@ export default function App() {
           open={sel} mails={mails} curTown={curTown} unreachable={unreachable} onTown={changeTown} onPick={pick} onMail={(m) => openMail(m, true)} onBack={() => setSelected(null)}
           chat={(back) => <Panel {...panelProps} mobile onBack={back} />} />
       ) : (<>
-      {/* 右のチャットが閉じている間の並びは保存しない。保存すると、次に開いたときのチャットの幅が最小に戻る */}
-      <SplitGroup className="body" orientation="horizontal" defaultLayout={savedSplit()} onLayoutChanged={(l) => { if (!sideRef.current?.isCollapsed()) saveSplit(l); }}>
+      {/* 右のチャットが閉じている間は、左の幅と開閉だけを保存し、チャットの幅は前に保存した値を残す（0 を保存すると、次に開いたときのチャットの幅が最小に戻る） */}
+      <SplitGroup className="body" orientation="horizontal" defaultLayout={savedSplit()} onLayoutChanged={(l) => saveSplit(sideRef.current?.isCollapsed() ? keepSide(l, savedSplit()) : l)}>
         <SplitPanel id="houses" panelRef={housesRef} collapsible collapsedSize={0} defaultSize={HOUSES_DEFAULT} minSize={HOUSES_MIN} maxSize="30%"
           onResize={() => setHousesOpen(!housesRef.current?.isCollapsed())}>
           <NewHousePane disabled={!local} onCreated={newHousehold} onError={(m) => toast(m, true)} />
