@@ -1279,6 +1279,16 @@ fn post_create(url: &str, body: Value, from: Option<String>) -> Result<Value, St
     }
 }
 
+/// 新しい世帯のペイン（#89）の「最近使った場所」の材料。手元のノードの /api/host、/api/sessions、/api/places をそのまま返し、
+/// 合わせ方は画面（src/newHouse/places.ts）で決める。places は走査に最大3秒かかり、古い ccn は 404 を返すので、失敗したら null にする
+fn house_places() -> Result<Value, String> {
+    let base = api(&None);
+    let host = get_json_t(&format!("{base}/host"), LIST_TIMEOUT)?;
+    let sessions = get_json_t(&format!("{base}/sessions"), LIST_TIMEOUT)?;
+    let places = get_json_t(&format!("{base}/places?limit=300"), Duration::from_secs(6)).ok().and_then(|v| v.get("places").cloned());
+    Ok(json!({ "roots": host.get("roots").cloned().unwrap_or(json!([])), "lobby": host.get("lobby").cloned().unwrap_or(Value::Null), "sessions": sessions, "places": places }))
+}
+
 /// セッションの詳細（承認の pending を含む）
 fn session_detail(session_id: String, peer: Option<String>) -> Result<Value, String> {
     let peer = peer.filter(|p| !p.is_empty());
@@ -1659,6 +1669,8 @@ mod cmd {
         blocking(move || super::create_session(cwd, prompt, parent, name, cols, rows, resume, fork, succeed, peer)).await
     }
     #[tauri::command]
+    pub async fn house_places() -> Result<Value, String> { blocking(super::house_places).await }
+    #[tauri::command]
     pub async fn session_detail(session_id: String, peer: Option<String>) -> Result<Value, String> {
         blocking(move || super::session_detail(session_id, peer)).await
     }
@@ -2033,7 +2045,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::conversation_cache, cmd::send_message, set_house_name, cmd::answer_permission,
-            cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, term_open, term_close, term_input, term_resize,
+            cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, cmd::house_places, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
             cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::paste_clipboard, cmd::stage_files
         ])
