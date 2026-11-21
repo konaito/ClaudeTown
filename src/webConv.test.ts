@@ -142,3 +142,15 @@ describe("道具の結果とターンの終わり（#83）", () => {
     expect(resultText([{ type: "text", text: "a" }, { type: "image" }])).toBe("a\n[画像]");
   });
 });
+
+describe("-p の子を止めたとき（#83）", () => {
+  test("止めた印の文と続く失敗の result は、止めた印1つになる", async () => {
+    const msgs = [
+      { type: "user", timestamp: "t", message: { role: "user", content: [{ type: "text", text: "[Request interrupted by user for tool use]" }] } },
+      { type: "result", subtype: "error_during_execution", is_error: true, result: "" },
+    ];
+    const s = newConvState();
+    const d = await readConversation(s, async () => ({ messages: msgs, next: 2, epoch: "e" }), null);
+    expect(d.items.map((x) => [x.role, x.kind])).toEqual([["event", "interrupted"]]);
+  });
+});

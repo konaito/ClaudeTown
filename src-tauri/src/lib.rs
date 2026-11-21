@@ -787,6 +787,10 @@ impl Conv {
     fn push(&mut self, fresh: Vec<Value>) {
         let start = self.total;
         for mut v in fresh {
+            // 止めた印の直後の印は重ねない。-p の子は、止めると止めた印の文に続いて error_during_execution の result を書く（#83）
+            if v["role"] == "event" && self.items.last().map(|l| l["role"] == "event" && l["kind"] == "interrupted").unwrap_or(false) {
+                continue;
+            }
             // 道具の結果は、持っている道具の行に付ける。道具の行が今回の分にあれば、それで画面に届くので項目にしない。
             // 前に渡した道具の行の結果だけ、小さい result の項目で送り、画面が道具の行に付け直す。道具の行が無ければ捨てる（#83）
             if v["role"] == "result" {
@@ -929,6 +933,11 @@ fn simplify(m: &Value) -> Vec<Value> {
                     out.push(json!({ "role": "user", "text": body, "from": null, "at": at,
                         "letter": { "fromName": attr("from-name"), "fromRaw": attr("from") } }));
                 }
+                return out;
+            }
+            // 止めたときに claude が書く印（-p の子で見た。2026-11-21）。吹き出しにせず、止めた印にする（#83）
+            if text.starts_with("[Request interrupted by user") {
+                out.push(json!({ "role": "event", "kind": "interrupted", "text": "ここで止めた", "at": at }));
                 return out;
             }
             // 道具の結果だけの user、hook やシステムの差し込み（<...> で始まる）は出さない
@@ -2670,6 +2679,18 @@ mod tests {
         assert_eq!(e[0]["kind"], "error");
         assert!(e[0]["text"].as_str().unwrap().contains("API Error: limit"));
         assert!(r(json!({"type": "result", "subtype": "success", "is_error": false, "result": "ok"})).is_empty());
+    }
+
+    #[test]
+    fn node_interrupt_is_one_mark() {
+        // 2026-11-21 に -p の子を止めたときの行（中身は縮めた）
+        let user = json!({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user for tool use]"}]}, "timestamp": "t"});
+        let end = json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "result": ""});
+        let mut c = Conv::default();
+        c.push(simplify(&user));
+        c.push(simplify(&end));
+        assert_eq!(c.items.len(), 1);
+        assert_eq!(c.items[0]["kind"], "interrupted");
     }
 
     #[test]
