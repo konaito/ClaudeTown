@@ -21,7 +21,11 @@ import { reuseAgents, reuseSnap } from "./snap";
 import { kickTown, otherTownRetryMs, watchTown } from "./town";
 import { SucceedError, kidsOf, startSuccessor, succeedBlock } from "./succeed";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, usePanelRef, type Layout } from "react-resizable-panels";
-import { PanelLeftClose, PanelLeftOpen, Settings, Users, X } from "lucide-react";
+import {
+  ArrowRight, Check, ChevronLeft, ChevronRight, CircleStop, FileText, Hand, Handshake, Luggage, Maximize, MessageCircle,
+  MessageCircleQuestionMark, Minus, PanelLeftClose, PanelLeftOpen, Plus, Power, Settings, ThumbsUp, TriangleAlert, Users, Wrench, X, type LucideIcon,
+} from "lucide-react";
+import { ICON, ROLE_ICON, STROKE } from "./icons";
 import { NewHousePane, createHousehold } from "./newHouse/NewHousePane";
 import { loadPlace, placeFailure, savePlace } from "./newHouse/placeSetting";
 import { SettingsDialog } from "./settings/SettingsDialog";
@@ -86,12 +90,12 @@ const KILL_STAGGER = 140;
  * succeed のボタンは、利用上限で止まったセッションを同じ段の後継へ引き継ぐ（src/succeed.ts）。
  * 見本は本人のスクショ（2026-11-13）。角丸のカードの右下の縁に、角丸の四角いボタンが縁にまたがって並ぶ
  */
-type CardAction = { key: string; icon: string; name: string } & ({ kind: "kill" } | { kind: "succeed" } | { kind: "send"; text: string });
+type CardAction = { key: string; icon: LucideIcon; name: string } & ({ kind: "kill" } | { kind: "succeed" } | { kind: "send"; text: string });
 const CARD_ACTIONS: CardAction[] = [
-  { key: "kill", icon: "🐺", name: "閉じる", kind: "kill" },
-  { key: "succeed", icon: "🤝", name: "引き継ぐ", kind: "succeed" },
-  { key: "howdy", icon: "🚪", name: "様子を聞く", kind: "send", text: "調子どうですか" },
-  { key: "go", icon: "👍", name: "許可する", kind: "send", text: "許可します、やってくださいお願いします。" },
+  { key: "kill", icon: Power, name: "閉じる", kind: "kill" },
+  { key: "succeed", icon: Handshake, name: "引き継ぐ", kind: "succeed" },
+  { key: "howdy", icon: MessageCircleQuestionMark, name: "様子を聞く", kind: "send", text: "調子どうですか" },
+  { key: "go", icon: ThumbsUp, name: "許可する", kind: "send", text: "許可します、やってくださいお願いします。" },
 ];
 /** true ならカードの右下のボタンをいつも出す。false ならカードに乗せたときと、選んでいるカードだけに出す */
 const CARD_ACTIONS_ALWAYS = false;
@@ -105,9 +109,9 @@ const LEGEND: Mood[] = ["working", "reply", "approval", "done", "idle"];
 const TownCtx = createContext<Agent[]>([]);
 /** 封筒の印（💌）を頭に出しているセッション */
 const LetterCtx = createContext<Set<string>>(new Set());
-/** 閉じる操作と演出の状態。カードの 🐺 と、倒れる演出が読む */
+/** 閉じる操作と演出の状態。カードの閉じるボタンと、倒れる演出が読む */
 const KillCtx = createContext<{ dying: Map<string, number>; ask: (a: Agent, instant: boolean) => void }>({ dying: new Map(), ask: () => {} });
-/** 引き継ぎの操作（🤝）。local は手元のノードの町を見ているか。busy は、いま引き継いでいる前任の ID */
+/** 引き継ぎの操作。local は手元のノードの町を見ているか。busy は、いま引き継いでいる前任の ID */
 const SucceedCtx = createContext<{ local: boolean; busy: Set<string>; ask: (a: Agent) => void }>({ local: false, busy: new Set(), ask: () => {} });
 /** カードのボタンから文を送る口（#63）。値は App で一度だけ作り、町の描き直しの合図にしない（#10） */
 const SendCtx = createContext<(a: Agent, text: string) => Promise<boolean>>(async () => false);
@@ -543,7 +547,6 @@ export default function App() {
                 title={housesOpen ? "新しい世帯のペインを閉じる" : "新しい世帯のペインを開く"} aria-expanded={housesOpen}>
                 {housesOpen ? <PanelLeftClose size={18} strokeWidth={1.8} /> : <PanelLeftOpen size={18} strokeWidth={1.8} />}
               </button>
-              <HouseIcon />
               <h1>Claude Town</h1>
             </div>
             <div className="top-mid">
@@ -604,12 +607,12 @@ export default function App() {
 
           <div className="left-foot">
             <div className="zoom">
-              <button onClick={() => setZoom((z) => Math.max(0.4, +(((z === "fit" ? 1 : z) - 0.1).toFixed(2))))}>−</button>
+              <button onClick={() => setZoom((z) => Math.max(0.4, +(((z === "fit" ? 1 : z) - 0.1).toFixed(2))))} aria-label="小さくする" title="小さくする"><Minus size={ICON.md} strokeWidth={STROKE} /></button>
               <button className="zval" onClick={() => setZoom("fit")} title="全体が入る大きさにする">
                 {zoom === "fit" ? "全体" : `${Math.round(zoom * 100)}%`}
               </button>
-              <button onClick={() => setZoom((z) => Math.min(1.6, +(((z === "fit" ? 1 : z) + 0.1).toFixed(2))))}>＋</button>
-              <button className="fs" title="全画面" onClick={() => setFullscreen()}>⛶</button>
+              <button onClick={() => setZoom((z) => Math.min(1.6, +(((z === "fit" ? 1 : z) + 0.1).toFixed(2))))} aria-label="大きくする" title="大きくする"><Plus size={ICON.md} strokeWidth={STROKE} /></button>
+              <button className="fs" title="全画面" aria-label="全画面" onClick={() => setFullscreen()}><Maximize size={ICON.md} strokeWidth={STROKE} /></button>
             </div>
             <span className="hint">クリックでチャット・右クリックでターミナル</span>
             <Credits skin={skin} onSkin={(v) => { setSkin(v); saveSkin(v); }} />
@@ -785,7 +788,7 @@ function Confirm({ title, ok, danger, single, onCancel, onConfirm, children }: {
 function KillConfirm({ agent, descendants, onCancel, onConfirm }: { agent: Agent; descendants: number; onCancel: () => void; onConfirm: () => void }) {
   return (
     <Confirm title={`${agent.name}${descendants ? ` と子孫 ${descendants} 人` : ""}を閉じる？`} ok="閉じる" danger onCancel={onCancel} onConfirm={onConfirm}>
-      ccn でセッションを止める。{descendants ? "子孫は孫から順に止める。" : ""}止まらなかった分は画面に残る。⌘ を押しながら 🐺 を押すと、確認なしで閉じる。
+      ccn でセッションを止める。{descendants ? "子孫は孫から順に止める。" : ""}止まらなかった分は画面に残る。⌘ を押しながら閉じるボタン（<Power className="inline-icon" size={ICON.sm} strokeWidth={STROKE} aria-label="閉じる" />）を押すと、確認なしで閉じる。
     </Confirm>
   );
 }
@@ -811,7 +814,7 @@ function NextRow({ mails, curTown, unreachable, working, total, onOpen }: {
   const first = mails[0];
   const rest = mails.slice(1, 3);
   const hidden = mails.length - 1 - rest.length;
-  const icon = (k: Mail["kind"]) => (k === "approval" ? "✋" : k === "reply" ? "💬" : "✓");
+  const icon = (k: Mail["kind"], size: number) => { const I = k === "approval" ? Hand : k === "reply" ? MessageCircle : Check; return <I size={size} strokeWidth={STROKE} aria-hidden />; };
   const away = (m: Mail) => m.town !== curTown;
   const mainText = (m: Mail) => {
     const n = m.agent.name;
@@ -825,7 +828,7 @@ function NextRow({ mails, curTown, unreachable, working, total, onOpen }: {
       <span className="next-label">お便り</span>
       {first ? (
         <div className={`next-main nm-${first.kind} ${away(first) ? "away" : ""}`}>
-          <span className="next-icon">{icon(first.kind)}</span>
+          <span className="next-icon">{icon(first.kind, ICON.lg)}</span>
           {stamp(first)}
           <button className="next-text" onClick={() => onOpen(first)}>{mainText(first)}</button>
           <button className="pane-btn" onClick={() => onOpen(first, true)}>チャットへ</button>
@@ -840,7 +843,7 @@ function NextRow({ mails, curTown, unreachable, working, total, onOpen }: {
       {rest.length > 0 && <span className="next-sep" />}
       {rest.map((m) => (
         <button key={`${m.town}/${m.agent.id}`} className={`next-chip ${away(m) ? "away" : ""}`} onClick={() => onOpen(m)}>
-          <span>{icon(m.kind)}</span>{stamp(m)}{chipText(m)}
+          <span className="chip-icon">{icon(m.kind, ICON.sm)}</span>{stamp(m)}{chipText(m)}
         </button>
       ))}
       {hidden > 0 && <span className="next-more">ほか{hidden}件</span>}
@@ -1088,7 +1091,7 @@ const CardActions = memo(function CardActions({ agent, place = "card" }: { agent
           <button key={act.key} type="button" className={`card-act ca-${act.key} ${off ? "off" : ""} ${fx}`}
             aria-disabled={off} title={title} aria-label={`${agent.name}: ${title}`}
             onClick={(e) => press(act, e)}>
-            <span aria-hidden>{act.icon}</span>
+            <act.icon size={place === "head" ? ICON.sm : ICON.xs} strokeWidth={STROKE} aria-hidden />
           </button>
         );
       })}
@@ -1135,7 +1138,7 @@ const GhostCard = memo(function GhostCard({ agent, depth, onSelect }: { agent: A
   return (
     <button className={`ghost-card ${mini ? "is-mini" : ""}`} style={{ width: box.w, height: box.h }}
       onClick={() => onSelect(agent)} title={`${agent.name}（${label}）\nクリックで ${g.town} の町に切り替える`}>
-      <span className="ghost-tag"><SuitcaseIcon />{label}</span>
+      <span className="ghost-tag"><Luggage size={ICON.sm} strokeWidth={STROKE} aria-hidden />{label}</span>
       <span className="ghost-body">
         <span className="ghost-av"><Avatar pick={agent.avatar} seed={agent.id} mood="idle" role={roleOf(depth)} size={mini ? 26 : 40} /></span>
         <span className="ghost-name">{agent.name}</span>
@@ -1143,10 +1146,6 @@ const GhostCard = memo(function GhostCard({ agent, depth, onSelect }: { agent: A
     </button>
   );
 });
-
-function SuitcaseIcon() {
-  return (<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinejoin="round" aria-hidden><rect x="3" y="7" width="18" height="13" rx="2.5" /><path d="M9 7V5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5v2M8 7v13M16 7v13" /></svg>);
-}
 
 /**
  * 作業中の経過時間（sinceText）。この部品の中だけで時計を回し、町全体は描き直さない（#4）。
@@ -1187,7 +1186,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
       title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}${acct ? `\nアカウント: ${acct}` : ""}\nクリックでチャット・右クリックでターミナル`}
     >
       <div className="card-top">
-        <span className="role">{ROLE_LABEL[Math.min(depth, 4)]}</span>
+        <RoleTag depth={depth} />
         <span className="task">{task}</span>
       </div>
       <div className="card-main">
@@ -1426,7 +1425,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
     <aside className={`panel pm-${mood}`}>
       {mobile ? (
         <div className="m-head">
-          <button className="m-back" onClick={onBack} aria-label="一覧へ戻る"><svg width="12" height="20" viewBox="0 0 12 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 2 2 10l8 8" /></svg></button>
+          <button className="m-back" onClick={onBack} aria-label="一覧へ戻る"><ChevronLeft size={28} strokeWidth={2} /></button>
           <div className="p-avatar"><Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(lineage.length - 1)} size={40} /></div>
           <div className="p-id">
             <div className="p-name"><span className="pn">{agent.name}</span><span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}</span></div>
@@ -1442,9 +1441,9 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
             {agent.account && <span className="acct" title={`アカウント: ${accountText(agent)}。このセッションの claude が動いているアカウント`}>{agent.account}</span>}
           </div>
           <div className="p-line">{lineage.map((a, i) => (
-            <span key={a.id}>{i > 0 && <b>›</b>}<button className="lnk" onClick={() => onSelect(a)}>{a.name}</button></span>
+            <span key={a.id}>{i > 0 && <ChevronRight className="p-line-sep" size={ICON.sm} strokeWidth={STROKE} aria-hidden />}<button className="lnk" onClick={() => onSelect(a)}>{a.name}</button></span>
           ))}</div>
-          <div className="p-task"><DocIcon />{linkify(taskOf(agent, mood))}</div>
+          <div className="p-task"><FileText className="p-task-icon" size={ICON.sm} strokeWidth={STROKE} aria-hidden />{linkify(taskOf(agent, mood))}</div>
         </div>
         <div className="p-actions">
           {onClose && <button className="p-close" onClick={onClose} aria-label="チャットを閉じる" title="チャットを閉じる"><X size={16} strokeWidth={1.8} /></button>}
@@ -1586,7 +1585,7 @@ function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent
           <div className="tp-plan">
             <div><b>子孫 {descendants.length} 人も一緒に移る</b>（親子の関係は行き先でも保つ）</div>
             {plan?.error ? <div className="bad-text">計画を出せない: {plan.error}</div> : !plan ? <div className="hint">計画を出している…</div> : (
-              <ul>{(plan.plan ?? []).map((m) => <li key={m.sourceId}>{m.title ?? m.sourceId.slice(0, 8)} → {String(m.cwd ?? "").replace(/^\/Users\/[^/]+/, "~")}</li>)}
+              <ul>{(plan.plan ?? []).map((m) => <li key={m.sourceId}>{m.title ?? m.sourceId.slice(0, 8)} <ArrowRight className="inline-icon" size={ICON.sm} strokeWidth={STROKE} aria-hidden /> {String(m.cwd ?? "").replace(/^\/Users\/[^/]+/, "~")}</li>)}
                 {(plan.skipped ?? []).map((m) => <li key={m.sourceId} className="bad-text">{m.sourceId.slice(0, 8)}: 対象外（{m.reason}）</li>)}</ul>
             )}
           </div>
@@ -1699,12 +1698,12 @@ const Bubble = memo(BubbleView, (a: BubbleProps, b: BubbleProps) =>
  */
 function ToolLine({ item }: { item: Shown }) {
   const group = item.group ?? [item];
-  const head = <>🔧 {linkify(item.text)}{item.more ? ` ほか${item.more}件` : ""}</>;
+  const head = <><Wrench className="inline-icon" size={ICON.xs} strokeWidth={STROKE} aria-hidden /> {linkify(item.text)}{item.more ? ` ほか${item.more}件` : ""}</>;
   if (!item.done) return <div className="tool-line">{head}</div>;
   const bad = group.some((g) => g.result?.error);
   return (
     <details className="tool-line tool-open">
-      <summary>{head}{bad && <span className="tl-bad">失敗あり</span>}</summary>
+      <summary>{head}<ChevronRight className="inline-icon tl-caret" size={ICON.xs} strokeWidth={STROKE} aria-hidden />{bad && <span className="tl-bad">失敗あり</span>}</summary>
       <div className="tl-list">
         {group.map((g, i) => (
           <div key={g.id ?? i} className="tl-item">
@@ -1721,7 +1720,7 @@ function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
   chatPerf.bubble++;
   if (item.role === "tool" && item.sent) return <SentLetter item={item} agent={agent} lineageDepth={lineageDepth} />;
   if (item.role === "tool") return <ToolLine item={item} />;
-  if (item.role === "event") return <div className={`turn-event te-${item.kind ?? "error"}`}>{item.kind === "interrupted" ? "⏹ " : item.kind === "command" ? "" : "⚠️ "}{item.text}<span className="te-at">{timeOf(item.at)}</span></div>;
+  if (item.role === "event") return <div className={`turn-event te-${item.kind ?? "error"}`}>{item.kind === "interrupted" ? <CircleStop className="inline-icon" size={ICON.sm} strokeWidth={STROKE} aria-hidden /> : item.kind === "command" ? null : <TriangleAlert className="inline-icon" size={ICON.sm} strokeWidth={STROKE} aria-hidden />}{item.text}<span className="te-at">{timeOf(item.at)}</span></div>;
   if (item.role === "result") return null;
   if (item.role === "user" && item.letter) return <LetterBubble item={item} />;
   if (item.role === "user") {
@@ -1852,9 +1851,9 @@ function Credits({ skin, onSkin }: { skin: Skin; onSkin: (s: Skin) => void }) {
 
 // ---------- 小さい絵 ----------
 
-function HouseIcon() {
-  return (<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round"><path d="M3 11 12 3l9 8" /><path d="M5 10v10h14V10" /><path d="M10 20v-5h4v5" /></svg>);
-}
-function DocIcon() {
-  return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M6 3h8l4 4v14H6z" /><path d="M9 12h6M9 16h6" /></svg>);
+/** カードの左上の札。文字（親、子、孫…）の代わりに lucide のアイコンを出し、文字は title と aria-label に残す */
+function RoleTag({ depth }: { depth: number }) {
+  const d = Math.min(depth, 4);
+  const I = ROLE_ICON[d];
+  return <span className="role" role="img" aria-label={ROLE_LABEL[d]} title={ROLE_LABEL[d]}><I size={ICON.sm} strokeWidth={STROKE} aria-hidden /></span>;
 }

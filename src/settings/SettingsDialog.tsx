@@ -49,7 +49,7 @@ export function SettingsDialog({ place, onSave, onClose }: { place: string | nul
         <div className="modal-title">設定</div>
         <section className="set-sec">
           <label className="set-label" htmlFor="set-place">新しい世帯の場所</label>
-          <p className="hint">「＋ 新しい世帯」を押したときに、親を立てる場所。空にすると {DEFAULT_PLACE_LABEL} で立てる。</p>
+          <p className="hint">左のペインの「新しい世帯」を押したときに、親を立てる場所。空にすると {DEFAULT_PLACE_LABEL} で立てる。</p>
           <input id="set-place" className="set-input" value={text} spellCheck={false} placeholder={`${DEFAULT_PLACE_LABEL}（既定）`} autoFocus
             onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") save(); }} aria-invalid={!!bad} />
           {bad && <p className="set-bad">{bad}</p>}
