@@ -45,6 +45,7 @@ import {
 } from "./model";
 import { savedLabel } from "./conv";
 import type { CreatedSession } from "./types";
+import { NEW_HOUSE_CAPS } from "./abilities";
 
 /** 右パネルの幅（px）。最小と既定。最大はウィンドウ幅の半分（maxSize="50%"） */
 const SIDE_MIN = 380;
@@ -179,7 +180,7 @@ export default function App() {
     setFresh({
       // 名前は一覧と同じ決め方（cardNames）。一覧に載ったときに名前が変わって見えないようにする
       id: r.id, name: cardNames([{ id: r.id, cwd: r.cwd ?? "" }]).get(r.id) ?? r.id.slice(0, 8), kind: "terminal", state: "running", cwd: r.cwd ?? "", canSend: true, parent: null,
-      startedAt: Date.now(), capabilities: { terminal: true, send: true, stop: true },
+      startedAt: Date.now(), capabilities: NEW_HOUSE_CAPS,
     });
     setSelected(r.id);
     setComposeReq((n) => n + 1);

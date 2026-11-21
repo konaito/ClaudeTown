@@ -2,6 +2,8 @@
 // Rust との違い: 送信の非常停止（~/.family-computing/send-disabled）は、手元のファイルなのでブラウザからは見えず、効かない。
 
 /** ccn の GET /sessions/<id> の応答のうち、承認への返事が読む部分 */
+import { canAnswerPermission } from "./abilities";
+
 type Detail = { state?: unknown; capabilities?: { permissions?: unknown }; pending?: unknown } | null | undefined;
 type Get = (path: string) => Promise<Detail>;
 type Post = (path: string, body: unknown) => Promise<unknown>;
@@ -62,7 +64,7 @@ export async function answerPermission(get: Get, post: Post, sessionId: string, 
   if (choice !== "allow" && choice !== "deny") throw new Error("choice は allow か deny");
   const detail = await get(`/sessions/${sessionId}`);
   if (detail?.state !== "waiting_permission") throw new Error("もう承認待ちではない（ほかで答えたか、終わった）");
-  if (detail?.capabilities?.permissions !== true) throw new Error("このセッションは ccn から承認に答えられない（人がターミナルで開いたセッション）。そのターミナルで答えて");
+  if (!canAnswerPermission(detail)) throw new Error("このセッションは ccn から承認に答えられない（人がターミナルで開いたセッション）。そのターミナルで答えて");
   const first: Pending | undefined = Array.isArray(detail?.pending) ? detail.pending[0] : undefined;
   if (!first) throw new Error("ccn に承認の要求が見当たらない");
   const { body, done } = permissionBody(first, choice, expectId, answers, message, suggestion);

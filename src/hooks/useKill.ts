@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { call as invoke } from "../bridge";
 import type { Agent, buildTree } from "../model";
 import { kickTown } from "../town";
+import { canStop } from "../abilities";
 
 /** 閉じる演出の長さ（ms）。CSS の kill-* と合わせる */
 const KILL_MS = 1150;
@@ -28,8 +29,8 @@ export function useKill(h: {
     // ゴースト（別の町にいる本物の影）は閉じない
     const walk = (x: Agent) => { for (const k of tree.childrenOf.get(x.id) ?? []) if (!k.ghost) walk(k); order.push(x); };
     if (alone) order.push(a); else walk(a);
-    const targets = order.filter((x) => x.capabilities?.stop);
-    const skipped = order.filter((x) => !x.capabilities?.stop);
+    const targets = order.filter(canStop);
+    const skipped = order.filter((x) => !canStop(x));
     setDying((m) => { const n = new Map(m); targets.forEach((x, i) => n.set(x.id, i * KILL_STAGGER)); return n; });
     if (!alone && selected && targets.some((x) => x.id === selected)) setSelected(null);
     const failed: Agent[] = [];

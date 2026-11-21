@@ -2,6 +2,7 @@ import { memo, useContext, useEffect, useRef, useState } from "react";
 import type { Agent } from "../model";
 import { succeedBlock } from "../succeed";
 import { KillCtx, SendCtx, SucceedCtx } from "../contexts";
+import { canStop as abilityStop } from "../abilities";
 
 /**
  * カードの右下のボタン（#63）。左から並べる順に書く。送る文を足し替えるときはここだけを直す。
@@ -41,7 +42,7 @@ export const CardActions = memo(function CardActions({ agent, place = "card" }: 
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
   const canSend = agent.canSend;
-  const canStop = !!agent.capabilities?.stop;
+  const canStop = abilityStop(agent);
   // 引き継げない理由（引き継げるなら null）と、いま引き継いでいる最中か
   const sucWhy = succeedBlock(agent, suc.local);
   const sucBusy = suc.busy.has(agent.id);

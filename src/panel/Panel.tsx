@@ -20,6 +20,7 @@ import { CardActions } from "../card/CardActions";
 import { StateTab } from "./StateTab";
 import { useConversation } from "./useConversation";
 import { usePanelSend } from "./usePanelSend";
+import { hasTerminal } from "../abilities";
 
 const NO_NOTES: PendingItem[] = [];
 
@@ -33,7 +34,7 @@ export function Panel({ agent, peer, lineage, descendants, termReq, chatReq, com
   sendHook: React.MutableRefObject<((id: string, text: string) => Promise<boolean> | null) | null>;
   onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
 }) {
-  const hasTerm = !!agent?.capabilities?.terminal;
+  const hasTerm = hasTerminal(agent);
   const town = useContext(TownCtx);
   const [tab, setTab] = useState<"term" | "talk" | "state">("talk");
   const [sheet, setSheet] = useState<"teleport" | null>(null);

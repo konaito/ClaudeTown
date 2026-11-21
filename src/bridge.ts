@@ -9,6 +9,7 @@ import { deltaOf } from "./conv";
 import { answerPermission } from "./webPerm";
 import { newConvState, readConversation, type ConvState } from "./webConv";
 import { cardNames, projectFromPath, type ConvItem } from "./model";
+import { NO_CAPS } from "./abilities";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 // ?mockport=<ポート> で、モック以外の口（本番のノードの前に置いた試験用の中継など）にも繋げる
@@ -164,7 +165,7 @@ function mockNative(rows: { id: string; parent: string | null; cwd: string }[]) 
   const root = rows.find((r) => !r.parent);
   if (!root) return [];
   const kid = rows.find((r) => r.parent === root.id) ?? root;
-  const ro = { send: false, permissions: false, interrupt: false, stop: false, terminal: false };
+  const ro = NO_CAPS;
   const now = Date.now();
   const sub = (id: string, parent: string, name: string, state: string, asked: string, said: string | null, doing: string | null) => ({
     id, name, project: projectFromPath(root.cwd), kind: "subagent", source: "native", state, cwd: root.cwd, startedAt: now - 60_000, lastActivityAt: now,

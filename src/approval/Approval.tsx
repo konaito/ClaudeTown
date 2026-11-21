@@ -7,6 +7,7 @@ import type { Agent } from "../model";
 import type { SessionDetail } from "../types";
 import { answerText, emptyPick, type Pick, type Question } from "./answers";
 import { alwaysOptions } from "./suggestions";
+import { canAnswerPermission } from "../abilities";
 
 type PendingReq = { requestId: string; toolName: string; input: Record<string, unknown>; suggestions?: unknown };
 type Answer = (choice: "allow" | "deny", extra?: { answers?: Record<string, string>; message?: string; suggestion?: number }) => Promise<void>;
@@ -25,7 +26,7 @@ export function Approval({ agent, peer, planHint, onDone, onError }: {
   const [busy, setBusy] = useState<"allow" | "deny" | null>(null);
   const [pending, setPending] = useState<PendingReq[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const canAnswer = !!agent.capabilities?.permissions;
+  const canAnswer = canAnswerPermission(agent);
   useEffect(() => {
     let alive = true;
     const load = () => invoke<SessionDetail | null>("session_detail", { sessionId: agent.id, peer: peer || null })

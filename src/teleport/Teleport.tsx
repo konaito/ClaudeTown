@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { call as invoke } from "../bridge";
 import type { Agent, Peer } from "../model";
 import type { TeleportInfo, TeleportPlan, TeleportResult } from "../types";
+import { hasTerminal } from "../abilities";
 
 /**
  * 転出（ccn の teleport）。行き先のノードと move / fork を選び、下見（移動元の説明）を見てから実行する。
@@ -71,7 +72,7 @@ export function Teleport({ agent, descendants, peers, onDone, onError }: { agent
           </div>
         )}
         {running && <div className="bad-text">作業中か承認待ちの人がいるので転出できない（{busyOnes.map((x) => x.name).join("、")}）。全員が待機になってから転出する。</div>}
-        <div className="hint">行き先に同じリポジトリが無ければ、ccn が行き先の ~/Documents に clone する。実行には最大95秒かかる。{agent.capabilities?.terminal ? "ターミナルのセッションは、行き先ではまだターミナルとして再開しない（ccn 側の対応待ち）。" : ""}</div>
+        <div className="hint">行き先に同じリポジトリが無ければ、ccn が行き先の ~/Documents に clone する。実行には最大95秒かかる。{hasTerminal(agent) ? "ターミナルのセッションは、行き先ではまだターミナルとして再開しない（ccn 側の対応待ち）。" : ""}</div>
       </div>
       {result ? (
         subtree ? (

@@ -10,6 +10,7 @@ import { useHistory } from "./useHistory";
 import { useHistorySearch } from "./useHistorySearch";
 import { routeOf } from "./route";
 import { viaCcn, type Support } from "../session/control";
+import { canInterrupt as abilityInterrupt, hasTerminal } from "../abilities";
 import {
   backslashNewline, histDown, isSlashCommand, histUp, killToEnd, killToStart, killWordBack, killWordForward,
   toLineEnd, toLineStart, wordBack, wordForward, type Edit, type Sel,
@@ -51,8 +52,8 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
 }) {
   const ta = useRef<HTMLTextAreaElement>(null);
   const local = !peer;
-  const hasTerm = !!agent.capabilities?.terminal;
-  const canInterrupt = !!agent.capabilities?.interrupt;
+  const hasTerm = hasTerminal(agent);
+  const canInterrupt = abilityInterrupt(agent);
   const [caret, setCaret] = useState(text.length);
   const [dismissed, setDismissed] = useState<string | null>(null);
   const [help, setHelp] = useState(false);
