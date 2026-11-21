@@ -2,8 +2,8 @@ import { Suspense, createContext, lazy, memo, useCallback, useContext, useEffect
 import { IS_WEB, call as invoke, setFullscreen } from "./bridge";
 import { pickTown, savedTown, saveTown } from "./webTown";
 import { lastTermSize } from "./term/size";
-import { perfEnd, perfMark, perfSetId, perfStart, perfWaitingPrompt } from "./term/perf";
-import { benchName, useBench } from "./term/bench";
+import { perfEnd, perfMark, perfStart, perfWaitingPrompt } from "./term/perf";
+import { useBench } from "./term/bench";
 import { collectMail, type Mail } from "./mail";
 import { flightsOf, resolve, type Flight } from "./letters";
 import { withGhosts } from "./ghost";
@@ -17,7 +17,9 @@ import { isVisible, onVisibleChange, pollBackoff, pollWhileVisible, shownAt } fr
 import { reuseAgents, reuseSnap } from "./snap";
 import { kickTown, otherTownRetryMs, watchTown } from "./town";
 import { SucceedError, kidsOf, startSuccessor, succeedBlock } from "./succeed";
-import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
+import { Group as SplitGroup, Panel as SplitPanel, Separator, usePanelRef, type Layout } from "react-resizable-panels";
+import { PanelLeftClose, PanelLeftOpen, Users, X } from "lucide-react";
+import { NewHousePane, createHousehold } from "./newHouse/NewHousePane";
 import "./App.css";
 import "./mobile/mobile.css";
 import { MobileShell } from "./mobile/MobileShell";
@@ -46,10 +48,24 @@ const OTHER_TOWN_KEEP_MS = 60000;
 /** 右パネルの幅（px）。最小と既定。最大はウィンドウ幅の半分（maxSize="50%"） */
 const SIDE_MIN = 380;
 const SIDE_DEFAULT = 380;
-const SPLIT_KEY = "claude-town.split";
-/** 前回の境目の位置。次に起動したときも同じにする */
+/** 左の新しい世帯のペイン（#89）の幅（px）。既定と最小。最大はウィンドウ幅の 30%。本人が決めていないので仮置き */
+const HOUSES_DEFAULT = 300;
+const HOUSES_MIN = 200;
+/** 町の最小の幅（px）。3枚が 900px（tauri.conf.json の minWidth）の窓に収まるようにする。#89 より前は窓の 50% */
+const TOWN_MIN = 240;
+/**
+ * 前回の境目の位置。次に起動したときも同じにする。#89 で3枚（houses、town、side）にしたので、キーを変えた。
+ * 前のキー（claude-town.split、town と side の2枚）は、戻したときの古い安定版が読むので書き換えない
+ */
+const SPLIT_KEY = "claude-town.split3";
 function savedSplit(): Layout | undefined {
   try { const v = JSON.parse(localStorage.getItem(SPLIT_KEY) ?? "null"); return v && typeof v === "object" ? v : undefined; } catch { return undefined; }
+}
+/** チャット（side）が閉じている間の並び l に、前に保存したチャットの幅を戻す。町（town）の幅で釣り合わせる。前の値が無ければ l のまま */
+function keepSide(l: Layout, prev: Layout | undefined): Layout {
+  const side = prev?.side ?? 0;
+  if (!side || l.houses === undefined) return l;
+  return { houses: l.houses, town: Math.max(0, 100 - l.houses - side), side };
 }
 function saveSplit(l: Layout) { try { localStorage.setItem(SPLIT_KEY, JSON.stringify(l)); } catch { /* 保存できなくても動きは変えない */ } }
 /** 閉じる演出の長さ（ms）。CSS の kill-* と合わせる */
@@ -75,6 +91,9 @@ const CARD_ACTIONS: CardAction[] = [
 const CARD_ACTIONS_ALWAYS = false;
 /** 押したあとの反応（ボタンの一瞬の変化）の長さ（ms）。CSS の card-act-* と合わせる */
 const CARD_ACT_FLASH_MS = 700;
+
+/** 世帯の要約の凡例に並べる順 */
+const LEGEND: Mood[] = ["working", "reply", "approval", "done", "idle"];
 
 /** いま見ている町のセッション（お手紙の送り手の名前を引くため） */
 const TownCtx = createContext<Agent[]>([]);
@@ -469,8 +488,25 @@ export default function App() {
   const panelProps = {
     agent: sel, peer, lineage: sel ? tree.lineage(sel) : [], descendants: sel ? descOf(tree.childrenOf, sel.id) : [], termReq, chatReq, composeReq, peers, sendHook: panelSend,
     onSent: (a: Agent) => { kickTown(); toast(`${a.name} に届けた`); }, onSent2: (m: string) => { kickTown(); toast(m); }, onError: (m: string) => toast(m, true),
-    needs, onSelect: (a: Agent) => setSelected(a.id),
+    needs, onSelect: (a: Agent) => setSelected(a.id), onClose: () => setSelected(null),
   };
+
+  // 3枚のペイン（#89）。左の新しい世帯のペインはヘッダーのボタンとドラッグで開け閉めする。
+  // 右のチャットは、セッションを選んでいないときに閉じ、選んだら開く。閉じても Panel は残す（入力欄の下書きを Panel が持っているため）
+  const housesRef = usePanelRef();
+  const sideRef = usePanelRef();
+  const [housesOpen, setHousesOpen] = useState(true);
+  const [sideOpen, setSideOpen] = useState(false);
+  const hasSel = !!sel;
+  const selRef = useRef(hasSel);
+  selRef.current = hasSel;
+  useLayoutEffect(() => {
+    const r = sideRef.current;
+    if (!r || mobile) return;
+    if (hasSel && r.isCollapsed()) r.expand();
+    else if (!hasSel && !r.isCollapsed()) r.collapse();
+  }, [hasSel, mobile]);
+  const toggleHouses = () => { const r = housesRef.current; if (!r) return; if (r.isCollapsed()) r.expand(); else r.collapse(); };
 
   return (
     <SkinCtx.Provider value={skinCtx}>
@@ -485,26 +521,50 @@ export default function App() {
           open={sel} mails={mails} curTown={curTown} unreachable={unreachable} onTown={changeTown} onPick={pick} onMail={(m) => openMail(m, true)} onBack={() => setSelected(null)}
           chat={(back) => <Panel {...panelProps} mobile onBack={back} />} />
       ) : (<>
-      <header className="top">
-        <div className="brand">
-          <HouseIcon />
-          <h1>Claude Town</h1>
-        </div>
-        <div className="top-mid">
-          <select className="node" value={peer} onChange={(e) => changeTown(e.target.value)}>
-            <option value="">{IS_WEB && selfPeer ? selfPeer.name : `このMac${selfPeer ? `（${selfPeer.name}）` : ""}`}</option>
-            {peers.filter((p) => !p.self).map((p) => (
-              <option key={p.name} value={p.name} disabled={p.status !== "healthy"}>{p.name}{p.status !== "healthy" ? "（つながらない）" : ""}</option>
-            ))}
-          </select>
-          <span className={`conn ${!snap?.ccn_ok ? "bad" : slow ? "slow" : "ok"}`} title={fail?.msg ?? ""}><i />{snap ? (!snap.ccn_ok ? "つながらない" : slow ? "つながりにくい" : "接続中") : "よみこみ中"}</span>
-        </div>
-        <div className="top-right" />
-      </header>
-
-      <SplitGroup className="body" orientation="horizontal" defaultLayout={savedSplit()} onLayoutChanged={saveSplit}>
-        <SplitPanel id="town" minSize="50%">
+      {/* 右のチャットが閉じている間は、左の幅と開閉だけを保存し、チャットの幅は前に保存した値を残す（0 を保存すると、次に開いたときのチャットの幅が最小に戻る） */}
+      <SplitGroup className="body" orientation="horizontal" defaultLayout={savedSplit()} onLayoutChanged={(l) => saveSplit(sideRef.current?.isCollapsed() ? keepSide(l, savedSplit()) : l)}>
+        <SplitPanel id="houses" panelRef={housesRef} collapsible collapsedSize={0} defaultSize={HOUSES_DEFAULT} minSize={HOUSES_MIN} maxSize="30%"
+          onResize={() => setHousesOpen(!housesRef.current?.isCollapsed())}>
+          <NewHousePane disabled={!local} onCreated={newHousehold} onError={(m) => toast(m, true)} />
+        </SplitPanel>
+        <Separator className={`split-handle${housesOpen ? "" : " closed"}`} />
+        <SplitPanel id="town" minSize={TOWN_MIN}>
         <div className="left">
+          {/* アプリのヘッダー。#89 で窓の上から中央のペインの最上部へ移した（本人の指定）。ノードの選択と接続の表示は、前の実装のまま */}
+          <header className="top">
+            <div className="brand">
+              {/* 左の新しい世帯のペインの開け閉め（#89）。アイコンは lucide の panel-left-close / panel-left-open（ISC）。置き場所は仮置き */}
+              <button className="side-toggle" onClick={toggleHouses} aria-label={housesOpen ? "新しい世帯のペインを閉じる" : "新しい世帯のペインを開く"}
+                title={housesOpen ? "新しい世帯のペインを閉じる" : "新しい世帯のペインを開く"} aria-expanded={housesOpen}>
+                {housesOpen ? <PanelLeftClose size={18} strokeWidth={1.8} /> : <PanelLeftOpen size={18} strokeWidth={1.8} />}
+              </button>
+              <HouseIcon />
+              <h1>Claude Town</h1>
+            </div>
+            <div className="top-mid">
+              <select className="node" value={peer} onChange={(e) => changeTown(e.target.value)}>
+                <option value="">{IS_WEB && selfPeer ? selfPeer.name : `このMac${selfPeer ? `（${selfPeer.name}）` : ""}`}</option>
+                {peers.filter((p) => !p.self).map((p) => (
+                  <option key={p.name} value={p.name} disabled={p.status !== "healthy"}>{p.name}{p.status !== "healthy" ? "（つながらない）" : ""}</option>
+                ))}
+              </select>
+              <span className={`conn ${!snap?.ccn_ok ? "bad" : slow ? "slow" : "ok"}`} title={fail?.msg ?? ""}><i />{snap ? (!snap.ccn_ok ? "つながらない" : slow ? "つながりにくい" : "接続中") : "よみこみ中"}</span>
+            </div>
+            <div className="top-right" />
+          </header>
+
+          {/* 世帯の要約。#89 でお便りの上へ移した（本人の指定） */}
+          <div className="fam-head">
+            <span className="fam-title"><Users size={20} strokeWidth={1.8} aria-hidden /> {tree.families.length}世帯・{agents.length}人</span>
+            {/* 凡例は数が 0 の項目を出さない。全部 0 なら凡例ごと出さない（本人の確認、#89） */}
+            {LEGEND.some((m) => counts[m]) && (
+              <span className="legend">
+                {LEGEND.filter((m) => counts[m]).map((m) => (
+                  <span key={m} className={`lg lg-${m}`}><i />{MOOD_LABEL[m]} {counts[m]}</span>
+                ))}
+              </span>
+            )}
+          </div>
           <NextRow mails={mails} curTown={curTown} unreachable={unreachable} working={counts.working} total={agents.length} onOpen={openMail} />
 
           {((err && !snap?.ccn_ok) || (snap && !snap.ccn_ok)) && (
@@ -514,16 +574,6 @@ export default function App() {
               <span className="hint">次: ターミナルで <code>ccn doctor</code> を実行する</span>
             </div>
           )}
-
-          <div className="fam-head">
-            <span className="fam-title"><PeopleIcon /> {tree.families.length}世帯・{agents.length}人</span>
-            <NewHousehold disabled={!local} onCreated={newHousehold} onError={(m) => toast(m, true)} />
-            <span className="legend">
-              {(["working", "reply", "approval", "done", "idle"] as Mood[]).map((m) => (
-                <span key={m} className={`lg lg-${m}`}><i />{MOOD_LABEL[m]}{counts[m] ? ` ${counts[m]}` : ""}</span>
-              ))}
-            </span>
-          </div>
 
           {snap && agents.length === 0 && snap.ccn_ok && (
             <div className="empty">
@@ -564,9 +614,11 @@ export default function App() {
         </div>
 
         </SplitPanel>
-        {/* 町と右パネルの境目。ドラッグで右パネルを 380px からウィンドウ幅の半分まで広げられる。ダブルクリックで既定の幅に戻る */}
-        <Separator className="split-handle" />
-        <SplitPanel id="side" defaultSize={SIDE_DEFAULT} minSize={SIDE_MIN} maxSize="50%">
+        {/* 町と右パネルの境目。ドラッグで右パネルを 380px からウィンドウ幅の半分まで広げられる。ダブルクリックで既定の幅に戻る。
+            右パネルを最小より細くドラッグすると閉じ、選ぶのをやめる（#89） */}
+        <Separator className={`split-handle side-sep${sideOpen ? "" : " closed"}`} />
+        <SplitPanel id="side" panelRef={sideRef} collapsible collapsedSize={0} defaultSize={SIDE_DEFAULT} minSize={SIDE_MIN} maxSize="50%"
+          onResize={() => { const closed = !!sideRef.current?.isCollapsed(); setSideOpen(!closed); if (closed && selRef.current) setSelected(null); }}>
         <Panel {...panelProps} />
         </SplitPanel>
       </SplitGroup>
@@ -1161,9 +1213,11 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
 
 // ---------- 右のパネル ----------
 
-function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq, peers, sendHook, onSent, onSent2, onError, needs, onSelect, mobile, onBack }: {
+function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq, peers, sendHook, onSent, onSent2, onError, needs, onSelect, mobile, onBack, onClose }: {
   /** スマホ専用の画面（src/mobile）。見出しを戻るつきの1行にし、転出と細かいボタンは出さない */
   mobile?: boolean; onBack?: () => void;
+  /** 見出しの × で選ぶのをやめる（#89）。右パネルが閉じる */
+  onClose?: () => void;
   agent: Agent | null; peer: string; lineage: Agent[]; descendants: Agent[]; termReq: number; chatReq: number; composeReq: number; peers: Peer[];
   /** カードのボタン（#63）が、選んでいるセッションへの送信をこのパネルに任せる口。選んでいないセッションなら null を返す */
   sendHook: React.MutableRefObject<((id: string, text: string) => Promise<boolean> | null) | null>;
@@ -1376,6 +1430,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
           <div className="p-task"><DocIcon />{linkify(taskOf(agent, mood))}</div>
         </div>
         <div className="p-actions">
+          {onClose && <button className="p-close" onClick={onClose} aria-label="チャットを閉じる" title="チャットを閉じる"><X size={16} strokeWidth={1.8} /></button>}
           <button className="pane-btn" disabled={!!peer} title={peer ? "転出できない: 別の機械のセッションの転出は、まだ出していない" : "転出: このセッションを別の機械（ccn のノード）へ移すか、複製する"} onClick={() => setSheet(sheet === "teleport" ? null : "teleport")}>転出</button>
           {/* カードの右下と同じボタン（CARD_ACTIONS）。カードに乗せなくても押せるよう、ここにも並べる */}
           {!agent.ghost && <CardActions agent={agent} place="head" />}
@@ -1432,19 +1487,15 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
 
 // ---------- 新しい世帯・転出 ----------
 
-/** 新しい世帯を作る。最初の依頼の欄は出さず、すぐ ~/Documents/meta で親（端末のセッション）を立て、右のチャットを開く */
+/** 町が空のときの「最初の世帯を作る」。最初の依頼の欄は出さず、すぐ ~/Documents/meta で親（端末のセッション）を立て、右のチャットを開く。
+ *  ふだんの作る口は左の新しい世帯のペイン（#89、src/newHouse） */
 function NewHousehold({ big, disabled, onCreated, onError }: { big?: boolean; disabled?: boolean; onCreated: (r: any) => void; onError: (m: string) => void }) {
   const [busy, setBusy] = useState(false);
   const go = async () => {
-    perfStart("new");
     setBusy(true);
     try {
-      // 前に開いたターミナルの大きさで起動する。開いた直後に大きさを変えて、claude が全部描き直すのを省く
-      const { cols, rows } = lastTermSize() ?? { cols: null, rows: null };
-      const r = await invoke<any>("create_session", { cwd: null, prompt: null, parent: null, name: benchName(), cols, rows, peer: null });
-      perfMark("create");
-      if (r?.id) perfSetId(r.id);
-      onCreated(r);
+      // 前に開いたターミナルの大きさで起動する。開いた直後に大きさを変えて、claude が全部描き直すのを省く（createHousehold の中）
+      onCreated(await createHousehold(null));
     } catch (e) { onCreated(null); onError(`世帯を作れなかった: ${e}`); } finally { setBusy(false); }
   };
   return (
@@ -1784,9 +1835,6 @@ function Credits({ skin, onSkin }: { skin: Skin; onSkin: (s: Skin) => void }) {
 
 function HouseIcon() {
   return (<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round"><path d="M3 11 12 3l9 8" /><path d="M5 10v10h14V10" /><path d="M10 20v-5h4v5" /></svg>);
-}
-function PeopleIcon() {
-  return (<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><circle cx="9" cy="8" r="3.2" /><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6" /><circle cx="17" cy="9" r="2.6" /><path d="M16 14.2c2.8.3 5 2.6 5 5.8" /></svg>);
 }
 function DocIcon() {
   return (<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M6 3h8l4 4v14H6z" /><path d="M9 12h6M9 16h6" /></svg>);

@@ -81,6 +81,13 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     case "term_input": return post(`/sessions/${a.sessionId}/terminal/input`, { text: a.text }) as T;
     case "term_resize": return post(`/sessions/${a.sessionId}/terminal/resize`, { cols: a.cols, rows: a.rows }) as T;
     case "session_detail": return j(`/sessions/${a.sessionId}`) as T;
+    // 新しい世帯のペイン（#89）の材料。Rust の house_places と同じ形で返す。新しい世帯は手元のノードにだけ作るので、peer は見ない。
+    // places は古い ccn やモックに無い（404）ので null にする。host が無いモックでは roots を空（絞らない）にする
+    case "house_places": {
+      const opt = (path: string) => fetch(`${MOCK}${path}`, { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      const [host, sessions, places] = await Promise.all([opt("/host"), fetch(`${MOCK}/sessions`, { credentials: "same-origin" }).then((r) => r.json()), opt("/places?limit=300")]);
+      return { roots: host?.roots ?? [], lobby: host?.lobby ?? null, sessions, places: places?.places ?? null } as T;
+    }
     // Rust の send_direct と同じく、貼り付けてから Enter を押す
     case "send_direct": {
       await post(`/sessions/${a.sessionId}/terminal/input`, { text: `\x1b[200~${String(a.text)}\x1b[201~` });
@@ -139,6 +146,8 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
     return (OFFLINE ? { ...s, ccn_ok: false, ccn_error: OFFLINE_ERR, cached_at: LOADED_AT - 25 * 60 * 1000 } : s) as T;
   }
   if (cmd === "peers") return devJson<T>("dev-peers.json", [] as T);
+  // 見た目の確認用: public/dev-house-places.json（Rust の house_places の出力）。無ければ空の一覧
+  if (cmd === "house_places") return devJson<T>("dev-house-places.json", { roots: [], lobby: null, sessions: [], places: null } as T);
   // ブラウザ表示では本物の会話を読めない。別のセッションの会話を見せて取り違えに見えないよう、仮の1件だけ返す
   // 見た目の確認用: ?longconv を付けると、スクロールが要る長さの仮の会話を返す
   // 見た目の確認用: ?conv を付けると public/dev-conversation.json（`--conversation <id>` の出力の Ok）を返す
