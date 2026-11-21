@@ -579,10 +579,6 @@ mod cmd {
     #[tauri::command]
     pub async fn town_agents(peer: Option<String>) -> Result<Vec<Value>, String> { blocking(move || super::town_agents(peer)).await }
     #[tauri::command]
-    pub async fn answer_permission(session_id: String, choice: String, expect_id: Option<String>, answers: Option<Value>, message: Option<String>, suggestion: Option<usize>, peer: Option<String>) -> Result<String, String> {
-        blocking(move || super::answer_permission(session_id, choice, expect_id, answers, message, suggestion, peer)).await
-    }
-    #[tauri::command]
     pub async fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, succeed: Option<bool>, peer: Option<String>) -> Result<Value, String> {
         blocking(move || super::create_session(cwd, prompt, parent, name, cols, rows, resume, fork, succeed, peer)).await
     }
@@ -769,7 +765,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            cmd::snapshot, cmd::town_agents, cmd::peers, conversation::cmd::conversation, conversation::cmd::conversation_cache, conversation::cmd::send_message, cmd::answer_permission,
+            cmd::snapshot, cmd::town_agents, cmd::peers, conversation::cmd::conversation, conversation::cmd::conversation_cache, conversation::cmd::send_message, permission::cmd::answer_permission,
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, cmd::house_places, cmd::place_repos, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick, town_settings, set_town_settings,
             cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::session_controls, cmd::configure_session, cmd::run_command, cmd::paste_clipboard, cmd::stage_files
