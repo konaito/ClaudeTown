@@ -578,9 +578,6 @@ mod cmd {
     pub async fn snapshot(peer: Option<String>) -> Result<Snapshot, String> { blocking(move || Ok(super::snapshot(peer))).await }
     #[tauri::command]
     pub async fn town_agents(peer: Option<String>) -> Result<Vec<Value>, String> { blocking(move || super::town_agents(peer)).await }
-    /// 新しい世帯の一覧の各場所に連携しているリポジトリ名（owner/repo）。.git/config を読むだけ（#99）
-    #[tauri::command]
-    pub async fn place_repos(paths: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> { blocking(move || Ok(super::repo::repos_of(&paths))).await }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -701,7 +698,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             cmd::snapshot, cmd::town_agents, cmd::peers, conversation::cmd::conversation, conversation::cmd::conversation_cache, conversation::cmd::send_message, permission::cmd::answer_permission,
-            session_ops::cmd::create_session, session_ops::cmd::stop_session, teleport, session_ops::cmd::teleport_info, session_ops::cmd::session_detail, session_ops::cmd::house_places, cmd::place_repos, term_open, term_close, term_input, term_resize,
+            session_ops::cmd::create_session, session_ops::cmd::stop_session, teleport, session_ops::cmd::teleport_info, session_ops::cmd::session_detail, session_ops::cmd::house_places, repo::cmd::place_repos, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick, town_settings, set_town_settings,
             composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::interrupt_session, composer::cmd::session_controls, composer::cmd::configure_session, composer::cmd::run_command, attach::cmd::paste_clipboard, attach::cmd::stage_files
         ])
