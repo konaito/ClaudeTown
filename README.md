@@ -138,12 +138,10 @@ hook は本物の `claude -p` で試し、頼まれたこと、道具、最後�
 - プロダクト名は Claude Town にする（2026-11-12）。数える単位は世帯で、画面の見出しは「5世帯・23人」のように出す。
 - 世帯とカードの名前は、そのセッションが作業しているプロジェクトの名前にする（2026-11-13）。プロジェクトの名前は、リポジトリの本体のディレクトリの名前（例 family-computing）。決め方は `src-tauri/src/naming.rs` と `src/model.ts` の cardNames に同じものを書き、試験の事例は `src/naming-cases.json` にまとめて両方で読む。
   1. git の worktree は、`.git` の gitdir から本体の名前に直す（この機械の町だけ）。`.git` を読めないときは `<名前>.wt/<x>` を <名前> にし、それ以外は cwd の最後の名前にする。
-  2. cwd が振り分けの場所（ホーム、`~/Documents`、`~/Documents/meta`、`~/.local/share/ccn/lobby`、`/`、`/tmp`、`/private/tmp`、`/root`）なら、子孫のプロジェクトで一番多いものにする。振り分けの場所にいる子孫は数えず、同数なら先に始まった子孫の分にする。
-  3. 子孫から分からなければ、エージェントが `python3 scripts/hook.py name <プロジェクトの名前>` で付けた名前にする。それも無ければ cwd の最後の名前（meta など）のままにする。
-  4. cwd が無ければ ccn の題名、それも無ければセッション ID の先頭8字にする。
-- 世帯の名前は、根のカードの名前と同じにする。画面からは変えられない（2026-11-21 に本人が付ける機能を消した）。旧版が `houses.json` に書いた by=human の名前は、読んでも使わず、消さない。
-- 振り分けの場所で動く親が、別のプロジェクトで子を作ると（ccn の create_session か Specter の spawn_child）、状態 hook が「そのプロジェクトのディレクトリの名前を `hook.py name` で付けて」と促す。促すのは、まだ名前が無いときの1回だけにする。meta のような振り分け役は毎回違うプロジェクトで子を作るので、名前が付いた後は付け直しを勧めない（2026-11-14）。Specter の子は ccn に親が残らず、アプリが子孫として数えられないので、この名前で世帯の名前が分かる。
-- チャットの発言とお手紙の差出人には、発言したセッション自身の名前を出す。ふつうはカードの名前と同じにする。振り分けの場所で動くセッションは、カードの名前が子孫のプロジェクトの名前になるので、発言には cwd の最後の名前（meta など）を出す（2026-11-14、src/model.ts の speakerName）。
+  2. cwd があれば、cwd のプロジェクトの名前にする。ホーム、`~/Documents` 直下、`~/.local/share/ccn/lobby`、`/`、`/tmp` も cwd の最後の名前のままにする（子孫の cwd は見ない）。
+  3. cwd が無ければ ccn の題名、それも無ければセッション ID の先頭8字にする。
+- 世帯の名前は、根（親）のカードの名前と同じにする。子のプロジェクトは世帯の名前に影響しない。親が meta なら世帯の名前は meta になる（2026-11-21、#93）。画面からも、エージェント（旧 `hook.py name`、hook の促し）からも付けられない。旧版が `~/.family-computing/houses.json` に書いた名前（by=human、by=agent）は、読まず、消さない。
+- チャットの発言とお手紙の差出人には、発言したセッション自身のカードの名前を出す。
 - キャラの見た目は、右下の「素材」を開いた中の「キャラの見た目」で「いつもの」と「ポケモン」を切り替えられる。使う素材が見た目で変わるので、素材の表示と同じ所に置く。既定は「いつもの」で、選んだ値はこの画面の localStorage に残す。ポケモンでは、世帯の根のセッションの ID から3段進化の系統を1つ決め、親を3段目（最終進化）、子を2段目、孫（孫より下も）を1段目で描く。例えばリザードンの系統なら、親がリザードン、子がリザード、孫がヒトカゲになる。作業中は GIF を動かして小さく跳ねさせ、それ以外は1フレームを止める。絵は2Dのドット絵で、アニメの無い番号（第6世代以降の一部、38番号）は作業中も止め絵のまま跳ねる（2026-11-18、#76）。状態の印と待機の薄さは「いつもの」と同じ。GIF が読めないときは、その1体だけ「いつもの」の絵に戻す（2026-11-13）。
 
 ## 決まっていないこと
@@ -208,11 +206,11 @@ scripts/rollback-stable.sh    # 今の版と1つ前の版を入れ替える。�
 
 戻すときも、状態 hook を戻した先の版のタグから写し直す。アプリを入れ替えずに hook だけを写し直すときは `scripts/install-stable-hooks.sh [タグ]` を使う（タグを省くと、いま入っている版のタグから写す）。
 
-作業ツリーの hook を試すときは、手で見本の入力を流す。`FC_STATE_DIR`、`FC_LETTERS`、`FC_HOUSES` を一時の場所に向けると、本物の状態ファイルに書かない。
+作業ツリーの hook を試すときは、手で見本の入力を流す。`FC_STATE_DIR`、`FC_LETTERS` を一時の場所に向けると、本物の状態ファイルに書かない。
 
 ```bash
 echo '{"session_id":"0123abcd-0000-0000-0000-000000000001","hook_event_name":"UserPromptSubmit","prompt":"試し"}' \
-  | FC_STATE_DIR=/tmp/fc-try FC_LETTERS=/tmp/fc-try/letters.jsonl FC_HOUSES=/tmp/fc-try/houses.json python3 hooks/fc-report.py
+  | FC_STATE_DIR=/tmp/fc-try FC_LETTERS=/tmp/fc-try/letters.jsonl python3 hooks/fc-report.py
 ```
 
 本物のセッションで試すときだけ、`python3 scripts/hook.py install --worktree` で作業ツリーの hook に登録を替える。その間は安定版にも作業ツリーの hook の内容が出るので、済んだら `python3 scripts/hook.py install` で写した先に戻す。2つを同時に登録しないのは、同じ状態ファイルに2つの版の hook が書くと、作業ツリーの hook がまた安定版の表示に混ざるためである。
@@ -223,13 +221,11 @@ echo '{"session_id":"0123abcd-0000-0000-0000-000000000001","hook_event_name":"Us
 
 - 状態 hook は1つだけ登録してあり、両版が同じ状態ファイルを読む。登録先は安定版のタグから写した `~/.family-computing/stable/hooks/fc-report.py` なので、作業ツリーの hook を書き換えても、安定版を上げ直すまで両版に出る内容は変わらない。
 - hook が書くファイル（state/、letters.jsonl）と、送信の非常停止（send-disabled）は、両版が `~/.family-computing/` の同じものを読む。非常停止は1か所で両版を止めるために共有にしてある。
-- エージェントが hook（`scripts/hook.py name`）で付けた世帯の名前は、`~/.family-computing/houses.json` に入り、両版が読む。
 
 両版で分けているもの:
 
-- アプリが書くファイル（avatars.json、avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json、houses.json）は、安定版は `~/.family-computing/` に、開発版は `~/.family-computing/dev/` に置く。開発版でキャラの割り当てや世帯の名前を変えても、安定版のファイルは変わらない。
+- アプリが書くファイル（avatars.json、avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json）は、安定版は `~/.family-computing/` に、開発版は `~/.family-computing/dev/` に置く。開発版でキャラの割り当てを変えても、安定版のファイルは変わらない。
 - どちらに置くかは、ビルドに入った identifier で決める。安定版の identifier なら今までの場所、それ以外（開発版）なら dev/ にする。環境変数を付け忘れても、開発版が安定版のファイルに書かない。
-- 開発版の世帯の名前は、共有の houses.json を下地に読み、開発版の houses.json を上に重ねる。本人が開発版の画面で付けた名前は開発版の分にだけ書く。開発版で名前を消しても、共有の分にある名前は残って見える。
 - 置き場所を決める関数は `src-tauri/src/lib.rs` の `fc_path` だけにしてある。`FC_APP_HOME` を付けると、アプリが書くファイルの置き場所だけを差し替えられる。`FC_AVATARS` と `FC_HOUSES` は今までどおり使える。
 - 置き場所は `src-tauri/target/debug/family-computing --paths` で確かめられる。identifier と、各ファイルの置き場所を出す。
 - 開発版の dev/ は、初めて起動したときは空なので、キャラは安定版と違う顔ぶれで振り直される。avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json の3つは、キャラの選び方の変更（feat/char-age）が入った版から使う。
@@ -252,7 +248,7 @@ Claude Town は、ブラウザから開けるインストール可能な PWA と
 
 | 機能 | 状態 |
 | --- | --- |
-| お手紙、プロンプト履歴、スラッシュ補完、ファイルの候補、クリップボードの貼り付け、世帯の名前の変更 | 動かない |
+| お手紙、プロンプト履歴、スラッシュ補完、ファイルの候補、クリップボードの貼り付け| 動かない |
 | 町の一覧の名前づけ | パスの形だけで決める（Rust は `.git` も読む） |
 
 ### スマホ専用の画面

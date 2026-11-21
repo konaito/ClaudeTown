@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { accountText, cardNames, houseNameOf, isDispatchPlace, projectFromPath, speakerName, targetLabel, type Agent, type Who } from "./model";
+import { accountText, cardNames, houseNameOf, projectFromPath, targetLabel, type Agent, type Who } from "./model";
 import cases from "./naming-cases.json";
 
 const ag = (id: string, cwd: string, over: Partial<Agent> = {}): Agent => ({
@@ -16,15 +16,7 @@ describe("cardNames（src/naming-cases.json）", () => {
   }
 });
 
-describe("振り分けの場所とプロジェクトの名前", () => {
-  test("振り分けの場所", () => {
-    for (const p of ["/Users/x/Documents/meta", "/Users/x/Documents/meta/", "/Users/x", "/home/x/.local/share/ccn/lobby", "/tmp", "/private/tmp", "/", "/Users/x/Documents"]) {
-      expect(isDispatchPlace(p)).toBe(true);
-    }
-    for (const p of ["/Users/x/Documents/meta.wt/delegation", "/Users/x/Documents/family-computing", "/tmp/foo", "/Users/x/Documents/meta/sub"]) {
-      expect(isDispatchPlace(p)).toBe(false);
-    }
-  });
+describe("プロジェクトの名前", () => {
   test("worktree はパスの形でも本体の名前", () => {
     expect(projectFromPath("/Users/x/Documents/family-computing.wt/chat")).toBe("family-computing");
     expect(projectFromPath("/a/b/")).toBe("b");
@@ -37,33 +29,12 @@ describe("houseNameOf", () => {
     const root = ag("r", "/Users/x/Documents/family-computing", { name: "family-computing" });
     expect(houseNameOf(root)).toBe("family-computing");
   });
-  test("保存された名前（本人、エージェントのどちらも）は見ない", () => {
-    for (const by of ["human", "agent"] as const) {
-      const root = ag("r", "/Users/x/Documents/family-computing", { name: "family-computing", house: { name: "うち", by } });
-      expect(houseNameOf(root)).toBe("family-computing");
-    }
-  });
-});
-
-describe("speakerName（発言の差出人の名前）", () => {
-  test("振り分けの場所の親は、子孫のプロジェクトでなく自分の cwd の名前", () => {
-    const sessions: Who[] = [
+  test("親が meta なら世帯の名前は meta。子のプロジェクトにはならない", () => {
+    const names = cardNames([
       { id: "p", cwd: "/Users/x/Documents/meta" },
-      { id: "c", cwd: "/Users/x/Documents/family-computing", parent: "p" },
-    ];
-    const names = cardNames(sessions);
-    expect(names.get("p")).toBe("family-computing");
-    expect(speakerName(ag("p", "/Users/x/Documents/meta", { name: names.get("p")! }))).toBe("meta");
-    expect(speakerName(ag("c", "/Users/x/Documents/family-computing", { name: names.get("c")! }))).toBe("family-computing");
-  });
-  test("ふつうの場所ではカードの名前のまま（worktree は本体の名前）", () => {
-    expect(speakerName(ag("a", "/Users/x/Documents/family-computing.wt/chat", { name: "family-computing" }))).toBe("family-computing");
-  });
-  test("ホーム、ccn の受け口、/、cwd 無し", () => {
-    expect(speakerName(ag("a", "/Users/x", { name: "family-computing" }))).toBe("x");
-    expect(speakerName(ag("a", "/Users/x/.local/share/ccn/lobby", { name: "family-computing" }))).toBe("lobby");
-    expect(speakerName(ag("a", "/", { name: "family-computing" }))).toBe("/");
-    expect(speakerName(ag("a", "", { name: "題名" }))).toBe("題名");
+      { id: "c", cwd: "/Users/x/Documents/voice-clone", parent: "p" } as Who,
+    ]);
+    expect(houseNameOf(ag("p", "/Users/x/Documents/meta", { name: names.get("p")! }))).toBe("meta");
   });
 });
 

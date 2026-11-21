@@ -61,7 +61,7 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
         letters: WEB ? [] : await fetch("/dev-letters.json", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
         // 名前は Rust の snapshot と同じ決め方（src/model.ts の cardNames）。モックでは .git を読まないので、パスの形だけで決める
         agents: (() => {
-          const names = cardNames(live.map((s) => ({ id: s.id, cwd: s.cwd, title: s.title, parent: parentOf(s), startedAt: s.startedAt })));
+          const names = cardNames(live.map((s) => ({ id: s.id, cwd: s.cwd, title: s.title })));
           return live.map((s) => ({ id: s.id, name: names.get(s.id), project: s.cwd ? projectFromPath(s.cwd) : null, kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities, account: s.account ?? null, accountEmail: s.accountEmail ?? null }));
         })(),
       } as T;

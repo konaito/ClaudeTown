@@ -338,21 +338,16 @@ fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<V
         live_ids.iter().find(|id| id.starts_with(sid8)).cloned()
     };
 
-    let houses = read_houses();
     // 名前は、そのセッションが作業しているプロジェクトの名前（src-tauri/src/naming.rs）。
     // .git を読むのはこの機械の町だけ。別の機械の cwd はパスの形だけで決める
     let local = peer.is_none();
     let whos: Vec<naming::Who> = live.iter().map(|s| {
         let id = s["id"].as_str().unwrap_or_default().to_string();
         let cwd = s["cwd"].as_str().filter(|c| !c.is_empty());
-        let house = houses.get(&id);
         naming::Who {
-            parent: parent_from_ccn(s).filter(|p| *p != id),
             cwd: cwd.map(String::from),
             title: s["title"].as_str().map(String::from),
             project: cwd.and_then(|c| naming::project_of(c, local)),
-            agent_name: house.filter(|h| h["by"] == "agent").and_then(|h| h["name"].as_str()).map(String::from),
-            started_at: s["startedAt"].as_u64().unwrap_or(0),
             id,
         }
     }).collect();
@@ -390,7 +385,6 @@ fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<V
             // どのアカウントで動いているか（cam のコマンド名と email）。ccn の PR #56 から載る。古い ccn と、選べなかったセッションでは null
             "account": s["account"],
             "accountEmail": s["accountEmail"],
-            "house": houses.get(&id).cloned(),
             "report": report,
             // status が ok/ng なら short は直下、working/checking なら前回の判定が last に入っている
             "closeCheck": close_check.map(|c| json!({
@@ -494,25 +488,13 @@ fn avatars_path(peer: &Option<String>) -> PathBuf {
 // ---------- 家の名前 ----------
 
 /// 世帯の名前の置き場所。（共有の分, アプリが書く分）を返す。
-/// 共有の分には、hook（scripts/hook.py name）でエージェントが付けた名前が入る。アプリは自分の分にだけ書く。
+/// 旧版が書いた houses.json の置き場所。今は名前に使わない（--paths の表示だけに残してある）。
 /// 安定版では2つは同じファイル。FC_HOUSES があれば、両方ともそのファイルにする
 fn houses_paths() -> (PathBuf, PathBuf) {
     match std::env::var("FC_HOUSES") {
         Ok(p) if !p.is_empty() => (PathBuf::from(&p), PathBuf::from(p)),
         _ => (fc_path(Scope::Shared, "houses.json"), fc_path(Scope::App, "houses.json")),
     }
-}
-
-/// houses.json を読む。共有の分を下地にして、アプリの分（開発版の dev/ の下）を上に重ねる。使うのは by=agent の名前だけ（by=human は旧版の名残で、読んでも使わない）
-fn read_houses() -> Value {
-    let (shared, own) = houses_paths();
-    let mut out = read_json_cached(&shared).filter(Value::is_object).unwrap_or(json!({}));
-    if own != shared {
-        if let (Some(base), Some(Value::Object(top))) = (out.as_object_mut(), read_json_cached(&own)) {
-            base.extend(top);
-        }
-    }
-    out
 }
 
 // ---------- 会話 ----------

@@ -21,7 +21,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import sys
 import time
 from pathlib import Path
@@ -29,14 +28,8 @@ from pathlib import Path
 STATE_DIR = Path(os.environ.get("FC_STATE_DIR", Path.home() / ".family-computing" / "state"))
 LETTERS = Path(os.environ.get("FC_LETTERS", Path.home() / ".family-computing" / "letters.jsonl"))
 LETTERS_MAX = 1024 * 1024
-HOUSES = Path(os.environ.get("FC_HOUSES", Path.home() / ".family-computing" / "houses.json"))
 # 子を作る道具。ccn の MCP の create_session（親は from 行で ccn に残る）と、Specter の spawn_child（ccn には親が残らない）
 MAKE_CHILD = ("mcp__ccn__create_session", "mcp__specter-agents__spawn_child")
-# 振り分けの場所（依頼を振り分けるだけの場所）。src-tauri/src/naming.rs と src/model.ts の一覧と同じ。
-# ホーム（/Users/<名前> か /home/<名前>）からの相対の分（空はホームそのもの）と、絶対パスの分
-DISPATCH_UNDER_HOME = ["", "Documents", "Documents/meta", ".local/share/ccn/lobby"]
-DISPATCH_ABSOLUTE = ["/", "/tmp", "/private/tmp", "/root"]
-NAME_CMD = f"python3 {Path(__file__).resolve().parent.parent / 'scripts' / 'hook.py'} name"
 KEEP_SEC = 3 * 24 * 3600
 MAX = 90
 
@@ -156,75 +149,6 @@ def write(sid, patch, data):
     tmp = p.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(cur, ensure_ascii=False))
     os.replace(tmp, p)
-
-
-def is_dispatch_place(cwd):
-    """cwd が振り分けの場所か。パスの形だけで決める（src-tauri/src/naming.rs の is_dispatch_place と同じ）"""
-    segs = [x for x in str(cwd or "").split("/") if x]
-    if "/" + "/".join(segs) in DISPATCH_ABSOLUTE:
-        return True
-    if len(segs) >= 2 and segs[0] in ("Users", "home"):
-        return "/".join(segs[2:]) in DISPATCH_UNDER_HOME
-    return False
-
-
-def project_of(cwd):
-    """cwd のプロジェクトの名前。git の worktree なら本体のディレクトリの名前、`<名前>.wt/<x>` なら <名前>、
-    それ以外は最後の名前（src-tauri/src/naming.rs の project_of と同じ）"""
-    try:
-        dot = Path(cwd) / ".git"
-        if dot.is_file():
-            raw = next((l[len("gitdir:"):].strip() for l in dot.read_text().splitlines() if l.startswith("gitdir:")), "")
-            gitdir = Path(raw) if os.path.isabs(raw) else Path(cwd) / raw
-            common = None
-            if (gitdir / "commondir").is_file():
-                c = (gitdir / "commondir").read_text().strip()
-                common = Path(c) if os.path.isabs(c) else gitdir / c
-            elif gitdir.parent.name == "worktrees":
-                common = gitdir.parent.parent
-            if common is not None:
-                common = Path(os.path.normpath(common))
-                name = common.parent.name if common.name == ".git" else common.name.removesuffix(".git")
-                if name:
-                    return name
-    except Exception:
-        pass
-    segs = [x for x in str(cwd or "").split("/") if x]
-    if len(segs) >= 2 and segs[-2].endswith(".wt") and len(segs[-2]) > 3:
-        return segs[-2][:-3]
-    return segs[-1] if segs else None
-
-
-def house_nudge(sid, own_cwd, child_cwd):
-    """振り分けの場所（meta など）で動く親が、別のプロジェクトで子を作ったら、世帯の名前をそのプロジェクトの
-    ディレクトリの名前にするよう促す文を返す。まだ名前が無いときに1回だけ。
-    振り分けの場所でない親は、自分の cwd のプロジェクトがそのまま名前になるので促さない。
-    名前が付いた後は、別のプロジェクトで子を作っても付け直しを勧めない。meta のような振り分け役は毎回違う
-    プロジェクトで子を作るので、勧めると子を作るたびに名前が替わる。子孫が町にいる間は、カードと世帯の名前は
-    子孫のプロジェクトで一番多いものになり（src-tauri/src/naming.rs）、この名前は使われない"""
-    own_cwd, child_cwd = (os.path.expanduser(str(c)) if c else c for c in (own_cwd, child_cwd))
-    if not own_cwd or not is_dispatch_place(own_cwd) or not child_cwd or is_dispatch_place(child_cwd):
-        return None
-    project = project_of(child_cwd)
-    if not project:
-        return None
-    try:
-        houses = json.loads(HOUSES.read_text())
-    except Exception:
-        houses = {}
-    cur = houses.get(sid) or {}
-    # 旧版で本人が付けた名前（by=human）は、アプリが使わないので無いものとして扱う
-    if cur.get("by") == "agent" and cur.get("name"):
-        return None
-    nudged = cur_field(sid, "house_nudged_projects") or []
-    if not isinstance(nudged, list) or nudged:
-        return None
-    write(sid, {"house_nudged_projects": nudged + [project]}, {})
-    cmd = f"`{NAME_CMD} {shlex.quote(project)}`"
-    head = "Claude Town: この世帯の名前は、作業しているプロジェクトのディレクトリの名前にします。依頼の文の要約は名前にしません。"
-    return (
-        f"{head}子を {project} で動かしたので、Bash で {cmd} を1回実行してください。"
-    )
 
 
 def perm_item(name, inp):
@@ -411,11 +335,6 @@ def main():
                 pass
         if ev == "PostToolUse" and data.get("tool_name") in MAKE_CHILD:
             write(sid, {"made_child": True}, data)
-            inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-            # cwd を省いた子は、ccn なら受け口、Specter なら親と同じ場所で動く。どちらも振り分けの場所なので促さない
-            nudge = house_nudge(sid, data.get("cwd"), inp.get("cwd"))
-            if nudge:
-                emit_context("PostToolUse", nudge)
     elif ev == "Notification":
         kind = data.get("notification_type") or ""
         msg = data.get("message") or ""
