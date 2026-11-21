@@ -115,7 +115,7 @@ pub struct Who {
 }
 
 /// カードの名前を全員分決める。世帯の名前は根のカードの名前なので、親のプロジェクトの名前になる。
-/// 1. cwd が無ければ ccn の題名、それも無ければ ID の先頭8字
+/// 1. cwd が無ければセッションの題名（sessions/<pid>.json の name）、それも無ければ ID の先頭8字
 /// 2. cwd があれば、cwd のプロジェクトの名前（worktree は本体の名前。~/Documents 直下、ホーム、/tmp なども cwd の最後の名前）。
 ///    子孫の cwd や、エージェントが付けた名前（houses.json）は見ない
 pub fn card_names(ws: &[Who]) -> HashMap<String, String> {

@@ -3,13 +3,11 @@
 // - prompt_history(cwd): CLI の入力履歴（~/.claude/history.jsonl）。上下キーは同じ project の分、Ctrl+R は全部
 // - slash_commands(cwd): / の候補にするスキルとコマンド（ユーザー、プロジェクト、有効なプラグイン）。組み込みのコマンドは画面が持つ
 // - file_suggestions(cwd, query): @ の候補にするファイルとフォルダ
-// - send_direct(session_id, text, peer): PTY のセッションの入力欄へ直接貼って Enter を押す。先頭が / か ! の文に使う
-// - interrupt_session(session_id, peer): ccn の interrupt の口（Esc と Ctrl+C）
-//
-// 手元のファイルを読む命令（履歴、スキル、ファイル）は、この機械のセッションにだけ使う。別の機械の分は ccn の口が無いので返さない。
+// - send_direct(session_id, text): このアプリが立てた端末（pty.rs）の入力欄へ貼って Enter を押す。チャット欄の送信はすべてこれ
+// - interrupt_session(session_id): 端末に Esc を書いて、claude の今のターンを止める
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,7 +27,7 @@ pub struct History {
 const HISTORY_ALL_MAX: usize = 1000;
 const HISTORY_PROJECT_MAX: usize = 1000;
 
-/// ccn が本文の前に付ける1行（from <誰> via <ノード>）を外す。人が打ったのは、その後ろの文だから
+/// 別のプロダクト（ccn など）が本文の前に付ける1行（from <誰> via <ノード>）を外す。人が打ったのは、その後ろの文だから
 pub fn strip_from_line(s: &str) -> &str {
     if let Some(rest) = s.strip_prefix("from ") {
         if let Some(nl) = rest.find('\n') {
@@ -358,130 +356,51 @@ pub fn paste_body(text: &str) -> String {
     text.replace("\x1b[201~", "").replace("\x1b[200~", "")
 }
 
-/// 先頭が / か ! の文を、PTY のセッションの入力欄へ直接貼り、Enter を押す。
-/// ccn の send_message は本文の前に from の1行を付けるので、/ と ! が CLI のコマンドとして動かない（2026-11-13 に実測）。
-/// 端末の口は ccn の send が持つ検査（承認待ちの拒否）を通らないので、ここで先に見る。承認待ちのときに Enter を送ると、許可を押したことになる
-pub fn send_direct(session_id: String, text: String, peer: Option<String>) -> Result<(), String> {
-    if super::send_disabled() {
-        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
-    }
+/// チャット欄の文を、このアプリが立てた端末の入力欄へ貼り、Enter を押す。/ と ! の文も、CLI に打ったのと同じに動く。
+/// 承認待ちのときに Enter を送ると、許可を押したことになるので、送る前に状態を見る（check_direct）
+pub fn send_direct(session_id: String, text: String) -> Result<(), String> {
+    super::refuse_if_disabled()?;
     if text.trim().is_empty() {
         return Err("文が空".into());
     }
-    let peer = peer.filter(|p| !p.is_empty());
-    let base = super::api(&peer);
-    let d = super::get_json(&format!("{base}/sessions/{session_id}"))?;
-    check_direct(&d, super::now_ms() as u64)?;
-    let url = format!("{base}/sessions/{session_id}/terminal/input");
-    let post = |t: &str| {
-        super::agent()
-            .post(&url)
-            .timeout(Duration::from_secs(5))
-            .send_json(json!({ "text": t }))
-            .map(|_| ())
-            .map_err(|e| format!("ターミナルに書けなかった: {e}"))
-    };
-    post(&format!("\x1b[200~{}\x1b[201~", paste_body(&text)))?;
-    // ccn の PTY の send と同じく、貼り付けと Enter の間を空ける（pasteDelayMs の既定 150ms）
+    let started = super::pty::started_at(&session_id).ok_or("このセッションの端末はこのアプリに無い")?;
+    let row = super::native_state(&session_id);
+    let hooked = super::fc_path(super::Scope::Shared, &format!("state/{session_id}.json")).exists();
+    check_direct(row.as_ref(), hooked, started, super::now_ms() as u64)?;
+    super::pty::write(&session_id, &format!("\x1b[200~{}\x1b[201~", paste_body(&text)))?;
+    // 貼り付けと Enter の間を空ける。続けて書くと、貼り付けの最後と Enter が1つの入力として読まれ、改行になることがある
     std::thread::sleep(Duration::from_millis(150));
-    post("\r")
+    super::pty::write(&session_id, "\r")
 }
 
-/// 直接送ってよい状態か。PTY で、claude が動いていて、承認や質問を待っていないこと
-pub fn check_direct(d: &Value, now_ms: u64) -> Result<(), String> {
-    if d.pointer("/capabilities/terminal").and_then(|v| v.as_bool()) != Some(true) {
-        return Err("このセッションには端末が無いので、/ と ! のコマンドを直接は送れない".into());
+/// 直接送ってよい状態か。row は Claude Code の記録（sessions/<pid>.json）から読んだ行（まだ無ければ None）。
+/// hooked は hook の状態ファイル（state/<id>.json）があるか
+pub fn check_direct(row: Option<&Value>, hooked: bool, started_at: u64, now_ms: u64) -> Result<(), String> {
+    if let Some(r) = row {
+        if r.get("state").and_then(|s| s.as_str()) == Some("waiting_permission") {
+            return Err("承認待ちなので送らなかった。先にターミナルで承認に答えて".into());
+        }
     }
-    match d.get("state").and_then(|s| s.as_str()) {
-        Some("exited") => return Err("セッションが終わっている".into()),
-        Some("waiting_permission") => return Err("承認待ちなので送らなかった。先に承認に答えて".into()),
-        _ => {}
-    }
-    if d.get("pending").and_then(|p| p.as_array()).map(|a| !a.is_empty()).unwrap_or(false) {
-        return Err("承認待ちなので送らなかった。先に承認に答えて".into());
-    }
-    // claude が起動し、信頼の確認を抜けたか。ccn の send は SessionStart の hook と入力の受け付けを待つが、端末の口は待たない。
-    // 信頼の確認の画面で Enter を送ると、既定の「No, exit」が選ばれて claude が終わる（2026-11-13 に画面で見た）。
-    // ccn の detail に起動済みの印は無い。hook が届くと lastActivityAt が進むので、startedAt より後なら SessionStart が来たとみる
-    // （信頼の確認の画面では2つが同じ値だった。2026-11-13 に実測）。入力の受け付けは SessionStart の 0.3〜1.4 秒後なので（ccn #26）、起動から3秒は待つ。
-    // 端末で何かを打っても lastActivityAt は進むので、確かな印ではない。確かにするには ccn 側に起動済みの印が要る
-    let started = d.get("startedAt").and_then(|v| v.as_u64()).unwrap_or(0);
-    let active = d.get("lastActivityAt").and_then(|v| v.as_u64()).unwrap_or(0);
-    if active <= started || now_ms.saturating_sub(started) < 3000 {
+    // claude が起動し、信頼の確認を抜けたか。信頼の確認の画面で Enter を送ると、既定の「No, exit」が選ばれて claude が終わる
+    // （2026-11-13 に画面で見た）。SessionStart の hook が届くと state/<id>.json ができ、sessions/<pid>.json の updatedAt が startedAt より進む。
+    // どちらかがあれば起動したとみる。入力の受け付けは SessionStart の 0.3〜1.4 秒後なので、起動から3秒は待つ
+    let active = row.map(|r| r["lastActivityAt"].as_u64().unwrap_or(0) > r["startedAt"].as_u64().unwrap_or(u64::MAX)).unwrap_or(false);
+    if !(hooked || active) || now_ms.saturating_sub(started_at) < 3000 {
         return Err("claude がまだ起動していない（信頼の確認の画面かもしれない）。ターミナルで確かめてから送って".into());
     }
     Ok(())
 }
 
-pub fn interrupt_session(session_id: String, peer: Option<String>) -> Result<(), String> {
-    if super::send_disabled() {
-        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
-    }
-    let peer = peer.filter(|p| !p.is_empty());
-    super::agent()
-        .post(&format!("{}/sessions/{session_id}/interrupt", super::api(&peer)))
-        .send_json(json!({}))
-        .map(|_| ())
-        .map_err(|e| format!("止められなかった: {e}"))
-}
-
-// ---------- モデル、権限モード、組み込みコマンド（#97） ----------
-// ccn の口の仕様は claude-code-nodes の docs/superpowers/specs/2026-11-21-session-control-for-town.md。
-// 断られたときの扱い（409 busy、502 restart_failed など）は画面（src/session/control.ts）が status と code で決めるので、
-// HTTP の応答は status と本文をそのまま返す（{ status, body }）。Err はノードに届かなかったときだけ。
-
-/// ccn に1回要求を出し、HTTP の応答なら状態コードと本文（JSON でなければ文字列）を返す
-fn ccn_request(method: &str, url: &str, body: Value, timeout: Duration) -> Result<Value, String> {
-    let res = super::agent().request(method, url).timeout(timeout).send_json(body);
-    let (status, r) = match res {
-        Ok(r) => (r.status(), r),
-        Err(ureq::Error::Status(code, r)) => (code, r),
-        Err(e) => return Err(format!("ccn に届かない: {e}")),
-    };
-    let text = r.into_string().unwrap_or_default();
-    let body = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
-    Ok(json!({ "status": status, "body": body }))
-}
-
-/// このセッションのノードに、モデルの切り替えと組み込みコマンドの口があるか。
-/// ccn に能力の印は無いので、空の文で command の口を叩く。新しいノードは実行の前に 400（code: not_command）で断り、
-/// 古いノードは口が無いので 404 を返す（2026-11-21、本番の 4323 で実測）。古いノードの PATCH は permissionMode だけを受け、
-/// model を黙って無視して 200 を返すので、PATCH では見分けない。PR #65（PATCH）と #66（command）は同じ日に入ったので、片方だけを見る
-pub fn session_controls(session_id: String, peer: Option<String>) -> Result<Value, String> {
-    let peer = peer.filter(|p| !p.is_empty());
-    ccn_request("POST", &format!("{}/sessions/{session_id}/command", super::api(&peer)), json!({ "text": "" }), Duration::from_secs(8))
-}
-
-/// モデルと権限モードを替える（PATCH /api/sessions/<id>）。pty は claude を起動し直すので（実測 2.9 秒）、待ち時間を長くとる
-pub fn configure_session(session_id: String, model: Option<String>, permission_mode: Option<String>, peer: Option<String>) -> Result<Value, String> {
-    if super::send_disabled() {
-        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
-    }
-    let peer = peer.filter(|p| !p.is_empty());
-    let mut body = serde_json::Map::new();
-    if let Some(m) = model.filter(|m| !m.is_empty()) { body.insert("model".into(), json!(m)); }
-    if let Some(p) = permission_mode.filter(|p| !p.is_empty()) { body.insert("permissionMode".into(), json!(p)); }
-    if body.is_empty() {
-        return Err("替えるものが無い".into());
-    }
-    ccn_request("PATCH", &format!("{}/sessions/{session_id}", super::api(&peer)), Value::Object(body), Duration::from_secs(30))
-}
-
-/// 組み込みコマンドを from 行なしで送る（POST /api/sessions/<id>/command）。応答は { delivered }。出力は会話の合成の行で届く
-pub fn run_command(session_id: String, text: String, peer: Option<String>) -> Result<Value, String> {
-    if super::send_disabled() {
-        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
-    }
-    if !text.trim_start().starts_with('/') {
-        return Err("/ で始まる文だけを送る".into());
-    }
-    let peer = peer.filter(|p| !p.is_empty());
-    ccn_request("POST", &format!("{}/sessions/{session_id}/command", super::api(&peer)), json!({ "text": text }), Duration::from_secs(15))
+/// 今のターンを止める。端末で Esc を押したのと同じ
+pub fn interrupt_session(session_id: String) -> Result<(), String> {
+    super::refuse_if_disabled()?;
+    super::pty::write(&session_id, "\x1b")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn strips_ccn_from_line() {
@@ -543,15 +462,15 @@ mod tests {
 
     #[test]
     fn direct_send_refuses_while_waiting() {
-        let ok = json!({"capabilities":{"terminal":true},"state":"idle","pending":[],"startedAt":1000,"lastActivityAt":1800});
+        let ok = json!({"state":"idle","startedAt":1000,"lastActivityAt":1800});
         let now = 10_000;
-        assert!(check_direct(&ok, now).is_ok());
+        assert!(check_direct(Some(&ok), false, 1000, now).is_ok());
+        assert!(check_direct(None, true, 1000, now).is_ok());
         // 信頼の確認の画面（hook がまだ来ていない）と、起動の直後
-        assert!(check_direct(&json!({"capabilities":{"terminal":true},"state":"idle","pending":[],"startedAt":1000,"lastActivityAt":1000}), now).is_err());
-        assert!(check_direct(&ok, 2000).is_err());
-        assert!(check_direct(&json!({"capabilities":{"terminal":true},"state":"running","pending":[{"requestId":"r"}],"startedAt":1000,"lastActivityAt":1800}), now).is_err());
-        assert!(check_direct(&json!({"capabilities":{"terminal":true},"state":"waiting_permission","pending":[],"startedAt":1000,"lastActivityAt":1800}), now).is_err());
-        assert!(check_direct(&json!({"capabilities":{"terminal":false},"state":"idle"}), now).is_err());
+        assert!(check_direct(Some(&json!({"state":"idle","startedAt":1000,"lastActivityAt":1000})), false, 1000, now).is_err());
+        assert!(check_direct(None, false, 1000, now).is_err());
+        assert!(check_direct(Some(&ok), true, 1000, 2000).is_err());
+        assert!(check_direct(Some(&json!({"state":"waiting_permission","startedAt":1000,"lastActivityAt":1800})), true, 1000, now).is_err());
         assert_eq!(paste_body("a\x1b[201~b"), "ab");
     }
 }

@@ -1,16 +1,18 @@
-// ccn を通さずに、この機械の Claude Code の記録（~/.claude）から町の一覧と会話を読む（#96、#90 の案A の段1）。
+// この機械の Claude Code の記録（~/.claude）から町の一覧と会話を読む（#96 で入れ、ccn を外してからは唯一の読み方）。
 // 読むだけで、~/.claude の下には書かない。
 // - sessions.rs   生きている対話セッション（sessions/<pid>.json）と、その jsonl の場所、from 行の親
-// - subagents.rs  セッションの下の sub-agent と teammate（<sid>/subagents/ の jsonl と meta.json）
+// - subagents.rs  セッションの下の sub-agent と in-process のチームメイト（<sid>/subagents/ の jsonl と meta.json）
+// - teams.rs      tmux のチームメイト（teams/<チーム名>/config.json と、ps の引数）
 // - conv.rs       jsonl を読み位置（バイト）から読み、lib.rs の simplify に渡せる行に整える
 // 置き場所は FC_CLAUDE_HOME で差し替えられる（試験と、合成の木での確認に使う）。
 //
-// ここで作る一覧の1件は、ccn の GET /sessions の1件と同じ形（id、kind、state、cwd、pid、startedAt、lastActivityAt、
-// parent、capabilities、title）にして、lib.rs の agents_from がそのまま画面の形に直す。ネイティブだけの項目は native に入れる。
+// 一覧の1件の形は id、kind、state、cwd、pid、startedAt、lastActivityAt、parent、capabilities、title。
+// lib.rs の agents_from が画面の形に直す。記録から読んだ項目は native に入れる。
 
 pub mod conv;
 pub mod sessions;
 pub mod subagents;
+pub mod teams;
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -45,12 +47,12 @@ pub fn mtime_ms(m: &fs::Metadata) -> u64 {
     m.modified().ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
-/// ネイティブの記録から読むものは、送信、承認、割り込み、停止、端末ができない（段1は読むだけ）
+/// 記録から読むだけのセッションは、送信、承認、割り込み、停止、端末ができない（このアプリが立てたものは lib.rs が上書きする）
 pub fn read_only_caps() -> Value {
     json!({ "send": false, "permissions": false, "interrupt": false, "stop": false, "terminal": false, "events": false })
 }
 
-/// 一覧を作った結果。agents は ccn の一覧と同じ形の行。stats は報告と画面の確認用の件数
+/// 一覧を作った結果。stats は報告と画面の確認用の件数
 #[derive(Default, Debug)]
 pub struct NativeList {
     pub sessions: Vec<Value>,
@@ -74,6 +76,10 @@ pub struct Stats {
     pub sub_folded: usize,
     pub sub_capped: usize,
     pub sub_no_meta: usize,
+    /// tmux のチームメイト（出した数、プロセスが無かった数、jsonl が見つからなかった数）
+    pub team_shown: usize,
+    pub team_gone: usize,
+    pub team_no_jsonl: usize,
     /// 想定外の形（読めない json、知らない kind や status など）。種類ごとの件数
     pub unexpected: HashMap<String, usize>,
     /// 作るのにかかった時間（ms）
@@ -86,36 +92,38 @@ impl Stats {
     }
 }
 
-/// 会話を読む先の登録。一覧を作るたびに、画面に出したネイティブの id（ccn に同じ id が無いもの）と jsonl の場所を入れ直す。
-/// conversation と操作の命令は、ここに id があるかでネイティブかを決める
+/// 会話を読む先の登録。一覧を作るたびに、画面に出した id と jsonl の場所を入れ直す
 static PATHS: Mutex<Option<HashMap<String, PathBuf>>> = Mutex::new(None);
 
 pub fn register(paths: HashMap<String, PathBuf>) {
     *PATHS.lock().unwrap_or_else(|e| e.into_inner()) = Some(paths);
 }
 
-/// ネイティブの id なら jsonl の場所
+/// id の jsonl の場所
 pub fn path_of(id: &str) -> Option<PathBuf> {
     PATHS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(id).cloned())
 }
 
-/// 操作の命令で、ネイティブの id を断るときの文
-pub const READ_ONLY: &str = "このセッションは Claude Code の記録から読んでいるだけなので、Claude Town からは操作できない（ccn を通っていない。端末で操作して）";
+/// 操作の命令で、このアプリが立てていないセッションを断るときの文
+pub const READ_ONLY: &str = "このセッションは Claude Town の外で起動したもので、Claude Code の記録から読んでいるだけなので、ここからは操作できない。起動した端末で操作して";
 
-pub fn refuse_if_native(id: &str) -> Result<(), String> {
-    if path_of(id).is_some() { Err(READ_ONLY.into()) } else { Ok(()) }
-}
-
-/// 一覧を作る。生きているセッションと、その下の sub-agent
+/// 一覧を作る。生きているセッションと、その下の sub-agent とチームメイト
 pub fn list(root: &Path, now: u64) -> NativeList {
     let t0 = std::time::Instant::now();
     let mut stats = Stats::default();
     let live = sessions::live(root, &mut stats);
     let mut out = NativeList::default();
+    // tmux のチームメイトは sessions/<pid>.json を作らない（2回の実測）。もし作る版が来たら、同じ id のセッションの行は
+    // 親の分かるチームメイトの行で置き換える
+    let mates = teams::tmux_rows(root, &live, now, &mut stats);
+    let mate_ids: std::collections::HashSet<&str> = mates.iter().filter_map(|r| r["id"].as_str()).collect();
     for s in &live {
         out.subagents.extend(subagents::of_session(s, now, &mut stats));
-        out.sessions.push(s.to_row());
+        if !mate_ids.contains(s.id.as_str()) {
+            out.sessions.push(s.to_row());
+        }
     }
+    out.subagents.extend(mates);
     stats.ms = t0.elapsed().as_millis() as u64;
     out.stats = stats;
     out
