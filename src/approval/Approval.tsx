@@ -4,10 +4,12 @@ import { pollWhileVisible } from "../visible";
 import { ScrollEdgeGradient } from "../ScrollEdgeGradient";
 import { Markdown, linkify } from "../Markdown";
 import type { Agent } from "../model";
+import type { SessionDetail } from "../types";
 import { answerText, emptyPick, type Pick, type Question } from "./answers";
 import { alwaysOptions } from "./suggestions";
+import { canAnswerPermission } from "../abilities";
 
-type PendingReq = { requestId: string; toolName: string; input: Record<string, any>; suggestions?: unknown };
+type PendingReq = { requestId: string; toolName: string; input: Record<string, unknown>; suggestions?: unknown };
 type Answer = (choice: "allow" | "deny", extra?: { answers?: Record<string, string>; message?: string; suggestion?: number }) => Promise<void>;
 
 /**
@@ -24,10 +26,10 @@ export function Approval({ agent, planHint, onDone, onError }: {
   const [busy, setBusy] = useState<"allow" | "deny" | null>(null);
   const [pending, setPending] = useState<PendingReq[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const canAnswer = !!agent.capabilities?.permissions;
+  const canAnswer = canAnswerPermission(agent);
   useEffect(() => {
     let alive = true;
-    const load = () => invoke<any>("session_detail", { sessionId: agent.id })
+    const load = () => invoke<SessionDetail | null>("session_detail", { sessionId: agent.id })
       .then((d) => { if (alive) { setPending(Array.isArray(d?.pending) ? d.pending : []); setErr(null); } })
       .catch((e) => { if (alive) setErr(String(e)); });
     const stop = pollWhileVisible(load, 2000);
@@ -73,7 +75,7 @@ export function Approval({ agent, planHint, onDone, onError }: {
 function ToolForm({ p, busy, answer }: { p: PendingReq; busy: "allow" | "deny" | null; answer: Answer }) {
   const [reason, setReason] = useState("");
   const always = alwaysOptions(p.suggestions);
-  const i = p.input as any;
+  const i = p.input;
   const detail = String(i?.command ?? i?.file_path ?? i?.url ?? JSON.stringify(p.input));
   return (
     <>

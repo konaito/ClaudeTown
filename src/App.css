@@ -88,7 +88,6 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 /* 家族 */
 .fam-head { display: flex; align-items: center; gap: 14px; padding: 12px 22px 4px; }
 .fam-title { display: inline-flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 700; }
-.fam-count { color: var(--sub); }
 .legend { margin-left: auto; display: flex; gap: 14px; font-size: 13px; }
 .lg { display: inline-flex; align-items: center; gap: 5px; }
 .lg i, .st i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
@@ -111,7 +110,6 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .group.has-needs { border-color: #f1d79c; }
 .g-head { display: flex; align-items: baseline; gap: 10px; height: 34px; overflow: hidden; white-space: nowrap; cursor: text; }
 .g-name { font-size: 15px; font-weight: 700; color: #3d3a45; }
-.g-name.guess { color: #6f6b78; font-weight: 600; }
 .g-sub { font-size: 12px; color: var(--sub); }
 .g-needs { font-size: 11px; color: #9a6a00; background: #fff3d6; border-radius: 99px; padding: 1px 8px; }
 
@@ -381,12 +379,9 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 
 /* 新しい世帯 */
 .new-house { margin-left: 6px; }
-.new-house-form { display: inline-flex; align-items: center; gap: 6px; margin-left: 6px; }
-.new-house-form input { font: inherit; font-size: 13px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 10px; width: 16em; outline: none; }
-.new-house-form.big input { width: 24em; font-size: 14px; padding: 8px 12px; }
 .empty { display: flex; flex-direction: column; align-items: center; gap: 12px; }
 .empty p { margin: 0; }
-.sheet-foot .primary, .new-house-form .primary { white-space: nowrap; flex: none; }
+.sheet-foot .primary { white-space: nowrap; flex: none; }
 
 /* スクロールの端のグラデーション（src/ScrollEdgeGradient.tsx）。外側に地とグラデーションを置き、透明なスクロールの容れ物を上に重ねる */
 .seg-wrap { position: relative; display: flex; flex-direction: column; min-height: 0; }
@@ -479,7 +474,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 }
 /* 町が狭いとき（右パネルを広げたとき）に見出しが途中で折れないようにする */
 .fam-head { flex-wrap: wrap; row-gap: 4px; }
-.fam-title, .fam-count, .new-house { white-space: nowrap; }
+.fam-title, .new-house { white-space: nowrap; }
 .legend { flex-wrap: wrap; justify-content: flex-end; row-gap: 2px; }
 .lg { white-space: nowrap; }
 .tp-plan { display: flex; flex-direction: column; gap: 2px; }

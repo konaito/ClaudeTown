@@ -45,11 +45,10 @@ fn remote_url(config: &str) -> Option<String> {
         let t = line.trim();
         if t.starts_with('[') {
             cur = t.strip_prefix("[remote \"").and_then(|r| r.strip_suffix("\"]")).map(|n| n.to_string());
-        } else if let (Some(name), Some((k, v))) = (&cur, t.split_once('=')) {
-            if k.trim().eq_ignore_ascii_case("url") && !v.trim().is_empty() {
+        } else if let (Some(name), Some((k, v))) = (&cur, t.split_once('='))
+            && k.trim().eq_ignore_ascii_case("url") && !v.trim().is_empty() {
                 found.push((name.clone(), v.trim().to_string()));
             }
-        }
     }
     found.iter().find(|(n, _)| n == "origin").or(found.first()).map(|(_, u)| u.clone())
 }
@@ -80,6 +79,13 @@ pub fn repo_of(cwd: &str) -> Option<String> {
 /// 場所ごとのリポジトリ名。連携していない場所は含めない
 pub fn repos_of(paths: &[String]) -> HashMap<String, String> {
     paths.iter().filter_map(|p| repo_of(p).map(|r| (p.clone(), r))).collect()
+}
+
+/// 画面から呼ぶ命令の包み。中身の関数は上にある。待つ命令は blocking で別のスレッドへ出す
+pub(crate) mod cmd {
+    /// 新しい世帯の一覧の各場所に連携しているリポジトリ名（owner/repo）。.git/config を読むだけ（#99）
+    #[tauri::command]
+    pub async fn place_repos(paths: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> { crate::blocking(move || Ok(super::repos_of(&paths))).await }
 }
 
 #[cfg(test)]

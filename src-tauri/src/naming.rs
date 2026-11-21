@@ -14,11 +14,10 @@ fn segs(p: &str) -> Vec<&str> {
 /// パスの形だけで出すプロジェクトの名前。`<名前>.wt/<x>` なら <名前>、それ以外は最後の名前
 pub fn project_from_path(cwd: &str) -> Option<String> {
     let s = segs(cwd);
-    if s.len() >= 2 {
-        if let Some(base) = s[s.len() - 2].strip_suffix(".wt").filter(|b| !b.is_empty()) {
+    if s.len() >= 2
+        && let Some(base) = s[s.len() - 2].strip_suffix(".wt").filter(|b| !b.is_empty()) {
             return Some(base.to_string());
         }
-    }
     s.last().map(|x| x.to_string())
 }
 
@@ -72,7 +71,8 @@ fn normalize(p: &Path) -> PathBuf {
 /// snapshot は一覧を取るたびに、セッションごとに `.git` と commondir を読んでいた。
 /// worktree を作り直すと `.git` も書き直されるので、commondir だけが変わる場合は考えない
 fn project_from_git_cached(cwd: &str) -> Option<String> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, (super::FileStamp, Option<String>)>>> = std::sync::OnceLock::new();
+    type Entry = (super::FileStamp, Option<String>);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Entry>>> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     // .git がファイルでなければ（無い、本体のディレクトリ）、project_from_git も読まずに None を返す
     let Some(meta) = fs::metadata(Path::new(cwd).join(".git")).ok().filter(|m| m.is_file()) else {
@@ -80,11 +80,10 @@ fn project_from_git_cached(cwd: &str) -> Option<String> {
         return None;
     };
     let st = super::stamp_of(&meta);
-    if let Some((s, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(cwd) {
-        if *s == st && st.modified.is_some() {
+    if let Some((s, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(cwd)
+        && *s == st && st.modified.is_some() {
             return v.clone();
         }
-    }
     let v = project_from_git(cwd);
     cache.lock().unwrap_or_else(|e| e.into_inner()).insert(cwd.to_string(), (st, v.clone()));
     v
@@ -92,11 +91,10 @@ fn project_from_git_cached(cwd: &str) -> Option<String> {
 
 /// cwd のプロジェクトの名前。local（この機械の cwd）なら .git を読み、別の機械の町ならパスの形だけで決める
 pub fn project_of(cwd: &str, local: bool) -> Option<String> {
-    if local {
-        if let Some(p) = project_from_git_cached(cwd) {
+    if local
+        && let Some(p) = project_from_git_cached(cwd) {
             return Some(p);
         }
-    }
     project_from_path(cwd)
 }
 

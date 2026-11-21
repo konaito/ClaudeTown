@@ -65,11 +65,10 @@ pub fn owns(id: &str) -> bool {
 pub fn note_ids(rows: &[(String, u32)]) {
     with(|m| {
         for (id, pid) in rows {
-            if let Some(p) = m.get_mut(pid) {
-                if !p.ids.contains(id) {
+            if let Some(p) = m.get_mut(pid)
+                && !p.ids.contains(id) {
                     p.ids.push(id.clone());
                 }
-            }
         }
     });
 }
@@ -147,11 +146,10 @@ fn login_path() -> Option<String> {
 
 /// claude の実行ファイル。FC_CLAUDE_BIN があればそれ（試験用）、無ければログインシェルの PATH、~/.local/bin の順に探す
 fn claude_bin(path: Option<&str>) -> Result<PathBuf, String> {
-    if let Ok(b) = std::env::var("FC_CLAUDE_BIN") {
-        if !b.is_empty() {
+    if let Ok(b) = std::env::var("FC_CLAUDE_BIN")
+        && !b.is_empty() {
             return Ok(PathBuf::from(b));
         }
-    }
     let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
     let dirs = path.unwrap_or("").split(':').filter(|d| !d.is_empty()).map(PathBuf::from).chain([home.join(".local/bin"), "/opt/homebrew/bin".into(), "/usr/local/bin".into()]);
     for d in dirs {
@@ -219,11 +217,10 @@ pub fn spawn(cwd: &str, name: Option<&str>, cols: u16, rows: u16, notice: impl F
         // 読み手が最後の出力を送り終えるのを少し待ってから、台帳から外す
         std::thread::sleep(Duration::from_millis(200));
         let gone = with(|m| m.remove(&pid));
-        if let Some(p) = gone {
-            if let Some((_, tx)) = &p.sub {
+        if let Some(p) = gone
+            && let Some((_, tx)) = &p.sub {
                 let _ = tx.send(TermOut::Event("exit".into(), json!({ "reason": "終わった", "code": code })));
             }
-        }
         notice();
     });
     Ok(json!({ "id": id, "pid": pid, "cwd": cwd }))
@@ -305,11 +302,10 @@ pub fn subscribe(id: &str, generation: u64, tx: Sender<TermOut>) -> Result<(), S
 /// 開いた画面を外す。generation を渡したら、その世代のときだけ外す
 pub fn unsubscribe(id: &str, generation: Option<u64>) {
     with(|m| {
-        if let Some(p) = pid_of(m, id).and_then(|pid| m.get_mut(&pid)) {
-            if generation.is_none() || p.sub.as_ref().map(|s| s.0) == generation {
+        if let Some(p) = pid_of(m, id).and_then(|pid| m.get_mut(&pid))
+            && (generation.is_none() || p.sub.as_ref().map(|s| s.0) == generation) {
                 p.sub = None;
             }
-        }
     });
 }
 

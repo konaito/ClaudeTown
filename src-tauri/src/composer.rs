@@ -29,14 +29,13 @@ const HISTORY_PROJECT_MAX: usize = 1000;
 
 /// 別のプロダクト（ccn など）が本文の前に付ける1行（from <誰> via <ノード>）を外す。人が打ったのは、その後ろの文だから
 pub fn strip_from_line(s: &str) -> &str {
-    if let Some(rest) = s.strip_prefix("from ") {
-        if let Some(nl) = rest.find('\n') {
+    if let Some(rest) = s.strip_prefix("from ")
+        && let Some(nl) = rest.find('\n') {
             let w: Vec<&str> = rest[..nl].split(' ').collect();
             if w.len() == 3 && w[1] == "via" && !w[0].is_empty() && !w[2].is_empty() {
                 return rest[nl..].trim_start_matches('\n');
             }
         }
-    }
     s
 }
 
@@ -55,11 +54,10 @@ fn expand_pastes(display: &str, pasted: Option<&Value>, home: &Path) -> String {
         });
         let Some(body) = body else { continue };
         let tag = format!("[Pasted text #{k}");
-        if let Some(start) = out.find(&tag) {
-            if let Some(end) = out[start..].find(']') {
+        if let Some(start) = out.find(&tag)
+            && let Some(end) = out[start..].find(']') {
                 out.replace_range(start..start + end + 1, &body);
             }
-        }
     }
     out
 }
@@ -79,11 +77,10 @@ pub fn history_from(lines: &str, cwd: Option<&str>, all: bool, home: &Path) -> H
             break;
         }
         // project で先に絞る（JSON を開く前に、文字列で見て外れる行を飛ばす）
-        if let (false, Some(c)) = (all, cwd) {
-            if !line.contains(&format!("\"project\":{}", Value::String(c.to_string()))) {
+        if let (false, Some(c)) = (all, cwd)
+            && !line.contains(&format!("\"project\":{}", Value::String(c.to_string()))) {
                 continue;
             }
-        }
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         if !all && v.get("project").and_then(|p| p.as_str()) != cwd {
             continue;
@@ -253,7 +250,9 @@ pub fn slash_commands(cwd: Option<String>) -> Vec<SlashCommand> {
 // ---------- @ の候補（ファイル） ----------
 
 /// cwd のファイルとフォルダの一覧。git の中なら ls-files（.gitignore に従う）、外なら浅く歩く。30秒は前の一覧を使う
-static FILES_CACHE: Mutex<Option<HashMap<String, (Instant, Vec<String>)>>> = Mutex::new(None);
+/// 覚えた時刻と一覧
+type FilesEntry = (Instant, Vec<String>);
+static FILES_CACHE: Mutex<Option<HashMap<String, FilesEntry>>> = Mutex::new(None);
 const FILES_MAX: usize = 30000;
 
 fn list_files(cwd: &str) -> Vec<String> {
@@ -378,11 +377,10 @@ pub fn send_direct(session_id: String, text: String) -> Result<(), String> {
 /// 直接送ってよい状態か。row は Claude Code の記録（sessions/<pid>.json）から読んだ行（まだ無ければ None）。
 /// hooked は hook の状態ファイル（state/<id>.json）があるか
 pub fn check_direct(row: Option<&Value>, hooked: bool, started_at: u64, now_ms: u64) -> Result<(), String> {
-    if let Some(r) = row {
-        if r.get("state").and_then(|s| s.as_str()) == Some("waiting_permission") {
+    if let Some(r) = row
+        && r.get("state").and_then(|s| s.as_str()) == Some("waiting_permission") {
             return Err("承認待ちなので送らなかった。先にターミナルで承認に答えて".into());
         }
-    }
     // claude が起動し、信頼の確認を抜けたか。信頼の確認の画面で Enter を送ると、既定の「No, exit」が選ばれて claude が終わる
     // （2026-11-13 に画面で見た）。SessionStart の hook が届くと state/<id>.json ができ、sessions/<pid>.json の updatedAt が startedAt より進む。
     // どちらかがあれば起動したとみる。入力の受け付けは SessionStart の 0.3〜1.4 秒後なので、起動から3秒は待つ
@@ -397,6 +395,32 @@ pub fn check_direct(row: Option<&Value>, hooked: bool, started_at: u64, now_ms: 
 pub fn interrupt_session(session_id: String) -> Result<(), String> {
     super::refuse_if_disabled()?;
     super::pty::write(&session_id, "\x1b")
+}
+
+/// 画面から呼ぶ命令の包み。中身の関数は上にある。待つ命令は blocking で別のスレッドへ出す
+pub(crate) mod cmd {
+    #[tauri::command]
+    pub async fn prompt_history(cwd: Option<String>, all: Option<bool>) -> Result<super::History, String> {
+        crate::blocking(move || super::prompt_history(cwd, all.unwrap_or(false))).await
+    }
+    #[tauri::command]
+    pub async fn slash_commands(cwd: Option<String>) -> Result<Vec<super::SlashCommand>, String> {
+        crate::blocking(move || Ok(super::slash_commands(cwd))).await
+    }
+    #[tauri::command]
+    pub async fn file_suggestions(cwd: String, query: String) -> Result<Vec<String>, String> {
+        crate::blocking(move || super::file_suggestions(cwd, query)).await
+    }
+    #[tauri::command]
+    pub async fn send_direct(session_id: String, text: String) -> Result<(), String> {
+        crate::app_guard(&session_id)?;
+        crate::blocking(move || super::send_direct(session_id, text)).await
+    }
+    #[tauri::command]
+    pub async fn interrupt_session(session_id: String) -> Result<(), String> {
+        crate::app_guard(&session_id)?;
+        crate::blocking(move || super::interrupt_session(session_id)).await
+    }
 }
 
 #[cfg(test)]

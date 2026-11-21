@@ -30,7 +30,9 @@ use std::sync::Mutex;
 const HEAD_BYTES: u64 = 256 * 1024;
 
 /// config.json の中身を、更新時刻と大きさが変わったときだけ読み直す
-static CONFIGS: Mutex<Option<HashMap<PathBuf, ((u64, u64), Option<Value>)>>> = Mutex::new(None);
+/// ファイルの (大きさ, 更新時刻) と中身
+type ConfigEntry = ((u64, u64), Option<Value>);
+static CONFIGS: Mutex<Option<HashMap<PathBuf, ConfigEntry>>> = Mutex::new(None);
 /// (agentId, pid) ごとに見つけた jsonl
 static FOUND: Mutex<Option<HashMap<(String, u32), PathBuf>>> = Mutex::new(None);
 
@@ -39,11 +41,10 @@ fn read_config(p: &Path, stats: &mut Stats) -> Option<Value> {
     let st = (m.len(), mtime_ms(&m));
     let mut g = CONFIGS.lock().unwrap_or_else(|e| e.into_inner());
     let map = g.get_or_insert_with(HashMap::new);
-    if let Some((s, v)) = map.get(p) {
-        if *s == st {
+    if let Some((s, v)) = map.get(p)
+        && *s == st {
             return v.clone();
         }
-    }
     let v = fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
     if v.is_none() {
         stats.odd("teams: 読めない config.json");
@@ -148,11 +149,10 @@ fn is_theirs(p: &Path, team: &str, name: &str) -> bool {
 
 fn find_jsonl(root: &Path, m: &Member, pid: u32) -> Option<PathBuf> {
     let key = (m.agent_id.clone(), pid);
-    if let Some(p) = FOUND.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|f| f.get(&key)) {
-        if p.exists() {
+    if let Some(p) = FOUND.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|f| f.get(&key))
+        && p.exists() {
             return Some(p.clone());
         }
-    }
     let dir = root.join("projects").join(project_dir_name(&m.cwd));
     let mut cands: Vec<(u64, PathBuf)> = fs::read_dir(&dir)
         .ok()?

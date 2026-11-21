@@ -6,15 +6,16 @@ import { benchName } from "../term/bench";
 import { onVisibleChange } from "../visible";
 import { DEFAULT_PLACE_LABEL, placeFailure } from "./placeSetting";
 import { RECENT_PLACES_MAX, placeLabel, placeName, placeTime, recentPlaces, withoutPlace, type PlaceRepos, type PlacesInput, type RecentPlace } from "./places";
+import type { CreatedSession } from "../types";
 
 /**
  * 新しい世帯（親なしの claude）を立てる。アプリではこのアプリの中の端末で claude を起動する（src-tauri/src/pty.rs）。
  * cwd が null なら ~/Documents/meta（Rust の create_session の既定）。前に開いたターミナルの大きさで起動する
  */
-export async function createHousehold(cwd: string | null): Promise<any> {
+export async function createHousehold(cwd: string | null): Promise<CreatedSession> {
   perfStart("new");
   const { cols, rows } = lastTermSize() ?? { cols: null, rows: null };
-  const r = await invoke<any>("create_session", { cwd, name: benchName(), cols, rows });
+  const r = await invoke<CreatedSession>("create_session", { cwd, name: benchName(), cols, rows });
   perfMark("create");
   if (r?.id) perfSetId(r.id);
   return r;
@@ -27,7 +28,7 @@ type Load = { state: "loading" } | { state: "ok"; list: RecentPlace[]; defaultPl
  * 先頭の「＋ 新しい世帯」は一覧を待たずに押せる。立てる場所は設定（place、#92）で、無ければ ~/Documents/meta。
  * 一覧からは、その立てる場所を除く（withoutPlace）。見出しは出さない（2026-11-21 本人の決定）
  */
-export function NewHousePane({ place, onCreated, onError }: { place: string | null; onCreated: (r: any) => void; onError: (m: string) => void }) {
+export function NewHousePane({ place, onCreated, onError }: { place: string | null; onCreated: (r: CreatedSession | null) => void; onError: (m: string) => void }) {
   const [load, setLoad] = useState<Load>({ state: "loading" });
   // 立てている場所。"" は先頭のボタン（既定の場所）
   const [busy, setBusy] = useState<string | null>(null);

@@ -154,7 +154,7 @@ export function TerminalView({ sessionId, onError }: { sessionId: string; onErro
           let reclaimNow = false;
           if (sentSize && e.data?.cols && `${e.data.cols}x${e.data.rows}` !== sentSize) {
             const fits = fit.proposeDimensions();
-            const tooBig = !!fits && (e.data.cols > fits.cols || e.data.rows > fits.rows);
+            const tooBig = !!fits && (e.data.cols > fits.cols || (e.data.rows ?? 0) > fits.rows);
             if (tooBig && Date.now() - reclaimedAt > FOREIGN_RECLAIM_MS) { following = false; reclaimedAt = Date.now(); reclaimNow = true; }
             else following = true;
           }
