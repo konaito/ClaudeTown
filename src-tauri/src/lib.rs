@@ -338,21 +338,16 @@ fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<V
         live_ids.iter().find(|id| id.starts_with(sid8)).cloned()
     };
 
-    let houses = read_houses();
     // 名前は、そのセッションが作業しているプロジェクトの名前（src-tauri/src/naming.rs）。
     // .git を読むのはこの機械の町だけ。別の機械の cwd はパスの形だけで決める
     let local = peer.is_none();
     let whos: Vec<naming::Who> = live.iter().map(|s| {
         let id = s["id"].as_str().unwrap_or_default().to_string();
         let cwd = s["cwd"].as_str().filter(|c| !c.is_empty());
-        let house = houses.get(&id);
         naming::Who {
-            parent: parent_from_ccn(s).filter(|p| *p != id),
             cwd: cwd.map(String::from),
             title: s["title"].as_str().map(String::from),
             project: cwd.and_then(|c| naming::project_of(c, local)),
-            agent_name: house.filter(|h| h["by"] == "agent").and_then(|h| h["name"].as_str()).map(String::from),
-            started_at: s["startedAt"].as_u64().unwrap_or(0),
             id,
         }
     }).collect();
@@ -390,7 +385,6 @@ fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<V
             // どのアカウントで動いているか（cam のコマンド名と email）。ccn の PR #56 から載る。古い ccn と、選べなかったセッションでは null
             "account": s["account"],
             "accountEmail": s["accountEmail"],
-            "house": houses.get(&id).cloned(),
             "report": report,
             // status が ok/ng なら short は直下、working/checking なら前回の判定が last に入っている
             "closeCheck": close_check.map(|c| json!({
@@ -494,46 +488,13 @@ fn avatars_path(peer: &Option<String>) -> PathBuf {
 // ---------- 家の名前 ----------
 
 /// 世帯の名前の置き場所。（共有の分, アプリが書く分）を返す。
-/// 共有の分には、hook（scripts/hook.py name）でエージェントが付けた名前が入る。アプリは自分の分にだけ書く。
+/// 旧版が書いた houses.json の置き場所。今は名前に使わない（--paths の表示だけに残してある）。
 /// 安定版では2つは同じファイル。FC_HOUSES があれば、両方ともそのファイルにする
 fn houses_paths() -> (PathBuf, PathBuf) {
     match std::env::var("FC_HOUSES") {
         Ok(p) if !p.is_empty() => (PathBuf::from(&p), PathBuf::from(p)),
         _ => (fc_path(Scope::Shared, "houses.json"), fc_path(Scope::App, "houses.json")),
     }
-}
-
-/// 世帯の名前を読む。共有の分を下地にして、アプリの分（開発版なら開発版で付けた名前）を上に重ねる
-fn read_houses() -> Value {
-    let (shared, own) = houses_paths();
-    let mut out = read_json_cached(&shared).filter(Value::is_object).unwrap_or(json!({}));
-    if own != shared {
-        if let (Some(base), Some(Value::Object(top))) = (out.as_object_mut(), read_json_cached(&own)) {
-            base.extend(top);
-        }
-    }
-    out
-}
-
-/// 本人が画面で家の名前を付ける。空なら本人の名前を消す（親が付けた名前か仮の名前に戻る）。
-/// 開発版では開発版の分にだけ書く。開発版で消しても、共有の分にある名前は残って見える
-#[tauri::command]
-fn set_house_name(session_id: String, name: String) -> Result<(), String> {
-    let p = houses_paths().1;
-    let mut houses = read_json(&p).unwrap_or(json!({}));
-    let obj = houses.as_object_mut().ok_or("houses.json の形が想定と違う")?;
-    let name: String = name.trim().chars().take(24).collect();
-    if name.is_empty() {
-        obj.remove(&session_id);
-    } else {
-        obj.insert(session_id, json!({ "name": name, "by": "human", "at": now_ms() as u64 }));
-    }
-    if let Some(dir) = p.parent() {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    let tmp = p.with_extension("tmp");
-    fs::write(&tmp, serde_json::to_string_pretty(&houses).unwrap_or_default()).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, &p).map_err(|e| e.to_string())
 }
 
 // ---------- 会話 ----------
@@ -1972,11 +1933,6 @@ pub fn run() {
         })).unwrap_or_default());
         return;
     }
-    // family-computing --house-name <sessionId> <名前>   世帯の名前を付ける（画面で名前を付けるのと同じ処理）。空にすると消す
-    if let Some(i) = args.iter().position(|a| a == "--house-name") {
-        println!("{:?}", set_house_name(args.get(i + 1).cloned().unwrap_or_default(), args.get(i + 2).cloned().unwrap_or_default()));
-        return;
-    }
     if args.iter().any(|a| a == "--snapshot") {
         println!("{}", serde_json::to_string_pretty(&snapshot(arg_after("--peer"))).unwrap_or_default());
         return;
@@ -2044,7 +2000,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::conversation_cache, cmd::send_message, set_house_name, cmd::answer_permission,
+            cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::conversation_cache, cmd::send_message, cmd::answer_permission,
             cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, cmd::house_places, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
             cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::paste_clipboard, cmd::stage_files

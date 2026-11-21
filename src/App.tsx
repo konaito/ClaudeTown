@@ -30,7 +30,7 @@ import { Avatar, hash as hashOf, roleOf, ROLE_LABEL, type Role } from "./kid/Ava
 import { SkinCtx, saveSkin, savedSkin, type Skin } from "./kid/pokemon";
 import {
   type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
-  MOOD_LABEL, NEEDS_YOU, accountText, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, speakerName, targetLabel, taskOf,
+  MOOD_LABEL, NEEDS_YOU, accountText, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, targetLabel, taskOf,
 } from "./model";
 import { Markdown, linkify } from "./Markdown";
 import { chatPerf } from "./chatPerf";
@@ -375,10 +375,6 @@ export default function App() {
         toast(`${a.name} の後継（${r.id.slice(0, 8)}）は起動したが、引き継ぎの文をまだ受け取っていない。ターミナルを見る。${a.name} は止めていないので、後継が動いたら閉じる`, true);
         return;
       }
-      // 本人が付けた世帯の名前は根の ID で持っているので、後継の ID にも付ける
-      if (!a.parent && a.house?.by === "human" && a.house.name) {
-        await invoke("set_house_name", { sessionId: r.id, name: a.house.name }).catch(() => toast("世帯の名前を後継に移せなかった", true));
-      }
       // 前任を選んでいたら、選択を後継へ移す（右パネルを空にしない）
       if (selectedNow.current === a.id) show(false);
       const id8 = r.id.slice(0, 8);
@@ -594,11 +590,7 @@ export default function App() {
             return {
               id: f.root.id, ...size,
               node: (
-                <Group root={f.root} all={f.all} count={f.all.length} size={size}
-                  onRename={async (name) => {
-                    try { await invoke("set_house_name", { sessionId: f.root.id, name }); kickTown(); toast(name ? `世帯の名前を「${name}」にした` : "世帯の名前を戻した"); }
-                    catch (e) { toast(`世帯の名前を変えられなかった: ${e}`, true); }
-                  }}
+                <Group root={f.root} count={f.all.length} size={size}
                   hasNeeds={f.all.some((a) => NEEDS_YOU.includes(moodOf(a)))}>
                   <FamilyCanvas all={f.all} result={r} selected={selected} onSelect={pick} onFocus={focus} />
                 </Group>
@@ -898,28 +890,15 @@ function Stage({ zoom, items, onBlank }: { zoom: number | "fit"; items: { id: st
 const GROUP_TINTS = ["#f3f7ff", "#fff6ec", "#f1faf3", "#f8f3ff", "#fff2f5", "#eff9f9", "#fbf8ec"];
 const GROUP_LINES = ["#d9e4fb", "#f6dfc4", "#d3ecd9", "#e4d8f6", "#f6d6df", "#cfe9e9", "#ece4c2"];
 
-function Group({ root, all, count, size, hasNeeds, onRename, children }: {
-  root: Agent; all: Agent[]; count: number; size: { w: number; h: number }; hasNeeds: boolean; onRename: (name: string) => void; children: React.ReactNode;
+function Group({ root, count, size, hasNeeds, children }: {
+  root: Agent; count: number; size: { w: number; h: number }; hasNeeds: boolean; children: React.ReactNode;
 }) {
-  const house = houseNameOf(root, all);
-  const [editing, setEditing] = useState(false);
   const tint = hashOf(root.id) % GROUP_TINTS.length;
   return (
     <section className={`group ${hasNeeds ? "has-needs" : ""}`}
       style={{ width: size.w, height: size.h, background: GROUP_TINTS[tint], borderColor: hasNeeds ? undefined : GROUP_LINES[tint] }}>
-      <div className="g-head" onDoubleClick={() => setEditing(true)}
-        title={`ダブルクリックで名前を変える（${house.by === "human" ? "あなたが付けた名前" : "作業ディレクトリの名前"}）`}>
-        {editing ? (
-          <input className="g-input" autoFocus defaultValue={house.by === "human" ? house.name : ""} placeholder={house.name}
-            maxLength={24}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") { onRename(e.currentTarget.value); setEditing(false); }
-              if (e.key === "Escape") setEditing(false);
-            }}
-            onBlur={() => setEditing(false)} />
-        ) : (
-          <span className={`g-name `}>{house.name}</span>
-        )}
+      <div className="g-head" title="親のプロジェクトのディレクトリの名前">
+        <span className="g-name">{houseNameOf(root)}</span>
         <span className="g-sub">{count}人</span>
         {hasNeeds && <span className="g-needs">あなたの番</span>}
       </div>
@@ -1727,7 +1706,7 @@ function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
     <div className="msg kid">
       <div className="mini-av"><Avatar pick={agent.avatar} seed={agent.id} mood="idle" role={roleOf(lineageDepth)} size={32} /></div>
       <div>
-        <div className="meta"><b>{speakerName(agent)}</b>{timeOf(item.at)}</div>
+        <div className="meta"><b>{agent.name}</b>{timeOf(item.at)}</div>
         <div className="b"><Markdown text={item.text} /></div>
       </div>
     </div>
@@ -1749,7 +1728,7 @@ function useLetterPeer(raw: string | null | undefined, name?: string | null): Ag
 function LetterBubble({ item }: { item: ConvItem }) {
   const raw = item.letter?.fromRaw ?? null;
   const who = useLetterPeer(raw, item.letter?.fromName);
-  const name = (who && speakerName(who)) ?? item.letter?.fromName ?? raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? "別のセッション";
+  const name = who?.name ?? item.letter?.fromName ?? raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? "別のセッション";
   return <LetterView pick={who?.avatar} seed={who?.id ?? name} role={who?.parent ? "child" : "parent"} name={name} at={item.at} text={item.text} />;
 }
 
@@ -1758,7 +1737,7 @@ function SentLetter({ item, agent, lineageDepth }: { item: ConvItem; agent: Agen
   const s = item.sent!;
   const who = useLetterPeer(s.to ?? null, s.to ?? null);
   const to = s.create ? "新しい子" : who?.name ?? (s.to ? String(s.to).replace(/^uds:.*\/(\d+)\.sock$/, "pid $1") : "相手");
-  return <LetterView pick={agent.avatar} seed={agent.id} role={roleOf(lineageDepth)} name={speakerName(agent)} to={`→ ${to}${s.peer ? `（${s.peer}）` : ""}`} at={item.at} text={s.text || s.summary || ""} />;
+  return <LetterView pick={agent.avatar} seed={agent.id} role={roleOf(lineageDepth)} name={agent.name} to={`→ ${to}${s.peer ? `（${s.peer}）` : ""}`} at={item.at} text={s.text || s.summary || ""} />;
 }
 
 type LetterViewProps = { pick?: Agent["avatar"]; seed: string; role: Role; name: string; to?: string; at?: string | number | null; text: string };
