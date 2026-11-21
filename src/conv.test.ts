@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, settlePending, withNotes, type Live, type PendingItem } from "./conv";
+import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, settlePending, answerPending, withNotes, type Live, type PendingItem } from "./conv";
 import type { ConvItem } from "./model";
 
 const item = (n: number): ConvItem => ({ role: "assistant", text: `t${n}`, n });
@@ -123,6 +123,25 @@ describe("settlePending（#69）", () => {
     const pend = [p("/tmp/a.png これ見て", 4), p("先に送ったやつ", 4), p("三通目", 4)];
     const items = [item(4), u(5, "[Image #1] これ見て"), item(6), u(7, "先に送ったやつ")];
     expect(settlePending(items, pend)).toEqual([pend[2]]);
+  });
+});
+
+describe("answerPending（#55）", () => {
+  const p = (text: string, after: number): PendingItem => ({ role: "user", text, pending: true, after });
+  // -p の子の会話には、送った文の user が出ない（2026-11-21 に ccn の messages で確認。出るのは assistant と result だけ）
+  test("返事（assistant）が after より後に出たら、仮の印を外して残す", () => {
+    const pend = [p("やって", 4)];
+    const out = answerPending([item(4), item(5)], pend);
+    expect(out).toEqual([{ ...pend[0], pending: false }]);
+  });
+  test("返事がまだなら同じ配列。after 以前の assistant では外さない", () => {
+    const pend = [p("やって", 4)];
+    expect(answerPending([item(3), item(4)], pend)).toBe(pend);
+  });
+  test("外れた項目は後から settlePending でも消えず、user が会話に出たら消える", () => {
+    const answered = answerPending([item(5)], [p("やって", 4)]);
+    expect(settlePending([item(5)], answered)).toBe(answered);
+    expect(settlePending([item(5), { role: "user", text: "やって", n: 6 }], answered)).toEqual([]);
   });
 });
 

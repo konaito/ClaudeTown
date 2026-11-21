@@ -269,5 +269,155 @@
       "cwd": "/tmp/y",
       "updated_at": 0
     }
+  },
+  {
+    "name": "休んだリードは、チームメイトが道具を使っても休んだまま",
+    "events": [
+      {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "a",
+        "cwd": "/tmp/x"
+      },
+      {
+        "hook_event_name": "Stop",
+        "last_assistant_message": "beta を呼んだ"
+      },
+      {
+        "hook_event_name": "PreToolUse",
+        "agent_id": "abeta-584d11236f35ece0",
+        "agent_type": "beta",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "touch beta.txt"
+        }
+      },
+      {
+        "hook_event_name": "PostToolUse",
+        "agent_id": "abeta-584d11236f35ece0",
+        "agent_type": "beta",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "touch beta.txt"
+        }
+      }
+    ],
+    "state": {
+      "phase": "resting",
+      "doing": null,
+      "needs": null,
+      "tools": 0,
+      "turn_started_at": 0,
+      "perm_queue": [],
+      "pending": null,
+      "pending_count": 0,
+      "asked": "a",
+      "asked_by": "human",
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/x",
+      "updated_at": 0,
+      "said": "beta を呼んだ",
+      "next": null
+    }
+  },
+  {
+    "name": "チームメイトの承認待ちはリードの承認待ちになる（画面はリードの端末に出る）",
+    "events": [
+      {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "a",
+        "cwd": "/tmp/x"
+      },
+      {
+        "hook_event_name": "Stop",
+        "last_assistant_message": "beta を呼んだ"
+      },
+      {
+        "hook_event_name": "PermissionRequest",
+        "agent_id": "abeta-584d11236f35ece0",
+        "agent_type": "beta",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "touch beta.txt"
+        }
+      }
+    ],
+    "state": {
+      "phase": "needs_you",
+      "doing": null,
+      "needs": "承認待ち: コマンド: touch beta.txt",
+      "tools": 0,
+      "turn_started_at": 0,
+      "perm_queue": [
+        {
+          "tool": "Bash",
+          "summary": "コマンド: touch beta.txt",
+          "detail": "touch beta.txt",
+          "id": "h:3debb1d6a2408f6b"
+        }
+      ],
+      "pending": {
+        "tool": "Bash",
+        "summary": "コマンド: touch beta.txt",
+        "detail": "touch beta.txt",
+        "id": "h:3debb1d6a2408f6b"
+      },
+      "pending_count": 1,
+      "asked": "a",
+      "asked_by": "human",
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/x",
+      "updated_at": 0,
+      "said": "beta を呼んだ",
+      "next": null
+    }
+  },
+  {
+    "name": "チームメイトの承認が済むと、休んだリードは休みに戻る",
+    "events": [
+      {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "a",
+        "cwd": "/tmp/x"
+      },
+      {
+        "hook_event_name": "Stop",
+        "last_assistant_message": "beta を呼んだ"
+      },
+      {
+        "hook_event_name": "PermissionRequest",
+        "agent_id": "abeta-584d11236f35ece0",
+        "agent_type": "beta",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "touch beta.txt"
+        }
+      },
+      {
+        "hook_event_name": "PostToolUse",
+        "agent_id": "abeta-584d11236f35ece0",
+        "agent_type": "beta",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "touch beta.txt"
+        }
+      }
+    ],
+    "state": {
+      "phase": "resting",
+      "doing": null,
+      "needs": null,
+      "tools": 0,
+      "turn_started_at": 0,
+      "perm_queue": [],
+      "pending": null,
+      "pending_count": 0,
+      "asked": "a",
+      "asked_by": "human",
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/x",
+      "updated_at": 0,
+      "said": "beta を呼んだ",
+      "next": null
+    }
   }
 ]
