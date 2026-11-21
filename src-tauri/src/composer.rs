@@ -456,6 +456,49 @@ pub fn run_command(session_id: String, text: String, peer: Option<String>) -> Re
     ccn::command(&peer, &session_id, &text, Duration::from_secs(15))
 }
 
+/// 画面から呼ぶ命令の包み。中身の関数は上にある。待つ命令は blocking で別のスレッドへ出す
+pub(crate) mod cmd {
+    use serde_json::Value;
+
+    #[tauri::command]
+    pub async fn prompt_history(cwd: Option<String>, all: Option<bool>) -> Result<super::History, String> {
+        crate::blocking(move || super::prompt_history(cwd, all.unwrap_or(false))).await
+    }
+    #[tauri::command]
+    pub async fn slash_commands(cwd: Option<String>) -> Result<Vec<super::SlashCommand>, String> {
+        crate::blocking(move || Ok(super::slash_commands(cwd))).await
+    }
+    #[tauri::command]
+    pub async fn file_suggestions(cwd: String, query: String) -> Result<Vec<String>, String> {
+        crate::blocking(move || super::file_suggestions(cwd, query)).await
+    }
+    #[tauri::command]
+    pub async fn send_direct(session_id: String, text: String, peer: Option<String>) -> Result<(), String> {
+        crate::native_guard(&session_id, &peer)?;
+        crate::blocking(move || super::send_direct(session_id, text, peer)).await
+    }
+    #[tauri::command]
+    pub async fn interrupt_session(session_id: String, peer: Option<String>) -> Result<(), String> {
+        crate::native_guard(&session_id, &peer)?;
+        crate::blocking(move || super::interrupt_session(session_id, peer)).await
+    }
+    /// モデルの切り替えとコマンドの口がノードにあるか（#97）。{ status, body } を返す
+    #[tauri::command]
+    pub async fn session_controls(session_id: String, peer: Option<String>) -> Result<Value, String> {
+        crate::blocking(move || super::session_controls(session_id, peer)).await
+    }
+    /// モデルと権限モードを替える（#97）。{ status, body } を返す
+    #[tauri::command]
+    pub async fn configure_session(session_id: String, model: Option<String>, permission_mode: Option<String>, peer: Option<String>) -> Result<Value, String> {
+        crate::blocking(move || super::configure_session(session_id, model, permission_mode, peer)).await
+    }
+    /// 組み込みコマンドを command の口へ送る（#97）。{ status, body } を返す
+    #[tauri::command]
+    pub async fn run_command(session_id: String, text: String, peer: Option<String>) -> Result<Value, String> {
+        crate::blocking(move || super::run_command(session_id, text, peer)).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

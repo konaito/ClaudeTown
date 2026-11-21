@@ -581,43 +581,6 @@ mod cmd {
     /// 新しい世帯の一覧の各場所に連携しているリポジトリ名（owner/repo）。.git/config を読むだけ（#99）
     #[tauri::command]
     pub async fn place_repos(paths: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> { blocking(move || Ok(super::repo::repos_of(&paths))).await }
-    #[tauri::command]
-    pub async fn prompt_history(cwd: Option<String>, all: Option<bool>) -> Result<super::composer::History, String> {
-        blocking(move || super::composer::prompt_history(cwd, all.unwrap_or(false))).await
-    }
-    #[tauri::command]
-    pub async fn slash_commands(cwd: Option<String>) -> Result<Vec<super::composer::SlashCommand>, String> {
-        blocking(move || Ok(super::composer::slash_commands(cwd))).await
-    }
-    #[tauri::command]
-    pub async fn file_suggestions(cwd: String, query: String) -> Result<Vec<String>, String> {
-        blocking(move || super::composer::file_suggestions(cwd, query)).await
-    }
-    #[tauri::command]
-    pub async fn send_direct(session_id: String, text: String, peer: Option<String>) -> Result<(), String> {
-        super::native_guard(&session_id, &peer)?;
-        blocking(move || super::composer::send_direct(session_id, text, peer)).await
-    }
-    #[tauri::command]
-    pub async fn interrupt_session(session_id: String, peer: Option<String>) -> Result<(), String> {
-        super::native_guard(&session_id, &peer)?;
-        blocking(move || super::composer::interrupt_session(session_id, peer)).await
-    }
-    /// モデルの切り替えとコマンドの口がノードにあるか（#97）。{ status, body } を返す
-    #[tauri::command]
-    pub async fn session_controls(session_id: String, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::composer::session_controls(session_id, peer)).await
-    }
-    /// モデルと権限モードを替える（#97）。{ status, body } を返す
-    #[tauri::command]
-    pub async fn configure_session(session_id: String, model: Option<String>, permission_mode: Option<String>, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::composer::configure_session(session_id, model, permission_mode, peer)).await
-    }
-    /// 組み込みコマンドを command の口へ送る（#97）。{ status, body } を返す
-    #[tauri::command]
-    pub async fn run_command(session_id: String, text: String, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::composer::run_command(session_id, text, peer)).await
-    }
     /// 入力欄への貼り付け（#64）。クリップボードのファイルのパスか、保存した画像のパスを返す
     #[tauri::command]
     pub async fn paste_clipboard(save_image: bool) -> Result<super::attach::Pasted, String> {
@@ -750,7 +713,7 @@ pub fn run() {
             cmd::snapshot, cmd::town_agents, cmd::peers, conversation::cmd::conversation, conversation::cmd::conversation_cache, conversation::cmd::send_message, permission::cmd::answer_permission,
             session_ops::cmd::create_session, session_ops::cmd::stop_session, teleport, session_ops::cmd::teleport_info, session_ops::cmd::session_detail, session_ops::cmd::house_places, cmd::place_repos, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick, town_settings, set_town_settings,
-            cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::session_controls, cmd::configure_session, cmd::run_command, cmd::paste_clipboard, cmd::stage_files
+            composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::interrupt_session, composer::cmd::session_controls, composer::cmd::configure_session, composer::cmd::run_command, cmd::paste_clipboard, cmd::stage_files
         ])
         .run(context)
         .expect("error while running tauri application");
