@@ -584,7 +584,7 @@ export default function App() {
           {snap && agents.length === 0 && snap.ccn_ok && (
             <div className="empty">
               <p>町にはまだ誰もいない。最初の世帯を作ると、右にチャットが開いてすぐ打てる（親は {place ? place.replace(/^\/Users\/[^/]+/, "~") : "~/Documents/meta"} で起動する。設定で変えられる）。</p>
-              <NewHousehold big disabled={!local} place={place} onCreated={newHousehold} onError={(m) => toast(m, true)} />
+              <NewHousehold disabled={!local} place={place} onCreated={newHousehold} onError={(m) => toast(m, true)} />
             </div>
           )}
           <Stage zoom={zoom} onBlank={() => setSelected(null)} items={tree.families.map((f) => {
@@ -1507,7 +1507,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
 
 /** 町が空のときの「最初の世帯を作る」。最初の依頼の欄は出さず、すぐ ~/Documents/meta で親（端末のセッション）を立て、右のチャットを開く。
  *  ふだんの作る口は左の新しい世帯のペイン（#89、src/newHouse） */
-function NewHousehold({ big, disabled, place, onCreated, onError }: { big?: boolean; disabled?: boolean; place: string | null; onCreated: (r: any) => void; onError: (m: string) => void }) {
+function NewHousehold({ disabled, place, onCreated, onError }: { disabled?: boolean; place: string | null; onCreated: (r: any) => void; onError: (m: string) => void }) {
   const [busy, setBusy] = useState(false);
   const go = async () => {
     setBusy(true);
@@ -1517,8 +1517,8 @@ function NewHousehold({ big, disabled, place, onCreated, onError }: { big?: bool
     } catch (e) { onCreated(null); onError(placeFailure(place, e)); } finally { setBusy(false); }
   };
   return (
-    <button className={big ? "primary new-house big" : "pane-btn new-house"} disabled={disabled || busy} onClick={go}>
-      {busy ? "立てている…" : big ? "最初の世帯を作る" : "＋ 新しい世帯"}
+    <button className="primary new-house big" disabled={disabled || busy} onClick={go}>
+      {busy ? "立てている…" : "最初の世帯を作る"}
     </button>
   );
 }

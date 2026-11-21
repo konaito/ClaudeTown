@@ -1,9 +1,11 @@
 // 世帯モジュールの並べ方の検証。docs/design/household-packing.md の検証条件5つ。
 // 実行: bun test src/layout
 import { describe, expect, test } from "bun:test";
-import { packHouseholds, readingOrder, type Box, type Packed } from "./pack";
+import { packHouseholds, type Box, type Packed } from "./pack";
 
 const GAP = 28;
+/** 画面の読み順（上から下、同じ高さなら左から右） */
+const readingOrder = (items: Packed[]): string[] => [...items].sort((a, b) => a.y - b.y || a.x - b.x).map((p) => p.id);
 const ids = (bs: Box[]) => bs.map((b) => b.id);
 const overlaps = (ps: Packed[]) => {
   let n = 0;

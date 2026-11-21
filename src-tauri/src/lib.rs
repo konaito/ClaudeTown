@@ -588,18 +588,6 @@ fn avatars_path(peer: &Option<String>) -> PathBuf {
     }
 }
 
-// ---------- 家の名前 ----------
-
-/// 世帯の名前の置き場所。（共有の分, アプリが書く分）を返す。
-/// 旧版が書いた houses.json の置き場所。今は名前に使わない（--paths の表示だけに残してある）。
-/// 安定版では2つは同じファイル。FC_HOUSES があれば、両方ともそのファイルにする
-fn houses_paths() -> (PathBuf, PathBuf) {
-    match std::env::var("FC_HOUSES") {
-        Ok(p) if !p.is_empty() => (PathBuf::from(&p), PathBuf::from(p)),
-        _ => (fc_path(Scope::Shared, "houses.json"), fc_path(Scope::App, "houses.json")),
-    }
-}
-
 // ---------- 会話 ----------
 
 #[derive(Default)]
@@ -2088,15 +2076,12 @@ pub fn run() {
     let arg_after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     // family-computing --paths   identifier と、状態ファイルの置き場所を出す（両版で分かれているかの確認に使う）
     if args.iter().any(|a| a == "--paths") {
-        let (houses_shared, houses_own) = houses_paths();
         println!("{}", serde_json::to_string_pretty(&json!({
             "identifier": APP_ID.get(),
             "shared": fc_path(Scope::Shared, ""),
             "app": fc_path(Scope::App, ""),
             "avatars": avatars_path(&None),
             "avatarsRecent": avatars::recent_path(&avatars_path(&None)),
-            "housesShared": houses_shared,
-            "houses": houses_own,
         })).unwrap_or_default());
         return;
     }
