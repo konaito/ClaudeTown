@@ -5,16 +5,19 @@ import { perfMark, perfSetId, perfStart } from "../term/perf";
 import { benchName } from "../term/bench";
 import { onVisibleChange } from "../visible";
 import { DEFAULT_PLACE_LABEL, placeFailure } from "./placeSetting";
+import { loadDefaults } from "../session/defaults";
 import { placeLabel, placeName, placeTime, recentPlaces, type PlaceRepos, type PlacesInput, type RecentPlace } from "./places";
 
 /**
  * 新しい世帯（親なしの端末のセッション）を手元のノードに立てる。cwd が null なら ~/Documents/meta（Rust の create_session の既定）。
- * 町の「＋ 新しい世帯」（#89 より前）と同じ呼び方で、前に開いたターミナルの大きさで起動する
+ * 町の「＋ 新しい世帯」（#89 より前）と同じ呼び方で、前に開いたターミナルの大きさで起動する。
+ * モデルと権限モードは設定の既定（src/session/defaults.ts）で起動する。設定していない項目は渡さず、ノードの Claude Code の既定になる
  */
 export async function createHousehold(cwd: string | null): Promise<any> {
   perfStart("new");
   const { cols, rows } = lastTermSize() ?? { cols: null, rows: null };
-  const r = await invoke<any>("create_session", { cwd, prompt: null, parent: null, name: benchName(), cols, rows, peer: null });
+  const { model, permissionMode } = loadDefaults();
+  const r = await invoke<any>("create_session", { cwd, prompt: null, parent: null, name: benchName(), cols, rows, peer: null, model, permissionMode });
   perfMark("create");
   if (r?.id) perfSetId(r.id);
   return r;

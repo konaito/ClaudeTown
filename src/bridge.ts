@@ -86,6 +86,11 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
       if (typeof a.name === "string" && a.name.trim()) body.name = a.name;
       // 引き継ぎ（src/succeed.ts）。Rust と同じく、resume があるときだけ fork を、fork があるときだけ succeed を送る
       if (typeof a.resume === "string" && a.resume.trim()) { body.resume = a.resume; if (a.fork) { body.fork = true; if (a.succeed) body.succeed = true; } }
+      // 設定の既定のモデルと権限モード（src/session/defaults.ts）。Rust と同じく、resume のときは送らない（ccn が前任の値を継ぐ）
+      else {
+        if (typeof a.model === "string" && a.model) body.model = a.model;
+        if (typeof a.permissionMode === "string" && a.permissionMode) body.permissionMode = a.permissionMode;
+      }
       return post("/sessions", body, headers) as T;
     }
     case "term_input": return post(`/sessions/${a.sessionId}/terminal/input`, { text: a.text }) as T;
