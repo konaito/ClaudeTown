@@ -88,7 +88,8 @@ export function configureError(r: Http): string | null {
 /** モデルの選択肢。今の値が候補の別名でなければ先頭に足す */
 export function modelOptions(current: string | null | undefined): { value: string; label: string }[] {
   if (!current || MODELS.some((m) => m.value === current)) return MODELS;
-  return [{ value: current, label: current }, ...MODELS];
+  // 幅が狭いので、表示だけ claude- を外す（値はそのまま）
+  return [{ value: current, label: current.replace(/^claude-/, "") }, ...MODELS];
 }
 
 /** 権限モードの選択肢。今の値が候補に無ければ（新しいモードなど）先頭に足す */

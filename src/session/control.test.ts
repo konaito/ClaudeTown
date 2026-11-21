@@ -59,6 +59,7 @@ describe("configureError", () => {
 describe("選択肢", () => {
   test("今の値が id なら先頭に足す", () => {
     expect(modelOptions("claude-sonnet-5-5").map((m) => m.value)).toEqual(["claude-sonnet-5-5", "opus", "sonnet", "haiku"]);
+    expect(modelOptions("claude-sonnet-5-5")[0].label).toBe("sonnet-5-5");
     expect(modelOptions("sonnet").map((m) => m.value)).toEqual(["opus", "sonnet", "haiku"]);
     expect(modelOptions(null).map((m) => m.value)).toEqual(["opus", "sonnet", "haiku"]);
   });
