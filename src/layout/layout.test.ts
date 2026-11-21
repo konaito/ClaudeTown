@@ -296,17 +296,29 @@ describe("家族の木の配置", () => {
   }
 
   /** 親 p と子 k1…kn に、孫を足した世帯。grand は「何番目の子に何人」 */
-  const gridFamily = (n: number, grand: Record<number, number>): LNode[] => {
+  const gridFamily = (n: number, grand: Record<number, number>, deep: Record<number, number> = {}): LNode[] => {
     const rows: [string, string | null][] = [["p", null]];
     for (let i = 1; i <= n; i++) rows.push([`k${i}`, "p"]);
-    for (const [i, m] of Object.entries(grand)) for (let j = 1; j <= m; j++) rows.push([`k${i}-g${j}`, `k${i}`]);
+    for (const [i, m] of Object.entries(grand)) for (let j = 1; j <= m; j++) {
+      rows.push([`k${i}-g${j}`, `k${i}`]);
+      // deep は「何番目の子の1人目の孫に、ひ孫を何人」
+      if (j === 1) for (let d = 1; d <= (deep[Number(i)] ?? 0); d++) rows.push([`k${i}-g1-d${d}`, `k${i}-g1`]);
+    }
     return family(rows);
   };
 
   // 画面の確かめ（docs/shots/2026-11-21-grid-*.png）と同じ形。5人は左下の子に孫2人、6人は左上の子に孫1人と右下の子に孫2人
-  for (const [n, grand] of [[5, { 3: 2 }], [6, { 1: 1, 6: 2 }]] as const) {
-    test(`15-${n}. 子${n}人で孫がいる: 子は格子のまま、孫はその子の外側に並ぶ`, () => {
-      const input = gridFamily(n, grand);
+  // 6人の上の段の2人（角度が ±π の側）に孫がいる形と、ひ孫がいる形も見る
+  const GRAND_CASES: { n: 5 | 6; grand: Record<number, number>; deep?: Record<number, number>; label: string }[] = [
+    { n: 5, grand: { 3: 2 }, label: "5" },
+    { n: 6, grand: { 1: 1, 6: 2 }, label: "6" },
+    { n: 6, grand: { 1: 2, 2: 2 }, label: "6-上の段" },
+    { n: 5, grand: { 1: 2, 4: 1 }, deep: { 1: 2 }, label: "5-ひ孫" },
+    { n: 6, grand: { 2: 2 }, deep: { 2: 1 }, label: "6-ひ孫" },
+  ];
+  for (const { n, grand, deep, label } of GRAND_CASES) {
+    test(`15-${label}. 子${n}人で孫がいる（${JSON.stringify(grand)}${deep ? `、ひ孫 ${JSON.stringify(deep)}` : ""}）: 子は格子のまま、孫より下はその子の外側に並ぶ`, () => {
+      const input = gridFamily(n, grand, deep);
       const r = layoutFamily(input);
       const radial = layoutFamily(input, RADIAL);
       expect(r.arcIndex).toBe(-1);
@@ -314,13 +326,14 @@ describe("家族の木の配置", () => {
       expect(ok(r.metrics)).toBe(true);
       expect(r.valid).toBe(true);
       expect(Array.from({ length: n }, (_, i) => get(r.nodes, `k${i + 1}`)).map((k) => [k.x, k.y])).toEqual(GRID[n]);
-      for (const g of r.nodes.filter((x) => x.depth === 2)) {
+      for (const g of r.nodes.filter((x) => x.depth >= 2)) {
         const k = get(r.nodes, g.parent!);
-        // 根から見て子より遠く、子の向きから 45 度以内
+        // 根から見て親より遠く、親の向きから 45 度以内
         expect(Math.hypot(g.x, g.y)).toBeGreaterThan(Math.hypot(k.x, k.y));
         expect(Math.abs(g.angle - k.angle)).toBeLessThan(Math.PI / 4);
       }
-      report.push({ ケース: `15-${n}`, 孫: JSON.stringify(grand), 格子のs: r.metrics.s.toFixed(3), 格子の枠: JSON.stringify(groupSizeOf(r.metrics)), 弧の計算のs: radial.metrics.s.toFixed(3), 弧の計算の枠: JSON.stringify(groupSizeOf(radial.metrics)), ...r.metrics });
+      if (deep) expect(Math.max(...r.nodes.map((x) => x.depth))).toBe(3);
+      report.push({ ケース: `15-${label}`, 孫: JSON.stringify(grand), ひ孫: JSON.stringify(deep ?? {}), 格子のs: r.metrics.s.toFixed(3), 格子の枠: JSON.stringify(groupSizeOf(r.metrics)), 弧の計算のs: radial.metrics.s.toFixed(3), 弧の計算の枠: JSON.stringify(groupSizeOf(radial.metrics)), ...r.metrics });
     });
   }
 
