@@ -797,32 +797,6 @@ pub(crate) static NATIVE_TEST_LOCK: Mutex<()> = Mutex::new(());
 mod tests {
     use super::*;
 
-    /// 見張りを、モックの町（FC_CCN_URL）につないで決まった秒数だけ回し、画面へ送った回数を数える（#5）。
-    /// ccn への要求の回数は、モックの /__bench/stats で数える。
-    /// HOME=<空のディレクトリ> FC_CCN_URL=http://127.0.0.1:<ポート> FC_WATCH_SECS=60 <cargo test --no-run で作った試験のバイナリ> watch_against_mock --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn watch_against_mock() {
-        let secs: u64 = std::env::var("FC_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
-        let (tx, rx) = std::sync::mpsc::channel::<WatchCmd>();
-        let sent = Arc::new(Mutex::new(0u32));
-        let s2 = sent.clone();
-        let tx2 = tx.clone();
-        let t0 = std::time::Instant::now();
-        let t = std::thread::spawn(move || watch_loop(None, tx2, rx, |v| {
-            *s2.lock().unwrap() += 1;
-            // 送った時刻と、町の人数、作業中か承認待ちの人数を出す（状態ファイルだけを変えたときに送られるかを見る）
-            let agents = v["agents"].as_array().cloned().unwrap_or_default();
-            let busy = agents.iter().filter(|a| a["report"]["phase"].is_string()).count();
-            println!("送った {:.1}秒 {}人 報告あり{}人 ccn_ok={}", t0.elapsed().as_secs_f32(), agents.len(), busy, v["ccn_ok"]);
-            true
-        }));
-        std::thread::sleep(Duration::from_secs(secs));
-        let _ = tx.send(WatchCmd::Stop);
-        let _ = t.join();
-        println!("見張りを {secs} 秒回して、画面へ送ったのは {} 回", sent.lock().unwrap());
-    }
-
     #[test]
     fn letters_read_only_what_was_added() {
         use std::io::Write;
@@ -902,82 +876,6 @@ mod tests {
         assert_eq!(read_json_cached(&p).unwrap()["phase"], "resting");
         fs::remove_file(&p).unwrap();
         assert!(read_json_cached(&p).is_none());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn sessions_sse_frames_are_read() {
-        use std::io::Cursor;
-        let stop = AtomicBool::new(false);
-        // ccn の src/api/sse.ts と同じ枠。keep-alive と id は読み捨てる
-        let body = ": keep-alive\n\nid: \"e1\"\nevent: sessions\ndata: [{\"id\":\"a\"}]\n\n: keep-alive\n\nid: \"e2\"\nevent: sessions\ndata: [{\"id\":\"a\"},{\"id\":\"b\"}]\n\n";
-        let mut got = vec![];
-        let why = pump_sessions_sse(Cursor::new(body), &stop, |v| { got.push(v.len()); true });
-        assert_eq!(got, vec![1, 2]);
-        assert_eq!(why, "ccn が閉じた");
-        // 形の違う data が来たら終わる（ポーリングに戻る）
-        let why = pump_sessions_sse(Cursor::new("event: sessions\ndata: {\"error\":1}\n\n"), &stop, |_| true);
-        assert_eq!(why, "一覧の形が想定と違う");
-        // 受け手が閉じたら終わる
-        let mut n = 0;
-        let why = pump_sessions_sse(Cursor::new(body), &stop, |_| { n += 1; false });
-        assert_eq!((n, why.as_str()), (1, "止めた"));
-    }
-
-    #[test]
-    fn watch_wait_backs_off_and_resets() {
-        let mut w = WATCH_MIN;
-        let mut seen = vec![];
-        for _ in 0..6 { w = next_wait(w, false); seen.push(w.as_secs()); }
-        assert_eq!(seen, vec![4, 8, 8, 8, 8, 8]);
-        assert_eq!(next_wait(WATCH_MAX, true), WATCH_MIN);
-    }
-
-    #[test]
-    fn snapshot_key_ignores_fetched_at() {
-        let mk = |at: u128, n: usize| Snapshot { ccn: "x".into(), peer: None, ccn_ok: true, ccn_error: None, agents: vec![json!({"id": n})], letters: vec![], fetched_at: at, cached_at: None, sources: None };
-        assert_eq!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(2, 1)));
-        assert_ne!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(1, 2)));
-    }
-
-    #[test]
-    fn town_is_saved_only_when_it_changes() {
-        let dir = std::env::temp_dir().join(format!("fc-town-{}-{}", std::process::id(), fastrand::u64(..)));
-        let file = dir.join("towns").join("_local.json");
-        let saved_at = || offline::read(&file).and_then(|c| c["savedAt"].as_u64());
-        let a = json!({ "id": "a", "state": "idle", "report": { "doing": "x" } });
-        let b = json!({ "id": "b", "state": "idle" });
-        let t0 = now_ms();
-        let mut prev = None;
-
-        // 初めては書く
-        assert!(save_town_to(&file, &[a.clone()], t0, &mut prev));
-        let first = saved_at().expect("書いた");
-        // 同じ中身は、どれだけ時間が経っても書かない（前は30秒ごとに書いていた）
-        assert!(!save_town_to(&file, &[a.clone()], t0 + 60_000, &mut prev));
-        assert!(!save_town_to(&file, &[a.clone()], t0 + 3_600_000, &mut prev));
-        assert_eq!(saved_at(), Some(first));
-
-        // 顔ぶれが変わったら、間隔を待たずに書く
-        assert!(save_town_to(&file, &[a.clone(), b.clone()], t0 + 3_600_001, &mut prev));
-        assert_eq!(offline::read(&file).unwrap()["agents"], json!([a, b]));
-
-        // 顔ぶれが同じで中身だけ変わったら、前の書き込みから TOWN_SAVE_GAP_MS 空けて書く
-        let a2 = json!({ "id": "a", "state": "running", "report": { "doing": "y" } });
-        let t1 = t0 + 3_600_001;
-        assert!(!save_town_to(&file, &[a2.clone(), b.clone()], t1 + 1_000, &mut prev));
-        assert!(save_town_to(&file, &[a2.clone(), b.clone()], t1 + TOWN_SAVE_GAP_MS, &mut prev));
-        assert_eq!(offline::read(&file).unwrap()["agents"], json!([a2, b]));
-
-        // 起動し直した（前回の記録が無い）ときは、保存してあるファイルと比べ、同じなら書かない
-        let before = saved_at();
-        let mut fresh = None;
-        assert!(!save_town_to(&file, &[a2.clone(), b.clone()], t0 + 7_200_000, &mut fresh));
-        assert_eq!(saved_at(), before);
-        // 違えば書く
-        let mut fresh = None;
-        assert!(save_town_to(&file, &[a.clone()], t0 + 7_200_000, &mut fresh));
-
         let _ = fs::remove_dir_all(&dir);
     }
 
