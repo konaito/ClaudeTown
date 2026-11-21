@@ -18,6 +18,11 @@ describe("simplify", () => {
     const out = simplify(ptyAsst([{ type: "thinking", thinking: "x" }, { type: "text", text: " 返事 " }, { type: "tool_use", name: "Read", input: { file_path: "/a/b/c.ts" } }]));
     expect(out.map((x) => [x.role, x.text])).toEqual([["assistant", "返事"], ["tool", "読む: b/c.ts"]]);
   });
+  test("ExitPlanMode の道具の行には計画の本文を付ける（#83）", () => {
+    const out = simplify(ptyAsst([{ type: "tool_use", name: "ExitPlanMode", input: { plan: "# 計画\n- a" } }, { type: "tool_use", name: "Read", input: { file_path: "/a/b" } }]));
+    expect(out[0].plan).toBe("# 計画\n- a");
+    expect(out[1].plan).toBeUndefined();
+  });
   test("道具の結果だけの user と、<…> で始まる差し込みは出さない", () => {
     expect(simplify(ptyUser([{ type: "tool_result", content: "ok" }]))).toEqual([]);
     expect(simplify(ptyUser("<system-reminder>x</system-reminder>"))).toEqual([]);

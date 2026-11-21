@@ -79,6 +79,8 @@ export type ConvItem = {
   letter?: { fromName?: string | null; fromRaw?: string | null } | null;
   /** 送ったお手紙（role が tool のとき）。宛先は生のまま。create は子を作って最初の文を渡したもの */
   sent?: { to?: string | null; peer?: string | null; summary?: string; text?: string | null; create?: boolean } | null;
+  /** 計画の確認（ExitPlanMode）の本文（role が tool のとき）。承認の欄で、hook の入力が空のときに出す */
+  plan?: string;
 };
 
 /**

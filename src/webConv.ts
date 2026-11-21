@@ -138,7 +138,10 @@ export function simplify(raw: J): Omit<ConvItem, "n">[] {
         if (name === "SendMessage" && typeof inp.message === "string") sent = { to: inp.to ?? null, summary: typeof inp.summary === "string" ? inp.summary : firstLine(inp.message), text: inp.message };
         else if (name === "mcp__ccn__send_message") sent = { to: inp.session ?? null, peer: inp.peer ?? null, summary: firstLine(inp.text), text: inp.text ?? null };
         else if (name === "mcp__ccn__create_session" && typeof inp.prompt === "string") sent = { to: null, peer: inp.peer ?? null, summary: firstLine(inp.prompt), text: inp.prompt, create: true };
-        out.push({ role: "tool", text: toolLine(name, inp), at, sent });
+        const item: ConvItem = { role: "tool", text: toolLine(name, inp), at, sent };
+        // 計画の確認の本文。Rust の simplify と同じ（承認の hook の tool_input は空で来ることがある、#83）
+        if (name === "ExitPlanMode" && typeof inp.plan === "string" && inp.plan.trim()) item.plan = inp.plan;
+        out.push(item);
       }
     }
   }
