@@ -41,6 +41,21 @@ export function toolLine(name: string, input: J): string {
   return target === "" ? verb : `${verb}: ${clip(target, 70)}`;
 }
 
+/** 道具の結果を画面に出す長さ（字）と行数（Rust の RESULT_CHARS と RESULT_LINES） */
+const RESULT_CHARS = 1500;
+const RESULT_LINES = 40;
+
+/** 道具の結果（tool_result の content）を文にする。改行は残し、頭だけを持つ（Rust の result_text） */
+export function resultText(content: J): string {
+  const t = (typeof content === "string" ? content : Array.isArray(content)
+    ? content.map((c: J) => (c?.type === "text" ? String(c.text ?? "") : c?.type === "image" ? "[画像]" : "")).filter(Boolean).join("\n")
+    : "").trim();
+  let out = t.split("\n").slice(0, RESULT_LINES).join("\n");
+  if (Array.from(out).length > RESULT_CHARS) out = Array.from(out).slice(0, RESULT_CHARS).join("");
+  if (out.length < t.length) out += "\n…（続きは省いた）";
+  return out;
+}
+
 /** CLI が貼り付けた文に付ける包み（<pasted_content id="…">）を外す（Rust の unwrap_pasted） */
 export function unwrapPasted(text: string): string {
   if (!text.includes("pasted_content")) return text.trim();
@@ -87,7 +102,7 @@ export function splitImageMarks(text: string): [string, string] {
 const firstLine = (v: J): string => String(typeof v === "string" ? v : "").split("\n").map((l) => l.trim()).find((l) => l) ?? "";
 
 /**
- * ccn の messages の1件を、画面に出す0件以上の項目に縮める。考えた中身と道具の結果は捨てる。
+ * ccn の messages の1件を、画面に出す0件以上の項目に縮める。考えた中身は捨てる。道具の結果は result の項目にし、push が道具の行に付ける（#83）。
  * node はトランスクリプトの行そのまま（type、message、timestamp）。pty は {at, type, data: {type, message, …}, seq} で、中身は data に入り、時刻は at（ms）にある
  */
 export function simplify(raw: J): Omit<ConvItem, "n">[] {
@@ -96,6 +111,21 @@ export function simplify(raw: J): Omit<ConvItem, "n">[] {
   const at: string | number | null = wrapped ? raw.at ?? null : raw?.timestamp ?? null;
   const content = m?.message?.content;
   const out: Omit<ConvItem, "n">[] = [];
+  if (m?.type === "result") {
+    // ターンの終わり。止めたと失敗だけを出す（Rust の simplify と同じ）
+    if (m.subtype === "interrupted") out.push({ role: "event", kind: "interrupted", text: "ここで止めた", at });
+    else if (m.is_error === true) {
+      const t = clip(String(m.result ?? ""), 300);
+      out.push({ role: "event", kind: "error", text: t ? `ターンが失敗で終わった: ${t}` : "ターンが失敗で終わった", at });
+    }
+    return out;
+  }
+  if (m?.type === "user" && Array.isArray(content) && content.some((c: J) => c?.type === "tool_result")) {
+    for (const c of content) {
+      if (c?.type === "tool_result" && typeof c.tool_use_id === "string") out.push({ role: "result", id: c.tool_use_id, text: resultText(c.content), error: c.is_error === true, at });
+    }
+    return out;
+  }
   if (m?.type === "user") {
     let text = userText(content);
     const pre = "Another Claude session sent a message:";
@@ -138,7 +168,7 @@ export function simplify(raw: J): Omit<ConvItem, "n">[] {
         if (name === "SendMessage" && typeof inp.message === "string") sent = { to: inp.to ?? null, summary: typeof inp.summary === "string" ? inp.summary : firstLine(inp.message), text: inp.message };
         else if (name === "mcp__ccn__send_message") sent = { to: inp.session ?? null, peer: inp.peer ?? null, summary: firstLine(inp.text), text: inp.text ?? null };
         else if (name === "mcp__ccn__create_session" && typeof inp.prompt === "string") sent = { to: null, peer: inp.peer ?? null, summary: firstLine(inp.prompt), text: inp.prompt, create: true };
-        const item: ConvItem = { role: "tool", text: toolLine(name, inp), at, sent };
+        const item: ConvItem = { role: "tool", text: toolLine(name, inp), at, sent, id: typeof c.id === "string" ? c.id : null };
         // 計画の確認の本文。Rust の simplify と同じ（承認の hook の tool_input は空で来ることがある、#83）
         if (name === "ExitPlanMode" && typeof inp.plan === "string" && inp.plan.trim()) item.plan = inp.plan;
         out.push(item);
@@ -177,7 +207,18 @@ async function readMessages(fetchPage: (after: number) => Promise<MessagesPage>,
 }
 
 function push(s: ConvState, fresh: Omit<ConvItem, "n">[]) {
-  for (const x of fresh) s.items.push({ ...x, n: s.total++ } as ConvItem);
+  const start = s.total;
+  for (const x of fresh) {
+    // 道具の結果は持っている道具の行に付ける。前に渡した道具の行の結果だけ result の項目で送る（Rust の Conv::push と同じ）
+    if (x.role === "result") {
+      let t: ConvItem | undefined;
+      for (let i = s.items.length - 1; i >= 0; i--) { const y = s.items[i]; if (y.role === "tool" && y.id === x.id && !y.result) { t = y; break; } }
+      if (!t) continue;
+      t.result = { text: x.text, error: !!x.error };
+      if ((t.n ?? -1) >= start) continue;
+    }
+    s.items.push({ ...x, n: s.total++ } as ConvItem);
+  }
   if (s.items.length > KEEP_CONV) s.items.splice(0, s.items.length - KEEP_CONV);
 }
 

@@ -72,7 +72,8 @@ export type Snapshot = {
 export type Peer = { name: string; url: string; status: string; self: boolean };
 
 export type ConvItem = {
-  role: "user" | "assistant" | "tool"; text: string; from?: string | null; at?: string | number | null; pending?: boolean;
+  /** result は道具の結果（画面は道具の行に付け直し、吹き出しにしない）。event は止めた・失敗したターンの印（#83） */
+  role: "user" | "assistant" | "tool" | "result" | "event"; text: string; from?: string | null; at?: string | number | null; pending?: boolean;
   /** 通し番号（このセッションで何件目か。Rust の conversation が付ける）。吹き出しの key に使う。送ったばかりの仮の項目には無い */
   n?: number;
   /** 別のセッションからのお手紙なら、送り手（from-name と、uds のソケットか agent:<ノード>/<sid8>/<役割>） */
@@ -81,6 +82,14 @@ export type ConvItem = {
   sent?: { to?: string | null; peer?: string | null; summary?: string; text?: string | null; create?: boolean } | null;
   /** 計画の確認（ExitPlanMode）の本文（role が tool のとき）。承認の欄で、hook の入力が空のときに出す */
   plan?: string;
+  /** 道具の呼び出しの id（tool_use の id）。role が result のときは、どの道具の結果か */
+  id?: string | null;
+  /** 道具の結果（role が tool のとき）。届いていなければ無い */
+  result?: { text: string; error: boolean };
+  /** role が result のとき、結果が失敗か */
+  error?: boolean;
+  /** role が event のときの種類 */
+  kind?: "interrupted" | "error";
 };
 
 /**

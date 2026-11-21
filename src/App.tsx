@@ -1267,14 +1267,14 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   useEffect(() => { setPending((p) => settlePending(items, p)); }, [items, pending.length]);
 
   // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
-  const shown = useMemo(() => collapseTools([...items, ...pending]), [items, pending]);
+  const shown = useMemo(() => collapseTools(withResults([...items, ...pending])), [items, pending]);
   // 保存した履歴の印が出ているか。出ている間は中身の上に余白を足す（下の has-note）
   const hasNote = shown.length > 0 && !!(convErr || cachedAt);
   // 会話の最後の計画（ExitPlanMode の本文）。承認の hook の入力が空のとき、承認の欄に出す（#83）
   const lastPlan = useMemo(() => [...items].reverse().find((x) => x.role === "tool" && x.plan)?.plan ?? null, [items]);
   const lastChoices = useMemo(() => {
     const lastAssistant = [...items].reverse().find((x) => x.role === "assistant");
-    const lastIsAssistant = items.filter((x) => x.role !== "tool").slice(-1)[0]?.role === "assistant";
+    const lastIsAssistant = items.filter((x) => x.role === "user" || x.role === "assistant").slice(-1)[0]?.role === "assistant";
     return lastAssistant && lastIsAssistant ? choicesOf(lastAssistant.text) : [];
   }, [items]);
 
@@ -1576,15 +1576,28 @@ const LiveLine = memo(function LiveLine({ live, turnAt }: { live: Live; turnAt: 
 });
 
 /** 道具の行が続いたら1行にまとめる。まとめた行の n は最初の行の n にする（後ろに道具が増えても key が変わらない） */
-function collapseTools(items: ConvItem[]): (ConvItem & { more?: number })[] {
-  const out: (ConvItem & { more?: number })[] = [];
+type Shown = ConvItem & { more?: number; group?: ConvItem[]; done?: number };
+function collapseTools(items: ConvItem[]): Shown[] {
+  const out: Shown[] = [];
   for (const x of items) {
     const last = out[out.length - 1];
     if (x.role === "tool" && last?.role === "tool") {
-      out[out.length - 1] = { ...x, n: last.n, more: (last.more ?? 0) + 1 };
-    } else out.push(x);
+      const group = [...(last.group ?? [last]), x];
+      out[out.length - 1] = { ...x, n: last.n, more: (last.more ?? 0) + 1, group, done: group.filter((g) => g.result).length };
+    } else out.push(x.role === "tool" ? { ...x, group: [x], done: x.result ? 1 : 0 } : x);
   }
   return out;
+}
+
+/**
+ * 後から届いた道具の結果（role が result の項目）を、同じ id の道具の行に付け直し、結果の項目は外す（#83）。
+ * Rust は、同じ読み出しで届いた結果を初めから道具の行に付けて渡す
+ */
+function withResults(items: ConvItem[]): ConvItem[] {
+  if (!items.some((x) => x.role === "result")) return items;
+  const late = new Map<string, { text: string; error: boolean }>();
+  for (const x of items) if (x.role === "result" && x.id) late.set(x.id, { text: x.text, error: !!x.error });
+  return items.filter((x) => x.role !== "result").map((x) => (x.role === "tool" && !x.result && x.id && late.has(x.id) ? { ...x, result: late.get(x.id) } : x));
 }
 
 /** 時刻の書式。toLocaleTimeString は呼ぶたびに ICU の書式を作り直すので、1つを使い回す（#10） */
@@ -1597,24 +1610,48 @@ function timeOf(at?: string | number | null): string {
   return isNaN(+d) ? "" : HM.format(d);
 }
 
-type BubbleProps = { item: ConvItem & { more?: number }; agent: Agent; lineageDepth: number };
+type BubbleProps = { item: Shown; agent: Agent; lineageDepth: number };
 /**
  * 吹き出しは、中身か見た目に使う値が変わったときだけ描き直す（#10）。
  * agent は一覧を取るたびに別の物になるので、使う値（id、名前、cwd、絵）だけを比べる。
  * まとめた道具の行は毎回作り直すので、n と件数と文で比べる
  */
 const Bubble = memo(BubbleView, (a: BubbleProps, b: BubbleProps) =>
-  (a.item === b.item || (a.item.n != null && a.item.n === b.item.n && a.item.more === b.item.more && a.item.text === b.item.text && a.item.pending === b.item.pending))
+  (a.item === b.item || (a.item.n != null && a.item.n === b.item.n && a.item.more === b.item.more && a.item.done === b.item.done && a.item.text === b.item.text && a.item.pending === b.item.pending))
   && a.lineageDepth === b.lineageDepth
   && a.agent.id === b.agent.id && a.agent.name === b.agent.name && a.agent.cwd === b.agent.cwd
   && a.agent.avatar?.char === b.agent.avatar?.char && a.agent.avatar?.hue === b.agent.avatar?.hue);
 
+/**
+ * 道具の行。結果が届いた道具があれば、押すと開いて、道具ごとの1行と結果の頭を出す（#83）。
+ * 続いた道具は1行にまとめたまま（「ほか N 件」）。結果が1つも無いうちは開けない
+ */
+function ToolLine({ item }: { item: Shown }) {
+  const group = item.group ?? [item];
+  const head = <>🔧 {linkify(item.text)}{item.more ? ` ほか${item.more}件` : ""}</>;
+  if (!item.done) return <div className="tool-line">{head}</div>;
+  const bad = group.some((g) => g.result?.error);
+  return (
+    <details className="tool-line tool-open">
+      <summary>{head}{bad && <span className="tl-bad">失敗あり</span>}</summary>
+      <div className="tl-list">
+        {group.map((g, i) => (
+          <div key={g.id ?? i} className="tl-item">
+            <div className="tl-name">{linkify(g.text)}{g.result?.error && <span className="tl-bad">失敗</span>}</div>
+            {g.result ? (g.result.text ? <pre className={`tl-out${g.result.error ? " bad" : ""}`}>{g.result.text}</pre> : <div className="hint">（出力なし）</div>) : <div className="hint">結果を待っている</div>}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
   chatPerf.bubble++;
   if (item.role === "tool" && item.sent) return <SentLetter item={item} agent={agent} lineageDepth={lineageDepth} />;
-  if (item.role === "tool") {
-    return <div className="tool-line">🔧 {linkify(item.text)}{item.more ? ` ほか${item.more}件` : ""}</div>;
-  }
+  if (item.role === "tool") return <ToolLine item={item} />;
+  if (item.role === "event") return <div className={`turn-event te-${item.kind ?? "error"}`}>{item.kind === "interrupted" ? "⏹" : "⚠️"} {item.text}<span className="te-at">{timeOf(item.at)}</span></div>;
+  if (item.role === "result") return null;
   if (item.role === "user" && item.letter) return <LetterBubble item={item} />;
   if (item.role === "user") {
     const who = item.from ? fromLabel(item.from) : null;

@@ -207,6 +207,21 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .msg.kid .mini-av { flex: none; padding-top: 8px; }
 .msg.kid .b { background: #fff; border: 1px solid var(--line); }
 .tool-line { font-size: 11.5px; color: var(--sub); padding-left: 38px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 道具の結果（#83）。開くまでは今までと同じ1行 */
+.tool-open { white-space: normal; overflow: visible; }
+.tool-open > summary { cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; list-style: none; }
+.tool-open > summary::-webkit-details-marker { display: none; }
+.tool-open > summary::after { content: " ▸"; }
+.tool-open[open] > summary::after { content: " ▾"; }
+.tl-bad { margin-left: 6px; color: #b4473a; font-weight: 600; }
+.tl-list { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 2px; }
+.tl-name { color: var(--sub); }
+.tl-out { margin: 2px 0 0; background: #f7f6f3; border: 1px solid #ebe8e1; border-radius: 6px; padding: 6px 8px; font: 11px/1.45 ui-monospace, Menlo, monospace; color: #3d3b45; white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow: auto; overscroll-behavior: contain; user-select: text; }
+.tl-out.bad { border-color: #efc3bd; background: #fdf4f2; }
+/* 止めた・失敗したターンの印（#83） */
+.turn-event { align-self: center; font-size: 12px; color: var(--sub); background: #f4f2ee; border-radius: 999px; padding: 3px 12px; }
+.turn-event.te-error { color: #b4473a; background: #fdf0ee; }
+.te-at { margin-left: 8px; font-size: 11px; opacity: 0.7; }
 /* 作業中の末尾の1行（#59）。点が明滅し、経過は数字の幅をそろえて揺れないようにする */
 .live-line { font-size: 11.5px; color: var(--sub); padding-left: 38px; min-width: 0; }
 .ll-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
