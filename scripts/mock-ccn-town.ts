@@ -2,8 +2,10 @@
 //   bun run scripts/mock-ccn-town.ts <ポート> [オプション]
 //     --households <数>   世帯（根のセッション）の数。既定 4
 //     --sessions <数>     セッションの合計。既定 10。根の残りを、世帯に順に子として配る（3人目からは孫）
-//     --kids <a,b,…>      世帯ごとの子の数をそのまま決める（孫は作らない）。例 --kids 1,2,3,4 で子1〜4人の世帯を4つ。
-//                         指定すると --households と --sessions は無視する（世帯の数は並べた数、合計は世帯と子の和）
+//     --kids <a,b,…>      世帯ごとの子の数をそのまま決める。例 --kids 1,2,3,4 で子1〜4人の世帯を4つ。孫は --grand で足す
+//                         指定すると --households と --sessions は無視する（世帯の数は並べた数、合計は世帯と子と孫の和）
+//     --grand <h>:<k>:<n>[,…]  --kids と一緒に使う。h 番目の世帯の k 番目の子に、孫を n 人足す（h と k は1から数える）。
+//                         例 --kids 5 --grand 1:3:2 で、子5人の世帯の3人目の子に孫2人
 //     --running <数>      作業中（state=running）にする数。既定 0
 //     --approval <数>     承認待ち（state=waiting_permission）にする数。既定 0
 //     --flood <Hz>        先頭の世帯に PTY のセッションを1つ足し、決まった出力を1秒に Hz かたまり流し続ける（mock-ccn-flood.ts と同じ中身）。既定 0（足さない）
@@ -21,6 +23,8 @@ const PORT = Number(argv[0]);
 if (!PORT) { console.error("ポートを渡す"); process.exit(2); }
 const opt = (k: string, d: number) => { const i = argv.indexOf(`--${k}`); return i >= 0 ? Number(argv[i + 1]) : d; };
 const kidsArg = (() => { const i = argv.indexOf("--kids"); return i >= 0 ? argv[i + 1].split(",").map(Number) : null; })();
+const grandArg = (() => { const i = argv.indexOf("--grand"); return i >= 0 ? argv[i + 1].split(",").map((x) => x.split(":").map(Number) as [number, number, number]) : []; })();
+if (grandArg.length && !kidsArg) { console.error("--grand は --kids と一緒に使う"); process.exit(2); }
 const HOUSEHOLDS = kidsArg ? kidsArg.length : opt("households", 4);
 const SESSIONS = kidsArg ? kidsArg.length + kidsArg.reduce((a, b) => a + b, 0) : opt("sessions", 10);
 const RUNNING = opt("running", 0), APPROVAL = opt("approval", 0);
@@ -58,6 +62,17 @@ for (let i = 0; i < SESSIONS; i++) {
   const s: S = { id, kind: "node", title: cwd.split("/").pop()!, cwd, pid: 50000 + i, parent, state, startedAt: T0 + i * 60_000, lastActivityAt: T0 + i * 60_000, capabilities: caps(false) };
   sessions.push(s);
   if (i < HOUSEHOLDS) roots.push(s);
+}
+// --grand: 指定した子に孫を足す。開始時刻は子の後ろに続ける
+let gi = sessions.length;
+for (const [h, k, n] of grandArg) {
+  const root = roots[h - 1];
+  const kid = sessions.filter((s) => s.parent === `agent:bench/${root?.id.slice(0, 8)}/子`)[k - 1];
+  if (!kid) { console.error(`--grand ${h}:${k}:${n} の子が無い`); process.exit(2); }
+  for (let j = 0; j < n; j++, gi++) {
+    sessions.push({ id: idOf(gi + 1), kind: "node", title: `${kid.title}-${j + 1}`, cwd: `${kid.cwd}/grand-${j + 1}`, pid: 50000 + gi,
+      parent: `agent:bench/${kid.id.slice(0, 8)}/子`, state: "idle", startedAt: T0 + gi * 60_000, lastActivityAt: T0 + gi * 60_000, capabilities: caps(false) });
+  }
 }
 const extra = (tag: string, kind: "node" | "pty", n: number, state: string): S => {
   const s: S = { id: `${tag}0000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`, kind, title: tag, cwd: `${roots[0].cwd}/${tag === "f" ? "flood" : "talk"}`, pid: 60000 + n,
