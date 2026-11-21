@@ -578,90 +578,44 @@ mod cmd {
     pub async fn snapshot(peer: Option<String>) -> Result<Snapshot, String> { blocking(move || Ok(super::snapshot(peer))).await }
     #[tauri::command]
     pub async fn town_agents(peer: Option<String>) -> Result<Vec<Value>, String> { blocking(move || super::town_agents(peer)).await }
-    #[tauri::command]
-    pub async fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<super::ConvDelta, String> {
-        blocking(move || super::conversation(session_id, peer, since)).await
-    }
-    #[tauri::command]
-    pub async fn conversation_cache(session_id: String, peer: Option<String>) -> Result<Option<super::offline::ConvCache>, String> {
-        blocking(move || Ok(super::conversation_cache(session_id, peer))).await
-    }
-    #[tauri::command]
-    pub async fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
-        blocking(move || super::send_message(session_id, text, peer)).await
-    }
-    #[tauri::command]
-    pub async fn answer_permission(session_id: String, choice: String, expect_id: Option<String>, answers: Option<Value>, message: Option<String>, suggestion: Option<usize>, peer: Option<String>) -> Result<String, String> {
-        blocking(move || super::answer_permission(session_id, choice, expect_id, answers, message, suggestion, peer)).await
-    }
-    #[tauri::command]
-    pub async fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, succeed: Option<bool>, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::create_session(cwd, prompt, parent, name, cols, rows, resume, fork, succeed, peer)).await
-    }
-    #[tauri::command]
-    pub async fn house_places() -> Result<Value, String> { blocking(super::house_places).await }
-    /// 新しい世帯の一覧の各場所に連携しているリポジトリ名（owner/repo）。.git/config を読むだけ（#99）
-    #[tauri::command]
-    pub async fn place_repos(paths: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> { blocking(move || Ok(super::repo::repos_of(&paths))).await }
-    #[tauri::command]
-    pub async fn session_detail(session_id: String, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::session_detail(session_id, peer)).await
-    }
-    #[tauri::command]
-    pub async fn teleport_info(session_id: String, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::teleport_info(session_id, peer)).await
-    }
-    #[tauri::command]
-    pub async fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> {
-        blocking(move || super::stop_session(session_id, peer)).await
-    }
-    #[tauri::command]
-    pub async fn prompt_history(cwd: Option<String>, all: Option<bool>) -> Result<super::composer::History, String> {
-        blocking(move || super::composer::prompt_history(cwd, all.unwrap_or(false))).await
-    }
-    #[tauri::command]
-    pub async fn slash_commands(cwd: Option<String>) -> Result<Vec<super::composer::SlashCommand>, String> {
-        blocking(move || Ok(super::composer::slash_commands(cwd))).await
-    }
-    #[tauri::command]
-    pub async fn file_suggestions(cwd: String, query: String) -> Result<Vec<String>, String> {
-        blocking(move || super::composer::file_suggestions(cwd, query)).await
-    }
-    #[tauri::command]
-    pub async fn send_direct(session_id: String, text: String, peer: Option<String>) -> Result<(), String> {
-        super::native_guard(&session_id, &peer)?;
-        blocking(move || super::composer::send_direct(session_id, text, peer)).await
-    }
-    #[tauri::command]
-    pub async fn interrupt_session(session_id: String, peer: Option<String>) -> Result<(), String> {
-        super::native_guard(&session_id, &peer)?;
-        blocking(move || super::composer::interrupt_session(session_id, peer)).await
-    }
-    /// モデルの切り替えとコマンドの口がノードにあるか（#97）。{ status, body } を返す
-    #[tauri::command]
-    pub async fn session_controls(session_id: String, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::composer::session_controls(session_id, peer)).await
-    }
-    /// モデルと権限モードを替える（#97）。{ status, body } を返す
-    #[tauri::command]
-    pub async fn configure_session(session_id: String, model: Option<String>, permission_mode: Option<String>, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::composer::configure_session(session_id, model, permission_mode, peer)).await
-    }
-    /// 組み込みコマンドを command の口へ送る（#97）。{ status, body } を返す
-    #[tauri::command]
-    pub async fn run_command(session_id: String, text: String, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::composer::run_command(session_id, text, peer)).await
-    }
-    /// 入力欄への貼り付け（#64）。クリップボードのファイルのパスか、保存した画像のパスを返す
-    #[tauri::command]
-    pub async fn paste_clipboard(save_image: bool) -> Result<super::attach::Pasted, String> {
-        blocking(move || super::attach::clipboard(&super::fc_path(Scope::App, "attachments"), save_image)).await
-    }
-    /// ドロップと貼り付けで受けたファイルのうち、一時の場所のものを attachments に写し、入力欄に入れるパスを返す（#69）
-    #[tauri::command]
-    pub async fn stage_files(paths: Vec<String>) -> Result<Vec<String>, String> {
-        blocking(move || super::attach::stage(&super::fc_path(Scope::App, "attachments"), paths)).await
-    }
+}
+
+/// 開発用の引数 --paths。identifier と、状態ファイルの置き場所を出す
+fn print_paths() {
+    println!("{}", serde_json::to_string_pretty(&json!({
+        "identifier": APP_ID.get(),
+        "shared": fc_path(Scope::Shared, ""),
+        "app": fc_path(Scope::App, ""),
+        "avatars": avatars_path(&None),
+        "avatarsRecent": avatars::recent_path(&avatars_path(&None)),
+    })).unwrap_or_default());
+}
+
+/// 開発用の引数 --native-list。~/.claude（FC_CLAUDE_HOME）から一覧を2回作り、件数と時間だけを出す
+fn print_native_list() {
+    let root = native::claude_home();
+    let first = native::list(&root, native::now_ms());
+    let second = native::list(&root, native::now_ms());
+    let convs: Vec<Value> = first.sessions.iter().chain(first.subagents.iter()).filter_map(|r| {
+        let p = PathBuf::from(r["native"]["jsonl"].as_str()?);
+        let t = std::time::Instant::now();
+        let c = native::conv::read(&p, 0).ok()?;
+        let items: usize = c.lines.iter().map(|l| simplify(l).len()).sum();
+        Some(json!({ "kind": r["kind"], "bytes": fs::metadata(&p).map(|m| m.len()).unwrap_or(0), "lines": c.lines.len(), "items": items, "ms": t.elapsed().as_secs_f64() * 1000.0 }))
+    }).collect();
+    let mut odd = first.stats.unexpected.clone();
+    for (k, v) in native::conv::odd_counts() { *odd.entry(k).or_default() += v; }
+    println!("{}", serde_json::to_string_pretty(&json!({
+        "first": first.stats, "second": second.stats,
+        "rows": first.sessions.iter().chain(first.subagents.iter()).map(|r| json!({ "kind": r["kind"], "state": r["state"], "hasParent": !r["parent"].is_null() || !r["native"]["parentId"].is_null() })).collect::<Vec<_>>(),
+        "conversations": convs,
+        "unexpected": odd,
+    })).unwrap_or_default());
+}
+
+/// 開発用の引数 --snapshot。画面に渡すのと同じ一覧の JSON を出す
+fn print_snapshot(peer: Option<String>) {
+    println!("{}", serde_json::to_string_pretty(&snapshot(peer)).unwrap_or_default());
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -682,40 +636,17 @@ pub fn run() {
     let arg_after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     // family-computing --paths   identifier と、状態ファイルの置き場所を出す（両版で分かれているかの確認に使う）
     if args.iter().any(|a| a == "--paths") {
-        println!("{}", serde_json::to_string_pretty(&json!({
-            "identifier": APP_ID.get(),
-            "shared": fc_path(Scope::Shared, ""),
-            "app": fc_path(Scope::App, ""),
-            "avatars": avatars_path(&None),
-            "avatarsRecent": avatars::recent_path(&avatars_path(&None)),
-        })).unwrap_or_default());
+        print_paths();
         return;
     }
     // family-computing --native-list   ~/.claude（FC_CLAUDE_HOME）から一覧を2回作り、件数と時間だけを出す（中身の文は出さない。#96）。
     // 生きているセッションの会話を末尾から読んだ件数と時間も出す。読むだけで、~/.claude にも ~/.family-computing にも書かない
     if args.iter().any(|a| a == "--native-list") {
-        let root = native::claude_home();
-        let first = native::list(&root, native::now_ms());
-        let second = native::list(&root, native::now_ms());
-        let convs: Vec<Value> = first.sessions.iter().chain(first.subagents.iter()).filter_map(|r| {
-            let p = PathBuf::from(r["native"]["jsonl"].as_str()?);
-            let t = std::time::Instant::now();
-            let c = native::conv::read(&p, 0).ok()?;
-            let items: usize = c.lines.iter().map(|l| simplify(l).len()).sum();
-            Some(json!({ "kind": r["kind"], "bytes": fs::metadata(&p).map(|m| m.len()).unwrap_or(0), "lines": c.lines.len(), "items": items, "ms": t.elapsed().as_secs_f64() * 1000.0 }))
-        }).collect();
-        let mut odd = first.stats.unexpected.clone();
-        for (k, v) in native::conv::odd_counts() { *odd.entry(k).or_default() += v; }
-        println!("{}", serde_json::to_string_pretty(&json!({
-            "first": first.stats, "second": second.stats,
-            "rows": first.sessions.iter().chain(first.subagents.iter()).map(|r| json!({ "kind": r["kind"], "state": r["state"], "hasParent": !r["parent"].is_null() || !r["native"]["parentId"].is_null() })).collect::<Vec<_>>(),
-            "conversations": convs,
-            "unexpected": odd,
-        })).unwrap_or_default());
+        print_native_list();
         return;
     }
     if args.iter().any(|a| a == "--snapshot") {
-        println!("{}", serde_json::to_string_pretty(&snapshot(arg_after("--peer"))).unwrap_or_default());
+        print_snapshot(arg_after("--peer"));
         return;
     }
     if let Some(id) = arg_after("--conversation") {
@@ -781,329 +712,21 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::conversation_cache, cmd::send_message, cmd::answer_permission,
-            cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, cmd::house_places, cmd::place_repos, term_open, term_close, term_input, term_resize,
+            cmd::snapshot, cmd::town_agents, cmd::peers, conversation::cmd::conversation, conversation::cmd::conversation_cache, conversation::cmd::send_message, permission::cmd::answer_permission,
+            session_ops::cmd::create_session, session_ops::cmd::stop_session, teleport, session_ops::cmd::teleport_info, session_ops::cmd::session_detail, session_ops::cmd::house_places, repo::cmd::place_repos, term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick, town_settings, set_town_settings,
-            cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::session_controls, cmd::configure_session, cmd::run_command, cmd::paste_clipboard, cmd::stage_files
+            composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::interrupt_session, composer::cmd::session_controls, composer::cmd::configure_session, composer::cmd::run_command, attach::cmd::paste_clipboard, attach::cmd::stage_files
         ])
         .run(context)
         .expect("error while running tauri application");
 }
 
 #[cfg(test)]
+pub(crate) static NATIVE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
 mod tests {
-    fn ask() -> serde_json::Value {
-        serde_json::json!({ "requestId": "r1", "toolName": "AskUserQuestion", "input": { "questions": [
-            { "question": "色は？", "header": "色", "options": [{ "label": "赤" }, { "label": "青" }], "multiSelect": false },
-            { "question": "数は？", "header": "数", "options": [{ "label": "1" }, { "label": "2" }], "multiSelect": true }
-        ] } })
-    }
-
-    #[test]
-    fn permission_body_answers_questions() {
-        let a = serde_json::json!({ "色は？": "青", "数は？": "1, 2" });
-        let (b, done) = super::permission_body(&ask(), "allow", Some("r1"), Some(&a), None, None).unwrap();
-        assert_eq!(b["behavior"], "allow");
-        assert_eq!(b["updatedInput"]["answers"], a);
-        // 元の questions はそのまま返す
-        assert_eq!(b["updatedInput"]["questions"], ask()["input"]["questions"]);
-        assert_eq!(done, "質問に答えた");
-    }
-
-    #[test]
-    fn permission_body_refuses_partial_or_stale_answers() {
-        let some = serde_json::json!({ "色は？": "青" });
-        assert!(super::permission_body(&ask(), "allow", Some("r1"), Some(&some), None, None).unwrap_err().contains("数は？"));
-        let blank = serde_json::json!({ "色は？": "青", "数は？": "  " });
-        assert!(super::permission_body(&ask(), "allow", Some("r1"), Some(&blank), None, None).is_err());
-        assert!(super::permission_body(&ask(), "allow", Some("r1"), None, None, None).is_err());
-        let full = serde_json::json!({ "色は？": "青", "数は？": "1" });
-        assert!(super::permission_body(&ask(), "allow", Some("old"), Some(&full), None, None).unwrap_err().contains("変わった"));
-    }
-
-    #[test]
-    fn permission_body_always_allow_uses_the_pending_suggestion() {
-        // 2026-11-21 に本番のノードで見た pending の形（mcp__ccn__list_peers）
-        let mcp = serde_json::json!({ "requestId": "r4", "toolName": "mcp__ccn__list_peers", "input": {}, "suggestions": [
-            { "type": "addRules", "rules": [{ "toolName": "mcp__ccn__list_peers" }], "behavior": "allow", "destination": "localSettings" },
-            { "type": "addDirectories", "directories": ["/x"], "destination": "session" }
-        ] });
-        let (b, done) = super::permission_body(&mcp, "allow", Some("r4"), None, None, Some(0)).unwrap();
-        assert_eq!(b["updatedPermissions"], serde_json::json!([mcp["suggestions"][0]]));
-        assert!(done.contains("以後は聞かない"));
-        // addDirectories と、無い番号は返さない
-        assert!(super::permission_body(&mcp, "allow", Some("r4"), None, None, Some(1)).is_err());
-        assert!(super::permission_body(&mcp, "allow", Some("r4"), None, None, Some(9)).is_err());
-        // 中身が変わっていたら送らない。拒否と計画には付けない
-        assert!(super::permission_body(&mcp, "allow", Some("old"), None, None, Some(0)).is_err());
-        assert!(super::permission_body(&mcp, "deny", None, None, None, Some(0)).is_err());
-        let plan = serde_json::json!({ "requestId": "r2", "toolName": "ExitPlanMode", "input": {}, "suggestions": [{ "type": "setMode", "mode": "acceptEdits", "destination": "session" }] });
-        assert!(super::permission_body(&plan, "allow", Some("r2"), None, None, Some(0)).is_err());
-    }
-
-    #[test]
-    fn permission_body_plan_and_tools() {
-        let plan = serde_json::json!({ "requestId": "r2", "toolName": "ExitPlanMode", "input": { "plan": "p" } });
-        assert_eq!(super::permission_body(&plan, "allow", Some("r2"), None, None, None).unwrap().0, serde_json::json!({ "behavior": "allow" }));
-        let (b, done) = super::permission_body(&plan, "deny", None, None, Some("  "), None).unwrap();
-        assert_eq!(b, serde_json::json!({ "behavior": "deny", "message": super::PLAN_DENY_DEFAULT }));
-        assert_eq!(done, "計画の見直しを頼んだ");
-        assert_eq!(super::permission_body(&plan, "deny", None, None, Some("テストも足して"), None).unwrap().0["message"], "テストも足して");
-        let bash = serde_json::json!({ "requestId": "r3", "toolName": "Bash", "input": { "command": "ls" } });
-        assert_eq!(super::permission_body(&bash, "allow", Some("r3"), None, None, None).unwrap().0, serde_json::json!({ "behavior": "allow" }));
-        assert_eq!(super::permission_body(&bash, "deny", None, None, None, None).unwrap().0["message"], super::DENY_DEFAULT);
-        // 質問でない待ちに答えを付けたら送らない
-        assert!(super::permission_body(&bash, "allow", Some("r3"), Some(&serde_json::json!({ "x": "y" })), None, None).is_err());
-    }
-
-    #[test]
-    fn live_tracks_open_tools_and_thinking() {
-        use super::{live_events, Live};
-        use serde_json::json;
-        let pty = |ts: &str, data: serde_json::Value| json!({ "at": 1, "type": "x", "seq": 0, "data": { "timestamp": ts, "type": data["type"], "message": data["message"] } });
-        let mut l = Live::default();
-        let feed = |l: &mut Live, m: serde_json::Value| for e in live_events(&m) { l.apply(e) };
-        feed(&mut l, pty("t0", json!({ "type": "user", "message": { "content": "やって" } })));
-        assert_eq!(l.turn_at, json!("t0"));
-        feed(&mut l, pty("t1", json!({ "type": "assistant", "message": { "content": [{ "type": "thinking", "thinking": "" }] } })));
-        assert_eq!(l.last, Some("thinking"));
-        feed(&mut l, pty("t2", json!({ "type": "assistant", "message": { "content": [
-            { "type": "tool_use", "id": "a", "name": "Bash", "input": { "command": "git status", "description": "見る" } },
-            { "type": "tool_use", "id": "b", "name": "mcp__ccn__send_message", "input": { "session": "abc", "text": "x" } } ] } })));
-        assert_eq!(l.tools.len(), 2);
-        assert_eq!(l.tools[0].text, "コマンド: git status");
-        assert_eq!(l.tools[1].kind, "ccn");
-        assert_eq!(l.tools[1].text, "send_message: abc");
-        // node の形（timestamp が外）でも読む
-        feed(&mut l, json!({ "type": "user", "timestamp": "t3", "message": { "content": [{ "type": "tool_result", "tool_use_id": "a" }] } }));
-        assert_eq!(l.tools.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["b"]);
-        assert_eq!((l.last, l.last_at.clone()), (Some("result"), json!("t3")));
-        // hook の差し込みはターンの始まりにしない。人の文が来たら、結果の来なかった道具は捨てる
-        feed(&mut l, pty("t4", json!({ "type": "user", "message": { "content": "<system-reminder>x</system-reminder>" } })));
-        assert_eq!(l.tools.len(), 1);
-        feed(&mut l, pty("t5", json!({ "type": "user", "message": { "content": [{ "type": "text", "text": "[Request interrupted by user]" }] } })));
-        assert!(l.tools.is_empty());
-        assert_eq!(l.turn_at, json!("t5"));
-    }
-
-    #[test]
-    fn conversation_returns_only_what_the_screen_lacks() {
-        use super::{Conv, KEEP_MESSAGES};
-        use serde_json::json;
-        let mut c = Conv::default();
-        let item = |i: usize| json!({ "role": "assistant", "text": format!("t{i}") });
-        c.push((0..3).map(item).collect());
-        // 初めて開いたときは全部
-        let d = c.since(None);
-        assert!(d.reset);
-        assert_eq!(d.total, 3);
-        assert_eq!(d.items.iter().map(|v| v["n"].as_u64().unwrap()).collect::<Vec<_>>(), vec![0, 1, 2]);
-        // 増えていなければ空
-        let d = c.since(Some(3));
-        assert!(!d.reset && d.items.is_empty() && d.total == 3);
-        // 増えた分だけ
-        c.push(vec![item(3)]);
-        let d = c.since(Some(3));
-        assert!(!d.reset);
-        assert_eq!(d.items, vec![json!({ "role": "assistant", "text": "t3", "n": 3 })]);
-        // 一度に KEEP_MESSAGES を超えて増え、画面の持つ分が捨てた分より前になったら、全部を reset で
-        c.push((4..4 + KEEP_MESSAGES + 5).map(item).collect());
-        let d = c.since(Some(4));
-        assert!(d.reset);
-        assert_eq!(d.items.len(), KEEP_MESSAGES);
-        assert_eq!(d.items[0]["n"], json!(9));
-        assert_eq!(d.total, 4 + KEEP_MESSAGES as u64 + 5);
-        // 画面のほうが先に進んでいる（キャッシュを作り直した）ときも reset
-        assert!(c.since(Some(d.total + 1)).reset);
-    }
-
-    #[test]
-    fn overlapping_reads_do_not_add_twice() {
-        use super::Conv;
-        use serde_json::json;
-        let mut c = Conv::default();
-        let fresh = || vec![json!({ "role": "user", "text": "a" })];
-        // 同じ after=0 から読んだ2回。先に終わった方だけ足す
-        c.absorb(0, 5, fresh(), vec![], None);
-        c.absorb(0, 5, fresh(), vec![], None);
-        assert_eq!(c.total, 1);
-        assert_eq!(c.next, 5);
-        c.absorb(5, 6, fresh(), vec![], None);
-        assert_eq!(c.total, 2);
-    }
-
-    #[test]
-    fn idle_conversations_are_forgotten() {
-        use super::{forget_idle_convs, Conv, CONV_IDLE_MS};
-        use std::collections::HashMap;
-        let mut m: HashMap<String, Conv> = HashMap::new();
-        let now = 100 * CONV_IDLE_MS;
-        m.insert("|open".into(), Conv { used: now - 2500, ..Default::default() });
-        m.insert("|closed".into(), Conv { used: now - CONV_IDLE_MS - 1, ..Default::default() });
-        m.insert("|asked".into(), Conv { used: 0, ..Default::default() });
-        forget_idle_convs(&mut m, "|asked", now);
-        let mut keys: Vec<_> = m.keys().cloned().collect();
-        keys.sort();
-        // 読んでいる会話と、いま読もうとしている会話は残し、長く読まれていない会話は捨てる
-        assert_eq!(keys, vec!["|asked", "|open"]);
-    }
-
-    #[test]
-    fn a_changed_epoch_means_the_cursor_does_not_continue() {
-        use super::cursor_is_stale;
-        let s = |x: &str| Some(x.to_string());
-        // 初めて読む（from=0）ときは、印が何でも続きとして読む
-        assert!(!cursor_is_stale(0, &None, &s("a")));
-        // 同じ印なら続き
-        assert!(!cursor_is_stale(3, &s("a"), &s("a")));
-        // 印が変わった（ccn の再起動、付け直し、終わって jsonl の位置へ）
-        assert!(cursor_is_stale(3, &s("a"), &s("b")));
-        assert!(cursor_is_stale(3, &s("a"), &s("history")));
-        // 印を返さない古い ccn から入れ替わった
-        assert!(cursor_is_stale(3, &None, &s("b")));
-        // 印を返さない古い ccn では今までどおり
-        assert!(!cursor_is_stale(3, &None, &None));
-        assert!(!cursor_is_stale(3, &s("a"), &None));
-    }
-
-    /// 読み直して置き換えた後は、画面が前に持っていた数（since）で呼んでも必ず reset になる。
-    /// 読み直しが前より短い、同じ、長い（KEEP_MESSAGES を超える）の3通り
-    #[test]
-    fn replacing_after_a_reread_always_resets_the_screen() {
-        use super::{Conv, KEEP_MESSAGES};
-        use serde_json::json;
-        let item = |i: usize| json!({ "role": "assistant", "text": format!("t{i}") });
-        let a = Some("a".to_string());
-        for len in [1usize, 3, KEEP_MESSAGES + 7] {
-            let mut c = Conv::default();
-            c.absorb(0, 3, (0..3).map(item).collect(), vec![], a.clone());
-            let old = c.since(None).total;
-            assert!(c.replace(3, &a, 5, (0..len).map(item).collect(), vec![], Some("b".into())));
-            let d = c.since(Some(old));
-            assert!(d.reset, "len={len}");
-            assert_eq!(d.items.len(), len.min(KEEP_MESSAGES));
-            assert_eq!(d.items.last().unwrap()["text"], json!(format!("t{}", len - 1)));
-            // n は前より大きいところから続く
-            assert!(d.items[0]["n"].as_u64().unwrap() > old);
-            assert_eq!((c.next, c.epoch.as_deref()), (5, Some("b")));
-            // 画面が追いついた後は、続きの差分だけ
-            assert!(c.absorb(5, 6, vec![item(99)], vec![], Some("b".into())));
-            let e = c.since(Some(d.total));
-            assert!(!e.reset);
-            assert_eq!(e.items.len(), 1);
-        }
-        // 0件に読み直しても、画面は reset で空になり、その後は reset を繰り返さない
-        let mut c = Conv::default();
-        c.absorb(0, 3, (0..3).map(item).collect(), vec![], a.clone());
-        assert!(c.replace(3, &a, 0, vec![], vec![], Some("b".into())));
-        let d = c.since(Some(3));
-        assert!(d.reset && d.items.is_empty());
-        assert!(!c.since(Some(d.total)).reset);
-    }
-
-    #[test]
-    fn a_second_overlapping_reread_does_not_replace_twice() {
-        use super::Conv;
-        use serde_json::json;
-        let a = Some("a".to_string());
-        let mut c = Conv::default();
-        c.absorb(0, 3, vec![json!({ "role": "user", "text": "x" })], vec![], a.clone());
-        assert!(c.replace(3, &a, 5, vec![json!({ "role": "user", "text": "y" })], vec![], Some("b".into())));
-        let total = c.total;
-        // 同じ時に読み始めたもう1回は、もう進んでいるので置き換えない
-        assert!(!c.replace(3, &a, 5, vec![json!({ "role": "user", "text": "y" })], vec![], Some("b".into())));
-        assert_eq!(c.total, total);
-        // 古い印のまま続きを足そうとした取得も足さない
-        assert!(!c.absorb(3, 4, vec![json!({ "role": "user", "text": "z" })], vec![], a.clone()));
-        assert_eq!(c.total, total);
-    }
-
-    #[test]
-    fn conv_delta_is_sent_as_an_object() {
-        use super::ConvDelta;
-        use serde_json::json;
-        let d = ConvDelta { items: vec![json!({ "role": "user", "text": "a", "n": 0 })], total: 1, reset: true, live: Default::default() };
-        assert_eq!(serde_json::to_value(&d).unwrap(), json!({ "items": [{ "role": "user", "text": "a", "n": 0 }], "total": 1, "reset": true,
-            "live": { "tools": [], "last": null, "last_at": null, "turn_at": null } }));
-    }
-
-    /// 試験用の ccn（FC_CCN_URL）のセッション（FC_CONV_ID）の会話を、画面と同じ形で FC_CONV_SECS 秒読み続ける。
-    /// 同じプロセスで cursor を持ったまま、外で ccn を起動し直して会話を足す。終わりに、画面が持つ分と、
-    /// after=0 から読んだ分を比べる（再起動の前後で欠けも二重も無いか）。HOME は空のディレクトリにする（保存分を分ける）。
-    /// HOME=<空> FC_CCN_URL=http://127.0.0.1:<ポート> FC_CONV_ID=<id> FC_CONV_SECS=120 <試験のバイナリ> conversation_across_restart --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn conversation_across_restart() {
-        use super::{conversation, read_messages, offline, cache_dir};
-        let id = std::env::var("FC_CONV_ID").expect("FC_CONV_ID");
-        let secs: u64 = std::env::var("FC_CONV_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
-        // 画面（App.tsx の load と conv.ts の mergeConv）と同じ持ち方
-        let mut since: Option<u64> = None;
-        let mut screen: Vec<Value> = vec![];
-        let texts = |v: &[Value]| v.iter().map(|x| format!("{}:{}", x["role"].as_str().unwrap_or(""), x["text"].as_str().unwrap_or(""))).collect::<Vec<_>>();
-        let t0 = std::time::Instant::now();
-        // FC_CONV_PAUSE のファイルがある間は読まない（再起動して1往復進めてから読む順序を作る）
-        let pause = std::env::var("FC_CONV_PAUSE").ok().map(std::path::PathBuf::from);
-        while t0.elapsed() < Duration::from_secs(secs) {
-            if pause.as_ref().is_some_and(|p| p.exists()) {
-                std::thread::sleep(Duration::from_millis(500));
-                continue;
-            }
-            match conversation(id.clone(), None, since) {
-                Ok(d) => {
-                    if d.reset {
-                        screen = d.items.clone();
-                    } else {
-                        let last = screen.last().and_then(|x| x["n"].as_u64());
-                        screen.extend(d.items.iter().filter(|x| last.map_or(true, |l| x["n"].as_u64().unwrap_or(u64::MAX) > l)).cloned());
-                    }
-                    let prev = since;
-                    since = Some(if d.reset { d.total } else { since.unwrap_or(0).max(d.total) });
-                    if d.reset || !d.items.is_empty() {
-                        let g = super::CONVS.lock().unwrap();
-                        let c = g.as_ref().and_then(|m| m.get(&format!("|{id}"))).unwrap();
-                        println!("[{:>5.1}s] since {prev:?}→{since:?} reset={} +{} 画面{}件 cursor={} epoch={:?} {:?}",
-                            t0.elapsed().as_secs_f32(), d.reset, d.items.len(), screen.len(), c.next, c.epoch, texts(&d.items));
-                    }
-                }
-                Err(e) => println!("[{:>5.1}s] 読めない: {e}", t0.elapsed().as_secs_f32()),
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        let (_, fresh, _, epoch) = read_messages(&None, &id, 0).expect("after=0");
-        let cached = offline::load_conv(&cache_dir(), &None, &id).map(|c| texts(&c.items)).unwrap_or_default();
-        println!("画面 {}件: {:?}", screen.len(), texts(&screen));
-        println!("after=0 {}件（epoch {epoch:?}）: {:?}", fresh.len(), texts(&fresh));
-        println!("保存分 {}件", cached.len());
-        assert_eq!(texts(&screen), texts(&fresh));
-        assert_eq!(cached, texts(&fresh));
-    }
-
-    /// 見張りを、モックの町（FC_CCN_URL）につないで決まった秒数だけ回し、画面へ送った回数を数える（#5）。
-    /// ccn への要求の回数は、モックの /__bench/stats で数える。
-    /// HOME=<空のディレクトリ> FC_CCN_URL=http://127.0.0.1:<ポート> FC_WATCH_SECS=60 <cargo test --no-run で作った試験のバイナリ> watch_against_mock --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn watch_against_mock() {
-        let secs: u64 = std::env::var("FC_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
-        let (tx, rx) = std::sync::mpsc::channel::<WatchCmd>();
-        let sent = Arc::new(Mutex::new(0u32));
-        let s2 = sent.clone();
-        let tx2 = tx.clone();
-        let t0 = std::time::Instant::now();
-        let t = std::thread::spawn(move || watch_loop(None, tx2, rx, |v| {
-            *s2.lock().unwrap() += 1;
-            // 送った時刻と、町の人数、作業中か承認待ちの人数を出す（状態ファイルだけを変えたときに送られるかを見る）
-            let agents = v["agents"].as_array().cloned().unwrap_or_default();
-            let busy = agents.iter().filter(|a| a["report"]["phase"].is_string()).count();
-            println!("送った {:.1}秒 {}人 報告あり{}人 ccn_ok={}", t0.elapsed().as_secs_f32(), agents.len(), busy, v["ccn_ok"]);
-            true
-        }));
-        std::thread::sleep(Duration::from_secs(secs));
-        let _ = tx.send(WatchCmd::Stop);
-        let _ = t.join();
-        println!("見張りを {secs} 秒回して、画面へ送ったのは {} 回", sent.lock().unwrap());
-    }
+    use super::*;
 
     #[test]
     fn letters_read_only_what_was_added() {
@@ -1188,84 +811,6 @@ mod tests {
     }
 
     #[test]
-    fn sessions_sse_frames_are_read() {
-        use std::io::Cursor;
-        let stop = AtomicBool::new(false);
-        // ccn の src/api/sse.ts と同じ枠。keep-alive と id は読み捨てる
-        let body = ": keep-alive\n\nid: \"e1\"\nevent: sessions\ndata: [{\"id\":\"a\"}]\n\n: keep-alive\n\nid: \"e2\"\nevent: sessions\ndata: [{\"id\":\"a\"},{\"id\":\"b\"}]\n\n";
-        let mut got = vec![];
-        let why = pump_sessions_sse(Cursor::new(body), &stop, |v| { got.push(v.len()); true });
-        assert_eq!(got, vec![1, 2]);
-        assert_eq!(why, "ccn が閉じた");
-        // 形の違う data が来たら終わる（ポーリングに戻る）
-        let why = pump_sessions_sse(Cursor::new("event: sessions\ndata: {\"error\":1}\n\n"), &stop, |_| true);
-        assert_eq!(why, "一覧の形が想定と違う");
-        // 受け手が閉じたら終わる
-        let mut n = 0;
-        let why = pump_sessions_sse(Cursor::new(body), &stop, |_| { n += 1; false });
-        assert_eq!((n, why.as_str()), (1, "止めた"));
-    }
-
-    #[test]
-    fn watch_wait_backs_off_and_resets() {
-        let mut w = WATCH_MIN;
-        let mut seen = vec![];
-        for _ in 0..6 { w = next_wait(w, false); seen.push(w.as_secs()); }
-        assert_eq!(seen, vec![4, 8, 8, 8, 8, 8]);
-        assert_eq!(next_wait(WATCH_MAX, true), WATCH_MIN);
-    }
-
-    #[test]
-    fn snapshot_key_ignores_fetched_at() {
-        let mk = |at: u128, n: usize| Snapshot { ccn: "x".into(), peer: None, ccn_ok: true, ccn_error: None, agents: vec![json!({"id": n})], letters: vec![], fetched_at: at, cached_at: None, sources: None };
-        assert_eq!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(2, 1)));
-        assert_ne!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(1, 2)));
-    }
-
-    #[test]
-    fn town_is_saved_only_when_it_changes() {
-        let dir = std::env::temp_dir().join(format!("fc-town-{}-{}", std::process::id(), fastrand::u64(..)));
-        let file = dir.join("towns").join("_local.json");
-        let saved_at = || offline::read(&file).and_then(|c| c["savedAt"].as_u64());
-        let a = json!({ "id": "a", "state": "idle", "report": { "doing": "x" } });
-        let b = json!({ "id": "b", "state": "idle" });
-        let t0 = now_ms();
-        let mut prev = None;
-
-        // 初めては書く
-        assert!(save_town_to(&file, &[a.clone()], t0, &mut prev));
-        let first = saved_at().expect("書いた");
-        // 同じ中身は、どれだけ時間が経っても書かない（前は30秒ごとに書いていた）
-        assert!(!save_town_to(&file, &[a.clone()], t0 + 60_000, &mut prev));
-        assert!(!save_town_to(&file, &[a.clone()], t0 + 3_600_000, &mut prev));
-        assert_eq!(saved_at(), Some(first));
-
-        // 顔ぶれが変わったら、間隔を待たずに書く
-        assert!(save_town_to(&file, &[a.clone(), b.clone()], t0 + 3_600_001, &mut prev));
-        assert_eq!(offline::read(&file).unwrap()["agents"], json!([a, b]));
-
-        // 顔ぶれが同じで中身だけ変わったら、前の書き込みから TOWN_SAVE_GAP_MS 空けて書く
-        let a2 = json!({ "id": "a", "state": "running", "report": { "doing": "y" } });
-        let t1 = t0 + 3_600_001;
-        assert!(!save_town_to(&file, &[a2.clone(), b.clone()], t1 + 1_000, &mut prev));
-        assert!(save_town_to(&file, &[a2.clone(), b.clone()], t1 + TOWN_SAVE_GAP_MS, &mut prev));
-        assert_eq!(offline::read(&file).unwrap()["agents"], json!([a2, b]));
-
-        // 起動し直した（前回の記録が無い）ときは、保存してあるファイルと比べ、同じなら書かない
-        let before = saved_at();
-        let mut fresh = None;
-        assert!(!save_town_to(&file, &[a2.clone(), b.clone()], t0 + 7_200_000, &mut fresh));
-        assert_eq!(saved_at(), before);
-        // 違えば書く
-        let mut fresh = None;
-        assert!(save_town_to(&file, &[a.clone()], t0 + 7_200_000, &mut fresh));
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    use super::*;
-
-    #[test]
     fn dev_keeps_app_files_apart_from_stable() {
         let h = std::path::Path::new("/h");
         let p = |id: Option<&str>, over: Option<&str>, scope, name| place(h, id, over.map(String::from), scope, name);
@@ -1283,59 +828,6 @@ mod tests {
         // FC_APP_HOME はアプリの分だけを差し替える
         assert_eq!(p(Some(STABLE_ID), Some("/t"), Scope::App, "avatars.json"), PathBuf::from("/t/avatars.json"));
         assert_eq!(p(dev, Some("/t"), Scope::Shared, "letters.jsonl"), PathBuf::from("/h/.family-computing/letters.jsonl"));
-    }
-
-    #[test]
-    fn create_body_sends_fork_only_with_resume() {
-        let s = |v: &str| Some(v.to_string());
-        // 新しい世帯: resume も fork も succeed も送らない。空の prompt と name も送らない
-        let b = create_body("/w".into(), s(" "), None, Some(100), Some(30), None, Some(true), Some(true));
-        assert_eq!(b, json!({ "terminal": true, "cwd": "/w", "cols": 100, "rows": 30 }));
-        // 複製: 前任の ID を resume に、fork を true にして送る
-        let b = create_body("/w".into(), s("続き"), s("meta"), None, Some(5), s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), None);
-        assert_eq!(b, json!({ "terminal": true, "cwd": "/w", "cols": 120, "rows": 40, "prompt": "続き", "name": "meta", "resume": "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa", "fork": true }));
-        // 引き継ぎ: resume と fork に succeed を足す
-        let b = create_body("/w".into(), s("続き"), None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), Some(true));
-        assert_eq!(b, json!({ "terminal": true, "cwd": "/w", "cols": 120, "rows": 40, "prompt": "続き", "resume": "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa", "fork": true, "succeed": true }));
-        // fork 無しの付け直しは resume だけ。succeed を渡されても送らない（ccn は fork の無い succeed を 400 で断る）
-        let b = create_body("/w".into(), None, None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), None, Some(true));
-        assert_eq!(b["resume"], "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa");
-        assert!(b.get("fork").is_none());
-        assert!(b.get("succeed").is_none());
-    }
-
-    /// 付け直し（resume）の作成は、共有の Agent の8秒より長く待つ（RESUME_TIMEOUT）。10秒かけて返す偽の ccn で確かめる。
-    /// 時間がかかる（約18秒）ので、ふだんは回さない: cargo test resume_create_waits -- --ignored
-    #[test]
-    #[ignore]
-    fn resume_create_waits_longer_than_default() {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut s) = stream else { continue };
-                std::thread::spawn(move || {
-                    let mut buf = [0u8; 8192];
-                    let _ = s.read(&mut buf);
-                    std::thread::sleep(Duration::from_secs(10));
-                    let body = r#"{"id":"f7a05063-6d62-40d7-b13c-3604a655dfda","depth":0}"#;
-                    let _ = write!(s, "HTTP/1.1 201 Created\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body);
-                });
-            }
-        });
-        let url = format!("http://127.0.0.1:{port}/api/sessions");
-        let s = |v: &str| Some(v.to_string());
-        // resume 無し: 既定の8秒で切れる
-        let t = std::time::Instant::now();
-        let plain = ccn::post_create(&url, create_body("/w".into(), None, None, None, None, None, None, None), None);
-        assert!(plain.is_err(), "{plain:?}");
-        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
-        // resume あり: 10秒かかる応答を受け取る
-        let t = std::time::Instant::now();
-        let got = ccn::post_create(&url, create_body("/w".into(), s("続き"), None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), Some(true)), None);
-        assert_eq!(got.unwrap()["id"], "f7a05063-6d62-40d7-b13c-3604a655dfda");
-        assert!(t.elapsed() >= Duration::from_secs(10), "{:?}", t.elapsed());
     }
 
     #[test]
@@ -1410,42 +902,6 @@ mod tests {
         assert_eq!(LAST_SOURCES.lock().unwrap().as_ref().unwrap()["ccn"], "つながらない");
     }
 
-    static NATIVE_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn switching_between_ccn_and_native_always_resets_the_screen() {
-        // 会話を読む先の登録（native::register）はプロセスで1つなので、使う試験を1本ずつ動かす
-        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        use native::testtree::*;
-        let root = tmp("switch");
-        TEST_CACHE.with(|c| *c.borrow_mut() = Some(root.join("cache")));
-        let id = "cccccccc-0000-4000-8000-00000000000c";
-        let path = root.join("c.jsonl");
-        write(&path, "{\"type\":\"user\",\"message\":{\"content\":\"ネイティブ\"}}\n");
-        // ccn から読んだ会話が 10 件ある（読み位置 7、印 e1）
-        {
-            let mut g = CONVS.lock().unwrap();
-            let map = g.get_or_insert_with(HashMap::new);
-            let mut c = Conv { next: 7, epoch: Some("e1".into()), used: now_ms(), ..Default::default() };
-            c.push((0..10).map(|i| json!({ "role": "user", "text": format!("ccn {i}") })).collect());
-            map.insert(format!("|{id}"), c);
-        }
-        // 同じ id がネイティブの行になった（ccn が落ちた）。画面は 8 件目まで持っている
-        let mut reg = HashMap::new();
-        reg.insert(id.to_string(), path.clone());
-        native::register(reg);
-        let d = conversation(id.into(), None, Some(8)).unwrap();
-        assert!(d.reset, "出どころが変わったら必ず reset");
-        assert_eq!(d.items.len(), 1);
-        assert_eq!(d.items[0]["text"], "ネイティブ");
-        // 続きはネイティブの読み位置で読む（もう reset しない）
-        let d2 = conversation(id.into(), None, Some(d.total)).unwrap();
-        assert!(!d2.reset);
-        assert!(d2.items.is_empty());
-        native::register(HashMap::new());
-        CONVS.lock().unwrap().as_mut().unwrap().remove(&format!("|{id}"));
-    }
-
     #[test]
     fn stable_conf_identifier_matches() {
         let conf: Value = serde_json::from_str(include_str!("../tauri.stable.conf.json")).unwrap();
@@ -1454,173 +910,4 @@ mod tests {
         assert_ne!(dev["identifier"], STABLE_ID);
     }
 
-    // 2026-11-12 に本番のノードの pty のセッションから読んだ messages の形
-    #[test]
-    fn pty_messages_are_read_from_data() {
-        let user = json!({"at": 1794490104245u64, "type": "user", "seq": 1,
-            "data": {"type": "user", "message": {"role": "user", "content": "from local via konaito-pro\n\nちゃんと動くのかテスト"}}});
-        let out = simplify(&user);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0]["role"], "user");
-        assert_eq!(out[0]["text"], "ちゃんと動くのかテスト");
-        assert_eq!(out[0]["from"], "from local via konaito-pro");
-        assert_eq!(out[0]["at"], 1794490104245u64);
-
-        let asst = json!({"at": 1794490107988u64, "type": "assistant", "seq": 2,
-            "data": {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "届いてる"}]}}});
-        let out = simplify(&asst);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0]["role"], "assistant");
-        assert_eq!(out[0]["text"], "届いてる");
-
-        let result = json!({"at": 1794490107988u64, "type": "result", "seq": 3, "data": {"type": "result", "result": "届いてる"}});
-        assert!(simplify(&result).is_empty());
-    }
-
-    #[test]
-    fn utf8_stream_keeps_split_characters() {
-        let all = "あ❯x".as_bytes();
-        let mut carry = vec![];
-        // 「あ」の3バイトを途中で切る
-        assert_eq!(utf8_stream(&mut carry, &all[..2]), "");
-        assert_eq!(utf8_stream(&mut carry, &all[2..5]), "あ");
-        assert_eq!(utf8_stream(&mut carry, &all[5..]), "❯x");
-        assert!(carry.is_empty());
-        // 壊れたバイトは置き換えて先へ進む
-        assert_eq!(utf8_stream(&mut carry, &[b'a', 0xff, b'b']), "a\u{FFFD}b");
-    }
-
-    #[test]
-    fn tool_results_attach_to_tool_lines() {
-        let asst = |id: &str| json!({"type": "assistant", "timestamp": "t", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": id, "name": "Bash", "input": {"command": "ls"}}]}});
-        let res = |id: &str, err: bool| json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": [{"type": "text", "text": "a\nb"}], "is_error": err}]}});
-        let mut c = Conv::default();
-        // 同じ読み出しの結果は、道具の行に付くだけで項目は増えない
-        c.push([asst("t1"), res("t1", false)].iter().flat_map(simplify).collect());
-        assert_eq!(c.items.len(), 1);
-        assert_eq!(c.items[0]["result"], json!({"text": "a\nb", "error": false}));
-        // 後の読み出しの結果は、道具の行に付け、画面に送る result の項目も足す
-        c.push(simplify(&asst("t2")));
-        c.push(simplify(&res("t2", true)));
-        assert_eq!(c.items.len(), 3);
-        assert_eq!(c.items[1]["result"]["error"], true);
-        assert_eq!(c.items[2]["role"], "result");
-        assert_eq!(c.items[2]["id"], "t2");
-        // 道具の行が無い結果は捨てる
-        c.push(simplify(&res("nope", false)));
-        assert_eq!(c.items.len(), 3);
-    }
-
-    #[test]
-    fn turn_end_events() {
-        let r = |o: Value| simplify(&json!({"at": 5, "type": "result", "data": o}));
-        assert_eq!(r(json!({"type": "result", "subtype": "interrupted", "is_error": true, "result": ""}))[0]["kind"], "interrupted");
-        let e = r(json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "result": "API Error: limit"}));
-        assert_eq!(e[0]["kind"], "error");
-        assert!(e[0]["text"].as_str().unwrap().contains("API Error: limit"));
-        assert!(r(json!({"type": "result", "subtype": "success", "is_error": false, "result": "ok"})).is_empty());
-    }
-
-    #[test]
-    fn node_interrupt_is_one_mark() {
-        // 2026-11-21 に -p の子を止めたときの行（中身は縮めた）
-        let user = json!({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user for tool use]"}]}, "timestamp": "t"});
-        let end = json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "result": ""});
-        let mut c = Conv::default();
-        c.push(simplify(&user));
-        c.push(simplify(&end));
-        assert_eq!(c.items.len(), 1);
-        assert_eq!(c.items[0]["kind"], "interrupted");
-    }
-
-    #[test]
-    fn result_text_keeps_the_head() {
-        assert_eq!(result_text(&json!("x")), "x");
-        assert_eq!(result_text(&json!([{"type": "text", "text": "a"}, {"type": "image"}])), "a\n[画像]");
-        let long = (0..100).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
-        let t = result_text(&json!(long));
-        assert!(t.ends_with("…（続きは省いた）"));
-        assert_eq!(t.lines().count(), RESULT_LINES + 1);
-    }
-
-    #[test]
-    fn exit_plan_mode_keeps_the_plan() {
-        let asst = json!({"type": "assistant", "timestamp": "t", "message": {"role": "assistant", "content": [
-            {"type": "tool_use", "name": "ExitPlanMode", "input": {"plan": "# 計画\n- a"}},
-            {"type": "tool_use", "name": "Read", "input": {"file_path": "/a/b"}}]}});
-        let out = simplify(&asst);
-        assert_eq!(out[0]["plan"], "# 計画\n- a");
-        assert!(out[1].get("plan").is_none());
-    }
-
-    #[test]
-    fn node_messages_keep_the_transcript_shape() {
-        let asst = json!({"type": "assistant", "timestamp": "2026-11-12T13:00:00Z",
-            "message": {"role": "assistant", "content": [{"type": "text", "text": "はい"}]}});
-        let out = simplify(&asst);
-        assert_eq!(out[0]["text"], "はい");
-        assert_eq!(out[0]["at"], "2026-11-12T13:00:00Z");
-        // トランスクリプトの行に data が付いていても、message があればそちらを読む
-        let with_data = json!({"type": "user", "timestamp": "t", "data": {"type": "hook_progress"}, "message": {"role": "user", "content": "やあ"}});
-        assert_eq!(simplify(&with_data)[0]["text"], "やあ");
-    }
-
-    // 2026-11-14 14:21 に本人が meta（8074d764）へ続けて送った3通。ccn の GET messages が返した形のまま（#69）。
-    // 1通目と3通目は CLI が <pasted_content> で包んでいた。包みのまま `<` で始まるので会話から落ち、仮の吹き出しが消えずに末尾に残った
-    #[test]
-    fn pasted_content_is_unwrapped_not_dropped() {
-        let first = json!({"at": 1794633665654u64, "type": "user", "seq": 442, "data": {"type": "user", "message": {"role": "user",
-            "content": "\n\n<pasted_content id=\"9779\">\nfrom local via konaito-pro\n\n/var/folders/lp/twxk19yd58v9rb7ytpcxt6pm0000gn/T/TemporaryItems/NSIRD_screencaptureui_GJ7Y9w/スクリーンショット\\ 2026-11-14\\ 14.20.54.png \n\nこれ挙動がおかしいぞ、掘ってくれ\n</pasted_content id=\"9779\">\n"}}});
-        let second = json!({"at": 1794633683710u64, "type": "user", "seq": 453, "data": {"type": "user", "message": {"role": "user",
-            "content": "from local via konaito-pro\n\n先に送ったやつが先に反映されてない"}}});
-        let third = json!({"at": 1794633703956u64, "type": "user", "seq": 460, "data": {"type": "user", "message": {"role": "user",
-            "content": "<pasted_content id=\"9779\">\nfrom local via konaito-pro\n\n/var/folders/lp/twxk19yd58v9rb7ytpcxt6pm0000gn/T/TemporaryItems/NSIRD_screencaptureui_s8ZkFz/スクリーンショット\\ 2026-11-14\\ 14.21.28.png \n今回も、多分送られてるし、読まれてるんだけど、判定がおかしいんだと思う\n</pasted_content id=\"9779\">"}}});
-        let a = simplify(&first);
-        assert_eq!(a.len(), 1);
-        assert_eq!(a[0]["from"], "from local via konaito-pro");
-        assert_eq!(a[0]["text"], "/var/folders/lp/twxk19yd58v9rb7ytpcxt6pm0000gn/T/TemporaryItems/NSIRD_screencaptureui_GJ7Y9w/スクリーンショット\\ 2026-11-14\\ 14.20.54.png \n\nこれ挙動がおかしいぞ、掘ってくれ");
-        assert_eq!(simplify(&second)[0]["text"], "先に送ったやつが先に反映されてない");
-        let c = simplify(&third);
-        assert_eq!(c.len(), 1);
-        assert!(c[0]["text"].as_str().unwrap().ends_with("判定がおかしいんだと思う"));
-        // 包まれた文も、ターンの始まりとして数える
-        for m in [&first, &second, &third] {
-            assert!(matches!(live_events(m).as_slice(), [LiveEv::User(_)]));
-        }
-        // hook の差し込みは今までどおり落とす
-        let hook = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": "<command-name>/clear</command-name>"}});
-        assert!(simplify(&hook).is_empty());
-    }
-
-    // 2026-11-14、写した画像のパスを入れて送った文を、CLI が画像の添付にした形（ccn の GET messages のまま、#69）
-    #[test]
-    fn image_marks_before_the_from_line() {
-        let m = json!({"at": 1794634823274u64, "type": "user", "seq": 51, "data": {"type": "user", "message": {"role": "user",
-            "content": "[Image #3]from local via konaito-pro\n（ドロップの確認）上のパスの画像を Read で開いて"}}});
-        let out = simplify(&m);
-        assert_eq!(out[0]["from"], "from local via konaito-pro");
-        assert_eq!(out[0]["text"], "[Image #3]\n（ドロップの確認）上のパスの画像を Read で開いて");
-        // 画像だけを送り、from 行の後ろに何も無い形
-        let only = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": "[Image #4]from local via konaito-pro"}});
-        assert_eq!(simplify(&only)[0]["from"], "from local via konaito-pro");
-        assert_eq!(simplify(&only)[0]["text"], "[Image #4]");
-        // 印が無く改行も無い from 始まりの文は、今までどおり本文として出す
-        let plain = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": "from A via B"}});
-        assert_eq!(simplify(&plain)[0]["text"], "from A via B");
-        assert_eq!(split_image_marks("[Image #1] [Image #12]from x"), ("[Image #1] [Image #12]", "from x"));
-        assert_eq!(split_image_marks("[Image #]x"), ("", "[Image #]x"));
-        assert_eq!(split_image_marks("ふつう"), ("", "ふつう"));
-    }
-
-    #[test]
-    fn unwrap_pasted_keeps_text_around_and_odd_tags() {
-        assert_eq!(unwrap_pasted("  ふつう  "), "ふつう");
-        // 打った文と貼った文が混ざっている
-        assert_eq!(unwrap_pasted("見て <pasted_content id=\"1\">\n長い文\n</pasted_content id=\"1\"> どう？"), "見て \n長い文\n どう？");
-        // 閉じの印に id が無い形も外す
-        assert_eq!(unwrap_pasted("<pasted_content id=\"2\">a</pasted_content>"), "a");
-        // 名前が続いているもの、> で閉じないものは文のまま残す
-        assert_eq!(unwrap_pasted("<pasted_contents>x"), "<pasted_contents>x");
-        assert_eq!(unwrap_pasted("<pasted_content\nx"), "<pasted_content\nx");
-    }
 }

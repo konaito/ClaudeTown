@@ -286,3 +286,21 @@ pub(crate) fn spawn_writer(session_id: String, peer: Option<String>) -> std::syn
     });
     tx
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utf8_stream_keeps_split_characters() {
+        let all = "あ❯x".as_bytes();
+        let mut carry = vec![];
+        // 「あ」の3バイトを途中で切る
+        assert_eq!(utf8_stream(&mut carry, &all[..2]), "");
+        assert_eq!(utf8_stream(&mut carry, &all[2..5]), "あ");
+        assert_eq!(utf8_stream(&mut carry, &all[5..]), "❯x");
+        assert!(carry.is_empty());
+        // 壊れたバイトは置き換えて先へ進む
+        assert_eq!(utf8_stream(&mut carry, &[b'a', 0xff, b'b']), "a\u{FFFD}b");
+    }
+}

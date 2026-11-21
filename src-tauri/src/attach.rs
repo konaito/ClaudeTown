@@ -171,6 +171,20 @@ fn prune(dir: &Path, now: SystemTime) -> Vec<PathBuf> {
     gone
 }
 
+/// 画面から呼ぶ命令の包み。中身の関数は上にある。待つ命令は blocking で別のスレッドへ出す
+pub(crate) mod cmd {
+    /// 入力欄への貼り付け（#64）。クリップボードのファイルのパスか、保存した画像のパスを返す
+    #[tauri::command]
+    pub async fn paste_clipboard(save_image: bool) -> Result<super::Pasted, String> {
+        crate::blocking(move || super::clipboard(&crate::fc_path(crate::Scope::App, "attachments"), save_image)).await
+    }
+    /// ドロップと貼り付けで受けたファイルのうち、一時の場所のものを attachments に写し、入力欄に入れるパスを返す（#69）
+    #[tauri::command]
+    pub async fn stage_files(paths: Vec<String>) -> Result<Vec<String>, String> {
+        crate::blocking(move || super::stage(&crate::fc_path(crate::Scope::App, "attachments"), paths)).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -82,6 +82,13 @@ pub fn repos_of(paths: &[String]) -> HashMap<String, String> {
     paths.iter().filter_map(|p| repo_of(p).map(|r| (p.clone(), r))).collect()
 }
 
+/// 画面から呼ぶ命令の包み。中身の関数は上にある。待つ命令は blocking で別のスレッドへ出す
+pub(crate) mod cmd {
+    /// 新しい世帯の一覧の各場所に連携しているリポジトリ名（owner/repo）。.git/config を読むだけ（#99）
+    #[tauri::command]
+    pub async fn place_repos(paths: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> { crate::blocking(move || Ok(super::repos_of(&paths))).await }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

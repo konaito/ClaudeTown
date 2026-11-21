@@ -100,3 +100,80 @@ pub(crate) fn permission_body(first: &Value, choice: &str, expect_id: Option<&st
         },
     }
 }
+
+/// 画面から呼ぶ命令の包み。中身の関数は上にある。待つ命令は blocking で別のスレッドへ出す
+pub(crate) mod cmd {
+    use super::*;
+
+    #[tauri::command]
+    pub async fn answer_permission(session_id: String, choice: String, expect_id: Option<String>, answers: Option<Value>, message: Option<String>, suggestion: Option<usize>, peer: Option<String>) -> Result<String, String> {
+        blocking(move || super::answer_permission(session_id, choice, expect_id, answers, message, suggestion, peer)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    fn ask() -> serde_json::Value {
+        serde_json::json!({ "requestId": "r1", "toolName": "AskUserQuestion", "input": { "questions": [
+            { "question": "色は？", "header": "色", "options": [{ "label": "赤" }, { "label": "青" }], "multiSelect": false },
+            { "question": "数は？", "header": "数", "options": [{ "label": "1" }, { "label": "2" }], "multiSelect": true }
+        ] } })
+    }
+
+    #[test]
+    fn permission_body_answers_questions() {
+        let a = serde_json::json!({ "色は？": "青", "数は？": "1, 2" });
+        let (b, done) = super::permission_body(&ask(), "allow", Some("r1"), Some(&a), None, None).unwrap();
+        assert_eq!(b["behavior"], "allow");
+        assert_eq!(b["updatedInput"]["answers"], a);
+        // 元の questions はそのまま返す
+        assert_eq!(b["updatedInput"]["questions"], ask()["input"]["questions"]);
+        assert_eq!(done, "質問に答えた");
+    }
+
+    #[test]
+    fn permission_body_refuses_partial_or_stale_answers() {
+        let some = serde_json::json!({ "色は？": "青" });
+        assert!(super::permission_body(&ask(), "allow", Some("r1"), Some(&some), None, None).unwrap_err().contains("数は？"));
+        let blank = serde_json::json!({ "色は？": "青", "数は？": "  " });
+        assert!(super::permission_body(&ask(), "allow", Some("r1"), Some(&blank), None, None).is_err());
+        assert!(super::permission_body(&ask(), "allow", Some("r1"), None, None, None).is_err());
+        let full = serde_json::json!({ "色は？": "青", "数は？": "1" });
+        assert!(super::permission_body(&ask(), "allow", Some("old"), Some(&full), None, None).unwrap_err().contains("変わった"));
+    }
+
+    #[test]
+    fn permission_body_always_allow_uses_the_pending_suggestion() {
+        // 2026-11-21 に本番のノードで見た pending の形（mcp__ccn__list_peers）
+        let mcp = serde_json::json!({ "requestId": "r4", "toolName": "mcp__ccn__list_peers", "input": {}, "suggestions": [
+            { "type": "addRules", "rules": [{ "toolName": "mcp__ccn__list_peers" }], "behavior": "allow", "destination": "localSettings" },
+            { "type": "addDirectories", "directories": ["/x"], "destination": "session" }
+        ] });
+        let (b, done) = super::permission_body(&mcp, "allow", Some("r4"), None, None, Some(0)).unwrap();
+        assert_eq!(b["updatedPermissions"], serde_json::json!([mcp["suggestions"][0]]));
+        assert!(done.contains("以後は聞かない"));
+        // addDirectories と、無い番号は返さない
+        assert!(super::permission_body(&mcp, "allow", Some("r4"), None, None, Some(1)).is_err());
+        assert!(super::permission_body(&mcp, "allow", Some("r4"), None, None, Some(9)).is_err());
+        // 中身が変わっていたら送らない。拒否と計画には付けない
+        assert!(super::permission_body(&mcp, "allow", Some("old"), None, None, Some(0)).is_err());
+        assert!(super::permission_body(&mcp, "deny", None, None, None, Some(0)).is_err());
+        let plan = serde_json::json!({ "requestId": "r2", "toolName": "ExitPlanMode", "input": {}, "suggestions": [{ "type": "setMode", "mode": "acceptEdits", "destination": "session" }] });
+        assert!(super::permission_body(&plan, "allow", Some("r2"), None, None, Some(0)).is_err());
+    }
+
+    #[test]
+    fn permission_body_plan_and_tools() {
+        let plan = serde_json::json!({ "requestId": "r2", "toolName": "ExitPlanMode", "input": { "plan": "p" } });
+        assert_eq!(super::permission_body(&plan, "allow", Some("r2"), None, None, None).unwrap().0, serde_json::json!({ "behavior": "allow" }));
+        let (b, done) = super::permission_body(&plan, "deny", None, None, Some("  "), None).unwrap();
+        assert_eq!(b, serde_json::json!({ "behavior": "deny", "message": super::PLAN_DENY_DEFAULT }));
+        assert_eq!(done, "計画の見直しを頼んだ");
+        assert_eq!(super::permission_body(&plan, "deny", None, None, Some("テストも足して"), None).unwrap().0["message"], "テストも足して");
+        let bash = serde_json::json!({ "requestId": "r3", "toolName": "Bash", "input": { "command": "ls" } });
+        assert_eq!(super::permission_body(&bash, "allow", Some("r3"), None, None, None).unwrap().0, serde_json::json!({ "behavior": "allow" }));
+        assert_eq!(super::permission_body(&bash, "deny", None, None, None, None).unwrap().0["message"], super::DENY_DEFAULT);
+        // 質問でない待ちに答えを付けたら送らない
+        assert!(super::permission_body(&bash, "allow", Some("r3"), Some(&serde_json::json!({ "x": "y" })), None, None).is_err());
+    }
+}
