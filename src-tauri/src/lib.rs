@@ -1323,6 +1323,17 @@ fn create_body(cwd: String, prompt: Option<String>, name: Option<String>, cols: 
     body
 }
 
+/// 起動するときのモデルと権限モード（claude の --model と --permission-mode）を足す。空の値は送らない。
+/// resume があるとき（付け直し、複製、引き継ぎ）は送らない。ccn が前任の値を継ぐので、設定の既定で上書きしない
+fn with_start_config(mut body: Value, model: Option<String>, permission_mode: Option<String>) -> Value {
+    if body.get("resume").is_some() {
+        return body;
+    }
+    if let Some(m) = model.filter(|m| !m.trim().is_empty()) { body["model"] = json!(m); }
+    if let Some(p) = permission_mode.filter(|p| !p.trim().is_empty()) { body["permissionMode"] = json!(p); }
+    body
+}
+
 /// 端末（PTY）のセッションを立てる。parent を渡すと、その親の子として立てる（x-ccn-from で親を名乗る）。
 /// 渡さなければ新しい世帯（親なし）になる。cwd を省くと ~/Documents/meta（本人の指定）
 /// cols と rows は、画面のターミナルの今の大きさ。渡せば claude を最初からその大きさで起動し、開いた直後の描き直しを省く（#18）
@@ -1331,13 +1342,15 @@ fn create_body(cwd: String, prompt: Option<String>, name: Option<String>, cols: 
 /// succeed も渡すと、ccn に引き継ぎを頼む（ccn の PR #56 から）。ccn が後継の起動を確かめ、前任の子を後継へ付け替え、前任を止め、応答に succeeded を入れる。
 /// 古い ccn は succeed を読まず、ただの複製を返す（応答に succeeded が無い）。どちらだったかは画面が応答で見分ける（src/succeed.ts）。
 /// ccn が断ったときの失敗は「ccn が <状態> を返した: <応答の JSON>」の形で返す。画面はこの JSON から code（no_account など）を読む
-fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, succeed: Option<bool>, peer: Option<String>) -> Result<Value, String> {
+/// model と permission_mode は、設定の既定（src/session/defaults.ts）。新しく立てるときだけ送る（with_start_config）
+#[allow(clippy::too_many_arguments)]
+fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, succeed: Option<bool>, peer: Option<String>, model: Option<String>, permission_mode: Option<String>) -> Result<Value, String> {
     if send_disabled() {
         return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
     }
     let peer = peer.filter(|p| !p.is_empty());
     let cwd = cwd.filter(|c| !c.is_empty()).unwrap_or_else(|| home().join("Documents/meta").to_string_lossy().to_string());
-    let body = create_body(cwd, prompt, name, cols, rows, resume, fork, succeed);
+    let body = with_start_config(create_body(cwd, prompt, name, cols, rows, resume, fork, succeed), model, permission_mode);
     // 親を名乗る。一覧の parent に agent:<ノード>/<親の sid 先頭8>/town が入り、木がつながる
     let from = parent.filter(|p| !p.is_empty()).map(|pid| format!("agent:{}/{}/town", node_name(), &pid[..8.min(pid.len())]));
     post_create(&format!("{}/sessions", api(&peer)), body, from)
@@ -1756,8 +1769,9 @@ mod cmd {
         blocking(move || super::answer_permission(session_id, choice, expect_id, answers, message, suggestion, peer)).await
     }
     #[tauri::command]
-    pub async fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, succeed: Option<bool>, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::create_session(cwd, prompt, parent, name, cols, rows, resume, fork, succeed, peer)).await
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, succeed: Option<bool>, peer: Option<String>, model: Option<String>, permission_mode: Option<String>) -> Result<Value, String> {
+        blocking(move || super::create_session(cwd, prompt, parent, name, cols, rows, resume, fork, succeed, peer, model, permission_mode)).await
     }
     #[tauri::command]
     pub async fn house_places() -> Result<Value, String> { blocking(super::house_places).await }
@@ -2140,7 +2154,7 @@ pub fn run() {
     }
     // family-computing --create [cwd] [prompt] [parentId]   端末のセッションを立てる（画面の「子を足す」「新しい世帯」と同じ処理）
     if let Some(i) = args.iter().position(|a| a == "--create") {
-        println!("{:?}", create_session(args.get(i + 1).cloned(), args.get(i + 2).cloned(), args.get(i + 3).cloned(), None, None, None, None, None, None, None));
+        println!("{:?}", create_session(args.get(i + 1).cloned(), args.get(i + 2).cloned(), args.get(i + 3).cloned(), None, None, None, None, None, None, None, None, None));
         return;
     }
     // family-computing --send <sessionId> <文>   注文を送る（画面の送信と同じ処理）
@@ -2696,6 +2710,22 @@ mod tests {
         assert_eq!(b["resume"], "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa");
         assert!(b.get("fork").is_none());
         assert!(b.get("succeed").is_none());
+    }
+
+    #[test]
+    fn start_config_only_for_new_sessions() {
+        let s = |v: &str| Some(v.to_string());
+        // 新しい世帯: 設定の既定のモデルと権限モードを送る
+        let b = with_start_config(create_body("/w".into(), None, None, None, None, None, None, None), s("sonnet"), s("plan"));
+        assert_eq!(b, json!({ "terminal": true, "cwd": "/w", "cols": 120, "rows": 40, "model": "sonnet", "permissionMode": "plan" }));
+        // 設定していない項目と空の値は送らない
+        let b = with_start_config(create_body("/w".into(), None, None, None, None, None, None, None), None, s(" "));
+        assert!(b.get("model").is_none());
+        assert!(b.get("permissionMode").is_none());
+        // 引き継ぎ: ccn が前任の値を継ぐので送らない
+        let b = with_start_config(create_body("/w".into(), None, None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), Some(true)), s("opus"), s("default"));
+        assert!(b.get("model").is_none());
+        assert!(b.get("permissionMode").is_none());
     }
 
     /// 付け直し（resume）の作成は、共有の Agent の8秒より長く待つ（RESUME_TIMEOUT）。10秒かけて返す偽の ccn で確かめる。
