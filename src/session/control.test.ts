@@ -34,6 +34,10 @@ describe("lockReason", () => {
     expect(lockReason({ kind: "node", state: "waiting_permission" }, "yes", false)).toContain("承認待ち");
     expect(lockReason({ kind: "pty", state: "waiting_permission" }, "yes", false)).toContain("承認待ち");
   });
+  test("ネイティブの記録だけのセッションと sub-agent は替えられない（#96）", () => {
+    expect(lockReason({ kind: "terminal", state: "idle", source: "native" }, "no", false)).toContain("記録から読んでいる");
+    expect(lockReason({ kind: "subagent", state: "idle" }, "no", false)).toContain("記録から読んでいる");
+  });
   test("端末のセッションと古いノードは替えられない", () => {
     expect(lockReason({ kind: "terminal", state: "idle" }, "yes", false)).toContain("端末で起動");
     expect(lockReason({ kind: "node", state: "idle" }, "no", false)).toBe(NO_SUPPORT);

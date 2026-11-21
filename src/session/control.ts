@@ -59,7 +59,8 @@ export const NO_SUPPORT = "このノードでは使えません（ccn が古く�
  * 今は替えられない理由。替えられるなら null。
  * switching は、こちらが替えている最中（pty は起動し直しを待っている）
  */
-export function lockReason(a: Pick<Agent, "kind" | "state">, support: Support, switching: boolean): string | null {
+export function lockReason(a: Pick<Agent, "kind" | "state" | "source">, support: Support, switching: boolean): string | null {
+  if (!viaCcn(a)) return "Claude Code の記録から読んでいるだけのセッションなので、ここからは替えられない";
   if (a.kind === "terminal") return "端末で起動したセッションなので、ここからは替えられない";
   if (support === "no") return NO_SUPPORT;
   if (support === "unknown") return "このノードで使えるかを確かめている";
@@ -68,6 +69,11 @@ export function lockReason(a: Pick<Agent, "kind" | "state">, support: Support, s
   if (a.state === "waiting_permission") return "承認待ちの間は替えられない。先に承認の欄で答える";
   if (a.kind === "pty" && a.state !== "idle") return "作業中は替えられない。端末のセッションは待機中だけ替えられる（止めてから替える）";
   return null;
+}
+
+/** ccn が動かしているセッションか。ネイティブの記録だけから読んだもの（#96）と sub-agent は ccn の口が使えない */
+export function viaCcn(a: Pick<Agent, "kind" | "source">): boolean {
+  return a.source !== "native" && a.kind !== "subagent";
 }
 
 /** 理由のうち、画面にいつも出しておくもの（確かめている最中は出さない） */

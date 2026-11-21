@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import { call as invoke } from "../bridge";
 import type { Agent } from "../model";
-import { configureError, isHttp, lockReason, noRoute, modelOptions, modeOptions, showReason, supportOf, type Support } from "./control";
+import { configureError, isHttp, lockReason, noRoute, viaCcn, modelOptions, modeOptions, showReason, supportOf, type Support } from "./control";
 
 // ノードごとに、口があるかを覚える。あれば以後は確かめない。無ければ1分たったら確かめ直す（ノードを新しくしたとき）
 const supportByNode = new Map<string, { v: Support; at: number }>();
@@ -20,7 +20,7 @@ export function SessionControls({ agent, peer, onSwitching, onDone, onError }: {
 }) {
   const nodeKey = peer || "";
   const [support, setSupport] = useState<Support>(() => {
-    if (agent.kind === "terminal") return "no";
+    if (agent.kind === "terminal" || !viaCcn(agent)) return "no";
     const c = supportByNode.get(nodeKey);
     return c && (c.v === "yes" || Date.now() - c.at < RECHECK_NO_MS) ? c.v : "unknown";
   });
@@ -31,7 +31,7 @@ export function SessionControls({ agent, peer, onSwitching, onDone, onError }: {
 
   // 口があるか（ノードごとに1回）
   useEffect(() => {
-    if (agent.kind === "terminal" || support !== "unknown") return;
+    if (agent.kind === "terminal" || !viaCcn(agent) || support !== "unknown") return;
     let on = true;
     invoke<unknown>("session_controls", { sessionId: agent.id, peer: peer || null })
       .then((r) => {
