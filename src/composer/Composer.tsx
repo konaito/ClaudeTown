@@ -5,18 +5,16 @@ import { call as invoke, onFileDrop } from "../bridge";
 import getCaretCoordinates from "textarea-caret";
 import type { Agent } from "../model";
 import { BUILTINS, type Command } from "./commands";
+import { useHistory } from "./useHistory";
 import { routeOf, tagOf } from "./route";
 import { viaCcn, type Support } from "../session/control";
 import {
-  backslashNewline, histDown, insertPaths, isSlashCommand, histUp, killToEnd, killToStart, killWordBack, killWordForward, mergeHistory, pushHistory,
-  rankCommands, searchHistory, tokenAt, toLineEnd, toLineStart, wordBack, wordForward, type Edit, type HistState, type Sel,
+  backslashNewline, histDown, insertPaths, isSlashCommand, histUp, killToEnd, killToStart, killWordBack, killWordForward,
+  rankCommands, searchHistory, tokenAt, toLineEnd, toLineStart, wordBack, wordForward, type Edit, type Sel,
 } from "./edit";
-
-type History = { project: string[]; all: string[] };
 
 // セッションごとに持つもの。セッションを切り替えて戻っても残す（CLI の stash と、送った文の履歴）
 const stashes = new Map<string, string>();
-const sentBy = new Map<string, string[]>();
 // スキルの一覧は作業フォルダごとに1回だけ読む
 const skillsByCwd = new Map<string, Command[]>();
 
@@ -61,45 +59,28 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
   const hasTerm = !!agent.capabilities?.terminal;
   const canInterrupt = !!agent.capabilities?.interrupt;
   const [caret, setCaret] = useState(text.length);
-  const [hist, setHist] = useState<History>({ project: [], all: [] });
   const [skills, setSkills] = useState<Command[]>(() => skillsByCwd.get(agent.cwd) ?? []);
   const [files, setFiles] = useState<string[]>([]);
   const [pick, setPick] = useState(0);
   const [dismissed, setDismissed] = useState<string | null>(null);
   const [help, setHelp] = useState(false);
   const [search, setSearch] = useState<{ query: string; idx: number; original: string } | null>(null);
-  const histSt = useRef<HistState>({ index: -1, draft: "" });
   // 検索を閉じたあと、検索欄の blur でもう一度閉じない（Ctrl+C でやめたのに、一致した文で上書きしないように）
   const searchEnding = useRef(false);
   const kills = useRef<string[]>([]);
   const yank = useRef<{ from: number; to: number; i: number } | null>(null);
   const lastEsc = useRef(0);
   const caretAfter = useRef<number | null>(null);
-  const [sent, setSent] = useState<string[]>(() => sentBy.get(agent.id) ?? []);
   const [dropping, setDropping] = useState(false);
   // 貼り付けとドロップの返事が来る前に、別のセッションへ替わって入力欄が消えていることがある
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const { loadHistory, loadAll, remember, histSt, upList, searchList } = useHistory(agent, local);
 
-  // 履歴は CLI と同じ ~/.claude/history.jsonl から読む（手元のセッションだけ）。上下キーの分（同じ project）は開いたときと送るたびに読む。
-  // Ctrl+R の分（全部の project、1000件で約1.2MB）は、Ctrl+R を押したときだけ読む
-  const loadHistory = () => {
-    if (!local) return;
-    invoke<History>("prompt_history", { cwd: agent.cwd || null, all: false }).then((h) => { if (Array.isArray(h?.project)) setHist((x) => ({ ...x, project: h.project })); }).catch(() => {});
-  };
-  const loadAll = () => {
-    if (!local) return;
-    invoke<History>("prompt_history", { cwd: agent.cwd || null, all: true }).then((h) => { if (Array.isArray(h?.all)) setHist((x) => ({ ...x, all: h.all })); }).catch(() => {});
-  };
-  useEffect(loadHistory, [agent.id, agent.cwd, local]);
   useEffect(() => {
     if (!local || !agent.cwd || skillsByCwd.has(agent.cwd)) return;
     invoke<Command[]>("slash_commands", { cwd: agent.cwd }).then((l) => { if (!Array.isArray(l)) return; skillsByCwd.set(agent.cwd, l); setSkills(l); }).catch(() => {});
   }, [agent.cwd, local]);
-
-  const upList = useMemo(() => mergeHistory(sent, hist.project), [sent, hist.project]);
-  const searchList = useMemo(() => mergeHistory(sent, hist.all), [sent, hist.all]);
-  const remember = (t: string) => { const n = pushHistory(sentBy.get(agent.id) ?? [], t); sentBy.set(agent.id, n); setSent(n); };
 
   // 補完
   const token = search ? null : tokenAt({ text, start: caret, end: caret });
