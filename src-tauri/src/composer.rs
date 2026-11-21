@@ -364,7 +364,9 @@ pub fn send_direct(session_id: String, text: String) -> Result<(), String> {
         return Err("文が空".into());
     }
     let started = super::pty::started_at(&session_id).ok_or("このセッションの端末はこのアプリに無い")?;
-    let row = super::native_state(&session_id);
+    // 承認待ちかは、送る直前に sessions/<pid>.json を読み直して決める。一覧（2〜8秒おき）の値を使うと、
+    // 承認の画面に入った直後に送った文と Enter が、承認の画面に届く
+    let row = super::pty::pid_of_id(&session_id).and_then(|pid| super::native::sessions::fresh_row(&super::native::claude_home(), pid));
     let hooked = super::fc_path(super::Scope::Shared, &format!("state/{session_id}.json")).exists();
     check_direct(row.as_ref(), hooked, started, super::now_ms() as u64)?;
     super::pty::write(&session_id, &format!("\x1b[200~{}\x1b[201~", paste_body(&text)))?;

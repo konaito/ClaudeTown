@@ -171,6 +171,17 @@ pub fn caller_of(text: &str) -> Option<String> {
     (it.next()? == "via" && it.next().is_some()).then(|| who.to_string())
 }
 
+/// pid の sessions/<pid>.json を、覚えた値を使わずに今読む。返すのは state、startedAt、lastActivityAt（無ければ None）
+pub fn fresh_row(root: &Path, pid: u32) -> Option<Value> {
+    let v: Value = serde_json::from_str(&fs::read_to_string(root.join(format!("sessions/{pid}.json"))).ok()?).ok()?;
+    let mut st = Stats::default();
+    Some(json!({
+        "state": state_of(v["status"].as_str(), &mut st),
+        "startedAt": v["startedAt"],
+        "lastActivityAt": v["updatedAt"].as_u64().or(v["startedAt"].as_u64()),
+    }))
+}
+
 /// 生きている対話セッション（開始の古い順）
 pub fn live(root: &Path, stats: &mut Stats) -> Vec<Session> {
     let mut raw = vec![];

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// replay のために持つ出力の末尾の長さ
@@ -35,7 +35,8 @@ struct Proc {
     started_at: u64,
     size: (u16, u16),
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    /// 書き口は台帳の錠の外で書く（claude が読まずに PTY が詰まっても、出力の読み手と一覧を止めない）
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     /// 出力の末尾
     out: Vec<u8>,
@@ -207,7 +208,7 @@ pub fn spawn(cwd: &str, name: Option<&str>, cols: u16, rows: u16, notice: impl F
     let killer = child.clone_killer();
     let started_at = crate::now_ms() as u64;
     with(|m| {
-        m.insert(pid, Proc { pid, ids: vec![id.clone()], cwd: cwd.to_string(), started_at, size: (cols, rows), master: pair.master, writer, killer, out: vec![], sub: None, carry: vec![] });
+        m.insert(pid, Proc { pid, ids: vec![id.clone()], cwd: cwd.to_string(), started_at, size: (cols, rows), master: pair.master, writer: Arc::new(Mutex::new(writer)), killer, out: vec![], sub: None, carry: vec![] });
     });
     eprintln!("[pty] claude を起動した pid {pid} id {id} cwd {cwd}");
     std::thread::spawn(move || read_loop(pid, reader));
@@ -313,11 +314,14 @@ pub fn unsubscribe(id: &str, generation: Option<u64>) {
 }
 
 pub fn write(id: &str, text: &str) -> Result<(), String> {
-    with(|m| {
-        let pid = pid_of(m, id).ok_or("このセッションの端末はこのアプリに無い")?;
-        let p = m.get_mut(&pid).expect("上で見つけた");
-        p.writer.write_all(text.as_bytes()).and_then(|_| p.writer.flush()).map_err(|e| format!("ターミナルに書けなかった: {e}"))
-    })
+    let w = with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| p.writer.clone())).ok_or("このセッションの端末はこのアプリに無い")?;
+    let mut w = w.lock().unwrap_or_else(|e| e.into_inner());
+    w.write_all(text.as_bytes()).and_then(|_| w.flush()).map_err(|e| format!("ターミナルに書けなかった: {e}"))
+}
+
+/// このアプリが立てたセッションの pid
+pub fn pid_of_id(id: &str) -> Option<u32> {
+    with(|m| pid_of(m, id))
 }
 
 pub fn resize(id: &str, cols: u16, rows: u16) -> Result<(), String> {
@@ -336,10 +340,20 @@ pub fn resize(id: &str, cols: u16, rows: u16) -> Result<(), String> {
     })
 }
 
-/// 1つ止める。SIGHUP を送り、0.25秒で終わらなければ SIGKILL（portable-pty の kill）。待つ間は錠を持たない
+/// 1つ止める。SIGHUP を送る（portable-pty の clone_killer の kill は SIGHUP だけを送る。0.9.0 のソースで確かめた）。
+/// 2秒たっても終わっていなければ、別のスレッドから SIGKILL を送る。待つ間は錠を持たない
 pub fn kill(id: &str) -> Result<(), String> {
-    let mut k = with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| p.killer.clone_killer())).ok_or("このセッションはこのアプリが立てたものではないので止められない")?;
-    k.kill().map_err(|e| format!("止められなかった: {e}"))
+    let (pid, mut k) = with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| (p.pid, p.killer.clone_killer()))).ok_or("このセッションはこのアプリが立てたものではないので止められない")?;
+    k.kill().map_err(|e| format!("止められなかった: {e}"))?;
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(2));
+        // まだ台帳にある（終わりを待つスレッドが外していない）ときだけ送る。外した後の pid は別のプロセスに使い回されうる
+        if with(|m| m.contains_key(&pid)) {
+            eprintln!("[pty] SIGHUP で終わらなかったので SIGKILL を送る pid {pid}");
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+    });
+    Ok(())
 }
 
 /// アプリを終えるときに、ここから立てた claude を全部止める。SIGHUP を全部に送り、1秒待って残りに SIGKILL
@@ -408,6 +422,34 @@ mod tests {
         assert!(!drop_env("HOME"));
     }
 
+    /// 書き込みが詰まっても台帳の錠を持たない（読まない子に大きく書いている間も、owns と list が返る）
+    #[test]
+    fn a_stuck_write_does_not_hold_the_table() {
+        let dir = std::env::temp_dir().join(format!("fc-pty-stuck-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        // 入力を読まない子
+        std::fs::write(&bin, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
+        let r = spawn(dir.to_str().unwrap(), None, 80, 24, || {}).unwrap();
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+        let id = r["id"].as_str().unwrap().to_string();
+        let id2 = id.clone();
+        // PTY の入力の欄（数KB）を超えて書く。子が読まないので、この書き込みは戻らない
+        std::thread::spawn(move || { let _ = write(&id2, &"x".repeat(1 << 20)); });
+        std::thread::sleep(Duration::from_millis(300));
+        let t0 = Instant::now();
+        assert!(owns(&id));
+        assert!(!list().is_empty());
+        assert!(t0.elapsed() < Duration::from_millis(200), "台帳の錠が書き込みに取られている");
+        kill(&id).unwrap();
+    }
+
+    static BIN_LOCK: Mutex<()> = Mutex::new(());
+
     /// 本物の PTY で、cat を起動して書き、読み、止める（claude の代わり）
     #[test]
     fn spawn_write_read_kill_with_a_stand_in() {
@@ -417,9 +459,10 @@ mod tests {
         std::fs::write(&bin, "#!/bin/sh\nexec cat\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // SAFETY 相当: この試験だけが FC_CLAUDE_BIN を使う
+        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
         let r = spawn(dir.to_str().unwrap(), None, 80, 24, || {}).unwrap();
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
         let id = r["id"].as_str().unwrap().to_string();
         assert!(owns(&id));
         write(&id, "hello\r").unwrap();
@@ -443,7 +486,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(!owns(&id));
-        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
     }
 }
 
@@ -495,5 +537,47 @@ mod real {
         let v2 = read().unwrap();
         println!("after /clear: sessionId={} pid={}", v2["sessionId"], v2["pid"]);
         println!("exiting without kill; check: ps -p {pid}");
+    }
+}
+
+#[cfg(test)]
+mod real_permission {
+    /// 本物の claude で、承認待ちのときにチャット欄からの送信を断るかを確かめる（課金がかかるので手で回す）。
+    /// FC_PTY_TRY_CWD=<信頼済みで、Bash を許可していない場所> <試験のバイナリ> real_permission_wait --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_permission_wait() {
+        use std::time::{Duration, Instant};
+        let cwd = std::env::var("FC_PTY_TRY_CWD").expect("FC_PTY_TRY_CWD");
+        println!("login_path = {:?}", super::login_path());
+        let r = super::spawn(&cwd, None, 120, 40, || {}).unwrap();
+        let (id, pid) = (r["id"].as_str().unwrap().to_string(), r["pid"].as_u64().unwrap() as u32);
+        let root = crate::native::claude_home();
+        let row = || crate::native::sessions::fresh_row(&root, pid);
+        let t0 = Instant::now();
+        // 信頼の確認の画面が出たら「Yes」を選ぶ（信頼する前は sessions/<pid>.json が作られない）
+        std::thread::sleep(Duration::from_secs(4));
+        if row().is_none() {
+            println!("trust prompt: before trusting, send_direct says {:?}", crate::composer::send_direct(id.clone(), "x".into()));
+            super::write(&id, "\x1b[B").unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            super::write(&id, "\r").unwrap();
+        }
+        while t0.elapsed() < Duration::from_secs(30) && row().is_none() {
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        println!("sessions/{pid}.json after {:?}: {:?}", t0.elapsed(), row());
+        std::thread::sleep(Duration::from_secs(5));
+        let sent = crate::composer::send_direct(id.clone(), "Bash ツールで date コマンドを実行して、出力だけを答えて".into());
+        println!("first send: {sent:?}");
+        let t1 = Instant::now();
+        while t1.elapsed() < Duration::from_secs(60) && row().map(|v| v["state"] != "waiting_permission").unwrap_or(true) {
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        println!("state after {:?}: {:?}", t1.elapsed(), row());
+        let second = crate::composer::send_direct(id.clone(), "これは届いてはいけない".into());
+        println!("second send while waiting: {second:?}");
+        super::kill(&id).unwrap();
+        std::thread::sleep(Duration::from_secs(1));
     }
 }

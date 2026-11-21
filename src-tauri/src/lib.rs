@@ -208,9 +208,6 @@ fn town_rows() -> Vec<Value> {
         }
     }
     native::register(native::paths_of(&rows.iter().collect::<Vec<_>>()));
-    *LAST_ROWS.lock().unwrap_or_else(|e| e.into_inner()) = rows.iter()
-        .filter_map(|r| Some((r["id"].as_str()?.to_string(), json!({ "state": r["state"], "startedAt": r["startedAt"], "lastActivityAt": r["lastActivityAt"] }))))
-        .collect();
     let mut odd = n.stats.unexpected.clone();
     for (k, v) in native::conv::odd_counts() {
         *odd.entry(k).or_default() += v;
@@ -223,13 +220,6 @@ fn town_rows() -> Vec<Value> {
     }
     *LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!({ "native": st, "app": app }));
     rows
-}
-
-/// 最後に作った一覧の、id ごとの状態（state、startedAt、lastActivityAt）。送る前の確認（composer::check_direct）に使う
-static LAST_ROWS: Mutex<Vec<(String, Value)>> = Mutex::new(Vec::new());
-
-fn native_state(id: &str) -> Option<Value> {
-    LAST_ROWS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(k, _)| k == id).map(|(_, v)| v.clone())
 }
 
 /// このアプリが立てたセッションでできること。承認は端末で答える（構造化した承認の口は無い）
