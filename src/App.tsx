@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IS_WEB, call as invoke, setFullscreen } from "./bridge";
 import { pickTown, savedTown, saveTown } from "./webTown";
 import { lastTermSize } from "./term/size";
@@ -9,16 +9,19 @@ import { collectMail, type Mail } from "./mail";
 import { flightsOf } from "./letters";
 import { withGhosts } from "./ghost";
 import { pollWhileVisible } from "./visible";
-import { reuseAgents, reuseSnap } from "./snap";
-import { kickTown, otherTownRetryMs, watchTown } from "./town";
+import { kickTown } from "./town";
 import { SucceedError, kidsOf, startSuccessor, succeedBlock } from "./succeed";
-import { Group as SplitGroup, Panel as SplitPanel, Separator, usePanelRef, type Layout } from "react-resizable-panels";
+import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
 import { PanelLeftClose, PanelLeftOpen, Settings, Users } from "lucide-react";
 import { NewHousePane } from "./newHouse/NewHousePane";
 import { NewHousehold } from "./newHouse/NewHousehold";
 import { Credits } from "./credits/Credits";
 import { HouseIcon } from "./icons";
 import { groupSizeOf } from "./layout/params";
+import { useToasts } from "./hooks/useToasts";
+import { useTown } from "./hooks/useTown";
+import { useOtherTowns } from "./hooks/useOtherTowns";
+import { usePanes } from "./hooks/usePanes";
 import { Stage } from "./canvas/Stage";
 import { FamilyCanvas, Group, layoutOf } from "./canvas/FamilyCanvas";
 import { Confirm, KillConfirm, SucceedConfirm } from "./confirm/Confirm";
@@ -34,20 +37,12 @@ import { MobileShell } from "./mobile/MobileShell";
 import { useMobileLayout, useVisualViewport } from "./mobile/useMobile";
 import { SkinCtx, saveSkin, savedSkin, type Skin } from "./kid/pokemon";
 import {
-  type Agent, type Mood, type Peer, type Snapshot,
+  type Agent, type Mood, type Peer,
   MOOD_LABEL, NEEDS_YOU, buildTree, cardNames, moodOf,
 } from "./model";
 import { savedLabel } from "./conv";
 import type { CreatedSession } from "./types";
 
-/**
- * 別の町（いま見ていない ccn のノード）のお便りを取りに行く間隔。町を1つずつ順に取り、前の回が終わるまで次の回を始めない。
- * 1回は町1つにつき手元のノード経由の GET /api/sessions 1本（中継先の ccn には 15 秒に1本）。peers が healthy でない町には取りに行かない。
- * 実測（2026-11-12）: 中継で incertotech 0.42 秒、vm 0.46 秒
- */
-const OTHER_TOWNS_POLL_MS = 15000;
-/** 別の町の一覧が取れなかったとき、前回の町を残す長さ */
-const OTHER_TOWN_KEEP_MS = 60000;
 /** 右パネルの幅（px）。最小と既定。最大はウィンドウ幅の半分（maxSize="50%"） */
 const SIDE_MIN = 380;
 const SIDE_DEFAULT = 380;
@@ -79,26 +74,17 @@ const KILL_STAGGER = 140;
 /** 世帯の要約の凡例に並べる順 */
 const LEGEND: Mood[] = ["working", "reply", "approval", "done", "idle"];
 
-type Toast = { id: number; text: string; bad?: boolean };
-
 export default function App() {
   // スマホ専用の画面（src/mobile）。取得・選択・送信の状態はこの App が持ち、下の return の並べ方だけを切り替える
   const mobile = useMobileLayout();
   useVisualViewport(mobile);
   useEffect(() => { const t = setTimeout(() => { void loadTerminal(); }, 2000); return () => clearTimeout(t); }, []);
-  const [snap, setSnap] = useState<Snapshot | null>(null);
-  const [err, setErr] = useState<string | null>(null);
   const [peer, setPeer] = useState<string>("");
+  const { snap, err, fail, reload } = useTown(peer);
   const [peers, setPeers] = useState<Peer[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [toasts, setToasts] = useState<Toast[]>([]);
+  const { toasts, toast } = useToasts();
   const [zoom, setZoom] = useState<number | "fit">("fit");
-
-  const toast = useCallback((text: string, bad = false) => {
-    const id = Date.now() + Math.random();
-    setToasts((t) => [...t.slice(-2), { id, text, bad }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), bad ? 6000 : 2600);
-  }, []);
 
   useEffect(() => {
     invoke<Peer[]>("peers").then((p) => setPeers(Array.isArray(p) ? p : [])).catch(() => {});
@@ -131,32 +117,6 @@ export default function App() {
   const selfPeer = peers.find((p) => p.self);
   /** 町を切り替える（上の帯の選択と、スマホの町の選択で共通） */
   const changeTown = (v: string) => { touched.current = true; setPeer(v); setSelected(null); if (IS_WEB) saveTown(v || selfPeer?.name || ""); };
-  const reload = useRef<() => void>(() => {});
-  // 一覧の取得が続けて失敗している数と、失敗し始めた時刻。1回の失敗では町を描き直さない
-  // （2026-11-12、ノードが一瞬詰まって一覧の取得が時間切れになり、町が「0世帯・0人」になった）
-  const [fail, setFail] = useState<{ n: number; since: number; msg: string } | null>(null);
-  useEffect(() => {
-    let alive = true;
-    const want = peer || null;
-    setFail(null);
-    // 失敗したら、同じ町の前回の一覧があればそれを出し続ける。無いときだけ、失敗した一覧（空の町と赤い帯）を出す
-    const failed = (msg: string, s?: Snapshot) => {
-      setFail((f) => ({ n: (f?.n ?? 0) + 1, since: f?.since ?? Date.now(), msg }));
-      setSnap((prev) => (prev?.ccn_ok && (prev.peer ?? null) === want ? prev : s ?? prev));
-      if (!s) setErr((e) => e ?? msg);
-    };
-    // 一覧は Rust の見張りが、変わったときだけ送ってくる（#5）。ウィンドウが見えていない間は止まる（#6）。
-    // 経過時間の表示は Since が自分で時計を回すので、ここで町全体を毎秒描き直さない（#4）
-    const stop = watchTown(want, (s) => {
-      if (!alive) return;
-      // 中身が前回と同じなら前回のオブジェクトのまま（描き直さない）。変わらないセッションも使い回す（#4）
-      if (s.ccn_ok) { setSnap((prev) => reuseSnap(prev, s)); setErr(null); setFail(null); }
-      else failed(s.ccn_error ?? "ccn につながらない", s);
-    }, (msg) => { if (alive) failed(msg); });
-    reload.current = kickTown;
-    return () => { alive = false; stop(); };
-  }, [peer]);
-
   // 閉じたセッション。演出が終わったら隠し、ccn の一覧から消えたら忘れる（10秒たっても消えなければ戻して失敗を出す）
   const [dying, setDying] = useState<Map<string, number>>(new Map());
   const [hidden, setHidden] = useState<Map<string, number>>(new Map());
@@ -179,59 +139,7 @@ export default function App() {
   // 別の町のお便り。町の表示はいま選んだノードだけで、お便りは全部の町から集める
   const selfName = peers.find((p) => p.self)?.name ?? "このMac";
   const curTown = peer || selfName;
-  const [others, setOthers] = useState<Map<string, { agents: Agent[] } | { error: string }>>(new Map());
-  // 別の町の一覧が最後に取れた時刻。others に入れると取るたびに町が描き直されるので、別に持つ（#4）
-  const okAt = useRef<Map<string, number>>(new Map());
-  // 町ごとの、続けて失敗した回数と、次に取りに行ってよい時刻（#14）
-  const retry = useRef<Map<string, { fails: number; at: number }>>(new Map());
-  useEffect(() => {
-    let alive = true;
-    let running = false;
-    const towns: { key: string; name: string; healthy: boolean }[] = [
-      { key: "", name: selfName, healthy: true },
-      ...peers.filter((p) => !p.self).map((p) => ({ key: p.name, name: p.name, healthy: p.status === "healthy" })),
-    ].filter((t) => t.key !== peer);
-    setOthers((m) => new Map([...m].filter(([name]) => towns.some((t) => t.name === name))));
-    const load = async () => {
-      if (running) return;
-      running = true;
-      for (const t of towns) {
-        // 失敗が続いている町は、決めた時刻まで取りに行かない（前の結果を残す）
-        const r = retry.current.get(t.name);
-        if (r && Date.now() < r.at) continue;
-        let v: { agents: Agent[] } | { error: string };
-        if (!t.healthy) v = { error: "つながらない" };
-        else {
-          // 一覧と、前に決めたキャラの割り当てを読むだけの軽い命令（#14）。snapshot と違い、割り当ての保存も状態ファイルの読み込みもしない
-          try { v = { agents: await invoke<Agent[]>("town_agents", { peer: t.key || null }) }; }
-          catch (e) { v = { error: String(e) }; }
-        }
-        if (!alive) break;
-        if ("agents" in v) { okAt.current.set(t.name, Date.now()); retry.current.delete(t.name); }
-        else if (t.healthy) {
-          const fails = (r?.fails ?? 0) + 1;
-          retry.current.set(t.name, { fails, at: Date.now() + otherTownRetryMs(fails, OTHER_TOWNS_POLL_MS) });
-        }
-        // 取れなかった回は、60秒以内に取れた前回の町を残す（1回の時間切れで、お便りとゴーストが消えないように）
-        // 前回と同じなら Map を作り直さない（#4）
-        const got = v;
-        setOthers((m) => {
-          const prev = m.get(t.name);
-          if ("error" in got) {
-            if (prev && "agents" in prev && Date.now() - (okAt.current.get(t.name) ?? 0) < OTHER_TOWN_KEEP_MS) return m;
-            if (prev && "error" in prev && prev.error === got.error) return m;
-            return new Map(m).set(t.name, got);
-          }
-          const agents = reuseAgents(prev && "agents" in prev ? prev.agents : undefined, got.agents);
-          if (prev && "agents" in prev && agents === prev.agents) return m;
-          return new Map(m).set(t.name, { agents });
-        });
-      }
-      running = false;
-    };
-    const stop = pollWhileVisible(load, OTHER_TOWNS_POLL_MS);
-    return () => { alive = false; stop(); };
-  }, [peer, peers, selfName]);
+  const others = useOtherTowns(peer, peers, selfName);
   // 木を作るときだけ、転出のゴースト（別の町にいる親子の影）を足す。お便りや数には入れない
   const otherTowns = useMemo(() => [...others].flatMap(([town, v]) => ("agents" in v ? [{ town, agents: v.agents }] : [])), [others]);
   const tree = useMemo(() => buildTree(withGhosts({ town: curTown, agents }, otherTowns)), [agents, otherTowns, curTown]);
@@ -452,23 +360,10 @@ export default function App() {
 
   // 3枚のペイン（#89）。左の新しい世帯のペインはヘッダーのボタンとドラッグで開け閉めする。
   // 右のチャットは、セッションを選んでいないときに閉じ、選んだら開く。閉じても Panel は残す（入力欄の下書きを Panel が持っているため）
-  const housesRef = usePanelRef();
-  const sideRef = usePanelRef();
-  const [housesOpen, setHousesOpen] = useState(true);
-  const [sideOpen, setSideOpen] = useState(false);
-  const hasSel = !!sel;
-  const selRef = useRef(hasSel);
-  selRef.current = hasSel;
-  useLayoutEffect(() => {
-    const r = sideRef.current;
-    if (!r || mobile) return;
-    if (hasSel && r.isCollapsed()) r.expand();
-    else if (!hasSel && !r.isCollapsed()) r.collapse();
-  }, [hasSel, mobile]);
+  const { housesRef, sideRef, housesOpen, setHousesOpen, sideOpen, setSideOpen, selRef, toggleHouses } = usePanes(!!sel, mobile);
   // 設定（#92）。「＋ 新しい世帯」で親を立てる場所。null は既定（~/Documents/meta）
   const [place, setPlace] = useState<string | null>(loadPlace);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const toggleHouses = () => { const r = housesRef.current; if (!r) return; if (r.isCollapsed()) r.expand(); else r.collapse(); };
 
   return (
     <SkinCtx.Provider value={skinCtx}>
