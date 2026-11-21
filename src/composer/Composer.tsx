@@ -172,6 +172,124 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
   const interrupt = () => invoke("interrupt_session", { sessionId: agent.id, peer: peer || null }).catch((e) => onError(`止められなかった: ${e}`));
   const clearDraft = () => { if (text.trim()) remember(text); histSt.current = { index: -1, draft: "" }; replaceAll(""); };
 
+  // onKeyDown の分岐。true を返したら、そのキーは処理済みで、あとの分岐へ進まない
+  type Key = { e: React.KeyboardEvent<HTMLTextAreaElement>; k: string; ctrl: boolean; alt: boolean; plain: boolean; stop: () => void };
+
+  /** 補完が出ているとき */
+  const menuKey = ({ k, ctrl, plain, stop }: Key): boolean => {
+    if (!menuOpen) return false;
+    if ((plain && k === "ArrowDown") || (ctrl && k === "n")) { stop(); setPick((p) => (p + 1) % menu.length); return true; }
+    if ((plain && k === "ArrowUp") || (ctrl && k === "p")) { stop(); setPick((p) => (p - 1 + menu.length) % menu.length); return true; }
+    if (plain && k === "Tab") { stop(); accept(); return true; }
+    if (plain && k === "Escape") { stop(); setDismissed(text); return true; }
+    // / の補完で Enter を押すと、選んだコマンドで送る。@ の補完では打った文のまま送る（2026-11-13 に CLI で実測）
+    if (plain && k === "Enter" && token?.kind === "slash") { stop(); const next = accept(); if (next) submit(next.trimEnd()); return true; }
+    return false;
+  };
+
+  /** 送ると改行 */
+  const sendKey = ({ e, k, ctrl, alt, plain, stop }: Key): boolean => {
+    if (k === "Enter") {
+      if (touch) return true;
+      if (e.shiftKey || alt || (e.altKey && !e.metaKey)) { stop(); apply({ ...selRange(), insert: "\n" }); return true; }
+      if (plain) {
+        stop();
+        const bs = backslashNewline(sel());
+        if (bs) { apply(bs); return true; }
+        submit(text);
+        return true;
+      }
+      if (e.metaKey || e.ctrlKey) { stop(); submit(text); return true; }
+    }
+    if (ctrl && k === "j") { stop(); apply({ ...selRange(), insert: "\n" }); return true; }
+    return false;
+  };
+
+  /** 履歴を辿る・検索を始める */
+  const historyKey = ({ k, ctrl, plain, stop }: Key): boolean => {
+    if ((plain && k === "ArrowUp") || (ctrl && k === "p")) {
+      if (!onFirstRow()) return true;
+      const r = histUp(histSt.current, upList, text);
+      if (!r) return true;
+      stop(); histSt.current = r.st; setDismissed(r.text); replaceAll(r.text); return true;
+    }
+    if ((plain && k === "ArrowDown") || (ctrl && k === "n")) {
+      if (!onLastRow()) return true;
+      const r = histDown(histSt.current, upList);
+      if (!r) return true;
+      stop(); histSt.current = r.st; setDismissed(r.text); replaceAll(r.text); return true;
+    }
+    if (ctrl && k === "r") { stop(); loadAll(); searchEnding.current = false; setSearch({ query: "", idx: -1, original: text }); return true; }
+    return false;
+  };
+
+  /** readline の編集 */
+  const editKey = ({ e, k, ctrl, alt, stop }: Key): boolean => {
+    if (ctrl && k === "a") { stop(); moveTo(toLineStart(sel())); return true; }
+    if (ctrl && k === "e") { stop(); moveTo(toLineEnd(sel())); return true; }
+    if (ctrl && k === "k") { stop(); const ed = killToEnd(sel()); if (ed) apply(ed); return true; }
+    if (ctrl && k === "u") { stop(); const ed = killToStart(sel()); if (ed) apply(ed); return true; }
+    if (ctrl && k === "w") { stop(); const ed = killWordBack(sel()); if (ed) apply(ed); return true; }
+    if (ctrl && k === "y") {
+      stop();
+      const t = kills.current[0];
+      if (!t) return true;
+      const s = sel();
+      apply({ from: s.start, to: s.end, insert: t });
+      yank.current = { from: s.start, to: s.start + t.length, i: 0 };
+      return true;
+    }
+    if (alt && e.code === "KeyY") {
+      stop();
+      const y = yank.current;
+      if (!y || kills.current.length < 2) return true;
+      const i = (y.i + 1) % kills.current.length;
+      const t = kills.current[i];
+      apply({ from: y.from, to: y.to, insert: t });
+      yank.current = { from: y.from, to: y.from + t.length, i };
+      return true;
+    }
+    // Option の文字（∫ など）が入らないよう、e.code で見る
+    if (alt && e.code === "KeyB") { stop(); moveTo(wordBack(sel())); return true; }
+    if (alt && e.code === "KeyF") { stop(); moveTo(wordForward(sel())); return true; }
+    if (alt && e.code === "KeyD") { stop(); const ed = killWordForward(sel()); if (ed) apply(ed); return true; }
+    if (e.ctrlKey && !e.metaKey && (k === "_" || (e.shiftKey && k === "-"))) { stop(); document.execCommand("undo"); return true; }
+    return false;
+  };
+
+  /** 打ちかけの退避 */
+  const stashKey = ({ k, ctrl, stop }: Key): boolean => {
+    if (!(ctrl && k === "s")) return false;
+    stop();
+    const st = stashes.get(agent.id);
+    if (text) { stashes.set(agent.id, text); replaceAll(""); }
+    else if (st != null) { stashes.delete(agent.id); replaceAll(st); }
+    return true;
+  };
+
+  /** 止める・消す・キーの一覧 */
+  const stopKey = ({ e, k, ctrl, plain, stop }: Key): boolean => {
+    if (ctrl && k === "c") {
+      if (ta.current && ta.current.selectionStart !== ta.current.selectionEnd && !running) return true;
+      stop();
+      if (running && canInterrupt) { interrupt(); return true; }
+      if (text) clearDraft();
+      return true;
+    }
+    if (plain && k === "Escape") {
+      stop();
+      if (help) { setHelp(false); return true; }
+      if (running && canInterrupt) { interrupt(); return true; }
+      const now = Date.now();
+      if (text && now - lastEsc.current < DOUBLE_MS) { lastEsc.current = 0; clearDraft(); return true; }
+      lastEsc.current = now;
+      return true;
+    }
+    // 空のときの ? はキーの一覧
+    if (k === "?" && !text && !e.ctrlKey && !e.metaKey) { stop(); setHelp((h) => !h); return true; }
+    return false;
+  };
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // 日本語の変換中は何もしない（変換を決める Enter で送らない）
     if (e.nativeEvent.isComposing || e.keyCode === 229) return;
@@ -179,110 +297,11 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
     const ctrl = e.ctrlKey && !e.metaKey && !e.altKey;
     const alt = e.altKey && !e.ctrlKey && !e.metaKey;
     const plain = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
-    const stop = () => e.preventDefault();
+    const key: Key = { e, k, ctrl, alt, plain, stop: () => e.preventDefault() };
     if (k !== "Escape") lastEsc.current = 0;
     if (!(ctrl && k === "y") && !(alt && e.code === "KeyY")) yank.current = null;
-
-    // 補完が出ているとき
-    if (menuOpen) {
-      if ((plain && k === "ArrowDown") || (ctrl && k === "n")) { stop(); setPick((p) => (p + 1) % menu.length); return; }
-      if ((plain && k === "ArrowUp") || (ctrl && k === "p")) { stop(); setPick((p) => (p - 1 + menu.length) % menu.length); return; }
-      if (plain && k === "Tab") { stop(); accept(); return; }
-      if (plain && k === "Escape") { stop(); setDismissed(text); return; }
-      // / の補完で Enter を押すと、選んだコマンドで送る。@ の補完では打った文のまま送る（2026-11-13 に CLI で実測）
-      if (plain && k === "Enter" && token?.kind === "slash") { stop(); const next = accept(); if (next) submit(next.trimEnd()); return; }
-    }
-
-    // 送ると改行
-    if (k === "Enter") {
-      if (touch) return;
-      if (e.shiftKey || alt || (e.altKey && !e.metaKey)) { stop(); apply({ ...selRange(), insert: "\n" }); return; }
-      if (plain) {
-        stop();
-        const bs = backslashNewline(sel());
-        if (bs) { apply(bs); return; }
-        submit(text);
-        return;
-      }
-      if (e.metaKey || e.ctrlKey) { stop(); submit(text); return; }
-    }
-    if (ctrl && k === "j") { stop(); apply({ ...selRange(), insert: "\n" }); return; }
-
-    // 履歴
-    if ((plain && k === "ArrowUp") || (ctrl && k === "p")) {
-      if (!onFirstRow()) return;
-      const r = histUp(histSt.current, upList, text);
-      if (!r) return;
-      stop(); histSt.current = r.st; setDismissed(r.text); replaceAll(r.text); return;
-    }
-    if ((plain && k === "ArrowDown") || (ctrl && k === "n")) {
-      if (!onLastRow()) return;
-      const r = histDown(histSt.current, upList);
-      if (!r) return;
-      stop(); histSt.current = r.st; setDismissed(r.text); replaceAll(r.text); return;
-    }
-    if (ctrl && k === "r") { stop(); loadAll(); searchEnding.current = false; setSearch({ query: "", idx: -1, original: text }); return; }
-
-    // readline の編集
-    if (ctrl && k === "a") { stop(); moveTo(toLineStart(sel())); return; }
-    if (ctrl && k === "e") { stop(); moveTo(toLineEnd(sel())); return; }
-    if (ctrl && k === "k") { stop(); const ed = killToEnd(sel()); if (ed) apply(ed); return; }
-    if (ctrl && k === "u") { stop(); const ed = killToStart(sel()); if (ed) apply(ed); return; }
-    if (ctrl && k === "w") { stop(); const ed = killWordBack(sel()); if (ed) apply(ed); return; }
-    if (ctrl && k === "y") {
-      stop();
-      const t = kills.current[0];
-      if (!t) return;
-      const s = sel();
-      apply({ from: s.start, to: s.end, insert: t });
-      yank.current = { from: s.start, to: s.start + t.length, i: 0 };
-      return;
-    }
-    if (alt && e.code === "KeyY") {
-      stop();
-      const y = yank.current;
-      if (!y || kills.current.length < 2) return;
-      const i = (y.i + 1) % kills.current.length;
-      const t = kills.current[i];
-      apply({ from: y.from, to: y.to, insert: t });
-      yank.current = { from: y.from, to: y.from + t.length, i };
-      return;
-    }
-    // Option の文字（∫ など）が入らないよう、e.code で見る
-    if (alt && e.code === "KeyB") { stop(); moveTo(wordBack(sel())); return; }
-    if (alt && e.code === "KeyF") { stop(); moveTo(wordForward(sel())); return; }
-    if (alt && e.code === "KeyD") { stop(); const ed = killWordForward(sel()); if (ed) apply(ed); return; }
-    if (e.ctrlKey && !e.metaKey && (k === "_" || (e.shiftKey && k === "-"))) { stop(); document.execCommand("undo"); return; }
-
-    // 退避
-    if (ctrl && k === "s") {
-      stop();
-      const st = stashes.get(agent.id);
-      if (text) { stashes.set(agent.id, text); replaceAll(""); }
-      else if (st != null) { stashes.delete(agent.id); replaceAll(st); }
-      return;
-    }
-
-    // 止める・消す
-    if (ctrl && k === "c") {
-      if (ta.current && ta.current.selectionStart !== ta.current.selectionEnd && !running) return;
-      stop();
-      if (running && canInterrupt) { interrupt(); return; }
-      if (text) clearDraft();
-      return;
-    }
-    if (plain && k === "Escape") {
-      stop();
-      if (help) { setHelp(false); return; }
-      if (running && canInterrupt) { interrupt(); return; }
-      const now = Date.now();
-      if (text && now - lastEsc.current < DOUBLE_MS) { lastEsc.current = 0; clearDraft(); return; }
-      lastEsc.current = now;
-      return;
-    }
-
-    // 空のときの ? はキーの一覧
-    if (k === "?" && !text && !e.ctrlKey && !e.metaKey) { stop(); setHelp((h) => !h); return; }
+    // この順に試す。順序は元の if の並びと同じ
+    menuKey(key) || sendKey(key) || historyKey(key) || editKey(key) || stashKey(key) || stopKey(key);
   };
 
   const selRange = () => { const s = sel(); return { from: s.start, to: s.end }; };
