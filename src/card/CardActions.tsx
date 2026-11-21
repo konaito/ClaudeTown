@@ -1,0 +1,81 @@
+import { memo, useContext, useEffect, useRef, useState } from "react";
+import type { Agent } from "../model";
+import { succeedBlock } from "../succeed";
+import { KillCtx, SendCtx, SucceedCtx } from "../contexts";
+
+/**
+ * カードの右下のボタン（#63）。左から並べる順に書く。送る文を足し替えるときはここだけを直す。
+ * 右パネルの見出しにも、同じ定義から同じボタンを並べる（CardActions の place）。
+ * kind が kill のボタンはセッションを閉じる（前のカードの × と同じ動き）。send のボタンは text をチャットの送信と同じ口で送る。
+ * succeed のボタンは、利用上限で止まったセッションを同じ段の後継へ引き継ぐ（src/succeed.ts）。
+ * 見本は本人のスクショ（2026-11-13）。角丸のカードの右下の縁に、角丸の四角いボタンが縁にまたがって並ぶ
+ */
+export type CardAction = { key: string; icon: string; name: string } & ({ kind: "kill" } | { kind: "succeed" } | { kind: "send"; text: string });
+
+const CARD_ACTIONS: CardAction[] = [
+  { key: "kill", icon: "🐺", name: "閉じる", kind: "kill" },
+  { key: "succeed", icon: "🤝", name: "引き継ぐ", kind: "succeed" },
+  { key: "howdy", icon: "🚪", name: "様子を聞く", kind: "send", text: "調子どうですか" },
+  { key: "go", icon: "👍", name: "許可する", kind: "send", text: "許可します、やってくださいお願いします。" },
+];
+
+/** true ならカードの右下のボタンをいつも出す。false ならカードに乗せたときと、選んでいるカードだけに出す */
+const CARD_ACTIONS_ALWAYS = false;
+
+/** 押したあとの反応（ボタンの一瞬の変化）の長さ（ms）。CSS の card-act-* と合わせる */
+const CARD_ACT_FLASH_MS = 700;
+
+/**
+ * カードの右下のボタン（#63）。並びと送る文は CARD_ACTIONS で決める。出し入れは CSS（.fnode:hover と .fnode.open）で行い、描き直さない。
+ * 押してもカードの選択や右パネルの切り替えが起きないよう、クリックはここで止める。
+ * place が head なら、右パネルの見出しに、いつも見える形で並べる（動きはカードと同じ）。
+ * ボタンに乗せたときの説明は title で出す（WebView の標準のツールチップ）。押せるときは何をするか、押せないときは押せない理由を書く
+ */
+export const CardActions = memo(function CardActions({ agent, place = "card" }: { agent: Agent; place?: "card" | "head" }) {
+  const kill = useContext(KillCtx);
+  const suc = useContext(SucceedCtx);
+  const send = useContext(SendCtx);
+  // 押したあとの一瞬の反応。key は押したボタン、ok は届いたか
+  const [flash, setFlash] = useState<{ key: string; ok: boolean } | null>(null);
+  const [sending, setSending] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  const canSend = agent.canSend;
+  const canStop = !!agent.capabilities?.stop;
+  // 引き継げない理由（引き継げるなら null）と、いま引き継いでいる最中か
+  const sucWhy = succeedBlock(agent, suc.local);
+  const sucBusy = suc.busy.has(agent.id);
+  const press = async (act: CardAction, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (act.kind === "kill") { if (canStop) kill.ask(agent, e.metaKey); return; }
+    if (act.kind === "succeed") { if (!sucWhy && !sucBusy) suc.ask(agent); return; }
+    if (!canSend || sending) return;
+    setSending(act.key);
+    const ok = await send(agent, act.text);
+    setSending(null);
+    setFlash({ key: act.key, ok });
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setFlash(null), CARD_ACT_FLASH_MS);
+  };
+  return (
+    <div className={`card-acts ${place === "head" ? "in-head" : CARD_ACTIONS_ALWAYS ? "always" : ""}`}
+      onClick={(e) => e.stopPropagation()} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}>
+      {CARD_ACTIONS.map((act) => {
+        const off = act.kind === "kill" ? !canStop : act.kind === "succeed" ? !!sucWhy || sucBusy : !canSend;
+        const title = act.kind === "kill"
+          ? (canStop ? `${act.name}: このセッションを止める。子孫がいれば一緒に止める（⌘ を押しながらで確認なし）` : "閉じられない: ccn から止められないセッション")
+          : act.kind === "succeed"
+            ? (sucBusy ? "引き継いでいる…" : sucWhy ? `引き継げない: ${sucWhy}` : `${act.name}: 利用上限で止まったとき、同じ会話の後継を立てて、このセッションを止める`)
+            : (canSend ? `${act.name}: 「${act.text}」を送る` : `${act.name}を送れない: このセッションには文を送れない`);
+        const fx = flash?.key === act.key ? (flash.ok ? "sent" : "failed") : sending === act.key || (act.kind === "succeed" && sucBusy) ? "sending" : "";
+        return (
+          <button key={act.key} type="button" className={`card-act ca-${act.key} ${off ? "off" : ""} ${fx}`}
+            aria-disabled={off} title={title} aria-label={`${agent.name}: ${title}`}
+            onClick={(e) => press(act, e)}>
+            <span aria-hidden>{act.icon}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+});
