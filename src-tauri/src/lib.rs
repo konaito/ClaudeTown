@@ -785,7 +785,19 @@ impl Conv {
     }
 
     fn push(&mut self, fresh: Vec<Value>) {
+        let start = self.total;
         for mut v in fresh {
+            // 道具の結果は、持っている道具の行に付ける。道具の行が今回の分にあれば、それで画面に届くので項目にしない。
+            // 前に渡した道具の行の結果だけ、小さい result の項目で送り、画面が道具の行に付け直す。道具の行が無ければ捨てる（#83）
+            if v["role"] == "result" {
+                let id = v["id"].clone();
+                let hit = self.items.iter_mut().rev().find(|t| t["role"] == "tool" && t["id"] == id && t.get("result").is_none());
+                let Some(t) = hit else { continue };
+                t["result"] = json!({ "text": v["text"], "error": v["error"] });
+                if t["n"].as_u64().map(|n| n >= start).unwrap_or(false) {
+                    continue;
+                }
+            }
             if let Value::Object(o) = &mut v {
                 o.insert("n".into(), json!(self.total));
             }
@@ -846,6 +858,32 @@ fn tool_line(name: &str, input: &Value) -> String {
 /// SDK の1件を、画面に出す0件以上の項目に縮める。考えた中身と道具の結果は捨てる
 /// ccn の messages は、セッションの種類で形が違う。node はトランスクリプトの行そのまま（type、message、timestamp）。
 /// pty は {at, type, data: {type, message, …}, seq} で、中身は data に入り、時刻は at（ms）にある。
+/// 道具の結果を画面に出す長さ（字）と行数。長い出力は頭だけを持つ
+const RESULT_CHARS: usize = 1500;
+const RESULT_LINES: usize = 40;
+
+/// 道具の結果（tool_result の content）を文にする。content は文字列か、text と image の並び。改行は残し、頭だけを持つ
+fn result_text(content: &Value) -> String {
+    let t = match content {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a.iter().map(|c| match c["type"].as_str() {
+            Some("text") => c["text"].as_str().unwrap_or("").to_string(),
+            Some("image") => "[画像]".to_string(),
+            _ => String::new(),
+        }).filter(|x| !x.is_empty()).collect::<Vec<_>>().join("\n"),
+        _ => String::new(),
+    };
+    let t = t.trim();
+    let mut out: String = t.lines().take(RESULT_LINES).collect::<Vec<_>>().join("\n");
+    if out.chars().count() > RESULT_CHARS {
+        out = out.chars().take(RESULT_CHARS).collect();
+    }
+    if out.len() < t.len() {
+        out.push_str("\n…（続きは省いた）");
+    }
+    out
+}
+
 fn simplify(m: &Value) -> Vec<Value> {
     let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
         Some(d) => (d, m["at"].clone()),
@@ -855,6 +893,23 @@ fn simplify(m: &Value) -> Vec<Value> {
     let content = &m["message"]["content"];
     let mut out = vec![];
     match ty {
+        // ターンの終わり。止めた（interrupted）と失敗（is_error）だけを会話に出す（#83）。成功は返事の文が出ているので出さない
+        "result" => {
+            if m["subtype"].as_str() == Some("interrupted") {
+                out.push(json!({ "role": "event", "kind": "interrupted", "text": "ここで止めた", "at": at }));
+            } else if m["is_error"].as_bool() == Some(true) {
+                let t = clip(m["result"].as_str().unwrap_or(""), 300);
+                out.push(json!({ "role": "event", "kind": "error", "text": if t.is_empty() { "ターンが失敗で終わった".to_string() } else { format!("ターンが失敗で終わった: {t}") }, "at": at }));
+            }
+        }
+        "user" if content.as_array().map(|a| a.iter().any(|c| c["type"] == "tool_result")).unwrap_or(false) => {
+            // 道具の結果。画面は道具の行を開いたときに出す。Conv::push が道具の行に付ける（#83）
+            for c in content.as_array().into_iter().flatten().filter(|c| c["type"] == "tool_result") {
+                if let Some(id) = c["tool_use_id"].as_str() {
+                    out.push(json!({ "role": "result", "id": id, "text": result_text(&c["content"]), "error": c["is_error"].as_bool() == Some(true), "at": at }));
+                }
+            }
+        }
         "user" => {
             // 貼り付けの包み（<pasted_content>）は外してから見る。外さないと `<` で始まり、下の除外で落ちる（#69）
             let text = user_text(content);
@@ -919,7 +974,7 @@ fn simplify(m: &Value) -> Vec<Value> {
                                 "mcp__ccn__create_session" if inp["prompt"].is_string() => Some(json!({ "to": null, "peer": inp["peer"], "summary": first(&inp["prompt"]), "text": inp["prompt"], "create": true })),
                                 _ => None,
                             };
-                            let mut item = json!({ "role": "tool", "text": tool_line(name, inp), "at": at, "sent": sent });
+                            let mut item = json!({ "role": "tool", "text": tool_line(name, inp), "at": at, "sent": sent, "id": c["id"] });
                             // 計画の確認（ExitPlanMode）の本文。承認の hook の tool_input は、計画ファイルが無いと空で来るので、
                             // 承認の欄は会話の最後の計画で補う（#83、2026-11-21 に PTY の子で見た）
                             if name == "ExitPlanMode" {
@@ -2584,6 +2639,47 @@ mod tests {
         assert!(carry.is_empty());
         // 壊れたバイトは置き換えて先へ進む
         assert_eq!(utf8_stream(&mut carry, &[b'a', 0xff, b'b']), "a\u{FFFD}b");
+    }
+
+    #[test]
+    fn tool_results_attach_to_tool_lines() {
+        let asst = |id: &str| json!({"type": "assistant", "timestamp": "t", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": id, "name": "Bash", "input": {"command": "ls"}}]}});
+        let res = |id: &str, err: bool| json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": [{"type": "text", "text": "a\nb"}], "is_error": err}]}});
+        let mut c = Conv::default();
+        // 同じ読み出しの結果は、道具の行に付くだけで項目は増えない
+        c.push([asst("t1"), res("t1", false)].iter().flat_map(simplify).collect());
+        assert_eq!(c.items.len(), 1);
+        assert_eq!(c.items[0]["result"], json!({"text": "a\nb", "error": false}));
+        // 後の読み出しの結果は、道具の行に付け、画面に送る result の項目も足す
+        c.push(simplify(&asst("t2")));
+        c.push(simplify(&res("t2", true)));
+        assert_eq!(c.items.len(), 3);
+        assert_eq!(c.items[1]["result"]["error"], true);
+        assert_eq!(c.items[2]["role"], "result");
+        assert_eq!(c.items[2]["id"], "t2");
+        // 道具の行が無い結果は捨てる
+        c.push(simplify(&res("nope", false)));
+        assert_eq!(c.items.len(), 3);
+    }
+
+    #[test]
+    fn turn_end_events() {
+        let r = |o: Value| simplify(&json!({"at": 5, "type": "result", "data": o}));
+        assert_eq!(r(json!({"type": "result", "subtype": "interrupted", "is_error": true, "result": ""}))[0]["kind"], "interrupted");
+        let e = r(json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "result": "API Error: limit"}));
+        assert_eq!(e[0]["kind"], "error");
+        assert!(e[0]["text"].as_str().unwrap().contains("API Error: limit"));
+        assert!(r(json!({"type": "result", "subtype": "success", "is_error": false, "result": "ok"})).is_empty());
+    }
+
+    #[test]
+    fn result_text_keeps_the_head() {
+        assert_eq!(result_text(&json!("x")), "x");
+        assert_eq!(result_text(&json!([{"type": "text", "text": "a"}, {"type": "image"}])), "a\n[画像]");
+        let long = (0..100).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        let t = result_text(&json!(long));
+        assert!(t.ends_with("…（続きは省いた）"));
+        assert_eq!(t.lines().count(), RESULT_LINES + 1);
     }
 
     #[test]

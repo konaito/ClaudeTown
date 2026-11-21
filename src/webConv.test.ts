@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { simplify, toolLine, unwrapPasted, splitImageMarks, readConversation, newConvState, clip, type MessagesPage } from "./webConv";
+import { simplify, toolLine, unwrapPasted, splitImageMarks, readConversation, newConvState, clip, resultText, type MessagesPage } from "./webConv";
 import { KEEP_CONV } from "./conv";
 
 // pty は { at, type, data: { type, message } }、node はトランスクリプトの行そのまま
@@ -113,5 +113,32 @@ describe("readConversation", () => {
     epoch = "e2"; total = 0;
     const b = await readConversation(s, f, null);
     expect(b.items.length).toBe(3);
+  });
+});
+
+describe("道具の結果とターンの終わり（#83）", () => {
+  const tool = (id: string) => ptyAsst([{ type: "tool_use", id, name: "Bash", input: { command: "ls" } }]);
+  const res = (id: string, err = false) => ptyUser([{ type: "tool_result", tool_use_id: id, content: [{ type: "text", text: "a\nb" }], is_error: err }]);
+  const page = (msgs: unknown[]) => { let sent = false; return async () => { if (sent) return { messages: [], next: msgs.length, epoch: "e" }; sent = true; return { messages: msgs, next: msgs.length, epoch: "e" }; }; };
+  test("同じ読み出しの結果は道具の行に付き、後から来た結果だけ result の項目になる", async () => {
+    const s = newConvState();
+    const a = await readConversation(s, page([tool("t1"), res("t1"), tool("t2")]), null);
+    expect(a.items.map((x) => [x.role, x.result?.text ?? null])).toEqual([["tool", "a\nb"], ["tool", null]]);
+    const all = [tool("t1"), res("t1"), tool("t2"), res("t2", true), res("none")];
+    const b = await readConversation(s, async (after) => ({ messages: all.slice(after), next: all.length, epoch: "e" }), a.total);
+    expect(b.items.map((x) => [x.role, x.id, x.error])).toEqual([["result", "t2", true]]);
+    expect(s.items[1].result).toEqual({ text: "a\nb", error: true });
+  });
+  test("止めたと失敗したターンは event、成功は出さない", () => {
+    const r = (data: unknown) => simplify({ at: 1, type: "result", data });
+    expect(r({ type: "result", subtype: "interrupted", is_error: true, result: "" })[0]).toMatchObject({ role: "event", kind: "interrupted" });
+    expect(r({ type: "result", subtype: "error_during_execution", is_error: true, result: "API Error" })[0].text).toContain("API Error");
+    expect(r({ type: "result", subtype: "success", is_error: false, result: "ok" })).toEqual([]);
+  });
+  test("結果は頭の40行だけ持つ", () => {
+    const t = resultText(Array.from({ length: 100 }, (_, i) => String(i)).join("\n"));
+    expect(t.endsWith("…（続きは省いた）")).toBe(true);
+    expect(t.split("\n").length).toBe(41);
+    expect(resultText([{ type: "text", text: "a" }, { type: "image" }])).toBe("a\n[画像]");
   });
 });
