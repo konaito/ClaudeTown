@@ -14,6 +14,7 @@
 // GET /__bench/stats で、起動してからの要求の数を口ごとに返す（ccn への問い合わせの回数を数える。#5、#14）。
 // 口は ccn と同じ形（GET /api/peers、/api/sessions、/api/sessions/stream の SSE、/api/sessions/<id>、…/messages?after=、…/terminal の SSE、POST …/terminal/input と resize）
 import { floodChunks } from "./flood-chunk";
+import { jsonResponse } from "./lib/common";
 
 const argv = process.argv.slice(2);
 const PORT = Number(argv[0]);
@@ -94,7 +95,7 @@ if (flood) {
 
 // ブラウザで開いた開発版（?mock&mockport=<ポート>、src/bridge.ts）からも読めるようにする
 const CORS = { "access-control-allow-origin": "*" };
-const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json", ...CORS } });
+const json = (v: unknown, status = 200) => jsonResponse(v, status, CORS);
 const byId = new Map(sessions.map((s) => [s.id, s]));
 Bun.serve({
   port: PORT, hostname: "127.0.0.1", idleTimeout: 0,

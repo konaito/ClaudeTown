@@ -19,6 +19,7 @@
 // 長い会話の試し（#10、#15）: FC_MOCK_CONV=1000 FC_MOCK_CONV_GROW_MS=5000 で、各セッションに 1000 件の会話があり、5秒ごとに1件増える
 
 import { existsSync } from "node:fs";
+import { jsonResponse } from "./lib/common";
 
 const PORT = Number(process.env.FC_MOCK_PORT ?? 4399);
 const ROOTS = (process.env.FC_MOCK_ROOTS ?? "").split(",").filter(Boolean);
@@ -90,7 +91,7 @@ const summary = (s: Sess) => ({
 });
 
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "content-type, x-ccn-from", "access-control-allow-methods": "GET, POST, DELETE" };
-const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json", ...CORS } });
+const json = (v: unknown, status = 200) => jsonResponse(v, status, CORS);
 
 Bun.serve({
   port: PORT, hostname: "127.0.0.1", idleTimeout: 0,

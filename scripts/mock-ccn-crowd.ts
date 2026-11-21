@@ -6,6 +6,7 @@
 //   FC_CROWD_LOG      1 なら、受けた要求ごとに「req <時刻ms> <パス>」を標準出力に出す（起動の時間の計測、scripts/bench-startup.sh）
 //   FC_CCN_URL=http://127.0.0.1:4396 FC_APP_HOME=$(mktemp -d) bun tauri dev
 // 口は ccn と同じ形（GET /api/peers、GET /api/sessions、GET /api/sessions/<id>）。書き込みの口は持たない
+import { jsonResponse } from "./lib/common";
 const PORT = Number(process.argv[2] ?? 4396);
 const N = Number(process.env.FC_CROWD_N ?? 20);
 const STATE = process.env.FC_CROWD_STATE ?? "waiting_permission";
@@ -24,7 +25,7 @@ const sessions = Array.from({ length: N }, (_, i) => {
 });
 const pending = STATE === "waiting_permission" ? [{ id: "p1", tool: "Bash", summary: "ls", detail: "ls" }] : [];
 
-const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json", "access-control-allow-origin": "*" } });
+const json = (v: unknown, status = 200) => jsonResponse(v, status, { "access-control-allow-origin": "*" });
 Bun.serve({
   port: PORT, hostname: "127.0.0.1",
   fetch(req) {
