@@ -20,8 +20,9 @@ export type Report = {
 export type Agent = {
   id: string;
   name: string;
-  /** subagent は Claude Code の記録から読んだ sub-agent と teammate（#96）。親のセッションの子として出す */
-  kind: "terminal" | "node" | "subagent";
+  /** ccn の種類。pty はノードが端末（PTY）で動かす対話の claude、node は -p の子、terminal は人が端末で起動したもの。
+   *  subagent は Claude Code の記録から読んだ sub-agent と teammate（#96）。親のセッションの子として出す */
+  kind: "terminal" | "node" | "pty" | "subagent";
   /** 一覧の出どころ（#96）。native は Claude Code の記録（~/.claude）から読んでいるだけで、capabilities が全部 false。古い一覧には無い */
   source?: "ccn" | "native";
   state: "running" | "waiting_permission" | "idle";

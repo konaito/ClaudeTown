@@ -9,6 +9,7 @@ import { flightsOf, resolve, type Flight } from "./letters";
 import { withGhosts } from "./ghost";
 import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Composer } from "./composer/Composer";
+import { SessionControls } from "./session/SessionControls";
 import { Approval } from "./approval/Approval";
 import { openPlan } from "./approval/answers";
 import { BUILTINS, opensDialog } from "./composer/commands";
@@ -1245,6 +1246,9 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   const text = agent ? drafts[agent.id] ?? "" : "";
   const setText = (v: string) => { if (agent) setDrafts((d) => ({ ...d, [agent.id]: v })); };
   const [busy, setBusy] = useState(false);
+  // モデルか権限モードを替えている間（#97）。pty は claude を起動し直すので、その間は送らない
+  const [switching, setSwitching] = useState(false);
+  useEffect(() => { setSwitching(false); }, [agent?.id]);
   // カードのボタンからの送信（#63）。描くたびに今の send に差し替える。パネルが消えたら口を外す
   const quickSend = useRef<((id: string, text: string) => Promise<boolean> | null) | null>(null);
   useEffect(() => {
@@ -1360,7 +1364,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
   const target = targetLabel(agent, town);
   /** quick はカードのボタンから送るとき。入力欄の下書きは消さない */
   const send = async (body: string, quick = false) => {
-    if (!body.trim() || busy) return false;
+    if (!body.trim() || busy || switching) return false;
     setBusy(true);
     const after = items[items.length - 1]?.n ?? -1;
     // 先頭が / か ! の文は、端末のあるセッションなら入力欄へ直接貼る。ccn の send_message は from の1行を前に付けるので、
@@ -1466,8 +1470,10 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
       )}
 
       {tab !== "term" && <div className="composer" ref={composerBox}>
-        <div className="to">送信先: {target}</div>
-        <Composer key={agent.id} touch={mobile} agent={agent} peer={peer} text={text} setText={setText} busy={busy} running={mood === "working"} onSubmit={send} onError={onError} />
+        <div className="to"><span className="to-name">送信先: {target}</span>
+          {!agent.ghost && <SessionControls key={agent.id} agent={agent} peer={peer} onSwitching={setSwitching} onDone={onSent2} onError={onError} />}
+        </div>
+        <Composer key={agent.id} touch={mobile} agent={agent} peer={peer} text={text} setText={setText} busy={busy || switching} running={mood === "working"} onSubmit={send} onError={onError} />
       </div>}
     </aside>
   );
