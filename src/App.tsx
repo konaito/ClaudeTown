@@ -11,7 +11,7 @@ import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
 import { Composer } from "./composer/Composer";
 import { SessionControls, useNodeSupport } from "./session/SessionControls";
 import { commandError, routeOf } from "./composer/route";
-import { isHttp } from "./session/control";
+import { isHttp, noRoute } from "./session/control";
 import { Approval } from "./approval/Approval";
 import { openPlan } from "./approval/answers";
 import { BUILTINS, opensDialog } from "./composer/commands";
@@ -1390,7 +1390,7 @@ function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq
         if (!isHttp(r)) throw new Error("ccn の応答が読めなかった");
         const err = commandError(r);
         if (err) {
-          if (r.status === 404 || r.status === 405) markNoSupport();
+          if (noRoute(r)) markNoSupport();
           throw new Error(err);
         }
         addNote(agent.id, { role: "event", kind: "command", text: `/${route.name} を実行した${route.note ? `。${route.note}` : ""}`, at: new Date().toISOString(), after });

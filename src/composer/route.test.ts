@@ -70,6 +70,7 @@ describe("commandError", () => {
   test("断られ方に文言を付ける", () => {
     expect(commandError({ status: 200, body: { delivered: "stdin" } })).toBeNull();
     expect(commandError({ status: 404, body: { error: "not found" } })).toBe(NO_COMMANDS);
+    expect(commandError({ status: 404, body: { error: "unknown session" } })).toContain("見つからなかった");
     expect(commandError({ status: 409, body: { code: "first_message_required" } })).toContain("最初の文");
     expect(commandError({ status: 409, body: { code: "persists" } })).toContain("保存");
     expect(commandError({ status: 409, body: { error: "session exited", hint: "resume" } })).toContain("終わっている");

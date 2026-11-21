@@ -10,7 +10,7 @@
 import { BUILTINS, type Command } from "./commands";
 import { isSlashCommand } from "./edit";
 import type { Agent } from "../model";
-import type { Support } from "../session/control";
+import { noRoute, type Support } from "../session/control";
 
 /** command の口へ送るもの */
 export const RUN = new Set(["compact", "clear", "context", "cost", "usage"]);
@@ -93,7 +93,8 @@ export function commandError(r: { status: number; body: any }): string | null {
   if (r.status >= 200 && r.status < 300) return null;
   const b = typeof r.body === "object" && r.body ? r.body : {};
   const msg = typeof b.error === "string" ? b.error : typeof r.body === "string" ? r.body : JSON.stringify(r.body);
-  if (r.status === 404 || r.status === 405) return NO_COMMANDS;
+  if (noRoute(r)) return NO_COMMANDS;
+  if (r.status === 404) return "セッションが見つからなかった（終わったか、別のノードに移った）";
   switch (b.code) {
     case "use_configure": return "/model はここでは使えません。送信先の行のモデルの切り替えを使う";
     case "use_stop": return "止めるときは、止めるボタンを使う";

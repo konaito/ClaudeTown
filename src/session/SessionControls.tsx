@@ -25,7 +25,8 @@ const cachedSupport = (kind: Agent["kind"], nodeKey: string): Support => {
 export function useNodeSupport(agent: Agent | null, peer: string): [Support, () => void] {
   const nodeKey = peer || "";
   const id = agent?.id ?? "";
-  const kind = agent?.kind ?? "terminal";
+  // 転出のゴースト（別の町の本物の写し）は、この町のノードにいないので確かめない
+  const kind = agent && !agent.ghost ? agent.kind : "terminal";
   const [support, setSupport] = useState<Support>(() => cachedSupport(kind, nodeKey));
   useEffect(() => {
     const v = cachedSupport(kind, nodeKey);
