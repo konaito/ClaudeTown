@@ -8,13 +8,13 @@ import { Terminal } from "@xterm/headless";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { sleep } from "./lib/common";
 
 const out = process.argv[2] ?? "/tmp/ct-term-fullscreen";
 mkdirSync(out, { recursive: true });
 const cwd = process.env.FC_CMP_CWD ?? join(homedir(), "Documents/meta");
 const PROMPT = "ツールは使わずに答えて。1から40まで、1行に1つずつ、数字と短い一言を書いて。";
 const COLS = 100, ROWS = 30, NARROW = 70;
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function env(extra: Record<string, string>) {
   const e: Record<string, string> = {};

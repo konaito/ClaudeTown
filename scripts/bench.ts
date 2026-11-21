@@ -24,6 +24,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { sleep, webkitPids } from "./lib/common";
 
 const ROOT = path.resolve(import.meta.dir, "..");
 const argv = process.argv.slice(2);
@@ -49,7 +50,6 @@ const LOCK_WAIT_MS = 3 * 3600_000;
 const RUN_DEADLINE_MS = 10 * 60_000;
 const READY_TIMEOUT_MS = 4 * 60_000;
 const VITE_PORT = 1420;
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const today = () => new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10);
 
 type Proc = { pid: number; name: string; cpu0: number; cpu1: number; rssMB: number };
@@ -84,7 +84,6 @@ function tree(root: number): number[] {
 }
 /** 前面のアプリの名前（窓が隠れた回の原因を見るため） */
 const frontApp = () => sh("/usr/bin/lsappinfo", ["info", "-only", "name", sh("/usr/bin/lsappinfo", ["front"])]).match(/"([^"]*)"/)?.[1] ?? "?";
-const webkitPids = () => sh("/usr/bin/pgrep", ["-f", "com.apple.WebKit.(WebContent|GPU|Networking)"]).split("\n").filter(Boolean).map(Number);
 const listener = (port: number) => sh("/usr/sbin/lsof", ["-t", `-iTCP:${port}`, "-sTCP:LISTEN"]).split("\n").filter(Boolean).map(Number);
 /** 自分が起動したプロセスの木を、子から順に止める。3秒たって残っていれば SIGKILL */
 async function killTree(root: number) {

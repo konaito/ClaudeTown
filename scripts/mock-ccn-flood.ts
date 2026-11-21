@@ -7,6 +7,7 @@
 //   記録どおりの間隔で繰り返し流す（#20）
 // 口は ccn と同じ形（GET /api/sessions、GET …/terminal の SSE、POST …/terminal/input と resize、GET /api/peers）。セッションは1つだけ
 import { floodChunks } from "./flood-chunk";
+import { jsonResponse } from "./lib/common";
 
 const PORT = Number(process.argv[2] ?? 4397);
 const HZ = Number(process.env.FC_FLOOD_HZ ?? 100);
@@ -39,7 +40,7 @@ if (REPLAY) {
   setInterval(() => push(chunk()), 1000 / HZ);
 }
 
-const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
+const json = (v: unknown, status = 200) => jsonResponse(v, status);
 Bun.serve({
   port: PORT, hostname: "127.0.0.1", idleTimeout: 0,
   async fetch(req) {

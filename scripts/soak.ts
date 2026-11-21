@@ -22,6 +22,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync, statfsSync } from "node:fs";
 import { join } from "node:path";
+import { sleep, webkitPids } from "./lib/common";
 
 const arg = (k: string, d?: string) => { const i = process.argv.indexOf(`--${k}`); return i >= 0 ? process.argv[i + 1] : d; };
 const MODE = arg("mode", "town")!;
@@ -38,7 +39,6 @@ const MAX_LOAD = 20;
 if (!BIN || !existsSync(BIN)) throw new Error("--bin にビルドした family-computing を渡す");
 
 const sh = (cmd: string, args: string[]) => spawnSync(cmd, args, { encoding: "utf8" }).stdout ?? "";
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const api = `http://127.0.0.1:${PORT}/api`;
 
 mkdirSync(join(HOME, ".family-computing"), { recursive: true });
@@ -77,7 +77,6 @@ for (const root of ["世帯A", "世帯B"]) {
 }
 
 // ---------- 開発版 ----------
-const webkitPids = () => sh("/usr/bin/pgrep", ["-f", "com.apple.WebKit.(WebContent|GPU|Networking)"]).split("\n").filter(Boolean).map(Number);
 const before = new Set(webkitPids());
 const t0 = Date.now();
 const app = spawn(bin, [], {
