@@ -16,13 +16,13 @@ const MODE: Record<string, string> = {
   plan: "計画だけにする（plan）",
 };
 
-const rule = (r: any) => (r?.ruleContent ? `${r.toolName}(${r.ruleContent})` : String(r?.toolName ?? "?"));
+const rule = (r: { ruleContent?: unknown; toolName?: unknown } | null | undefined) => (r?.ruleContent ? `${r.toolName}(${r.ruleContent})` : String(r?.toolName ?? "?"));
 
 /** 押せる提案と、元の並びでの番号。番号は Rust に渡す（Rust は pending から同じ番号の提案を取り直す） */
 export function alwaysOptions(suggestions: unknown): { index: number; label: string; title: string }[] {
   if (!Array.isArray(suggestions)) return [];
   const out: { index: number; label: string; title: string }[] = [];
-  suggestions.forEach((s: any, index) => {
+  suggestions.forEach((s, index) => {
     if (!allowedSuggestion(s)) return;
     const where = WHERE[s.destination] ?? String(s.destination ?? "");
     if (s.type === "addRules") {

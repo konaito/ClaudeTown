@@ -6,15 +6,16 @@ import { benchName } from "../term/bench";
 import { onVisibleChange } from "../visible";
 import { DEFAULT_PLACE_LABEL, placeFailure } from "./placeSetting";
 import { placeLabel, placeName, placeTime, recentPlaces, type PlaceRepos, type PlacesInput, type RecentPlace } from "./places";
+import type { CreatedSession } from "../types";
 
 /**
  * 新しい世帯（親なしの端末のセッション）を手元のノードに立てる。cwd が null なら ~/Documents/meta（Rust の create_session の既定）。
  * 町の「＋ 新しい世帯」（#89 より前）と同じ呼び方で、前に開いたターミナルの大きさで起動する
  */
-export async function createHousehold(cwd: string | null): Promise<any> {
+export async function createHousehold(cwd: string | null): Promise<CreatedSession> {
   perfStart("new");
   const { cols, rows } = lastTermSize() ?? { cols: null, rows: null };
-  const r = await invoke<any>("create_session", { cwd, prompt: null, parent: null, name: benchName(), cols, rows, peer: null });
+  const r = await invoke<CreatedSession>("create_session", { cwd, prompt: null, parent: null, name: benchName(), cols, rows, peer: null });
   perfMark("create");
   if (r?.id) perfSetId(r.id);
   return r;
@@ -26,7 +27,7 @@ type Load = { state: "loading" } | { state: "ok"; list: RecentPlace[] } | { stat
  * 左のペイン（#89）。新しい世帯を作るためだけのペインで、最近使った場所を新しい順に出し、押した場所で親を立てる。
  * 先頭の「＋ 新しい世帯」は一覧を待たずに押せる。立てる場所は設定（place、#92）で、無ければ ~/Documents/meta。disabled は別の町を見ているとき（世帯は手元のノードにだけ作る）
  */
-export function NewHousePane({ disabled, place, onCreated, onError }: { disabled: boolean; place: string | null; onCreated: (r: any) => void; onError: (m: string) => void }) {
+export function NewHousePane({ disabled, place, onCreated, onError }: { disabled: boolean; place: string | null; onCreated: (r: CreatedSession | null) => void; onError: (m: string) => void }) {
   const [load, setLoad] = useState<Load>({ state: "loading" });
   // 立てている場所。"" は先頭のボタン（既定の場所）
   const [busy, setBusy] = useState<string | null>(null);
