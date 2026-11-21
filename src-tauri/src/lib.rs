@@ -78,7 +78,17 @@ fn place(home: &std::path::Path, app_id: Option<&str>, app_home: Option<String>,
 
 /// オフラインのキャッシュの置き場所（src-tauri/src/offline.rs）。開発版と安定版で分かれる
 fn cache_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(p) = TEST_CACHE.with(|c| c.borrow().clone()) {
+        return p;
+    }
     fc_path(Scope::App, "cache")
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 試験のスレッドごとの会話の保存先（本物の ~/.family-computing に書かない）
+    static TEST_CACHE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 fn read_json(p: &PathBuf) -> Option<Value> {
@@ -604,6 +614,8 @@ struct Conv {
     used: u128,
     /// 今の動き（#59）
     live: Live,
+    /// ネイティブの jsonl から読んだか（#96）。同じ id が ccn とネイティブの間で入れ替わったら、読み位置の数え方が違うので頭から読み直す
+    native: bool,
 }
 
 /// 今の動き（#59）。会話を頭から読みながら、結果がまだ無い道具、最後の出来事、ターンの始まりを持つ。
@@ -1107,28 +1119,29 @@ fn read_native(path: &std::path::Path, from: u64) -> Result<(u64, Vec<Value>, Ve
 
 fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<ConvDelta, String> {
     let peer = peer.filter(|p| !p.is_empty());
-    // ネイティブのセッションと sub-agent（一覧に出したもので、ccn に無いもの）は jsonl から読む。
-    // ccn から読んだ分と読み位置の数え方が違うので、キャッシュの鍵を分ける
+    // ネイティブのセッションと sub-agent（一覧に出したもので、ccn に無いもの）は jsonl から読む（#96）
     let native_path = if peer.is_none() { native::path_of(&session_id) } else { None };
-    let key = match &native_path {
-        Some(_) => format!("native|{session_id}"),
-        None => format!("{}|{session_id}", peer.clone().unwrap_or_default()),
-    };
-    let (from, seen) = {
+    let is_native = native_path.is_some();
+    let key = format!("{}|{session_id}", peer.clone().unwrap_or_default());
+    let (from, seen, was_native) = {
         let g = CONVS.lock().map_err(|e| e.to_string())?;
-        g.as_ref().and_then(|m| m.get(&key)).map(|c| (c.next, c.epoch.clone())).unwrap_or((0, None))
+        g.as_ref().and_then(|m| m.get(&key)).map(|c| (c.next, c.epoch.clone(), Some(c.native))).unwrap_or((0, None, None))
     };
+    // 出どころが ccn とネイティブの間で入れ替わった（ccn が落ちた、戻った、設定を切り替えた）。読み位置は使えないので、
+    // 頭から読んで置き換える。置き換えは通し番号を1つ空けるので、画面には必ず reset で届き、2つの出どころの項目が混ざらない
+    let switched = was_native.is_some_and(|w| w != is_native);
+    let start = if switched { 0 } else { from };
     let read = |from: u64| match &native_path {
         Some(p) => read_native(p, from),
         None => read_messages(&peer, &session_id, from),
     };
-    let (mut next, mut fresh, mut evs, mut epoch) = read(from)?;
+    let (mut next, mut fresh, mut evs, mut epoch) = read(start)?;
     let restarted = epoch.as_deref().is_some_and(|e| e.ends_with(":restarted"));
-    let stale = restarted || cursor_is_stale(from, &seen, &epoch);
+    let stale = switched || restarted || cursor_is_stale(start, &seen, &epoch);
     if restarted {
         // ネイティブで頭から読み直した分は、そのまま置き換えに使う。印は元の形に戻す
         epoch = epoch.map(|e| e.trim_end_matches(":restarted").to_string());
-    } else if stale {
+    } else if stale && start > 0 {
         // 読んだページは捨て、after=0 から読み直して置き換える。読み直しに失敗したら何も変えない（次の呼び出しでもう一度気づく）
         (next, fresh, evs, epoch) = read(0)?;
     }
@@ -1145,6 +1158,9 @@ fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) ->
     } else {
         c.absorb(from, next, fresh, evs, epoch)
     };
+    if !stale || changed {
+        c.native = is_native;
+    }
     // 増えたか置き換えたら、画面に出す分（最後の KEEP_MESSAGES 件）を保存する。ネットが切れたときは画面が conversation_cache で読む。
     // 書くのは錠を持ったまま（同じセッションの取得が重なっても、古い中身があとから上書きしない）。80件の JSON なので短い
     if changed {
@@ -2730,6 +2746,8 @@ mod tests {
 
     #[test]
     fn local_town_merges_native_sessions_and_subagents() {
+        // 会話を読む先の登録（native::register）はプロセスで1つなので、使う試験を1本ずつ動かす
+        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use native::testtree::*;
         // 合成の ~/.claude: ccn にもあるセッション A（sub-agent 1体）と、ccn に無いセッション B
         let root = tmp("merge");
@@ -2779,6 +2797,42 @@ mod tests {
         assert!(err.is_none());
         assert_eq!(agents.len(), 3);
         assert_eq!(LAST_SOURCES.lock().unwrap().as_ref().unwrap()["ccn"], "つながらない");
+    }
+
+    static NATIVE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn switching_between_ccn_and_native_always_resets_the_screen() {
+        // 会話を読む先の登録（native::register）はプロセスで1つなので、使う試験を1本ずつ動かす
+        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use native::testtree::*;
+        let root = tmp("switch");
+        TEST_CACHE.with(|c| *c.borrow_mut() = Some(root.join("cache")));
+        let id = "cccccccc-0000-4000-8000-00000000000c";
+        let path = root.join("c.jsonl");
+        write(&path, "{\"type\":\"user\",\"message\":{\"content\":\"ネイティブ\"}}\n");
+        // ccn から読んだ会話が 10 件ある（読み位置 7、印 e1）
+        {
+            let mut g = CONVS.lock().unwrap();
+            let map = g.get_or_insert_with(HashMap::new);
+            let mut c = Conv { next: 7, epoch: Some("e1".into()), used: now_ms(), ..Default::default() };
+            c.push((0..10).map(|i| json!({ "role": "user", "text": format!("ccn {i}") })).collect());
+            map.insert(format!("|{id}"), c);
+        }
+        // 同じ id がネイティブの行になった（ccn が落ちた）。画面は 8 件目まで持っている
+        let mut reg = HashMap::new();
+        reg.insert(id.to_string(), path.clone());
+        native::register(reg);
+        let d = conversation(id.into(), None, Some(8)).unwrap();
+        assert!(d.reset, "出どころが変わったら必ず reset");
+        assert_eq!(d.items.len(), 1);
+        assert_eq!(d.items[0]["text"], "ネイティブ");
+        // 続きはネイティブの読み位置で読む（もう reset しない）
+        let d2 = conversation(id.into(), None, Some(d.total)).unwrap();
+        assert!(!d2.reset);
+        assert!(d2.items.is_empty());
+        native::register(HashMap::new());
+        CONVS.lock().unwrap().as_mut().unwrap().remove(&format!("|{id}"));
     }
 
     #[test]

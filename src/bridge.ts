@@ -65,7 +65,7 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
         agents: (() => {
           const names = cardNames(live.map((s) => ({ id: s.id, cwd: s.cwd, title: s.title })));
           const rows = live.map((s) => ({ id: s.id, name: names.get(s.id), project: s.cwd ? projectFromPath(s.cwd) : null, kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities, account: s.account ?? null, accountEmail: s.accountEmail ?? null }));
-          return location.search.includes("native") ? [...rows, ...mockNative(rows)] : rows;
+          return !WEB && location.search.includes("native") ? [...rows, ...mockNative(rows)] : rows;
         })(),
       } as T;
     }
