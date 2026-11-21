@@ -51,3 +51,13 @@ export function placeTime(ms: number): string {
 export function placeLabel(path: string): string {
   return path.replace(/^\/Users\/[^/]+/, "~");
 }
+
+/** 一覧の主の名前。パスの最後のディレクトリ名。ホームは ~、ルートは / */
+export function placeName(path: string): string {
+  const p = placeLabel(trim(path));
+  if (p === "~" || p === "/") return p;
+  return p.slice(p.lastIndexOf("/") + 1) || p;
+}
+
+/** 場所ごとのリポジトリ名（owner/repo）。Rust の place_repos の出力。連携していない場所は含まれない */
+export type PlaceRepos = Record<string, string>;
