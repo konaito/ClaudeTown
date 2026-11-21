@@ -1,9 +1,9 @@
 // 配置計算だけの検証。docs/design/physics-layout.md の 10 の8ケースを数値で確かめる。
 // 実行: bun test src/layout
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { childSlots, layoutFamily, type LNode, type Placed } from "./layout";
+import { childSlots, gridRowGap, layoutFamily, type LNode, type Placed } from "./layout";
 import { LAYOUT, boxOf, groupSizeOf } from "./params";
 
 const deg = (r: number) => (r * 180) / Math.PI;
@@ -144,32 +144,50 @@ describe("家族の木の配置", () => {
     ...kidIds.map((id, i) => ({ id, parent: parentId, order: i + 1, ...boxOf(1, id.slice(-8)) })),
   ];
   const KIDS = ["b599aaf0", "69d112e0", "97aec551", "c737a3ff", "9f68ddc0"];
+  const KIDS6 = [...KIDS, "3e1d7a42"];
   const shape = (r: { nodes: Placed[] }) => r.nodes.map((n) => [n.depth, n.x.toFixed(3), n.y.toFixed(3), n.w, n.h].join(","));
 
-  test("9. 親の町（親が本物、子がゴースト）と子の町（親がゴースト、子が本物）で同じ配置になる", () => {
-    const local = layoutFamily(town("e8c798cd", KIDS.map((k) => `ghost:${k}`)));
-    const remote = layoutFamily(town("ghost:e8c798cd", KIDS));
+  // 子5人と6人は 2026-11-21 から格子の固定の座標に置く。試験9〜11 の数字は弧の計算（余白を指定した呼び出し）で出し、直したときの記録として残す
+  const RADIAL = { gap: LAYOUT.gap };
+
+  test("9. 親の町（親が本物、子がゴースト）と子の町（親がゴースト、子が本物）で同じ配置になる（弧の計算と、子5人と6人の格子）", () => {
+    const local = layoutFamily(town("e8c798cd", KIDS.map((k) => `ghost:${k}`)), RADIAL);
+    const remote = layoutFamily(town("ghost:e8c798cd", KIDS), RADIAL);
     // ゴーストの箱は本物と同じ大きさ（深さ 0、1 はカード、2 以降は boxOf。App.tsx の GhostCard も同じ値で描く）
     expect(boxOf(1, "ghost:b599aaf0")).toEqual(boxOf(1, "b599aaf0"));
     expect(shape(local)).toEqual(shape(remote));
     expect(local.arcIndex).toBe(remote.arcIndex);
     report.push({ ケース: 9, 親の町の候補: local.arcIndex, 子の町の候補: remote.arcIndex, 候補ごと: JSON.stringify(local.candidates), ...local.metrics });
-  });
-
-  test("10. 子が1人ずつ増えても、最初から5人いるのと同じ配置になる（前の候補を引き継がない）", () => {
-    const all = layoutFamily(town("e8c798cd", KIDS));
-    let last = layoutFamily(town("e8c798cd", KIDS.slice(0, 1)));
-    const picked = [last.arcIndex];
-    for (let n = 2; n <= KIDS.length; n++) {
-      last = layoutFamily(town("e8c798cd", KIDS.slice(0, n)));
-      picked.push(last.arcIndex);
+    for (const kids of [KIDS, KIDS6]) {
+      const gl = layoutFamily(town("e8c798cd", kids.map((k) => `ghost:${k}`)));
+      const gr = layoutFamily(town("ghost:e8c798cd", kids));
+      expect(shape(gl)).toEqual(shape(gr));
+      expect(gl.arcIndex).toBe(-1);
+      expect(gr.arcIndex).toBe(-1);
     }
-    expect(shape(last)).toEqual(shape(all));
-    report.push({ ケース: 10, "1→5人で選んだ候補": picked.join("→"), ...last.metrics });
   });
 
-  test("11. 親1人・子5人の世帯の枠: 直す前（候補0の扇形）878×580 から、直した後 609×502 に小さくなる", () => {
-    const r = layoutFamily(town("e8c798cd", KIDS));
+  test("10. 子が1人ずつ増えても、最初から5人（6人）いるのと同じ配置になる（前の候補を引き継がない）", () => {
+    const grow = (kids: string[], opt?: { gap: number }) => {
+      const picked: number[] = [];
+      let last = layoutFamily(town("e8c798cd", kids.slice(0, 1)), opt);
+      picked.push(last.arcIndex);
+      for (let n = 2; n <= kids.length; n++) {
+        last = layoutFamily(town("e8c798cd", kids.slice(0, n)), opt);
+        picked.push(last.arcIndex);
+      }
+      expect(shape(last)).toEqual(shape(layoutFamily(town("e8c798cd", kids), opt)));
+      return picked.join("→");
+    };
+    const radial = grow(KIDS, RADIAL);
+    expect(radial).toBe("0→0→1→3→3");
+    const fixed = grow(KIDS6);
+    expect(fixed).toBe("-1→-1→-1→-1→-1→-1");
+    report.push({ ケース: 10, "弧の計算で1→5人に選んだ候補": radial, "既定で1→6人に選んだ候補": fixed, ...layoutFamily(town("e8c798cd", KIDS6)).metrics });
+  });
+
+  test("11. 親1人・子5人の世帯の枠: 弧の計算では候補0の扇形 878×580 から候補3の 609×502 に小さくなる。格子では 619×307", () => {
+    const r = layoutFamily(town("e8c798cd", KIDS), RADIAL);
     const before = r.candidates.find((c) => c.arcIndex === 0)!;
     const after = r.candidates.find((c) => c.arcIndex === r.arcIndex)!;
     const fb = groupSizeOf(before), fa = groupSizeOf(r.metrics);
@@ -178,7 +196,9 @@ describe("家族の木の配置", () => {
     expect(groupSizeOf(after)).toEqual(fa);
     const areaB = fb.w * fb.h, areaA = fa.w * fa.h;
     expect(areaA).toBeLessThan(areaB * 0.65);
-    report.push({ ケース: 11, 直す前の枠: `${fb.w}×${fb.h}（${areaB}）`, 直した後の枠: `${fa.w}×${fa.h}（${areaA}）`, 面積の比: (areaA / areaB).toFixed(3), ...r.metrics });
+    const grid = groupSizeOf(layoutFamily(town("e8c798cd", KIDS)).metrics);
+    expect(grid).toEqual({ w: 619, h: 307 });
+    report.push({ ケース: 11, 直す前の枠: `${fb.w}×${fb.h}（${areaB}）`, 直した後の枠: `${fa.w}×${fa.h}（${areaA}）`, 面積の比: (areaA / areaB).toFixed(3), 格子の枠: `${grid.w}×${grid.h}`, ...r.metrics });
   });
 
   // 2026-11-13、本人が子1〜4人の位置を決めた。親の中心が (0,0)、y は下が正。card 176×96、余白 m 8 で、dx 92、dy 104、side 184
@@ -213,19 +233,117 @@ describe("家族の木の配置", () => {
     });
   }
 
-  test("13. 子5人以上の世帯と、孫がいる世帯は、今の計算のまま（弧の候補から選ぶ）", () => {
-    expect(childSlots(5)).toBeNull();
-    const five = layoutFamily(town("e8c798cd", KIDS));
-    expect(five.arcIndex).toBeGreaterThanOrEqual(0);
-    expect(five.candidates.length).toBe(LAYOUT.arcLimits.length);
+  test("13. 子7人以上の世帯と、子1〜4人で孫がいる世帯は、今の計算のまま（弧の候補から選ぶ）", () => {
+    expect(childSlots(7)).toBeNull();
+    const seven = layoutFamily(town("e8c798cd", [...KIDS6, "5c0ffee1"]));
+    expect(seven.arcIndex).toBeGreaterThanOrEqual(0);
+    expect(seven.candidates.length).toBe(LAYOUT.arcLimits.length);
+    expect(ok(seven.metrics)).toBe(true);
     const withGrand = layoutFamily(family([["p", null], ["a", "p"], ["b", "p"], ["a1", "a"]]));
     expect(withGrand.arcIndex).toBeGreaterThanOrEqual(0);
+    expect(withGrand.fallback).toBeUndefined();
     expect(ok(withGrand.metrics)).toBe(true);
     // ゴーストの世帯も同じ固定の座標になる（親の町と子の町で同じ形）
     const local = layoutFamily(town("e8c798cd", KIDS.slice(0, 4).map((k) => `ghost:${k}`)));
     const remote = layoutFamily(town("ghost:e8c798cd", KIDS.slice(0, 4)));
     expect(shape(local)).toEqual(shape(remote));
     expect(local.arcIndex).toBe(-1);
+  });
+
+  // 2026-11-21、本人が子5人と6人の位置を決めた。左右の子は親と同じ高さ、上下の段は左右の列（x = ±184）と真ん中（x = 0）にそろえる。
+  // 段の間は 108（h+m の 104 では、親から角の子への紐が左右の子の箱の余白 5px をかすめる。layout.ts の gridRowGap）
+  const GRID: Record<number, [number, number][]> = {
+    5: [[-184, 0], [184, 0], [-184, 108], [0, 108], [184, 108]],
+    6: [[-184, -108], [184, -108], [-184, 0], [184, 0], [-184, 108], [184, 108]],
+  };
+  const GRID_SIZE: Record<number, { w: number; h: number }> = { 5: { w: 619, h: 307 }, 6: { w: 619, h: 415 } };
+
+  for (const n of [5, 6]) {
+    test(`14-${n}. 子${n}人: 格子の固定の座標に置く。左右の子は親と同じ高さで、段と列がそろう`, () => {
+      expect(gridRowGap()).toBe(108);
+      expect(childSlots(n)!.map((p) => [p.x, p.y])).toEqual(GRID[n]);
+      const kids = KIDS6.slice(0, n);
+      // 生成順をわざと入力の並びと逆にして、兄弟の順（order）で位置が決まることを見る
+      const input = town("e8c798cd", kids).map((x, i) => (i === 0 ? x : { ...x, order: n + 1 - i }));
+      const r = layoutFamily(input);
+      const p = get(r.nodes, "e8c798cd");
+      const byOrder = [...kids].reverse().map((id) => get(r.nodes, id));
+      expect(byOrder.map((k) => [k.x, k.y])).toEqual(GRID[n]);
+      const left = byOrder.filter((k) => k.x < 0), right = byOrder.filter((k) => k.x > 0);
+      // 左右の子（x が ±184 で、y が 0）は親と同じ高さ
+      const sides = byOrder.filter((k) => k.y === p.y);
+      expect(sides.map((k) => k.x).sort((a, b) => a - b)).toEqual([-184, 184]);
+      // 左の列と右の列の x がそろい、左右対称
+      expect(new Set(left.map((k) => k.x)).size).toBe(1);
+      expect(new Set(right.map((k) => k.x)).size).toBe(1);
+      expect(left[0].x).toBe(-right[0].x);
+      // 下の段の y がそろう（5人は3枚、6人は2枚）。6人は上の段もそろい、上下が親から同じ距離
+      const below = byOrder.filter((k) => k.y > p.y), above = byOrder.filter((k) => k.y < p.y);
+      expect(below.length).toBe(n === 5 ? 3 : 2);
+      expect(new Set(below.map((k) => k.y)).size).toBe(1);
+      expect(above.length).toBe(n === 5 ? 0 : 2);
+      if (n === 6) expect(above[0].y).toBe(-below[0].y);
+      // 上下の段の x は、左右の列か真ん中にそろう
+      for (const k of [...below, ...above]) expect([-184, 0, 184]).toContain(k.x);
+      for (let i = 0; i < r.nodes.length; i++) for (let j = i + 1; j < r.nodes.length; j++) expect(apart(r.nodes[i], r.nodes[j])).toBe(true);
+      expect(ok(r.metrics)).toBe(true);
+      expect(r.valid).toBe(true);
+      expect(r.arcIndex).toBe(-1);
+      expect(r.fallback).toBeUndefined();
+      expect(groupSizeOf(r.metrics)).toEqual(GRID_SIZE[n]);
+      report.push({ ケース: `14-${n}`, 座標: JSON.stringify(byOrder.map((k) => [k.x, k.y])), 世帯の枠: `${GRID_SIZE[n].w}×${GRID_SIZE[n].h}`, ...r.metrics });
+    });
+  }
+
+  /** 親 p と子 k1…kn に、孫を足した世帯。grand は「何番目の子に何人」 */
+  const gridFamily = (n: number, grand: Record<number, number>): LNode[] => {
+    const rows: [string, string | null][] = [["p", null]];
+    for (let i = 1; i <= n; i++) rows.push([`k${i}`, "p"]);
+    for (const [i, m] of Object.entries(grand)) for (let j = 1; j <= m; j++) rows.push([`k${i}-g${j}`, `k${i}`]);
+    return family(rows);
+  };
+
+  // 画面の確かめ（docs/shots/2026-11-21-grid-*.png）と同じ形。5人は左下の子に孫2人、6人は左上の子に孫1人と右下の子に孫2人
+  for (const [n, grand] of [[5, { 3: 2 }], [6, { 1: 1, 6: 2 }]] as const) {
+    test(`15-${n}. 子${n}人で孫がいる: 子は格子のまま、孫はその子の外側に並ぶ`, () => {
+      const input = gridFamily(n, grand);
+      const r = layoutFamily(input);
+      const radial = layoutFamily(input, RADIAL);
+      expect(r.arcIndex).toBe(-1);
+      expect(r.fallback).toBeUndefined();
+      expect(ok(r.metrics)).toBe(true);
+      expect(r.valid).toBe(true);
+      expect(Array.from({ length: n }, (_, i) => get(r.nodes, `k${i + 1}`)).map((k) => [k.x, k.y])).toEqual(GRID[n]);
+      for (const g of r.nodes.filter((x) => x.depth === 2)) {
+        const k = get(r.nodes, g.parent!);
+        // 根から見て子より遠く、子の向きから 45 度以内
+        expect(Math.hypot(g.x, g.y)).toBeGreaterThan(Math.hypot(k.x, k.y));
+        expect(Math.abs(g.angle - k.angle)).toBeLessThan(Math.PI / 4);
+      }
+      report.push({ ケース: `15-${n}`, 孫: JSON.stringify(grand), 格子のs: r.metrics.s.toFixed(3), 格子の枠: JSON.stringify(groupSizeOf(r.metrics)), 弧の計算のs: radial.metrics.s.toFixed(3), 弧の計算の枠: JSON.stringify(groupSizeOf(radial.metrics)), ...r.metrics });
+    });
+  }
+
+  test("16. 子5人と6人で孫が多く、格子では検査を通らない世帯は、弧の計算に戻し、理由を fallback に残す", () => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const n of [5, 6]) {
+        const input = gridFamily(n, { 1: 8, 3: 8 });
+        const r = layoutFamily(input);
+        expect(r.arcIndex).toBeGreaterThanOrEqual(0);
+        expect(r.fallback).toBeDefined();
+        expect(r.fallback!.slots).toBe(n);
+        expect(r.fallback!.adjustments).toBe(LAYOUT.maxAdjust);
+        expect(r.fallback!.overlaps + r.fallback!.crossings + r.fallback!.edgeThroughNode + r.fallback!.interleave).toBeGreaterThan(0);
+        expect(ok(r.metrics)).toBe(true);
+        // 戻した結果は、余白を指定して弧の計算だけをした結果と同じ
+        expect(shape(r)).toEqual(shape(layoutFamily(input, RADIAL)));
+        report.push({ ケース: `16-${n}`, 戻した理由: JSON.stringify(r.fallback), 戻した先の候補: r.arcIndex, ...r.metrics });
+      }
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test("結果の表", () => {
