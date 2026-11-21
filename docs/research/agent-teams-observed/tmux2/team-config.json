@@ -1,0 +1,51 @@
+{
+  "name": "session-d35eb879",
+  "createdAt": 1795250853529,
+  "leadAgentId": "team-lead@session-d35eb879",
+  "leadSessionId": "d35eb879-b166-4f7e-a890-c8a462e5ff26",
+  "leadProcess": {
+    "pid": 66502,
+    "pidSpace": "MacBooks.local",
+    "claimedAt": 1795250853529
+  },
+  "members": [
+    {
+      "agentId": "team-lead@session-d35eb879",
+      "name": "team-lead",
+      "agentType": "team-lead",
+      "joinedAt": 1795250853529,
+      "tmuxPaneId": "leader",
+      "cwd": "/private/tmp/fc-team-obs2/tmux2",
+      "subscriptions": [],
+      "backendType": "in-process"
+    },
+    {
+      "agentId": "alpha@session-d35eb879",
+      "name": "alpha",
+      "color": "blue",
+      "joinedAt": 1795250880572,
+      "tmuxPaneId": "%1",
+      "subscriptions": [],
+      "model": "haiku",
+      "prompt": "Write the file /private/tmp/fc-team-obs2/tmux2/alpha.txt containing the single word ALPHA (no other content). Then reply with the path /private/tmp/fc-team-obs2/tmux2/alpha.txt and nothing else.",
+      "planModeRequired": false,
+      "cwd": "/private/tmp/fc-team-obs2/tmux2",
+      "backendType": "tmux",
+      "isActive": false
+    },
+    {
+      "agentId": "beta@session-d35eb879",
+      "name": "beta",
+      "color": "green",
+      "joinedAt": 1795250880994,
+      "tmuxPaneId": "%2",
+      "subscriptions": [],
+      "model": "haiku",
+      "prompt": "Write the file /private/tmp/fc-team-obs2/tmux2/beta.txt containing the single word BETA (no other content). Then reply with the path /private/tmp/fc-team-obs2/tmux2/beta.txt and nothing else.",
+      "planModeRequired": false,
+      "cwd": "/private/tmp/fc-team-obs2/tmux2",
+      "backendType": "tmux",
+      "isActive": false
+    }
+  ]
+}
