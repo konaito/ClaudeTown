@@ -5,9 +5,10 @@ import { ScrollEdgeGradient } from "../ScrollEdgeGradient";
 import { Markdown, linkify } from "../Markdown";
 import type { Agent } from "../model";
 import { answerText, emptyPick, type Pick, type Question } from "./answers";
+import { alwaysOptions } from "./suggestions";
 
-type PendingReq = { requestId: string; toolName: string; input: Record<string, any> };
-type Answer = (choice: "allow" | "deny", extra?: { answers?: Record<string, string>; message?: string }) => Promise<void>;
+type PendingReq = { requestId: string; toolName: string; input: Record<string, any>; suggestions?: unknown };
+type Answer = (choice: "allow" | "deny", extra?: { answers?: Record<string, string>; message?: string; suggestion?: number }) => Promise<void>;
 
 /**
  * 承認待ちに画面から答える。中身は ccn の pending（toolName、input、requestId）。
@@ -38,7 +39,7 @@ export function Approval({ agent, peer, planHint, onDone, onError }: {
     try {
       const r = await invoke<string>("answer_permission", {
         sessionId: agent.id, choice, expectId: p?.requestId ?? null,
-        answers: extra?.answers ?? null, message: extra?.message ?? null, peer: peer || null,
+        answers: extra?.answers ?? null, message: extra?.message ?? null, suggestion: extra?.suggestion ?? null, peer: peer || null,
       });
       onDone(`${agent.name}: ${r}`);
     } catch (e) {
@@ -61,14 +62,17 @@ export function Approval({ agent, peer, planHint, onDone, onError }: {
       ) : kind === "plan" ? (
         <PlanForm key={p.requestId} plan={String(p.input?.plan || planHint || "")} busy={busy} answer={answer} />
       ) : (
-        <ToolForm p={p} busy={busy} answer={answer} />
+        <ToolForm key={p.requestId} p={p} busy={busy} answer={answer} />
       )}
       {canAnswer && (pending?.length ?? 0) > 1 && <div className="hint">ほかに{pending!.length - 1}件の承認が待っている。1件ずつ答える。</div>}
     </div>
   );
 }
 
+/** 道具の承認。「常に許可」は ccn が渡した提案（suggestions）のうち、返してよいものだけを出す。拒否には理由を付けられる */
 function ToolForm({ p, busy, answer }: { p: PendingReq; busy: "allow" | "deny" | null; answer: Answer }) {
+  const [reason, setReason] = useState("");
+  const always = alwaysOptions(p.suggestions);
   const i = p.input as any;
   const detail = String(i?.command ?? i?.file_path ?? i?.url ?? JSON.stringify(p.input));
   return (
@@ -79,8 +83,12 @@ function ToolForm({ p, busy, answer }: { p: PendingReq; busy: "allow" | "deny" |
       </div>
       <div className="ap-btns">
         <button className="ap-allow" disabled={!!busy} onClick={() => answer("allow")}>{busy === "allow" ? "送っている…" : "許可する"}</button>
-        <button className="ap-deny" disabled={!!busy} onClick={() => answer("deny")}>{busy === "deny" ? "送っている…" : "拒否する"}</button>
+        {always.map((o) => (
+          <button key={o.index} className="ap-always" disabled={!!busy} title={o.title} onClick={() => answer("allow", { suggestion: o.index })}>{o.label}</button>
+        ))}
+        <button className="ap-deny" disabled={!!busy} title="拒否する。下の欄に書いた理由を Claude に伝える" onClick={() => answer("deny", { message: reason })}>{busy === "deny" ? "送っている…" : "拒否する"}</button>
       </div>
+      <input className="ap-reason" placeholder="拒否の理由（任意。Claude に伝わる）" value={reason} disabled={!!busy} onChange={(e) => setReason(e.target.value)} />
     </>
   );
 }

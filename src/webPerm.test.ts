@@ -60,3 +60,27 @@ describe("answerPermission", () => {
     await expect(run(detail(), "maybe", null).p).rejects.toThrow("allow か deny");
   });
 });
+
+describe("常に許可", () => {
+  const sug = [
+    { type: "addRules", rules: [{ toolName: "mcp__ccn__list_peers" }], behavior: "allow", destination: "localSettings" },
+    { type: "addDirectories", directories: ["/x"], destination: "session" },
+  ];
+  const d = detail({ pending: [{ requestId: "r1", toolName: "mcp__ccn__list_peers", input: {}, suggestions: sug }] });
+  const go = (choice: string, expect: string | null, i: number) => {
+    const sent: unknown[] = [];
+    const p = answerPermission(async () => d, async (_p, b) => { sent.push(b); return null; }, "s1", choice, expect, null, null, i);
+    return { p, sent };
+  };
+  test("pending の提案をそのまま updatedPermissions で返す", async () => {
+    const r = go("allow", "r1", 0);
+    expect(await r.p).toContain("以後は聞かない");
+    expect(r.sent).toEqual([{ behavior: "allow", updatedPermissions: [sug[0]] }]);
+  });
+  test("addDirectories、無い番号、拒否、中身の変わった要求には付けない", async () => {
+    await expect(go("allow", "r1", 1).p).rejects.toThrow("提案に無い");
+    await expect(go("allow", "r1", 5).p).rejects.toThrow("提案に無い");
+    await expect(go("deny", null, 0).p).rejects.toThrow("付けない");
+    await expect(go("allow", "old", 0).p).rejects.toThrow("変わった");
+  });
+});

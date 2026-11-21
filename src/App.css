@@ -301,7 +301,8 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .ask-opt.on { border-color: #2f8f5b; background: #eef8f1; }
 .ask-label { font-weight: 600; }
 .ask-desc { font-size: 12px; color: #7a6a4a; }
-.ask-other, .ap-note { font: inherit; font-size: 13px; background: #fff; border: 1px solid #efe3c4; border-radius: 8px; padding: 6px 8px; resize: vertical; }
+.ap-always { background: #fff; color: #2f8f5b; border: 1.5px solid #b9dfc7; border-radius: 10px; padding: 7px 14px; font-weight: 600; }
+.ask-other, .ap-note, .ap-reason { font: inherit; font-size: 13px; background: #fff; border: 1px solid #efe3c4; border-radius: 8px; padding: 6px 8px; resize: vertical; }
 .ap-plan { margin: 0; background: #fff; border: 1px solid #efe3c4; border-radius: 8px; padding: 8px 12px; font-size: 13px; max-height: 320px; overflow: auto; overscroll-behavior: contain; user-select: text; }
 
 .layout-warn { position: absolute; right: 0; top: -22px; font-size: 11px; color: #b4473a; background: #fdeeee; border-radius: 99px; padding: 1px 8px; }
