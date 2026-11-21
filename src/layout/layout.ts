@@ -7,10 +7,10 @@
 // 5. 実際の矩形で重なりを検査し、残れば決まった順序で角度の余白、次に半径を広げてやり直す
 // 6. 兄弟を並べる弧の上限を変えた候補を作り、検査を通るもののうち s が一番小さいものを選ぶ。
 //    前に選んだ候補は引き継がない。同じ顔ぶれなら、どの町で、どの順で増えても同じ配置になる（docs/design/geometric-layout.md の末尾）
-// ただし、親1人と子1〜6人だけの世帯（孫がいない、全員がカードの大きさ）は、上の計算をせず childSlots の固定の座標に置く。
-// 子が5人か6人で孫がいる世帯は、子を同じ固定の座標に置き、孫より下を子の角度を中心に外側へ並べる（placeGrid）。
-// 検査を通らなければ上の計算に戻し、戻した理由を結果の fallback に残す。
-// 子が7人以上の世帯と、子が1〜4人で孫がいる世帯は上の計算のまま（docs/design/geometric-layout.md の「子1〜4人の固定の座標」「子5人と6人の格子」）
+// ただし、子が1〜6人の世帯（根と子がカードの大きさ）は、上の計算をせず childSlots の固定の座標に子を置く。
+// 孫がいても子の位置は変えず、孫より下をその子の、親から離れる向きの延長に並べる（placeGrid）。
+// 検査を通らなければ、子の位置はそのままで、違反した枝の孫までの距離を広げる。上の計算には戻さない。
+// 子が7人以上の世帯は上の計算のまま（docs/design/geometric-layout.md の「子1〜4人の固定の座標」「子3人、5人、6人の格子と、孫がいる世帯」）
 
 import { LAYOUT } from "./params";
 
@@ -45,8 +45,6 @@ export type LayoutResult = {
   arcIndex: number;
   valid: boolean;
   candidates: { arcIndex: number; valid: boolean; s: number; width: number; height: number }[];
-  /** 子5人か6人の格子に置けず、弧の計算に戻したときの理由（格子の結果の検査の値）。戻していなければ無い */
-  fallback?: { slots: number; overlaps: number; crossings: number; edgeThroughNode: number; interleave: number; adjustments: number; s: number };
 };
 
 export type LayoutOptions = {
@@ -173,10 +171,11 @@ export function gridRowGap(card = LAYOUT.card, m = LAYOUT.cardMargin, gap = LAYO
 
 /**
  * 親1人と子1〜6人の世帯で、子のカードを置く位置。親の中心が (0,0)、y は下が正。
- * 1〜4人は本人が決めた座標（2026-11-13）。重ならない、余白 m を空ける、左右対称、紐を短く、外接矩形を小さく、の順に優先し、
+ * 1、2、4人は本人が決めた座標（2026-11-13）。重ならない、余白 m を空ける、左右対称、紐を短く、外接矩形を小さく、の順に優先し、
  * 中心の間の距離をそろえることより詰めることを取る。
- * 5人と6人は本人が決めた格子（2026-11-21）。左右の子は親と同じ高さに置き、上下の段は左右の列（x = ±side）と真ん中（x = 0）にそろえる。
- *   5人: 左、右、左下、真下、右下。6人: 左上、右上、左、右、左下、右下。
+ * 3人、5人、6人は本人が決めた格子（2026-11-21）。左右の子は親と同じ高さに置き、上下の段は左右の列（x = ±side）と真ん中（x = 0）にそろえる。
+ *   3人: 左、右、真下。5人: 左、右、左下、真下、右下。6人: 左上、右上、左、右、左下、右下。
+ *   3人は角に子がいないので、段の間は 1、2、4人と同じ h+m にする。5人と6人は gridRowGap。
  * どの人数も、上の段から下の段へ、同じ段は左から右へ並べる。i 番目の子（兄弟の順は order、次に id）を i 番目の位置に置く。
  */
 export function childSlots(count: number, card = LAYOUT.card, m = LAYOUT.cardMargin): { x: number; y: number }[] | null {
@@ -185,7 +184,7 @@ export function childSlots(count: number, card = LAYOUT.card, m = LAYOUT.cardMar
   switch (count) {
     case 1: return [{ x: 0, y: dy }];
     case 2: return [{ x: -dx, y: dy }, { x: dx, y: dy }];
-    case 3: return [{ x: 0, y: -dy }, { x: -dx, y: dy }, { x: dx, y: dy }];
+    case 3: return [{ x: -side, y: 0 }, { x: side, y: 0 }, { x: 0, y: dy }];
     case 4: return [{ x: -side, y: 0 }, { x: side, y: 0 }, { x: -dx, y: dy }, { x: dx, y: dy }];
     case 5: return [{ x: -side, y: 0 }, { x: side, y: 0 }, { x: -side, y: gy }, { x: 0, y: gy }, { x: side, y: gy }];
     case 6: return [{ x: -side, y: -gy }, { x: side, y: -gy }, { x: -side, y: 0 }, { x: side, y: 0 }, { x: -side, y: gy }, { x: side, y: gy }];
@@ -203,24 +202,14 @@ function placedRoot(t: Tree): Placed {
   return { id: t.root.id, parent: null, depth: 0, x: 0, y: 0, w: t.root.w, h: t.root.h, angle: 0 };
 }
 
-/** 固定の座標に置ける世帯（孫がいない、子1〜6人）なら、置いた結果を返す。置けなければ null（今の計算に回す） */
-function placeFixed(t: Tree): Placed[] | null {
-  const ks = t.kids.get(t.root.id) ?? [];
-  if (t.byId.size !== ks.length + 1) return null; // 孫がいる
-  if ([...t.byId.values()].some((n) => n.circle || n.w !== LAYOUT.card.w || n.h !== LAYOUT.card.h)) return null;
-  const slots = childSlots(ks.length);
-  if (!slots) return null;
-  // 角度は今の計算と同じ向き（下が 0、右が正）。真上は π
-  return [placedRoot(t), ...ks.map((k, i) => ({ id: k.id, parent: t.root.id, depth: 1, x: slots[i].x, y: slots[i].y, w: k.w, h: k.h, angle: Math.atan2(slots[i].x, slots[i].y) }))];
-}
-
 /** 箱が、根から角度 θ の向きに占める半分の長さ（箱の支持関数）。左右の子なら w/2、真下なら h/2 */
 function radialHalfAt(n: LNode, theta: number): number {
   return Math.abs((n.w / 2) * Math.sin(theta)) + Math.abs((n.h / 2) * Math.cos(theta));
 }
 
 /**
- * 子5人か6人で孫がいる世帯。子を childSlots の格子に置き、孫より下は今の計算と同じ決まりで、その子の外側に並べる。
+ * 子1〜6人の世帯。子を childSlots の位置に置き、孫より下は今の計算と同じ決まりで、その子の外側（親から離れる向きの延長）に並べる。
+ * 孫がいなければ、子の位置をそのまま返す。
  * - 子 k の枝の世代 d の半径 R_k[d] は、根から子 k までの距離から始め、子 k の角度の向きで箱の半分の長さと radialGap を足していく
  * - 兄弟は、子 k の角度（孫より下は親の角度）を中心に、重ならない最小の角度 2·arcsin(r/R) で並べる。葉から必要な幅を足し上げる
  * - extra[k] は子 k の枝の孫の半径に足す。検査に通らないときに広げる
@@ -360,9 +349,10 @@ function solve(t: Tree, arcLimit: number, gap: number, radialGap: number, view: 
 const passes = (m: Metrics) => !m.overlaps && !m.crossings && !m.edgeThroughNode && !m.interleave;
 
 /**
- * 子5人か6人で孫がいる世帯を格子に置く。検査に通るまで、違反した枝の孫の半径を radiusStep ずつ広げる。
+ * 子1〜6人の世帯を childSlots の位置に置く。子の位置は動かさず、検査に通るまで、違反した枝の孫までの距離を radiusStep ずつ広げる。
  * 重なった組は、深いほうの箱の枝（同じ深さなら両方の枝）を広げる。重なりが無く線の検査だけが残るときは、孫のいる枝をすべて広げる。
- * maxAdjust 回で通らなければ、最後の結果を返す（呼び出し側が今の計算に戻す）。
+ * 孫までの距離を広げるほど、兄弟を並べる角度が狭まり、枝どうしが離れるので、いずれ通る。
+ * gridMaxAdjust 回で通らなければ、最後の結果を valid: false で返す（画面は「配置が重なっている」を出す）。
  */
 function solveGrid(t: Tree, slots: { x: number; y: number }[], gap: number, radialGap: number, view: { w: number; h: number }) {
   const ks = t.kids.get(t.root.id) ?? [];
@@ -372,7 +362,7 @@ function solveGrid(t: Tree, slots: { x: number; y: number }[], gap: number, radi
   let nodes = placeGrid(t, slots, gap, radialGap, extra);
   let m = measure(nodes, view, gap / 2);
   let n = 0;
-  while (!passes(m) && n < LAYOUT.maxAdjust) {
+  while (!passes(m) && n < LAYOUT.gridMaxAdjust) {
     n++;
     const grow = new Set<number>();
     outer: for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
@@ -396,21 +386,14 @@ export function layoutFamily(input: LNode[], opt: LayoutOptions = {}): LayoutRes
   const radialGap = opt.radialGap ?? LAYOUT.radialGap;
   const view = opt.view ?? LAYOUT.view;
   // 余白を指定された呼び出し（検証用）は今の計算に回す
-  const useSlots = opt.gap === undefined && opt.radialGap === undefined;
-  const fixed = useSlots ? placeFixed(t) : null;
-  if (fixed) {
-    // 指標は今の計算と同じ measure で出す。世帯の枠（groupSizeOf）は width と height から決まるので、枠の計算も同じ式になる
-    const m = measure(fixed, view, gap / 2);
-    // arcIndex -1 は「弧の候補を使わず固定の座標に置いた」。候補は作らない
-    return { nodes: fixed, metrics: m, arcIndex: -1, valid: passes(m), candidates: [] };
-  }
   const kidCount = t.kids.get(t.root.id)?.length ?? 0;
-  let fallback: LayoutResult["fallback"];
-  if (useSlots && (kidCount === 5 || kidCount === 6) && kidsAreCards(t)) {
-    const g = solveGrid(t, childSlots(kidCount)!, gap, radialGap, view);
-    if (passes(g.m)) return { nodes: g.nodes, metrics: g.m, arcIndex: -1, valid: true, candidates: [] };
-    fallback = { slots: kidCount, overlaps: g.m.overlaps, crossings: g.m.crossings, edgeThroughNode: g.m.edgeThroughNode, interleave: g.m.interleave, adjustments: g.m.adjustments, s: Number(g.m.s.toFixed(3)) };
-    console.warn("Claude Town: 子5人か6人の格子に置けず、弧の計算に戻した", t.root.id, fallback);
+  const slots = opt.gap === undefined && opt.radialGap === undefined && kidsAreCards(t) ? childSlots(kidCount) : null;
+  if (slots) {
+    // 指標は今の計算と同じ measure で出す。世帯の枠（groupSizeOf）は width と height から決まるので、枠の計算も同じ式になる
+    const g = solveGrid(t, slots, gap, radialGap, view);
+    if (!passes(g.m)) console.warn("Claude Town: 子の固定の座標で、孫までの距離を広げても検査を通らなかった", t.root.id, g.m);
+    // arcIndex -1 は「弧の候補を使わず固定の座標に置いた」。候補は作らない
+    return { nodes: g.nodes, metrics: g.m, arcIndex: -1, valid: passes(g.m), candidates: [] };
   }
   const cands = LAYOUT.arcLimits.map((a, i) => ({ i, ...solve(t, a, gap, radialGap, view) }));
   const ok = (c: (typeof cands)[number]) => passes(c.m);
@@ -420,6 +403,5 @@ export function layoutFamily(input: LNode[], opt: LayoutOptions = {}): LayoutRes
   return {
     nodes: best.nodes, metrics: best.m, arcIndex: best.i, valid: ok(best),
     candidates: cands.map((c) => ({ arcIndex: c.i, valid: ok(c), s: Number(c.m.s.toFixed(3)), width: c.m.width, height: c.m.height })),
-    ...(fallback ? { fallback } : {}),
   };
 }
