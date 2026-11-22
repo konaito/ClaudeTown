@@ -145,7 +145,8 @@ export function simplify(raw: J): Omit<ConvItem, "n">[] {
   if (m?.type === "user") {
     let text = userText(content);
     const pre = "Another Claude session sent a message:";
-    if (text.startsWith(pre)) text = text.slice(pre.length).trimStart();
+    // 2.1.330 からは、本文の後ろに英語の注記（This came from another Claude session — …）が付く（Rust の simplify と同じ、#156）
+    if (text.startsWith(pre)) text = text.slice(pre.length).trimStart().split("\n\nThis came from another Claude session")[0].trimEnd();
     // 別のセッションからのお手紙（<cross-session-message from=… from-name=…>本文</cross-session-message>）は、包みの内側の本文だけ出す
     if (text.startsWith("<cross-session-message")) {
       const rest = text.slice("<cross-session-message".length);

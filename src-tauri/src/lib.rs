@@ -214,13 +214,16 @@ fn town_rows() -> Vec<Value> {
     }
     for r in rows.iter_mut() {
         let mine = r["id"].as_str().is_some_and(pty::owns);
-        r["capabilities"] = if mine { app_caps() } else { native::read_only_caps() };
+        // 記録から読んだ行は、読んだ側が決めた能力を残す（受信ソケットのあるセッションは送れる、#156）
         if mine {
+            r["capabilities"] = app_caps();
             r["source"] = json!("app");
             // claude が入力を受け付けるところまで起動していない（信頼の確認の画面を含む）。画面は「起動中」と出す
             if r["id"].as_str().and_then(composer::booted) == Some(false) {
                 r["booting"] = json!(true);
             }
+        } else if r["capabilities"].is_null() {
+            r["capabilities"] = native::read_only_caps();
         }
     }
     native::register(native::paths_of(&rows.iter().collect::<Vec<_>>()));
@@ -673,6 +676,29 @@ mod tests {
         // FC_APP_HOME はアプリの分だけを差し替える
         assert_eq!(p(Some(STABLE_ID), Some("/t"), Scope::App, "avatars.json"), PathBuf::from("/t/avatars.json"));
         assert_eq!(p(dev, Some("/t"), Scope::Shared, "letters.jsonl"), PathBuf::from("/h/.family-computing/letters.jsonl"));
+    }
+
+    #[test]
+    fn town_lets_send_to_native_session_with_socket() {
+        // 受信ソケットのあるセッションは、Town が立てていなくても画面で送れる（#156）。割り込みと端末はできない
+        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use native::testtree::*;
+        let root = tmp("town-sock");
+        let a = "dddddddd-0000-4000-8000-00000000000d";
+        let pid = std::process::id();
+        let sock = PathBuf::from(format!("/tmp/fc-town-sock-{pid}-{}.sock", fastrand::u32(..)));
+        let _l = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        write(&root.join(format!("sessions/{pid}.json")), &json!({ "pid": pid, "sessionId": a, "cwd": "/tmp/合成/a", "startedAt": 1_000u64,
+            "kind": "interactive", "status": "idle", "updatedAt": 2_000u64, "messagingSocketPath": sock }).to_string());
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        let agents = agents_from(town_rows());
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        let _ = std::fs::remove_file(&sock);
+        let me = agents.iter().find(|x| x["id"] == a).cloned().unwrap_or(Value::Null);
+        assert_eq!(me["source"], "native");
+        assert_eq!(me["canSend"], true);
+        assert_eq!(me["capabilities"]["interrupt"], false);
+        assert_eq!(me["capabilities"]["terminal"], false);
     }
 
     #[test]

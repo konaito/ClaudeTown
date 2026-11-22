@@ -34,8 +34,9 @@ export function usePanelSend({ agent, hasTerm, items, switching, support, markNo
     // アプリが立てたセッションは、どの文も端末の入力欄へ貼って Enter を押す（CLI に打ったのと同じ）。
     // ブラウザ版の ccn の行では、先頭が / か ! の文だけを入力欄へ貼る。ccn の send_message は from の1行を前に付けるので、
     // CLI のコマンドやシェルモードとして動かない（docs/research/cli-input.md）
+    // Claude Town の外で起動したセッション（端末が無い）も send_direct に渡す。Rust が受信ソケットで送る（#156）
     const plain = !(body.startsWith("!") || isSlashCommand(body));
-    const direct = hasTerm && (!viaCcn(agent) || !plain);
+    const direct = !viaCcn(agent) || (hasTerm && !plain);
     // 起動前で Rust が預かったか。預かったときは「届けた」と言わない（会話の末尾に「起動したら送る」が出る）
     let queued = false;
     try {
@@ -48,8 +49,8 @@ export function usePanelSend({ agent, hasTerm, items, switching, support, markNo
           throw new Error(err);
         }
         addNote(agent.id, { role: "event", kind: "command", text: `/${route.name} を実行した${route.note ? `。${route.note}` : ""}`, at: new Date().toISOString(), after });
-      } else if (direct && !viaCcn(agent)) {
-        // claude の起動前（信頼の確認の画面を含む）なら、Rust が預かって起動したら送る（composer.rs の send_or_queue）。
+      } else if (direct && !viaCcn(agent) && hasTerm) {
+        // アプリが立てた端末: claude の起動前（信頼の確認の画面を含む）なら、Rust が預かって起動したら送る（composer.rs の send_or_queue）。
         // 預かった文は会話の末尾に「起動したら送る」として出す（Panel が boot_status から出す）
         const r = await invoke<{ queued?: boolean } | null>("send_or_queue", { sessionId: agent.id, text: body });
         queued = !!r?.queued;
@@ -60,8 +61,10 @@ export function usePanelSend({ agent, hasTerm, items, switching, support, markNo
           if (plain) setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
         }
       } else if (direct) {
+        // ブラウザ版の ccn の行の / と ! の文と、Claude Town の外で起動したセッション（Rust が受信ソケットで送る、#156）
         await invoke("send_direct", { sessionId: agent.id, text: body });
         if (!plain && opensDialog(body, BUILTINS)) setTab("term");
+        if (plain && !viaCcn(agent)) setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
       } else {
         await invoke("send_message", { sessionId: agent.id, text: body });
         setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);

@@ -482,7 +482,11 @@ pub(crate) fn simplify(m: &Value) -> Vec<Value> {
             let text = user_text(content);
             let text = text.as_str();
             // ターミナルのセッションには、お手紙の前に「Another Claude session sent a message:」の1行が付く
-            let text = text.strip_prefix("Another Claude session sent a message:").map(str::trim_start).unwrap_or(text);
+            let text = match text.strip_prefix("Another Claude session sent a message:") {
+                // 2.1.330 からは、本文の後ろに英語の注記（This came from another Claude session — …）が付く（#156）
+                Some(r) => r.trim_start().split("\n\nThis came from another Claude session").next().unwrap_or("").trim_end(),
+                None => text,
+            };
             // 別のセッションからのお手紙（<cross-session-message from=… from-name=…>本文</cross-session-message>、後ろに注記が付くことがある）は、包みの内側の本文だけ出す
             if let Some(rest) = text.strip_prefix("<cross-session-message") {
                 let (attrs, body) = rest.split_once('>').unwrap_or(("", ""));

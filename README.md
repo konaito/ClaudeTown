@@ -63,7 +63,14 @@ Claude Town の違いは3つある。データ源をこの Mac の Claude Code �
 | 閉じてよいか | close-check-state hook が書く `~/.claude/close-check/<session_id>.json` |
 | 新しい世帯の「最近の場所」 | Claude Code の入力の履歴 `~/.claude/history.jsonl` の project と timestamp（`src-tauri/src/places.rs`） |
 
-記録から読むだけのセッション（Claude Town の外で起動したもの）には、送信、停止、端末、承認の操作ができない。操作できるのは、アプリが立てたセッションだけである（下の「アプリの中の端末」）。
+記録から読むセッション（Claude Town の外で起動したもの）には、停止、割り込み、端末、承認の操作ができない。操作できるのは、アプリが立てたセッションだけである（下の「アプリの中の端末」）。
+
+文の送信だけは、外で起動した対話セッションにもできる（#156）。`sessions/<pid>.json` の `messagingSocketPath` にある受信ソケットへ、`{"type":"user","message":{"role":"user","content":"<文>"}}` の1行を書く。ccn の `terminal-driver.ts` と同じ形である。届いた文は、相手には別の Claude のセッションからの文として入る。
+
+- 相手が作業中なら、文は順番待ちになり、ターンの途中で取り込まれる（2026-11-22、2.1.330 で確かめた）。
+- `/` のコマンドと `!` のシェルは、コマンドとして動かずに文として届くので、送らずに断る。
+- 相手は、送り主を別のセッションと読む。2026-11-22 の確認では、haiku の相手が返事を SendMessage で送り返そうとして、送り主が分からずに止まった。
+- ソケットのファイルが無いセッション、sub-agent、チームメイトには送れない。
 
 チームメイトの出し方は、2026-11-21 の実測（`docs/research/agent-teams-observed.md`）に合わせた。
 

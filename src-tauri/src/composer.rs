@@ -623,6 +623,43 @@ fn watch_waits() {
     }
 }
 
+/// 受信ソケットに書く1行。ccn の terminal-driver.ts と同じ形（#156）
+pub fn socket_line(text: &str) -> String {
+    serde_json::json!({ "type": "user", "message": { "role": "user", "content": text } }).to_string() + "\n"
+}
+
+/// 受信ソケットで送れない文か。/ のコマンドと ! のシェルは、CLI のコマンドとして動かず、ただの文として届く
+/// （2026-11-22 に 2.1.330 で /model を送って確かめた）
+pub fn socket_refusal(text: &str) -> Option<&'static str> {
+    let t = text.trim_start();
+    let slash = t.strip_prefix('/').map(|r| r.split(char::is_whitespace).next().unwrap_or("")).is_some_and(|w| !w.contains('/'));
+    if slash {
+        Some("このセッションには / のコマンドを送れない（Claude Town の外で起動したので、文としてしか届かない）。起動した端末で打って")
+    } else if t.starts_with('!') {
+        Some("このセッションには ! のシェルを送れない（Claude Town の外で起動したので、文としてしか届かない）。起動した端末で打って")
+    } else {
+        None
+    }
+}
+
+/// Claude Town の外で起動した対話セッションへ、受信ソケット（cross-session messaging）で文を送る（#156）。
+/// 届いた文は、相手には「別の Claude のセッションからの文」として入る（jsonl では origin が peer の user 行）。
+/// 承認待ちでも送ってよい。他のセッションからの文は承認の答えにならない（公式の文書）
+pub fn send_socket(session_id: String, text: String) -> Result<(), String> {
+    use std::io::Write;
+    super::refuse_if_disabled()?;
+    if text.trim().is_empty() {
+        return Err("文が空".into());
+    }
+    if let Some(why) = socket_refusal(&text) {
+        return Err(why.into());
+    }
+    let path = super::native::sessions::live_socket_of(&super::native::claude_home(), &session_id).ok_or(super::native::READ_ONLY)?;
+    let mut c = std::os::unix::net::UnixStream::connect(&path).map_err(|e| format!("受信ソケットにつなげなかった（{}）: {e}", path.display()))?;
+    c.set_write_timeout(Some(Duration::from_secs(5))).ok();
+    c.write_all(socket_line(&text).as_bytes()).map_err(|e| format!("受信ソケットに書けなかった: {e}"))
+}
+
 /// 今のターンを止める。端末で Esc を押したのと同じ
 pub fn interrupt_session(session_id: String) -> Result<(), String> {
     super::refuse_if_disabled()?;
@@ -643,10 +680,14 @@ pub(crate) mod cmd {
     pub async fn file_suggestions(cwd: String, query: String) -> Result<Vec<String>, String> {
         crate::blocking(move || super::file_suggestions(cwd, query)).await
     }
+    /// このアプリが立てたセッションは端末の入力欄へ貼る。外で起動したものは受信ソケットで送る（#156）
     #[tauri::command]
     pub async fn send_direct(session_id: String, text: String) -> Result<(), String> {
-        crate::app_guard(&session_id)?;
-        crate::blocking(move || super::send_direct(session_id, text)).await
+        if crate::app_guard(&session_id).is_ok() {
+            crate::blocking(move || super::send_direct(session_id, text)).await
+        } else {
+            crate::blocking(move || super::send_socket(session_id, text)).await
+        }
     }
     #[tauri::command]
     pub async fn send_or_queue(session_id: String, text: String) -> Result<serde_json::Value, String> {
@@ -672,6 +713,50 @@ pub(crate) mod cmd {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sends_to_native_session_over_socket() {
+        use crate::native::testtree::*;
+        use std::io::Read;
+        let root = tmp("sock");
+        let sid = "cccccccc-0000-4000-8000-00000000000c";
+        let pid = std::process::id();
+        // macOS の unix ソケットのパスは 104 バイトまでなので、temp_dir ではなく /tmp に置く
+        let sock = PathBuf::from(format!("/tmp/fc-sock-{pid}-{}.sock", fastrand::u32(..)));
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let row = |socket: &Path| json!({ "pid": pid, "sessionId": sid, "cwd": "/tmp/合成/s", "startedAt": 1_000u64, "kind": "interactive",
+            "status": "busy", "updatedAt": 2_000u64, "messagingSocketPath": socket });
+        write(&root.join(format!("sessions/{pid}.json")), &row(&sock).to_string());
+        crate::native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        // 一覧では送れる（ほかの操作はできない）
+        let mut st = crate::native::Stats::default();
+        let s = crate::native::sessions::live(&root, &mut st).into_iter().find(|s| s.id == sid).unwrap().to_row();
+        assert_eq!(s["capabilities"]["send"], true);
+        assert_eq!(s["capabilities"]["interrupt"], false);
+        assert_eq!(s["capabilities"]["terminal"], false);
+        // 送った文は1行の JSON でソケットに届く
+        let got = std::thread::spawn(move || {
+            let (mut c, _) = listener.accept().unwrap();
+            let mut b = String::new();
+            c.read_to_string(&mut b).unwrap();
+            b
+        });
+        send_socket(sid.into(), "見て\n2行目".into()).unwrap();
+        let line = got.join().unwrap();
+        assert_eq!(line, socket_line("見て\n2行目"));
+        let v: Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(v, json!({ "type": "user", "message": { "role": "user", "content": "見て\n2行目" } }));
+        // コマンドとシェルは、文としてしか届かないので送らない。パスで始まる文は送る
+        assert!(send_socket(sid.into(), "/model".into()).unwrap_err().contains("/ のコマンド"));
+        assert!(send_socket(sid.into(), "!ls".into()).unwrap_err().contains("! のシェル"));
+        assert!(socket_refusal("/Users/x/a.png を見て").is_none());
+        // ソケットが無くなったら、一覧でも送れず、送っても断る
+        fs::remove_file(&sock).unwrap();
+        let s = crate::native::sessions::live(&root, &mut st).into_iter().find(|s| s.id == sid).unwrap().to_row();
+        assert_eq!(s["capabilities"]["send"], false);
+        assert!(send_socket(sid.into(), "やあ".into()).is_err());
+        crate::native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+    }
 
     #[test]
     fn strips_ccn_from_line() {

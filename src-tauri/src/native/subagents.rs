@@ -265,7 +265,7 @@ mod tests {
     fn sess(root: &Path, sid: &str) -> Session {
         let jsonl = root.join(format!("projects/-p/{sid}.jsonl"));
         write(&jsonl, "");
-        Session { pid: 1, id: sid.into(), cwd: "/p".into(), started_at: 0, state: "idle", updated_at: 0, title: None, kind: "interactive".into(), jsonl, parent_raw: None }
+        Session { pid: 1, id: sid.into(), cwd: "/p".into(), started_at: 0, state: "idle", updated_at: 0, title: None, kind: "interactive".into(), jsonl, parent_raw: None, socket: None }
     }
 
     fn agent(root: &Path, sid: &str, stem: &str, meta: Option<Value>, lines: &[&str]) -> PathBuf {
