@@ -222,21 +222,31 @@ pub fn picker_cursor(screen: &str) -> Option<String> {
 
 const UP: &str = "\x1b[A";
 const DOWN: &str = "\x1b[B";
-const PICKER: &str = "Select model";
+pub(crate) const PICKER: &str = "Select model";
 const CONFIRM: &str = "Switch model?";
 
 /// /model でピッカーを開き、目当ての行へ矢印で動かして s を押す（このセッションだけ替える）。
 /// `/model <別名>` と Enter は新しいセッションの既定まで替えるので使わない（2026-11-21、v2.1.330 で確かめた）。
-/// 会話があると「Switch model?」の確認が出る。出たときだけ Enter を送る。ピッカーと確認が閉じ、「Set model to <名前>」が見えたら成功
-fn set_model(id: &str, model: &str) -> Result<(), String> {
+/// 会話があると「Switch model?」の確認が出る。出たときだけ Enter を送る。ピッカーと確認が閉じ、「Set model to <名前>」が見えたら成功。
+/// ピッカーを閉じるまで端末の錠（pty::serial）を持ち、チャット欄の送信と承認への答えのキーを間に入れない（#168）
+pub(crate) fn set_model(id: &str, model: &str) -> Result<(), String> {
+    super::pty::serial(id, || set_model_locked(id, model))
+}
+
+/// 錠を待つ間に状態が変わる（見張りが live を読んだ後に、承認待ちになるなど）ので、錠の中で読み直す。当てられなければ予約に戻す
+fn still_applicable(id: &str, what: &str) -> bool {
+    live(id).is_some_and(|(st, ready)| can_apply(what, &st, ready)) && super::composer::blocked_now(id).is_none()
+}
+
+fn set_model_locked(id: &str, model: &str) -> Result<(), String> {
     let name = picker_name(model).ok_or(format!("{model} は /model のピッカーの上の段に無いので、ここからは替えられない"))?;
     // 承認の画面に入力が入らないよう、貼る前と Enter の前に今の状態を読み直す（send_direct と同じ穴）
-    if waiting(id) {
+    if !still_applicable(id, "model") {
         return Err(RETRY.into());
     }
     super::pty::write(id, "\x1b[200~/model\x1b[201~")?;
     std::thread::sleep(Duration::from_millis(150));
-    if waiting(id) {
+    if waiting(id) || super::composer::blocked_now(id).is_some() {
         return Err("貼った直後に承認の画面が出たので Enter を送らなかった。ターミナルの入力欄に /model が残っているかもしれない".into());
     }
     super::pty::write(id, "\r")?;
@@ -271,8 +281,16 @@ fn set_model(id: &str, model: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Shift+Tab を、下の行が目当てのモードになるまで送る。1周して元に戻ったら、目当ては順に無い（元のモードのまま）
+/// Shift+Tab を、下の行が目当てのモードになるまで送る。1周して元に戻ったら、目当ては順に無い（元のモードのまま）。
+/// 回し終えるまで端末の錠（pty::serial）を持つ（#168）。承認の画面で Shift+Tab を押すと承認の操作になるので、錠の中で状態を読み直す
 fn set_mode(id: &str, mode: &str) -> Result<(), String> {
+    super::pty::serial(id, || set_mode_locked(id, mode))
+}
+
+fn set_mode_locked(id: &str, mode: &str) -> Result<(), String> {
+    if !still_applicable(id, "mode") {
+        return Err(RETRY.into());
+    }
     let screen = super::pty::screen_text(id).ok_or("このセッションの端末はこのアプリに無い")?;
     let start = last_mode(&screen).ok_or("今の権限モードが端末の表示から読めなかった")?;
     if start == mode {

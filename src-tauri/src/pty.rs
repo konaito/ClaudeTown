@@ -45,6 +45,8 @@ struct Proc {
     master: Box<dyn MasterPty + Send>,
     /// 書き口は台帳の錠の外で書く（claude が読まずに PTY が詰まっても、出力の読み手と一覧を止めない）
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// 何回かに分けて書く操作を1つずつ通す錠（serial、#168）
+    serial: Arc<Mutex<()>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     /// 出力の末尾
     out: Vec<u8>,
@@ -365,7 +367,7 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
     let killer = child.clone_killer();
     let started_at = crate::now_ms() as u64;
     with(|m| {
-        m.insert(pid, Proc { pid, ids: vec![id.clone()], cur: id.clone(), name, cwd: cwd.to_string(), started_at, size: (cols, rows), master: pair.master, writer: Arc::new(Mutex::new(writer)), killer, out: vec![], screen: new_screen(cols, rows), sub: None, carry: vec![] });
+        m.insert(pid, Proc { pid, ids: vec![id.clone()], cur: id.clone(), name, cwd: cwd.to_string(), started_at, size: (cols, rows), master: pair.master, writer: Arc::new(Mutex::new(writer)), serial: Arc::new(Mutex::new(())), killer, out: vec![], screen: new_screen(cols, rows), sub: None, carry: vec![] });
     });
     eprintln!("[pty] claude を{}した pid {pid} id {id} cwd {cwd}", if resume.is_some() { "resume で起動" } else { "起動" });
     persist();
@@ -493,6 +495,16 @@ pub fn write(id: &str, text: &str) -> Result<(), String> {
     w.write_all(text.as_bytes()).and_then(|_| w.flush()).map_err(|e| format!("ターミナルに書けなかった: {e}"))
 }
 
+/// 端末へ何回かに分けて書く操作（貼り付けと Enter、モデルと権限モードの切り替え、承認への答え）を、端末ごとに1つずつ通す（#168）。
+/// 錠を持たないと、貼り付けと Enter の間にモデルのピッカーのキーが入り、ピッカーの中で Enter が押される。
+/// 錠は台帳の1件（pid）に持たせるので、/clear などで session id が変わっても同じ錠になる。台帳の錠（PROCS）は、錠を取り出す間だけ持つ。
+/// f の中で serial をもう一度呼ばない（同じ錠を待って止まる）
+pub fn serial<T>(id: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let lock = with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| p.serial.clone())).ok_or("このセッションの端末はこのアプリに無い")?;
+    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
+
 /// このアプリが立てたセッションの pid
 pub fn pid_of_id(id: &str) -> Option<u32> {
     with(|m| pid_of(m, id))
@@ -567,6 +579,10 @@ fn alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
+/// FC_CLAUDE_BIN を書き換えて代役を立てる試験の錠（環境変数はプロセスで1つなので、立てる間だけ持つ）
+#[cfg(test)]
+pub(crate) static BIN_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,8 +647,6 @@ mod tests {
         assert!(t0.elapsed() < Duration::from_millis(200), "台帳の錠が書き込みに取られている");
         kill(&id).unwrap();
     }
-
-    static BIN_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn start_args_from_the_settings() {
