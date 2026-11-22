@@ -214,7 +214,7 @@ export function cardNames(ws: Who[]): Map<string, string> {
 }
 
 /**
- * 返事の最後の問いに付いた選択肢の行を取り出す（ボタンにする）。選択肢は、問いの行のすぐ後ろ（無ければすぐ前）に続く箇条書き。
+ * 返事の最後の問いに付いた選択肢の行を取り出す（ボタンにする）。選択肢は、問いの行のすぐ後ろ（無ければ、選ぶ言い方の問いに限ってすぐ前）に続く箇条書き。
  * - と * は後ろに空白があるときだけ箇条書きとみる（「**太字**」の行を箇条書きにしない、2026-11-22）
  * 長すぎる行が混じったら、黙って落とさずに何も出さない（落とすと残りだけの違う選択肢になる、2026-11-22）
  */
@@ -240,7 +240,8 @@ export function choicesOf(text: string): string[] {
     return step === 1 ? out : out.reverse();
   };
   const after = block(q + 1, 1);
-  const opts = after.length ? after : block(q - 1, -1);
+  // 前の箇条書きは、問いが「どれ」「どっち」のように選ぶ言い方のときだけ選択肢にする。はい/いいえの問いの前の箇条書きは報告の一部（2026-11-22）
+  const opts = after.length ? after : /どれ|どっち|どちら|どの|選[んべぶ]/.test(lines[q]) ? block(q - 1, -1) : [];
   if (opts.some((o) => !o || o.length > 200)) return [];
   return opts.length >= 2 && opts.length <= 5 ? opts : [];
 }
