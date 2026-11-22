@@ -1,4 +1,4 @@
-// 返事の文を出す小さい Markdown 表示。段落、見出し、箇条書き、太字、インラインのコード、コードブロック、リンクだけを扱う。
+// 返事の文を出す小さい Markdown 表示。段落、見出し、箇条書き、表、太字、インラインのコード、コードブロック、リンクだけを扱う。
 // http と https の URL と [文字](URL) はリンクにし、押すと既定のブラウザで開く（src/links.ts）。
 // 「できたこと」「やったこと」などの見出しの下の箇条書きと、✓ で始まる行は、チェックの付いた一覧にする。
 // HTML は解釈しない（文字列のまま出す）。
@@ -51,9 +51,14 @@ function inline(s: string): ReactNode[] {
   return out;
 }
 
-type Block = { kind: "p" | "h" | "ul" | "ol" | "code"; lines: string[]; check?: boolean };
+type Block = { kind: "p" | "h" | "ul" | "ol" | "code" | "table"; lines: string[]; check?: boolean };
 
-function blocks(text: string): Block[] {
+/** 表の行（| a | b |）を升目の文字に分ける。両端の | は省ける */
+const cells = (line: string) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+/** 見出しの下の区切りの行（|---|:--:|） */
+const TABLE_SEP = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+
+export function blocks(text: string): Block[] {
   chatPerf.md++;
   const out: Block[] = [];
   const lines = text.replace(/\r/g, "").split("\n");
@@ -67,6 +72,13 @@ function blocks(text: string): Block[] {
     if (inCode) { out[out.length - 1].lines.push(raw); continue; }
     const line = raw.trimEnd();
     if (!line.trim()) { prevHead = out[out.length - 1]?.kind === "h" ? prevHead : ""; out.push({ kind: "p", lines: [] }); continue; }
+    // 表は | で始まる行が続く間。2行目が区切りの行でなければ、ふつうの段落に戻す（下の filter の後で見る）
+    if (line.trimStart().startsWith("|")) {
+      const cur = out[out.length - 1];
+      if (cur && cur.kind === "table") cur.lines.push(line);
+      else out.push({ kind: "table", lines: [line] });
+      continue;
+    }
     const h = line.match(/^#{1,6}\s+(.*)$/) ?? line.match(/^\*\*(.+)\*\*[:：]?$/);
     if (h) { out.push({ kind: "h", lines: [h[1]] }); prevHead = h[1]; continue; }
     const ul = line.match(/^\s*[-*・]\s+(.*)$/);
@@ -86,7 +98,8 @@ function blocks(text: string): Block[] {
     if (cur && cur.kind === "p" && cur.lines.length) cur.lines.push(line);
     else out.push({ kind: "p", lines: [line] });
   }
-  return out.filter((b) => b.lines.length);
+  // 区切りの行が無い | の並びは表にしない（文の中の | を表と取り違えない）
+  return out.filter((b) => b.lines.length).map((b) => (b.kind === "table" && !(b.lines.length >= 2 && TABLE_SEP.test(b.lines[1])) ? { kind: "p", lines: b.lines } : b));
 }
 
 /** コードブロック。右上のボタンで中身（``` の行と言語名を除いた文字列）をクリップボードに入れる */
@@ -123,6 +136,17 @@ export const Markdown = memo(function Markdown({ text }: { text: string }) {
         switch (b.kind) {
           case "h": return <div key={i} className="md-h">{inline(b.lines[0])}</div>;
           case "code": return <CodeBlock key={i} k={i} text={b.lines.join("\n")} />;
+          case "table": {
+            const [head, , ...rows] = b.lines.map(cells);
+            return (
+              <div key={i} className="md-table">
+                <table>
+                  <thead><tr>{head.map((c, j) => <th key={j}>{inline(c)}</th>)}</tr></thead>
+                  <tbody>{rows.map((r, j) => <tr key={j}>{head.map((_, k) => <td key={k}>{inline(r[k] ?? "")}</td>)}</tr>)}</tbody>
+                </table>
+              </div>
+            );
+          }
           case "ul":
           case "ol": {
             const Tag = b.kind;
