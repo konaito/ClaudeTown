@@ -596,6 +596,15 @@ pub(crate) fn conversation(session_id: String, since: Option<u64>) -> Result<Con
     let Some(path) = native::path_of(&session_id) else {
         return Ok(ConvDelta { items: vec![], total: 0, reset: true, live: Live::default() });
     };
+    // 登録はあっても、jsonl は最初の文が処理されるまで作られない。NotFound は空で返す（権限などの失敗は下で今までどおり出す）。
+    // 前に読んだ分があれば、それを返す（消えたのを見て画面を空にしない）
+    if matches!(std::fs::metadata(&path), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+        let g = CONVS.lock().map_err(|e| e.to_string())?;
+        return Ok(match g.as_ref().and_then(|m| m.get(&session_id)) {
+            Some(c) => c.since(since),
+            None => ConvDelta { items: vec![], total: 0, reset: true, live: Live::default() },
+        });
+    }
     let key = session_id.clone();
     let (from, seen) = {
         let g = CONVS.lock().map_err(|e| e.to_string())?;
@@ -1025,6 +1034,29 @@ mod tests {
 
     /// 作業中に打った文（順番待ち）。jsonl の queue-operation の行と、途中で取り込まれた文の attachment（queued_command）の形は、
     /// 2026-11-22 の 16270b20 の jsonl（2.1.330）の 348、390、394、396 行目から写した。中身のない enqueue と dequeue の組は a9c909ad から
+    #[test]
+    fn conversation_is_empty_while_jsonl_is_not_created_yet() {
+        use crate::native::testtree::tmp;
+        // 登録はあるが jsonl がまだ無い（起動した直後）。エラーにせず空で返す
+        let d = tmp("nojsonl");
+        let id = "missing-jsonl-test-session".to_string();
+        let p = d.join("not-yet.jsonl");
+        native::register(HashMap::from([(id.clone(), p.clone())]));
+        let r = conversation(id.clone(), None);
+        let delta = r.expect("jsonl が無い間は空の会話を返す");
+        assert!(delta.items.is_empty());
+        assert_eq!(delta.total, 0);
+        // NotFound 以外（ここでは親がファイルで、ディレクトリとして辿れない）は今までどおりエラー
+        let blocker = d.join("file");
+        std::fs::write(&blocker, "x").unwrap();
+        let id2 = "unreadable-jsonl-test-session".to_string();
+        native::register(HashMap::from([(id.clone(), p), (id2.clone(), blocker.join("child.jsonl"))]));
+        assert!(conversation(id2, None).is_err());
+        // 作られたら読める
+        std::fs::write(d.join("not-yet.jsonl"), "").unwrap();
+        assert!(conversation(id, None).is_ok());
+    }
+
     #[test]
     fn queued_prompts_wait_then_land() {
         use crate::native::testtree::{tmp, write};
