@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, settlePending, answerPending, withNotes, withQueued, convFailed, type Live, type PendingItem } from "./conv";
 import type { ConvItem } from "./model";
+import { simplify } from "./webConv";
 
 const item = (n: number): ConvItem => ({ role: "assistant", text: `t${n}`, n });
 
@@ -109,6 +110,14 @@ describe("settlePending（#69）", () => {
     // パスだけが違う文は同じとみなすが、本文が違えば消さない
     const pend = [p("/a/b.png\nこれ見て", 4)];
     expect(settlePending([u(5, "[Image #1]\nあれ見て")], pend)).toBe(pend);
+  });
+  // 今の送り方は ! の文に仮の吹き出しを足さない（usePanelSend の plain、Panel の useBoot）。足すようにしたときに、
+  // 会話に出た文と突き合わせて消せることを確かめておく
+  test("! のシェルの入力は、打った文と同じ形で会話に出るので突き合わせられる（#254）", () => {
+    const line = (body: string) => ({ type: "user", timestamp: "2026-11-23T01:02:03.000Z", message: { role: "user", content: `<bash-input>${body}</bash-input>` } });
+    const shown = (body: string) => simplify(line(body)).map((x) => ({ ...x, n: 5 }) as ConvItem);
+    expect(settlePending(shown("ls"), [p("!ls", 4)])).toEqual([]);
+    expect(settlePending(shown(" git status"), [p("! git status", 4)])).toEqual([]);
   });
   test("送り始める前の同じ文では消さない", () => {
     const pend = [p("はい", 5)];
