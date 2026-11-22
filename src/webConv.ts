@@ -121,6 +121,58 @@ export function slashCommand(text: string): string | null {
   return args ? `${name} ${args}` : name;
 }
 
+/** お手紙の包み（Rust の LETTER_TAGS） */
+const LETTER_TAGS = ["cross-session-message", "teammate-message", "agent-message"] as const;
+
+/** お手紙の包みで始まる文を、包みごとの項目にする。包みで始まらなければ null（Rust の letters、#253） */
+function letters(text: string, at: string | number | null): Omit<ConvItem, "n">[] | null {
+  const out: Omit<ConvItem, "n">[] = [];
+  let rest = text;
+  let found = false;
+  for (;;) {
+    const s = rest.trimStart();
+    const tag = LETTER_TAGS.find((t) => s.startsWith(`<${t}`));
+    if (!tag) break;
+    found = true;
+    const r = s.slice(tag.length + 1);
+    const gt = r.indexOf(">");
+    const attrs = gt >= 0 ? r.slice(0, gt) : "";
+    const after = gt >= 0 ? r.slice(gt + 1) : "";
+    const close = `</${tag}>`;
+    const ci = after.indexOf(close);
+    const raw = ci >= 0 ? after.slice(0, ci) : after;
+    rest = ci >= 0 ? after.slice(ci + close.length) : "";
+    const attr = (k: string) => { const key = `${k}="`; const i = attrs.indexOf(key); return i >= 0 ? attrs.slice(i + key.length).split('"')[0] : null; };
+    let fromName: string | null;
+    let fromRaw: string | null;
+    if (tag === "cross-session-message") {
+      fromName = attr("from-name");
+      fromRaw = attr("from");
+    } else {
+      fromName = attr(tag === "teammate-message" ? "teammate_id" : "from") ?? "";
+      fromRaw = `teammate:${fromName}`;
+    }
+    const body = tag === "teammate-message" ? teammateBody(raw.trim()) : raw.trim();
+    if (body) out.push({ role: "user", text: body, from: null, at, letter: { fromName, fromRaw } });
+  }
+  return found ? out : null;
+}
+
+/** チームメイトの文の本文。決まった形の連絡（JSON の1行）を読む（Rust の teammate_body、#253） */
+function teammateBody(body: string): string | null {
+  let j: J = null;
+  if (body.startsWith("{")) {
+    try { j = JSON.parse(body.split("\n")[0]); } catch { j = null; }
+  }
+  const text = (k: string) => (typeof j?.[k] === "string" ? j[k].trim() : null);
+  switch (typeof j?.type === "string" ? j.type : null) {
+    case "idle_notification": return text("result");
+    case "teammate_terminated": return text("message");
+    case "shutdown_request": case "shutdown_approved": return null;
+  }
+  return body;
+}
+
 export function simplify(raw: J): Omit<ConvItem, "n">[] {
   const wrapped = raw?.data && typeof raw.data === "object" && raw.message == null;
   const m: J = wrapped ? raw.data : raw;
@@ -144,19 +196,13 @@ export function simplify(raw: J): Omit<ConvItem, "n">[] {
   }
   if (m?.type === "user") {
     let text = userText(content);
-    const pre = "Another Claude session sent a message:";
+    // 作業中に届いた文は「… sent a message while you were working:」になる（Rust の simplify と同じ、#253）
+    const pre = text.match(/^Another Claude session sent a message[^\n:]*:/);
     // 2.1.330 からは、本文の後ろに英語の注記（This came from another Claude session — …）が付く（Rust の simplify と同じ、#156）
-    if (text.startsWith(pre)) text = text.slice(pre.length).trimStart().split("\n\nThis came from another Claude session")[0].trimEnd();
-    // 別のセッションからのお手紙（<cross-session-message from=… from-name=…>本文</cross-session-message>）は、包みの内側の本文だけ出す
-    if (text.startsWith("<cross-session-message")) {
-      const rest = text.slice("<cross-session-message".length);
-      const gt = rest.indexOf(">");
-      const attrs = gt >= 0 ? rest.slice(0, gt) : "";
-      const body = (gt >= 0 ? rest.slice(gt + 1) : "").split("</cross-session-message>")[0].trim();
-      const attr = (k: string) => { const key = `${k}="`; const i = attrs.indexOf(key); return i >= 0 ? attrs.slice(i + key.length).split('"')[0] : null; };
-      if (body) out.push({ role: "user", text: body, from: null, at, letter: { fromName: attr("from-name"), fromRaw: attr("from") } });
-      return out;
-    }
+    if (pre) text = text.slice(pre[0].length).trimStart().split("\n\nThis came from another Claude session")[0].trimEnd();
+    // 別のセッションとチームメイトからのお手紙は、包みの内側の本文だけ出す
+    const ls = letters(text, at);
+    if (ls) return ls;
     // 止めたときに claude が書く印。吹き出しにせず、止めた印にする（Rust の simplify と同じ）
     if (text.startsWith("[Request interrupted by user")) {
       out.push({ role: "event", kind: "interrupted", text: "ここで止めた", at });
