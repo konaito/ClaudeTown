@@ -20,8 +20,8 @@ if [ "${FC_SINGLE_INSTANCE:-}" = 1 ] && [ -S "$sock" ] && python3 -c "import soc
 fi
 
 t="$(mktemp -d /tmp/fc-si.XXXXXX)"
-mkdir -p "$t/app" "$t/claude" "$t/state"
-export FC_APP_HOME="$t/app" FC_CLAUDE_HOME="$t/claude" FC_STATE_DIR="$t/state" FC_LETTERS="$t/letters.jsonl"
+mkdir -p "$t/app" "$t/claude" "$t/state" "$t/perm"
+export FC_APP_HOME="$t/app" FC_CLAUDE_HOME="$t/claude" FC_STATE_DIR="$t/state" FC_LETTERS="$t/letters.jsonl" FC_PERM_DIR="$t/perm"
 
 # 窓の数（画面の層 0 の窓）。swiftc が無ければ数えない
 wc_bin=""
