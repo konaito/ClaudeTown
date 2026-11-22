@@ -8,7 +8,7 @@
 // - isMeta と isCompactSummary の user の行は出さない（スキルの本文、要約などの差し込み。全件で数えて決めた）。
 //   ただし origin が peer の行は出す。受信ソケットで届いた文（Town のチャット欄から送った文、別のセッションのお手紙）も isMeta になる（#156）
 // - 作業中に受信ソケットで届いた文（attachment の queued_command、origin が peer）は、user の行に直す（#156）
-// - teammate の受信文（<teammate-message teammate_id=…>本文</teammate-message>）は、お手紙と同じ形に直す
+// - teammate の受信文（<teammate-message>、<agent-message>）は直さずに通す。1行に2通以上入ることがあるので、simplify が包みごとにお手紙にする（#253）
 // - API の失敗（isApiErrorMessage の assistant）は、失敗の印（type: result、is_error）に直す
 // - ターンの途中で取り込まれた人の文（attachment の queued_command）は、user の行に直す（queued の印付き）
 // - 順番待ちの出し入れ（queue-operation）と起動し直した印（SessionStart の attachment を session-start に直す）は、待ちの一覧のために通す
@@ -89,21 +89,13 @@ pub fn read(path: &Path, from: u64) -> Result<Chunk, String> {
 }
 
 /// トランスクリプトの1行を、simplify に渡す形に整える。出さない行は None
-pub fn normalize(mut v: Value) -> Option<Value> {
+pub fn normalize(v: Value) -> Option<Value> {
     let ty = v["type"].as_str().unwrap_or("").to_string();
     match ty.as_str() {
         "user" => {
             let peer = v["origin"]["kind"].as_str() == Some("peer");
             if (v["isMeta"].as_bool() == Some(true) && !peer) || v["isCompactSummary"].as_bool() == Some(true) {
                 return None;
-            }
-            let text = crate::user_text(&v["message"]["content"]);
-            if let Some(rest) = text.strip_prefix("<teammate-message") {
-                let (attrs, body) = rest.split_once('>').unwrap_or(("", ""));
-                let body = body.split("</teammate-message>").next().unwrap_or("").trim();
-                let who = attrs.split("teammate_id=\"").nth(1).and_then(|x| x.split('"').next()).unwrap_or("");
-                let esc = who.replace('"', "");
-                v["message"]["content"] = json!(format!("<cross-session-message from=\"teammate:{esc}\" from-name=\"{esc}\">{body}</cross-session-message>"));
             }
             Some(v)
         }
@@ -193,11 +185,26 @@ mod tests {
         let compact = json!({"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued"}});
         assert!(normalize(compact).is_none());
         let tm = json!({"type":"user","message":{"content":"<teammate-message teammate_id=\"team-lead\" summary=\"s\">\n調べて\n</teammate-message>"}});
+        // `<` で始まるが、お手紙なのでターンの始まりとして数える
+        assert!(crate::live_events(&normalize(tm.clone()).unwrap()).iter().any(|e| matches!(e, crate::LiveEv::User(_))));
         let it = crate::simplify(&normalize(tm).unwrap());
         assert_eq!(it[0]["role"], "user");
         assert_eq!(it[0]["text"], "調べて");
         assert_eq!(it[0]["letter"]["fromName"], "team-lead");
-        let err = json!({"type":"assistant","isApiErrorMessage":true,"timestamp":"t","message":{"content":[{"type":"text","text":"API Error: 529"}]}});
+        // リードに届くチームメイトの文は、前置きの後ろに包みが並ぶ。1行に2通以上入ることがある（2.1.330、#253）
+        let two = json!({"type":"user","message":{"content":"Another Claude session sent a message:\n<teammate-message teammate_id=\"fix-1\" color=\"blue\" summary=\"s\">\n1通目\n</teammate-message>\n\n<teammate-message teammate_id=\"fix-2\">\n2通目\n</teammate-message>\n\nThis came from another Claude session — not typed by your user."}});
+        let it = crate::simplify(&normalize(two).unwrap());
+        assert_eq!(it.len(), 2);
+        assert_eq!((it[0]["text"].as_str(), it[0]["letter"]["fromRaw"].as_str()), (Some("1通目"), Some("teammate:fix-1")));
+        assert_eq!((it[1]["text"].as_str(), it[1]["letter"]["fromName"].as_str()), (Some("2通目"), Some("fix-2")));
+        // 受信ソケットの agent-message（isMeta、origin が peer）と、作業中に取り込まれた agent-message（queued_command）も同じに出す（#253）
+        let am = json!({"type":"user","isMeta":true,"origin":{"kind":"peer","from":"unknown"},"message":{"content":"Another Claude session sent a message:\n<agent-message from=\"issue-1\">\n直した\n</agent-message>\n\nThat \"other Claude session\" is an agent working inside this same session."}});
+        let it = crate::simplify(&normalize(am).unwrap());
+        assert_eq!((it.len(), it[0]["text"].as_str(), it[0]["letter"]["fromName"].as_str()), (1, Some("直した"), Some("issue-1")));
+        let aq = json!({"type":"attachment","attachment":{"type":"queued_command","prompt":"<agent-message from=\"issue-1\">\n直した\n</agent-message>","commandMode":"prompt","origin":{"kind":"peer"}}});
+        let it = crate::simplify(&normalize(aq).unwrap());
+        assert_eq!((it.len(), it[0]["text"].as_str(), it[0]["letter"]["fromName"].as_str()), (1, Some("直した"), Some("issue-1")));
+        let err =json!({"type":"assistant","isApiErrorMessage":true,"timestamp":"t","message":{"content":[{"type":"text","text":"API Error: 529"}]}});
         let it = crate::simplify(&normalize(err).unwrap());
         assert_eq!(it[0]["role"], "event");
         assert_eq!(it[0]["kind"], "error");

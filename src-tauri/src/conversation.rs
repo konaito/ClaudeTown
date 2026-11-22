@@ -246,8 +246,8 @@ pub(crate) fn live_events(m: &Value) -> Vec<LiveEv> {
                 if m["queued"].as_bool() == Some(true) {
                     return out;
                 }
-                // hook やシステムの差し込み（<...>、Caveat:）はターンの始まりにしない。お手紙（<cross-session-message>）は始まりにする
-                let letter = text.contains("<cross-session-message");
+                // hook やシステムの差し込み（<...>、Caveat:）はターンの始まりにしない。お手紙（<cross-session-message>、<teammate-message>、<agent-message>）は始まりにする
+                let letter = has_letter(&text);
                 let command = slash_command(&text).is_some();
                 if !text.is_empty() && !m["isMeta"].as_bool().unwrap_or(false) && (letter || command || !(text.starts_with('<') || text.starts_with("Caveat:"))) {
                     out.push(LiveEv::User(at));
@@ -451,6 +451,64 @@ pub(crate) fn result_text(content: &Value) -> String {
     out
 }
 
+/// お手紙の包み。cross-session-message は別のセッションから、teammate-message と agent-message は agent teams のチームメイトから届く（#253）
+const LETTER_TAGS: [&str; 3] = ["cross-session-message", "teammate-message", "agent-message"];
+
+/// 文がお手紙の包みを含むか（live_events がターンの始まりを決めるのに使う）
+fn has_letter(text: &str) -> bool {
+    LETTER_TAGS.iter().any(|t| text.contains(&format!("<{t}")))
+}
+
+/// お手紙の包みで始まる文を、包みごとの項目にする。包みで始まらなければ None。
+/// 1行に2通以上の包みが並ぶことがある（2.1.330 のリードに届くチームメイトの文、#253）。最後の包みの後ろの注記は読まない。
+/// - cross-session-message from=… from-name=…: 送り手は from-name と from
+/// - teammate-message teammate_id=…、agent-message from=…: 送り手はチームメイトの名前。src/letters.ts の resolvePeer がチームの中で引けるように、
+///   生の値は teammate:<名前> にする
+fn letters(text: &str, at: &Value) -> Option<Vec<Value>> {
+    let mut out = vec![];
+    let mut rest = text;
+    let mut found = false;
+    loop {
+        let s = rest.trim_start();
+        let Some((tag, r)) = LETTER_TAGS.iter().find_map(|t| s.strip_prefix('<').and_then(|x| x.strip_prefix(t)).map(|r| (*t, r))) else { break };
+        found = true;
+        let (attrs, after) = r.split_once('>').unwrap_or(("", ""));
+        let (body, next) = after.split_once(&format!("</{tag}>")).unwrap_or((after, ""));
+        rest = next;
+        let attr = |k: &str| {
+            let key = format!("{k}=\"");
+            attrs.find(&key).and_then(|i| attrs[i + key.len()..].split('"').next()).map(String::from)
+        };
+        let (name, raw) = match tag {
+            "cross-session-message" => (attr("from-name"), attr("from")),
+            _ => {
+                let who = attr(if tag == "teammate-message" { "teammate_id" } else { "from" }).unwrap_or_default();
+                (Some(who.clone()), Some(format!("teammate:{who}")))
+            }
+        };
+        let body = body.trim();
+        let body = if tag == "teammate-message" { teammate_body(body) } else { Some(body.to_string()) };
+        if let Some(body) = body.filter(|b| !b.is_empty()) {
+            out.push(json!({ "role": "user", "text": body, "from": null, "at": at, "letter": { "fromName": name, "fromRaw": raw } }));
+        }
+    }
+    found.then_some(out)
+}
+
+/// チームメイトの文の本文。決まった形の連絡は JSON の1行で来る（2.1.330 の ~/.claude/projects で数えた、#253）。
+/// idle_notification は result（チームメイトのターンの最後の返事）、teammate_terminated は message を出す。
+/// 止める手続き（shutdown_request、shutdown_approved）は出さない。知らない type は JSON のまま出す
+fn teammate_body(body: &str) -> Option<String> {
+    let j = body.strip_prefix('{').and_then(|_| serde_json::from_str::<Value>(body.lines().next().unwrap_or("")).ok());
+    let text = |k: &str, j: &Value| j[k].as_str().map(|s| s.trim().to_string());
+    match j.as_ref().and_then(|j| j["type"].as_str().map(|t| (t, j))) {
+        Some(("idle_notification", j)) => text("result", j),
+        Some(("teammate_terminated", j)) => text("message", j),
+        Some(("shutdown_request" | "shutdown_approved", _)) => None,
+        _ => Some(body.to_string()),
+    }
+}
+
 pub(crate) fn simplify(m: &Value) -> Vec<Value> {
     let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
         Some(d) => (d, m["at"].clone()),
@@ -481,26 +539,16 @@ pub(crate) fn simplify(m: &Value) -> Vec<Value> {
             // 貼り付けの包み（<pasted_content>）は外してから見る。外さないと `<` で始まり、下の除外で落ちる（#69）
             let text = user_text(content);
             let text = text.as_str();
-            // ターミナルのセッションには、お手紙の前に「Another Claude session sent a message:」の1行が付く
-            let text = match text.strip_prefix("Another Claude session sent a message:") {
+            // ターミナルのセッションには、お手紙の前に「Another Claude session sent a message:」の1行が付く。
+            // 作業中に届いた文は「… sent a message while you were working:」になる（#253）
+            let text = match text.strip_prefix("Another Claude session sent a message").and_then(|r| r.split_once(':')).filter(|(head, _)| !head.contains('\n')) {
                 // 2.1.330 からは、本文の後ろに英語の注記（This came from another Claude session — …）が付く（#156）
-                Some(r) => r.trim_start().split("\n\nThis came from another Claude session").next().unwrap_or("").trim_end(),
+                Some((_, r)) => r.trim_start().split("\n\nThis came from another Claude session").next().unwrap_or("").trim_end(),
                 None => text,
             };
-            // 別のセッションからのお手紙（<cross-session-message from=… from-name=…>本文</cross-session-message>、後ろに注記が付くことがある）は、包みの内側の本文だけ出す
-            if let Some(rest) = text.strip_prefix("<cross-session-message") {
-                let (attrs, body) = rest.split_once('>').unwrap_or(("", ""));
-                let body = body.split("</cross-session-message>").next().unwrap_or("");
-                let attr = |k: &str| {
-                    let key = format!("{k}=\"");
-                    attrs.find(&key).and_then(|i| attrs[i + key.len()..].split('"').next()).map(String::from)
-                };
-                let body = body.trim();
-                if !body.is_empty() {
-                    out.push(json!({ "role": "user", "text": body, "from": null, "at": at,
-                        "letter": { "fromName": attr("from-name"), "fromRaw": attr("from") } }));
-                }
-                return out;
+            // 別のセッションとチームメイトからのお手紙は、包みの内側の本文だけ出す
+            if let Some(letters) = letters(text, &at) {
+                return letters;
             }
             // 止めたときに claude が書く印（-p の子で見た。2026-11-21）。吹き出しにせず、止めた印にする（#83）
             if text.starts_with("[Request interrupted by user") {
