@@ -3,6 +3,7 @@
 // 誰を通すかは Access のポリシー（town-owner）だけが決める。Worker に許可リストは持たない。
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import { defineMiddleware } from 'void';
+import { crossOriginReason } from '../lib/origin';
 
 type AccessEnv = { CF_ACCESS_TEAM_DOMAIN?: string; CF_ACCESS_AUD?: string; DEV_NO_AUTH?: string };
 
@@ -19,6 +20,12 @@ function keysFor(teamDomain: string) {
 export default defineMiddleware(async (c, next) => {
   const env = c.env as AccessEnv;
   const url = new URL(c.req.url);
+  // 別のオリジンからの書き込みは、Access のクッキーが付いていても断る（#167）。手元の開発でも同じに断る
+  const cross = crossOriginReason(c.req.raw);
+  if (cross) {
+    console.warn(`cross-origin request rejected: ${c.req.method} ${url.pathname} (${cross})`);
+    return c.text('forbidden: cross-origin request', 403);
+  }
   // 手元の開発サーバーだけ。.env に DEV_NO_AUTH=1 を書いたときに Access の確認を飛ばす
   if (env.DEV_NO_AUTH === '1' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || /^(10|192\.168|100)\./.test(url.hostname))) return next();
 
