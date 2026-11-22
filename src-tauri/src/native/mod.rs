@@ -49,7 +49,13 @@ pub fn mtime_ms(m: &fs::Metadata) -> u64 {
 
 /// 記録から読むだけのセッションは、送信、承認、割り込み、停止、端末ができない（このアプリが立てたものは lib.rs が上書きする）
 pub fn read_only_caps() -> Value {
-    json!({ "send": false, "permissions": false, "interrupt": false, "stop": false, "terminal": false, "events": false })
+    caps_with_send(false)
+}
+
+/// 受信ソケットのある対話セッションは、文の送信だけできる（#156）。割り込みは外から入れる口が無い
+/// （pid への SIGINT はセッションの終了になる。#90 の実測）
+pub fn caps_with_send(send: bool) -> Value {
+    json!({ "send": send, "permissions": false, "interrupt": false, "stop": false, "terminal": false, "events": false })
 }
 
 /// 一覧を作った結果。stats は報告と画面の確認用の件数

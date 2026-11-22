@@ -26,6 +26,8 @@ pub struct Session {
     pub jsonl: PathBuf,
     /// 最初の文の from 行の呼び手（agent:<ノード>/<sid8>/<役割>）。ccn などが子を立てるときに付ける
     pub parent_raw: Option<String>,
+    /// 受信ソケット（messagingSocketPath）。ファイルがあるときだけ入れる。あれば文を送れる（#156）
+    pub socket: Option<PathBuf>,
 }
 
 impl Session {
@@ -39,9 +41,9 @@ impl Session {
             "startedAt": self.started_at,
             "lastActivityAt": self.updated_at,
             "parent": self.parent_raw,
-            "capabilities": super::read_only_caps(),
+            "capabilities": super::caps_with_send(self.socket.is_some()),
             "title": self.title,
-            "native": { "jsonl": self.jsonl, "kind": self.kind },
+            "native": { "jsonl": self.jsonl, "kind": self.kind, "socket": self.socket },
         })
     }
 }
@@ -182,6 +184,18 @@ pub fn fresh_row(root: &Path, pid: u32) -> Option<Value> {
     }))
 }
 
+/// sessions/<pid>.json の messagingSocketPath。ファイルが無ければ None（古い版、受信を切ったセッション）
+fn socket_from(v: &Value) -> Option<PathBuf> {
+    v["messagingSocketPath"].as_str().map(PathBuf::from).filter(|p| p.exists())
+}
+
+/// id を名乗っている、生きているセッションの受信ソケット（sessions/<pid>.json を今読む）。無ければ None
+pub fn live_socket_of(root: &Path, id: &str) -> Option<PathBuf> {
+    let pid = live_pid_of(root, id)?;
+    let v: Value = serde_json::from_str(&fs::read_to_string(root.join(format!("sessions/{pid}.json"))).ok()?).ok()?;
+    socket_from(&v)
+}
+
 /// id の会話の jsonl を projects/*/ から探す。無ければ None（resume すると exit 1 で終わるので、立て直す前に見る）
 pub fn find_jsonl(root: &Path, id: &str) -> Option<PathBuf> {
     let name = format!("{id}.jsonl");
@@ -288,6 +302,7 @@ pub fn live(root: &Path, stats: &mut Stats) -> Vec<Session> {
             kind,
             jsonl,
             parent_raw: k.parent.clone().flatten(),
+            socket: socket_from(&v),
             id,
         });
     }

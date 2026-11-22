@@ -5,7 +5,9 @@
 // 初めて開くとき（読み位置 0）は、末尾の FIRST_BYTES だけを読む。画面に出すのは最後の 80 件なので、頭からは読まない。
 //
 // 行は lib.rs の simplify と live_events にそのまま渡せる形（トランスクリプトの行）に整える。整えるのは次だけ。
-// - isMeta と isCompactSummary の user の行は出さない（スキルの本文、要約などの差し込み。全件で数えて決めた）
+// - isMeta と isCompactSummary の user の行は出さない（スキルの本文、要約などの差し込み。全件で数えて決めた）。
+//   ただし origin が peer の行は出す。受信ソケットで届いた文（Town のチャット欄から送った文、別のセッションのお手紙）も isMeta になる（#156）
+// - 作業中に受信ソケットで届いた文（attachment の queued_command、origin が peer）は、user の行に直す（#156）
 // - teammate の受信文（<teammate-message teammate_id=…>本文</teammate-message>）は、お手紙と同じ形に直す
 // - API の失敗（isApiErrorMessage の assistant）は、失敗の印（type: result、is_error）に直す
 // 知らない type の行は、黙って捨てずに数える（odd_counts）
@@ -89,7 +91,8 @@ pub fn normalize(mut v: Value) -> Option<Value> {
     let ty = v["type"].as_str().unwrap_or("").to_string();
     match ty.as_str() {
         "user" => {
-            if v["isMeta"].as_bool() == Some(true) || v["isCompactSummary"].as_bool() == Some(true) {
+            let peer = v["origin"]["kind"].as_str() == Some("peer");
+            if (v["isMeta"].as_bool() == Some(true) && !peer) || v["isCompactSummary"].as_bool() == Some(true) {
                 return None;
             }
             let text = crate::user_text(&v["message"]["content"]);
@@ -109,6 +112,13 @@ pub fn normalize(mut v: Value) -> Option<Value> {
                 return Some(json!({ "type": "result", "is_error": true, "result": text, "timestamp": v["timestamp"] }));
             }
             Some(v)
+        }
+        // 作業中に受信ソケットで届いた文（Town のチャット欄から送った文など）は、ターンの途中で取り込まれ、
+        // attachment の queued_command（origin が peer）にしか残らない（2.1.330、#156）。user の行に直して吹き出しにする
+        "attachment" => {
+            let a = &v["attachment"];
+            (a["type"] == "queued_command" && a["commandMode"] == "prompt" && a["origin"]["kind"] == "peer")
+                .then(|| json!({ "type": "user", "timestamp": v["timestamp"], "queued": true, "message": { "role": "user", "content": a["prompt"] } }))
         }
         t if KNOWN_QUIET.contains(&t) => None,
         t => {
@@ -156,6 +166,18 @@ mod tests {
     fn normalizes_meta_teammate_and_api_errors() {
         let meta = json!({"type":"user","isMeta":true,"message":{"content":"Base directory for this skill: x"}});
         assert!(normalize(meta).is_none());
+        // 受信ソケットで届いた文は isMeta でも出す（#156）
+        let peer = json!({"type":"user","isMeta":true,"origin":{"kind":"peer","from":"unknown"},"message":{"content":"Another Claude session sent a message:\nやあ\n\nThis came from another Claude session — not typed by your user."}});
+        let it = crate::simplify(&normalize(peer).unwrap());
+        assert_eq!(it[0]["role"], "user");
+        assert_eq!(it[0]["text"], "やあ");
+        // 作業中に受信ソケットで届いた文は、ターンの途中で取り込まれ、attachment の queued_command にしか残らない（#156）
+        let q = json!({"type":"attachment","timestamp":"2026-11-22T13:15:28.000Z","attachment":{"type":"queued_command","prompt":"1通目","commandMode":"prompt","origin":{"kind":"peer","from":"unknown"}}});
+        let it = crate::simplify(&normalize(q).unwrap());
+        assert_eq!(it[0]["role"], "user");
+        assert_eq!(it[0]["text"], "1通目");
+        let task = json!({"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification>x</task-notification>","commandMode":"task-notification","origin":{"kind":"task-notification"}}});
+        assert!(normalize(task).is_none());
         let compact = json!({"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued"}});
         assert!(normalize(compact).is_none());
         let tm = json!({"type":"user","message":{"content":"<teammate-message teammate_id=\"team-lead\" summary=\"s\">\n調べて\n</teammate-message>"}});

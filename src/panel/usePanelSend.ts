@@ -32,8 +32,9 @@ export function usePanelSend({ agent, hasTerm, items, switching, support, markNo
     // アプリが立てたセッションは、どの文も端末の入力欄へ貼って Enter を押す（CLI に打ったのと同じ）。
     // ブラウザ版の ccn の行では、先頭が / か ! の文だけを入力欄へ貼る。ccn の send_message は from の1行を前に付けるので、
     // CLI のコマンドやシェルモードとして動かない（docs/research/cli-input.md）
+    // Claude Town の外で起動したセッション（端末が無い）も send_direct に渡す。Rust が受信ソケットで送る（#156）
     const plain = !(body.startsWith("!") || isSlashCommand(body));
-    const direct = hasTerm && (!viaCcn(agent) || !plain);
+    const direct = !viaCcn(agent) || (hasTerm && !plain);
     try {
       if (route?.kind === "command") {
         const r = await invoke<unknown>("run_command", { sessionId: agent.id, text: route.text });
