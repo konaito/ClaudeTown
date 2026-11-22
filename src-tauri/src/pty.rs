@@ -384,6 +384,9 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
         // 読み手が最後の出力を送り終えるのを少し待ってから、台帳から外す
         std::thread::sleep(Duration::from_millis(200));
         let gone = with(|m| m.remove(&pid));
+        if let Some(p) = &gone {
+            end_input(pid, &p.writer);
+        }
         if let Some(p) = gone
             && let Some((_, tx)) = &p.sub {
                 let _ = tx.send(TermOut::Event("exit".into(), json!({ "reason": "終わった", "code": code })));
@@ -527,6 +530,65 @@ pub fn resize(id: &str, cols: u16, rows: u16) -> Result<(), String> {
         }
         Ok(())
     })
+}
+
+// ---------- 打鍵の列（#231） ----------
+
+/// 端末ごとの打鍵の列（送り口）と、その端末の書き口。キーは pid。書き口は Weak で持ち、端末が台帳から外れたら今までどおり Proc と一緒に落ちる
+struct Input {
+    writer: std::sync::Weak<Mutex<Box<dyn Write + Send>>>,
+    tx: Sender<String>,
+}
+static INPUTS: Mutex<Option<HashMap<u32, Input>>> = Mutex::new(None);
+
+/// 打ったキー（ターミナルの欄の打鍵と貼り付け）を端末の列に積み、書くのを待たずに返す（#231）。
+/// 呼び手は Tauri のメインスレッドなので、claude が入力を読まずに PTY が詰まっても、チャット欄の送信が書き口の錠を持っていても、待つと窓全体が固まる。
+/// 書くのは端末ごとに1本の書き手のスレッドで、積んだ順に1件ずつ書くので、打った順は変わらない。
+/// 書き手が取るのは書き口の錠（writer）だけ。分けて書く操作の錠（#168 の serial）は取らない。書けなかったときは、開いている画面に input_error を送る
+pub fn input(id: &str, text: &str) -> Result<(), String> {
+    let (pid, writer) = with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| (p.pid, Arc::downgrade(&p.writer)))).ok_or("このセッションの端末はこのアプリに無い")?;
+    let mut g = INPUTS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = g.get_or_insert_with(HashMap::new);
+    // 同じ pid でも書き口が違えば別の端末（pid が使い回された）なので、列を作り直す
+    if !map.get(&pid).is_some_and(|q| q.writer.ptr_eq(&writer)) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let w = writer.clone();
+        std::thread::spawn(move || input_loop(pid, w, rx));
+        map.insert(pid, Input { writer, tx });
+    }
+    map[&pid].tx.send(text.to_string()).map_err(|_| "ターミナルの書き手が止まっている".to_string())
+}
+
+/// 書き手のスレッド。列が閉じる（end_input）か、端末が台帳から外れたら終わる
+fn input_loop(pid: u32, writer: std::sync::Weak<Mutex<Box<dyn Write + Send>>>, rx: std::sync::mpsc::Receiver<String>) {
+    while let Ok(text) = rx.recv() {
+        let Some(w) = writer.upgrade() else { return };
+        let r = {
+            let mut g = w.lock().unwrap_or_else(|e| e.into_inner());
+            g.write_all(text.as_bytes()).and_then(|_| g.flush())
+        };
+        let Err(e) = r else { continue };
+        // 続けて積まれていた分は捨てる。前の打鍵が届かないまま、後の打鍵だけを書かない
+        let dropped = rx.try_iter().count();
+        let message = if dropped > 0 { format!("ターミナルに書けなかった: {e}（続けて打った {dropped} 件も送らなかった）") } else { format!("ターミナルに書けなかった: {e}") };
+        eprintln!("[pty] {message} pid {pid}");
+        with(|m| {
+            if let Some(p) = m.get(&pid)
+                && Arc::ptr_eq(&p.writer, &w)
+                && let Some((_, tx)) = &p.sub {
+                    let _ = tx.send(TermOut::Event("input_error".into(), json!({ "message": message })));
+                }
+        });
+    }
+}
+
+/// 端末が台帳から外れたので、その端末の列を閉じる。書き手のスレッドは書き口を取り出せずに終わる
+fn end_input(pid: u32, writer: &Arc<Mutex<Box<dyn Write + Send>>>) {
+    let mut g = INPUTS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = g.as_mut()
+        && map.get(&pid).is_some_and(|q| q.writer.ptr_eq(&Arc::downgrade(writer))) {
+            map.remove(&pid);
+        }
 }
 
 /// 1つ止める。SIGHUP を送る（portable-pty の clone_killer の kill は SIGHUP だけを送る。0.9.0 のソースで確かめた）。
@@ -911,6 +973,85 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(!owns(&id));
+    }
+
+    /// 代役の claude（中身は script）を立てて id を返す。返す錠は、町の一覧を数える試験（lib.rs）と FC_CLAUDE_BIN を分けるもので、
+    /// 端末を止めて台帳から消えるまで持つ（取る順は launched_config_dir_as と同じ NATIVE_TEST_LOCK、BIN_LOCK）
+    fn stand_in(tag: &str, script: &str) -> (String, PathBuf, [std::sync::MutexGuard<'static, ()>; 2]) {
+        use std::os::unix::fs::PermissionsExt;
+        let native = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin_lock = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fc-pty-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        std::fs::write(&bin, script.replace("__DIR__", &dir.to_string_lossy())).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
+        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {});
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+        let id = r.unwrap()["id"].as_str().unwrap().to_string();
+        (id, dir, [native, bin_lock])
+    }
+
+    fn stop(id: &str) {
+        kill(id).unwrap();
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(5) && owns(id) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// 代役が raw にした（ready を書いた）のを待つ
+    fn wait_ready(dir: &std::path::Path) {
+        let t0 = Instant::now();
+        while !dir.join("ready").exists() {
+            assert!(t0.elapsed() < Duration::from_secs(5), "代役が raw にならない");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// 入力を読まない claude に、ターミナルの欄から長い貼り付け（4096 文字）が来ても、term_input はすぐ戻る（#231）。
+    /// term_input は async の付かない命令で、Tauri のメインスレッドで動く。戻らないと窓全体が固まる。
+    /// 代役は claude と同じく raw にしてから寝る（行の編集のモードのままだと、macOS は行の上限を超えた分を捨て、書き込みは詰まらない）
+    #[test]
+    fn term_input_returns_while_the_child_does_not_read() {
+        let (id, dir, _locks) = stand_in("unread", "#!/bin/sh\nstty raw -echo\n: > '__DIR__/ready'\nexec sleep 30\n");
+        wait_ready(&dir);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let id2 = id.clone();
+        // メインスレッドの代わり
+        std::thread::spawn(move || { let _ = tx.send(crate::terminal::term_input(id2, "x".repeat(4096))); });
+        let r = rx.recv_timeout(Duration::from_secs(1));
+        stop(&id);
+        assert!(matches!(r, Ok(Ok(()))), "term_input が1秒で戻らなかった: {r:?}");
+    }
+
+    /// 打った順に届く（#231）。代役は raw にしてから1秒読まずに待ち（その間 PTY は詰まる）、その後に受けた分を全部ファイルに書く。
+    /// 1字ずつと貼り付けを、待たずに続けて term_input に渡す
+    #[test]
+    fn term_input_keeps_the_order() {
+        let script = "#!/bin/sh\nstty raw -echo\n: > '__DIR__/ready'\nsleep 1\nexec cat > '__DIR__/got'\n";
+        let (id, dir, _locks) = stand_in("order", script);
+        wait_ready(&dir);
+        let mut want = String::new();
+        let t0 = Instant::now();
+        for i in 0..400 {
+            let s = if i % 50 == 0 { format!("[paste {i} {}]", "y".repeat(500)) } else { format!("{}", i % 10) };
+            crate::terminal::term_input(id.clone(), s.clone()).unwrap();
+            want.push_str(&s);
+        }
+        let queued_in = t0.elapsed();
+        let t0 = Instant::now();
+        let got = loop {
+            let got = std::fs::read_to_string(dir.join("got")).unwrap_or_default();
+            if got.len() >= want.len() || t0.elapsed() > Duration::from_secs(10) { break got; }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        stop(&id);
+        assert_eq!(got.len(), want.len(), "届いた長さが違う");
+        assert!(got == want, "順が入れ替わった");
+        assert!(queued_in < Duration::from_millis(500), "代役が読まない間に term_input が待った: {queued_in:?}");
     }
 }
 
