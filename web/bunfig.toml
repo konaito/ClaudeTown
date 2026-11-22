@@ -1,0 +1,3 @@
+# web/ の bun test は web/test だけを探す（src はルートへのシンボリックリンクで、ルートの bun test が走らせる）
+[test]
+root = "test"

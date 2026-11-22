@@ -20,7 +20,7 @@ export default defineMiddleware(async (c, next) => {
   const env = c.env as AccessEnv;
   const url = new URL(c.req.url);
   // 手元の開発サーバーだけ。.env に DEV_NO_AUTH=1 を書いたときに Access の確認を飛ばす
-  if (env.DEV_NO_AUTH === '1' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || /^(10|192\.168|100)\./.test(url.hostname))) return next();
+  if (env.DEV_NO_AUTH === '1' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) return next();
 
   const teamDomain = env.CF_ACCESS_TEAM_DOMAIN;
   const audience = env.CF_ACCESS_AUD;
