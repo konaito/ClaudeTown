@@ -3,7 +3,8 @@
 // - prompt_history(cwd): CLI の入力履歴（~/.claude/history.jsonl）。上下キーは同じ project の分、Ctrl+R は全部
 // - slash_commands(cwd): / の候補にするスキルとコマンド（ユーザー、プロジェクト、有効なプラグイン）。組み込みのコマンドは画面が持つ
 // - file_suggestions(cwd, query): @ の候補にするファイルとフォルダ
-// - send_direct(session_id, text): このアプリが立てた端末（pty.rs）の入力欄へ貼って Enter を押す。チャット欄の送信はすべてこれ
+// - send_direct(session_id, text): このアプリが立てた端末（pty.rs）の入力欄へ貼って Enter を押す
+// - send_or_queue / cancel_queued / boot_status: チャット欄の送信。claude の起動前に送った文は預かり、起動したら送る
 // - interrupt_session(session_id): 端末に Esc を書いて、claude の今のターンを止める
 
 use serde::Serialize;
@@ -362,33 +363,264 @@ pub fn send_direct(session_id: String, text: String) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("文が空".into());
     }
-    let started = super::pty::started_at(&session_id).ok_or("このセッションの端末はこのアプリに無い")?;
-    // 承認待ちかは、送る直前に sessions/<pid>.json を読み直して決める。一覧（2〜8秒おき）の値を使うと、
-    // 承認の画面に入った直後に送った文と Enter が、承認の画面に届く
-    let row = super::pty::pid_of_id(&session_id).and_then(|pid| super::native::sessions::fresh_row(&super::native::claude_home(), pid));
-    let hooked = super::fc_path(super::Scope::Shared, &format!("state/{session_id}.json")).exists();
-    check_direct(row.as_ref(), hooked, started, super::now_ms() as u64)?;
-    super::pty::write(&session_id, &format!("\x1b[200~{}\x1b[201~", paste_body(&text)))?;
+    match gate(&session_id)? {
+        Gate::Ready => paste_enter(&session_id, &text),
+        Gate::Booting => Err(NOT_BOOTED.into()),
+        Gate::Refused(e) => Err(e),
+    }
+}
+
+const NOT_BOOTED: &str = "claude がまだ起動していない（信頼の確認の画面かもしれない）。ターミナルで確かめてから送って";
+const WAITING: &str = "承認待ちなので送らなかった。先にターミナルで承認に答えて";
+
+fn paste_enter(session_id: &str, text: &str) -> Result<(), String> {
+    super::pty::write(session_id, &format!("\x1b[200~{}\x1b[201~", paste_body(text)))?;
     // 貼り付けと Enter の間を空ける。続けて書くと、貼り付けの最後と Enter が1つの入力として読まれ、改行になることがある
     std::thread::sleep(Duration::from_millis(150));
-    super::pty::write(&session_id, "\r")
+    super::pty::write(session_id, "\r")
+}
+
+/// 今この端末へ送ってよいか
+#[derive(Debug, PartialEq)]
+pub enum Gate {
+    Ready,
+    /// claude がまだ起動していない（信頼の確認の画面を含む）。起動を待てば送れる
+    Booting,
+    /// 承認待ちなど、待っても自分からは送れるようにならない理由
+    Refused(String),
+}
+
+/// 送る直前の状態。承認待ちかは sessions/<pid>.json を読み直して決める。一覧（2〜8秒おき）の値を使うと、
+/// 承認の画面に入った直後に送った文と Enter が、承認の画面に届く
+fn gate(session_id: &str) -> Result<Gate, String> {
+    let started = super::pty::started_at(session_id).ok_or("このセッションの端末はこのアプリに無い")?;
+    let row = super::pty::pid_of_id(session_id).and_then(|pid| super::native::sessions::fresh_row(&super::native::claude_home(), pid));
+    let hooked = hooked_since(&super::fc_path(super::Scope::Shared, &format!("state/{session_id}.json")), started);
+    let now = super::now_ms() as u64;
+    let seen = if marked(row.as_ref(), hooked) { first_seen(session_id, started, now) } else { None };
+    Ok(gate_of(row.as_ref(), hooked, started, seen, now))
+}
+
+/// claude が入力を受け付けるところまで起動したか（アプリが立てた端末だけ。ほかは None）。町の一覧の booting に使う
+pub fn booted(session_id: &str) -> Option<bool> {
+    gate(session_id).ok().map(|g| g != Gate::Booting)
+}
+
+/// hook の状態ファイル（state/<id>.json）が、この起動の後に書かれたか。claude --resume で立て直すと（pty.rs の resume）、
+/// 前の起動のファイルが残っているので、あるかどうかだけでは起動済みの印にならない
+pub fn hooked_since(path: &Path, started_at: u64) -> bool {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .is_some_and(|d| d.as_millis() as u64 >= started_at)
 }
 
 /// 直接送ってよい状態か。row は Claude Code の記録（sessions/<pid>.json）から読んだ行（まだ無ければ None）。
-/// hooked は hook の状態ファイル（state/<id>.json）があるか
-pub fn check_direct(row: Option<&Value>, hooked: bool, started_at: u64, now_ms: u64) -> Result<(), String> {
+/// hooked は hook の状態ファイル（state/<id>.json）がこの起動の後に書かれたか（hooked_since）
+pub fn gate_of(row: Option<&Value>, hooked: bool, started_at: u64, first_seen: Option<u64>, now_ms: u64) -> Gate {
     if let Some(r) = row
         && r.get("state").and_then(|s| s.as_str()) == Some("waiting_permission") {
-            return Err("承認待ちなので送らなかった。先にターミナルで承認に答えて".into());
+            return Gate::Refused(WAITING.into());
         }
     // claude が起動し、信頼の確認を抜けたか。信頼の確認の画面で Enter を送ると、既定の「No, exit」が選ばれて claude が終わる
-    // （2026-11-13 に画面で見た）。SessionStart の hook が届くと state/<id>.json ができ、sessions/<pid>.json の updatedAt が startedAt より進む。
-    // どちらかがあれば起動したとみる。入力の受け付けは SessionStart の 0.3〜1.4 秒後なので、起動から3秒は待つ
-    let active = row.map(|r| r["lastActivityAt"].as_u64().unwrap_or(0) > r["startedAt"].as_u64().unwrap_or(u64::MAX)).unwrap_or(false);
-    if !(hooked || active) || now_ms.saturating_sub(started_at) < 3000 {
-        return Err("claude がまだ起動していない（信頼の確認の画面かもしれない）。ターミナルで確かめてから送って".into());
+    // （2026-11-13 に画面で見た）。SessionStart の hook が届くと state/<id>.json が書かれ、sessions/<pid>.json の updatedAt が startedAt より進む。
+    // どちらかがあれば起動したとみる。入力の受け付けは SessionStart の 0.3〜1.4 秒後なので、起動からも、印を初めて見てからも3秒は待つ。
+    // 信頼の確認の画面で止まってから答えると、印は起動から何十秒も後に出るので、起動からだけ数えると早すぎる。
+    // first_seen は印を初めて見た時刻（None は、今が初めて）
+    if !marked(row, hooked) {
+        return Gate::Booting;
     }
-    Ok(())
+    let from = started_at.max(first_seen.unwrap_or(now_ms));
+    if now_ms.saturating_sub(from) < 3000 {
+        return Gate::Booting;
+    }
+    Gate::Ready
+}
+
+/// 起動の印があるか（hook の状態ファイルがこの起動の後に書かれたか、sessions/<pid>.json の updatedAt が startedAt より進んだか）
+fn marked(row: Option<&Value>, hooked: bool) -> bool {
+    hooked || row.map(|r| r["lastActivityAt"].as_u64().unwrap_or(0) > r["startedAt"].as_u64().unwrap_or(u64::MAX)).unwrap_or(false)
+}
+
+/// 起動の印を初めて見た時刻。セッションごとに、どの起動（started_at）で見たかと一緒に覚える
+static FIRST_SEEN: Mutex<Option<HashMap<String, (u64, u64)>>> = Mutex::new(None);
+
+fn first_seen(session_id: &str, started_at: u64, now_ms: u64) -> Option<u64> {
+    let mut g = FIRST_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(HashMap::new);
+    match m.get(session_id) {
+        Some(&(s, at)) if s == started_at => Some(at),
+        _ => {
+            m.insert(session_id.to_string(), (started_at, now_ms));
+            None
+        }
+    }
+}
+
+/// gate_of を文で返す形（switch.rs が使う。印を見た時刻は覚えず、起動から3秒で数える今までの形）
+pub fn check_direct(row: Option<&Value>, hooked: bool, started_at: u64, now_ms: u64) -> Result<(), String> {
+    match gate_of(row, hooked, started_at, Some(started_at), now_ms) {
+        Gate::Ready => Ok(()),
+        Gate::Booting => Err(NOT_BOOTED.into()),
+        Gate::Refused(e) => Err(e),
+    }
+}
+
+// ---------- 起動を待って送る ----------
+//
+// claude の起動が終わる前（信頼の確認の画面を含む）にチャット欄から送った文は、ここで持ち、起動したら古い順に送る。
+// 送る直前に毎回 gate を通すので、起動したと確かめられないまま Enter を押すことはない。
+// 見張りは Rust のスレッドで回す（画面の時計は、窓が隠れると止まる）。持っている文は、取り消すか、端末が終わるまで残す。
+// アプリを閉じたら消える（アプリが立てた claude もアプリと一緒に止まる）
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Waiting {
+    pub text: String,
+    /// 預かった時刻（ms）
+    pub at: u64,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Sent {
+    pub text: String,
+    pub at: u64,
+    /// 送った（送れなかった）時刻
+    #[serde(rename = "doneAt")]
+    pub done_at: u64,
+    /// 送れなかった理由。送れたら None
+    pub error: Option<String>,
+}
+
+#[derive(Default)]
+struct Waits {
+    queue: HashMap<String, Vec<Waiting>>,
+    /// 見張りが今送っている文。取り消しても戻さない（もう端末に書いている）
+    sending: HashMap<String, Waiting>,
+    /// 送り終えた文（画面が「届けた」の印に替えるため、と送れなかった理由を出すため）。セッションごとに新しい DONE_MAX 件
+    done: HashMap<String, Vec<Sent>>,
+    running: bool,
+}
+
+const DONE_MAX: usize = 10;
+static WAITS: Mutex<Option<Waits>> = Mutex::new(None);
+
+fn waits<T>(f: impl FnOnce(&mut Waits) -> T) -> T {
+    let mut g = WAITS.lock().unwrap_or_else(|e| e.into_inner());
+    f(g.get_or_insert_with(Waits::default))
+}
+
+fn finish(w: &mut Waits, id: &str, item: Waiting, error: Option<String>) {
+    let d = w.done.entry(id.to_string()).or_default();
+    d.push(Sent { text: item.text, at: item.at, done_at: super::now_ms() as u64, error });
+    let n = d.len();
+    if n > DONE_MAX {
+        d.drain(..n - DONE_MAX);
+    }
+}
+
+/// 送る。起動がまだなら預かり、起動したら送る。預かったら queued: true を返す。
+/// 先に預かった文があれば、順番を守るため、起動していても後ろに並べる
+pub fn send_or_queue(session_id: String, text: String) -> Result<Value, String> {
+    super::refuse_if_disabled()?;
+    if text.trim().is_empty() {
+        return Err("文が空".into());
+    }
+    let item = Waiting { text: text.clone(), at: super::now_ms() as u64 };
+    let queued = waits(|w| {
+        if w.queue.get(&session_id).is_some_and(|q| !q.is_empty()) || w.sending.contains_key(&session_id) {
+            w.queue.entry(session_id.clone()).or_default().push(item.clone());
+            true
+        } else {
+            false
+        }
+    });
+    if queued {
+        return Ok(serde_json::json!({ "queued": true }));
+    }
+    match gate(&session_id)? {
+        Gate::Ready => paste_enter(&session_id, &text).map(|_| serde_json::json!({ "queued": false })),
+        Gate::Refused(e) => Err(e),
+        Gate::Booting => {
+            let start = waits(|w| {
+                w.queue.entry(session_id.clone()).or_default().push(item);
+                !std::mem::replace(&mut w.running, true)
+            });
+            if start {
+                std::thread::spawn(watch_waits);
+            }
+            Ok(serde_json::json!({ "queued": true }))
+        }
+    }
+}
+
+/// 預かった文を取り消し、その文を古い順に返す（画面が入力欄に戻す）。見張りが今送っている文は返さない
+pub fn cancel_queued(session_id: &str) -> Vec<String> {
+    waits(|w| w.queue.remove(session_id).unwrap_or_default().into_iter().map(|x| x.text).collect())
+}
+
+/// 起動したかと、預かっている文、送り終えた文。アプリが立てた端末でなければ booted: true（待つものが無い）
+pub fn boot_status(session_id: &str) -> Value {
+    let started = super::pty::started_at(session_id);
+    let booted = booted(session_id).unwrap_or(true);
+    // 信頼する前は sessions/<pid>.json が作られない（pty.rs の real_claude_pty で実測）。無いまま長いときは、信頼の確認の画面を疑う
+    let row_seen = super::pty::pid_of_id(session_id).and_then(|pid| super::native::sessions::fresh_row(&super::native::claude_home(), pid)).is_some();
+    let (queue, done) = waits(|w| {
+        let mut q: Vec<Waiting> = w.sending.get(session_id).cloned().into_iter().collect();
+        q.extend(w.queue.get(session_id).cloned().unwrap_or_default());
+        (q, w.done.get(session_id).cloned().unwrap_or_default())
+    });
+    serde_json::json!({ "booted": booted, "rowSeen": row_seen, "startedAt": started, "queued": queue, "done": done })
+}
+
+/// 預かった文を、起動したら送る見張り。預かった文が無くなったら終わる
+fn watch_waits() {
+    loop {
+        let ids: Vec<String> = waits(|w| {
+            w.queue.retain(|_, q| !q.is_empty());
+            if w.queue.is_empty() {
+                w.running = false;
+            }
+            w.queue.keys().cloned().collect()
+        });
+        if ids.is_empty() {
+            return;
+        }
+        for id in ids {
+            let g = gate(&id);
+            if matches!(g, Ok(Gate::Booting)) || matches!(g, Ok(Gate::Refused(_))) {
+                // 起動を待つ。承認待ち（端末で何かを打った後）も、答え終わるまで待つ
+                continue;
+            }
+            if let Err(e) = g {
+                // 端末が無くなった。預かった文は全部、送れなかったことにする
+                waits(|w| {
+                    for item in w.queue.remove(&id).unwrap_or_default() {
+                        finish(w, &id, item, Some(format!("送れなかった: {e}")));
+                    }
+                });
+                continue;
+            }
+            let Some(item) = waits(|w| {
+                let q = w.queue.get_mut(&id)?;
+                if q.is_empty() {
+                    return None;
+                }
+                let item = q.remove(0);
+                w.sending.insert(id.clone(), item.clone());
+                Some(item)
+            }) else { continue };
+            let r = if super::send_disabled() { Err("送信を止めている（~/.family-computing/send-disabled がある）".to_string()) } else { paste_enter(&id, &item.text) };
+            eprintln!("[boot] {id} 預かった文を送った: {r:?}");
+            waits(|w| {
+                w.sending.remove(&id);
+                finish(w, &id, item, r.err());
+            });
+            // 続けて送る文は、前の文が入力として読まれてから送る
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
 }
 
 /// 今のターンを止める。端末で Esc を押したのと同じ
@@ -415,6 +647,19 @@ pub(crate) mod cmd {
     pub async fn send_direct(session_id: String, text: String) -> Result<(), String> {
         crate::app_guard(&session_id)?;
         crate::blocking(move || super::send_direct(session_id, text)).await
+    }
+    #[tauri::command]
+    pub async fn send_or_queue(session_id: String, text: String) -> Result<serde_json::Value, String> {
+        crate::app_guard(&session_id)?;
+        crate::blocking(move || super::send_or_queue(session_id, text)).await
+    }
+    #[tauri::command]
+    pub async fn cancel_queued(session_id: String) -> Result<Vec<String>, String> {
+        Ok(super::cancel_queued(&session_id))
+    }
+    #[tauri::command]
+    pub async fn boot_status(session_id: String) -> Result<serde_json::Value, String> {
+        crate::blocking(move || Ok(super::boot_status(&session_id))).await
     }
     #[tauri::command]
     pub async fn interrupt_session(session_id: String) -> Result<(), String> {
@@ -498,6 +743,31 @@ mod tests {
         assert!(check_direct(Some(&ok), true, 1000, 2000).is_err());
         assert!(check_direct(Some(&json!({"state":"waiting_permission","startedAt":1000,"lastActivityAt":1800})), true, 1000, now).is_err());
         assert_eq!(paste_body("a\x1b[201~b"), "ab");
+        // 起動待ちだけが「待てば送れる」。承認待ちは待たない理由として返す（預かって送る見張りが、起動待ちと見分ける）
+        assert_eq!(gate_of(None, false, 1000, None, now), Gate::Booting);
+        assert_eq!(gate_of(Some(&ok), true, 1000, Some(1000), 2000), Gate::Booting);
+        assert!(matches!(gate_of(Some(&json!({"state":"waiting_permission","startedAt":1000,"lastActivityAt":1800})), true, 1000, Some(1000), now), Gate::Refused(_)));
+        assert_eq!(gate_of(Some(&ok), false, 1000, Some(1800), now), Gate::Ready);
+        // 信頼の確認の画面で長く止まってから答えると、起動の印は起動から何十秒も後に出る。印を初めて見てから3秒は待つ
+        assert_eq!(gate_of(Some(&ok), false, 1000, Some(60_000), 60_000), Gate::Booting);
+        assert_eq!(gate_of(Some(&ok), false, 1000, Some(60_000), 62_000), Gate::Booting);
+        assert_eq!(gate_of(Some(&ok), false, 1000, Some(60_000), 63_000), Gate::Ready);
+        // 印をまだ覚えていない（初めて見た回）は、今が初めて見た時刻
+        assert_eq!(gate_of(Some(&ok), false, 1000, None, 60_000), Gate::Booting);
+    }
+
+    #[test]
+    fn stale_state_file_is_not_booted() {
+        // claude --resume で立て直すと、前の起動の state/<id>.json が残っている。それを起動済みの印にしない
+        let dir = std::env::temp_dir().join(format!("ct-hooked-{}-{}", std::process::id(), fastrand::u64(..)));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("state.json");
+        assert!(!hooked_since(&f, 0));
+        fs::write(&f, "{}").unwrap();
+        let mtime = fs::metadata(&f).unwrap().modified().unwrap().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as u64;
+        assert!(hooked_since(&f, mtime.saturating_sub(5_000)), "起動の後に書かれた");
+        assert!(!hooked_since(&f, mtime + 60_000), "起動の前に書かれた");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 

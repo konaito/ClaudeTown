@@ -85,6 +85,10 @@ async function webCall<T>(cmd: string, a: Record<string, unknown> = {}): Promise
       await new Promise((r) => setTimeout(r, 150));
       return post(`/sessions/${a.sessionId}/terminal/input`, { text: "\r" }) as T;
     }
+    // ブラウザ版は ccn の端末の口へ直接送る（起動の見張りは ccn の send が持つ。ここでは預からない）
+    case "send_or_queue": return webCall<unknown>("send_direct", a).then(() => ({ queued: false }) as T);
+    case "boot_status": return { booted: true, rowSeen: true, startedAt: null, queued: [], done: [] } as T;
+    case "cancel_queued": return [] as T;
     case "interrupt_session": return post(`/sessions/${a.sessionId}/interrupt`, {}) as T;
     // モデルと権限モード（#97）。HTTP の応答を { status, body } で返す（断られた理由は画面が status と code で決める）
     case "session_controls": return raw(`/sessions/${a.sessionId}/command`, "POST", { text: "" }) as T;
@@ -129,6 +133,8 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   // 見た目の確認用: public/dev-house-places.json（Rust の house_places の出力）。無ければ空の一覧
   if (cmd === "house_places") return devJson<T>("dev-house-places.json", { roots: [], lobby: null, sessions: [], places: null } as T);
   if (cmd === "place_repos") return devJson<T>("dev-place-repos.json", {} as T);
+  // 見た目の確認用: ?boot を付けると、起動を待って1件預かっている様子を返す（信頼の確認の画面を疑う長さ）
+  if (cmd === "boot_status" && location.search.includes("boot")) return { booted: false, rowSeen: false, startedAt: LOADED_AT - 10_000, queued: [{ text: "起動前に送った文", at: LOADED_AT }], done: [] } as T;
   // ブラウザ表示では本物の会話を読めない。別のセッションの会話を見せて取り違えに見えないよう、仮の1件だけ返す
   // 見た目の確認用: ?longconv を付けると、スクロールが要る長さの仮の会話を返す
   // 見た目の確認用: ?conv を付けると public/dev-conversation.json（`--conversation <id>` の出力の Ok）を返す

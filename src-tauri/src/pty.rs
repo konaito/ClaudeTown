@@ -852,3 +852,50 @@ mod real_permission {
         std::thread::sleep(Duration::from_secs(1));
     }
 }
+
+#[cfg(test)]
+mod real_boot {
+    /// 本物の claude で、起動の前に送った文を預かり、起動してから送るかを確かめる（課金がかかるので手で回す）。
+    /// 起動の直後に send_or_queue を呼び、預かったこと、起動するまで送らないこと、起動したら送ったことを、時刻つきで出す。
+    /// 信頼の確認の画面が出たら（sessions/<pid>.json が無いまま）、10秒待って預かったままかを見てから「Yes」を選ぶ。
+    /// FC_PTY_TRY_CWD=<場所> cargo test --lib real_boot_queue -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_boot_queue() {
+        use std::time::{Duration, Instant};
+        let cwd = std::env::var("FC_PTY_TRY_CWD").expect("FC_PTY_TRY_CWD");
+        let r = super::spawn(&cwd, None, 120, 40, || {}).unwrap();
+        let id = r["id"].as_str().unwrap().to_string();
+        let t0 = Instant::now();
+        let msg = "この文には「了解」とだけ返して";
+        let q = crate::composer::send_or_queue(id.clone(), msg.into()).unwrap();
+        println!("{:?} send_or_queue -> {q}", t0.elapsed());
+        assert_eq!(q["queued"], true, "起動の直後は預かる");
+        let st = || crate::composer::boot_status(&id);
+        let mut trusted = false;
+        while t0.elapsed() < Duration::from_secs(60) {
+            let s = st();
+            if !s["done"].as_array().unwrap().is_empty() {
+                println!("{:?} done: {}", t0.elapsed(), s["done"]);
+                assert!(s["done"][0]["error"].is_null(), "送れた");
+                assert_eq!(s["booted"], true, "送ったときは起動済み");
+                break;
+            }
+            if !trusted && s["rowSeen"] == false && t0.elapsed() > Duration::from_secs(10) {
+                let screen = super::screen_text(&id).unwrap_or_default();
+                println!("{:?} 信頼の確認の画面らしい。booted={} queued={} 画面の末尾:\n{}", t0.elapsed(), s["booted"], s["queued"], screen.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n"));
+                assert_eq!(s["queued"].as_array().unwrap().len(), 1, "信頼の確認の画面の間は預かったまま");
+                // 「Yes」の行の番号を押す（行の並びは版で変わりうるので、画面から読む）
+                let yes = screen.lines().find(|l| l.contains("Yes")).and_then(|l| l.chars().find(|c| c.is_ascii_digit()));
+                println!("Yes の番号: {yes:?}");
+                match yes { Some(d) => super::write(&id, &d.to_string()).unwrap(), None => { super::write(&id, "\x1b[B").unwrap(); std::thread::sleep(Duration::from_millis(300)); super::write(&id, "\r").unwrap(); } }
+                trusted = true;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        std::thread::sleep(Duration::from_secs(8));
+        let screen = super::screen_text(&id).unwrap_or_default();
+        println!("画面:\n{}", screen.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n"));
+        super::kill(&id).unwrap();
+    }
+}
