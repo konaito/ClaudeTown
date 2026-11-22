@@ -66,9 +66,17 @@ fn live(id: &str) -> Option<(String, bool)> {
     let row = super::native::sessions::fresh_row(&super::native::claude_home(), pid);
     let state = row.as_ref().and_then(|r| r["state"].as_str()).unwrap_or("").to_string();
     let status = match state.as_str() { "running" => "busy", "waiting_permission" => "waiting", "idle" => "idle", _ => "" }.to_string();
-    let hooked = super::fc_path(super::Scope::Shared, &format!("state/{id}.json")).exists();
-    let ready = super::composer::check_direct(row.as_ref(), hooked, started, super::now_ms() as u64).is_ok() || status == "waiting";
+    let state_file = super::fc_path(super::Scope::Shared, &format!("state/{id}.json"));
+    let ready = ready_of(row.as_ref(), &state_file, started, super::now_ms() as u64, &status);
     Some((status, ready))
+}
+
+/// 入力を受け付けるところまで起動したか（live の中身。試験のために端末から切り離してある）。
+/// 状態ファイルは、この起動の後に書かれたものだけを印にする（composer の gate と同じ hooked_since）。
+/// claude --resume で立て直すと前の起動のファイルが残っているので、あるかどうかだけで決めると、読み込み中の claude に書く（#181）
+fn ready_of(row: Option<&Value>, state_file: &Path, started: u64, now: u64, status: &str) -> bool {
+    let hooked = super::composer::hooked_since(state_file, started);
+    super::composer::check_direct(row, hooked, started, now).is_ok() || status == "waiting"
 }
 
 /// 当てる直前に承認待ちになっていたときの印。予約に戻して、次の回に当て直す
@@ -454,5 +462,26 @@ mod tests {
         let len = std::fs::metadata(&p).unwrap().len();
         assert_eq!(from_transcript(&p, len), (None, None));
         assert_eq!(from_transcript(&dir.join("none.jsonl"), 0), (None, None));
+    }
+
+    #[test]
+    fn stale_state_file_does_not_make_it_ready() {
+        // claude --resume で立て直すと、前の起動の state/<id>.json が残っている（#181）。起動の印を出さないまま 3.5 秒たっても、ready にしない
+        let dir = std::env::temp_dir().join(format!("fc-switch-ready-{}-{}", std::process::id(), fastrand::u64(..)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("state.json");
+        std::fs::write(&f, "{}").unwrap();
+        let now = super::super::now_ms() as u64;
+        let started = now - 3_500;
+        let old = std::time::UNIX_EPOCH + Duration::from_millis(started - 60_000);
+        std::fs::File::options().write(true).open(&f).unwrap().set_modified(old).unwrap();
+        assert!(!ready_of(None, &f, started, now, "idle"), "前の起動の状態ファイルで起動したとみなした");
+        // この起動の後に書かれたら、起動から3秒で ready
+        std::fs::File::options().write(true).open(&f).unwrap().set_modified(std::time::UNIX_EPOCH + Duration::from_millis(started + 500)).unwrap();
+        assert!(ready_of(None, &f, started, now, "idle"));
+        assert!(!ready_of(None, &f, started, started + 2_000, "idle"), "起動から3秒は待つ");
+        // 状態ファイルが無くても、承認待ちなら ready（承認待ちは起動の後にしか出ない）
+        assert!(ready_of(None, &dir.join("none.json"), started, now, "waiting"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
