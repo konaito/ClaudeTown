@@ -147,7 +147,7 @@ export default function App() {
 
   // 3枚のペイン（#89）。左の新しい世帯のペインはヘッダーのボタンとドラッグで開け閉めする。
   // 右のチャットは、セッションを選んでいないときに閉じ、選んだら開く。閉じても Panel は残す（入力欄の下書きを Panel が持っているため）
-  const { housesRef, sideRef, housesOpen, setHousesOpen, sideOpen, setSideOpen, selRef, toggleHouses } = usePanes(!!sel, mobile);
+  const { housesRef, sideRef, housesOpen, setHousesOpen, sideOpen, setSideOpen, selRef, toggleHouses } = usePanes(!!sel, mobile, HOUSES_MIN + TOWN_MIN + SIDE_MIN);
   // 設定（#92）。「新しい世帯」で親を立てる場所。null は既定（~/Documents/meta）
   const [place, setPlace] = useState<string | null>(loadPlace);
   const [settingsOpen, setSettingsOpen] = useState(false);
