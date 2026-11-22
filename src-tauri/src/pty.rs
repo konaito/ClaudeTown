@@ -622,6 +622,8 @@ mod tests {
             write(&root.join(format!("projects/{}/{sid}.jsonl", enc(cwd))), &format!("{{\"type\":\"user\",\"message\":{{\"content\":\"from {caller} via n\\n\\nやって\"}}}}\n"));
         };
         sess(pa, a_new, "/tmp/合成/a");
+        // A の /clear の後の最初の文が B からの文だと、A の親は B になる。B の親を A の今の id に引き直すと輪になるので、早く始まった A を根にする
+        from(a_new, "/tmp/合成/a", &format!("agent:n/{}/r", &b[..8]));
         // 生きている pid を3つ使う（launchd、この試験のプロセス、cargo）
         sess(1, b, "/tmp/合成/b");
         from(b, "/tmp/合成/b", &format!("agent:n/{}/r", &a_old[..8]));
@@ -638,8 +640,10 @@ mod tests {
         while t0.elapsed() < Duration::from_secs(3) && owns(&a_old) {
             std::thread::sleep(Duration::from_millis(50));
         }
+        assert!(!owns(&a_old), "代役の端末が台帳に残っている");
         assert_eq!(by(a_new)["source"], "app", "A は台帳で a_old と同じ端末");
         assert_eq!(by(b)["parent"], a_new, "前の id を指す from 行から、親の今の id を引けていない");
+        assert_eq!(by(a_new)["parent"], Value::Null, "親子が輪になっている");
         assert_eq!(by(c)["parent"], Value::Null, "役割を sid8 として読んでいる");
         assert_eq!(by(d)["parent"], Value::Null, "空の sid8 がどの id にも当たっている");
     }

@@ -58,7 +58,7 @@ Claude Town の違いは3つある。データ源をこの Mac の Claude Code �
 | 会話 | `~/.claude/projects/<cwd を直した名前>/<session id>.jsonl` を、前に読んだ位置から続けて読む（`native/conv.rs`） |
 | sub-agent と in-process のチームメイト | 親のセッションの `<session id>/subagents/agent-<agent id>.jsonl` と `.meta.json`。meta の taskKind が in_process_teammate ならチームメイトとして出す（`native/subagents.rs`） |
 | tmux のチームメイト | `~/.claude/teams/<チーム名>/config.json` の members と、ps で見た claude の起動の引数（`--agent-id`、`--parent-session-id`）。会話は同じ cwd の jsonl のうち、teamName と agentName が合うもの（`native/teams.rs`） |
-| 親子 | sub-agent とチームメイトは、置き場所と config.json から親を決める。ほかのセッションは、最初の文の from 行（`from agent:<ノード>/<親の sid 先頭8>/<役割> via <ノード>`）から引く。from 行は ccn などのプロダクトが子を立てるときに付ける。sid 先頭8が16進の8文字でない from 行（ccn が session id を知らないときの `agent:<ノード>/<役割>`）からは親を引かない。親の id が /clear や計画の承認で変わった後も、親がアプリの端末なら、同じ pid の前の id から今の id を引く。アプリの外の端末では前の id が記録に残らないので、子は根として出る |
+| 親子 | sub-agent とチームメイトは、置き場所と config.json から親を決める。ほかのセッションは、最初の文の from 行（`from agent:<ノード>/<親の sid 先頭8>/<役割> via <ノード>`）から引く。from 行は ccn などのプロダクトが子を立てるときに付ける。sid 先頭8が16進の8文字でない from 行（ccn が session id を知らないときの `agent:<ノード>/<役割>`）からは親を引かない。親の id が /clear や計画の承認で変わった後も、親がアプリの端末なら、同じ pid の前の id から今の id を引く。前の id はアプリの中にだけ持つので、アプリを起動し直すと引けなくなる。アプリの外の端末については、アプリは前の id を知る手段を持たないので、子は根として出る。親子が輪になったら、輪の中で最も早く始まったセッションを根にする |
 | 頼まれたこと、いまやっていること、最後の報告、次の一手 | hook が書く `~/.family-computing/state/<session_id>.json` |
 | 閉じてよいか | close-check-state hook が書く `~/.claude/close-check/<session_id>.json` |
 | 新しい世帯の「最近の場所」 | Claude Code の入力の履歴 `~/.claude/history.jsonl` の project と timestamp（`src-tauri/src/places.rs`） |
