@@ -1026,3 +1026,33 @@ mod real_boot {
         super::kill(&id).unwrap();
     }
 }
+
+#[cfg(test)]
+mod real_cam {
+    /// 本物の cam と claude で、cam usage の best のプロファイルで起動するかを確かめる（画面を出さない。claude は信頼の画面で止まったまま止める）。
+    /// 起動した claude の `ps eww` の CLAUDE_CONFIG_DIR と、cam usage --json の best を並べて出す。cargo の環境の CLAUDE_CONFIG_DIR は外して回す。
+    /// env -u CLAUDE_CONFIG_DIR FC_CAM_BIN=$HOME/.cam/bin/cam cargo test --lib real_cam_account -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_cam_account() {
+        use std::time::Duration;
+        assert!(std::env::var("CLAUDE_CONFIG_DIR").is_err(), "env -u CLAUDE_CONFIG_DIR で回す");
+        let cam = std::env::var("FC_CAM_BIN").expect("FC_CAM_BIN");
+        let dir = std::env::temp_dir().join(format!("fc-real-cam-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = super::spawn(dir.to_str().unwrap(), None, &[], 120, 40, || {}).unwrap();
+        let (id, pid) = (r["id"].as_str().unwrap().to_string(), r["pid"].as_u64().unwrap());
+        std::thread::sleep(Duration::from_secs(4));
+        let ps = std::process::Command::new("/bin/ps").args(["eww", "-o", "command=", "-p", &pid.to_string()]).output().unwrap();
+        let ps = String::from_utf8_lossy(&ps.stdout).to_string();
+        let got = ps.split_whitespace().find(|w| w.starts_with("CLAUDE_CONFIG_DIR=")).map(String::from);
+        let usage = std::process::Command::new(&cam).args(["usage", "--json"]).output().unwrap();
+        let best = serde_json::from_slice::<serde_json::Value>(&usage.stdout).unwrap()["best"].as_str().map(String::from);
+        println!("pid {pid}: {}", got.as_deref().unwrap_or("CLAUDE_CONFIG_DIR なし"));
+        println!("cam usage --json best: {best:?}");
+        println!("screen: {}", super::screen_text(&id).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).take(6).collect::<Vec<_>>().join(" / "));
+        super::kill(&id).unwrap();
+        let want = format!("CLAUDE_CONFIG_DIR={}/.cam/profiles/{}", std::env::var("HOME").unwrap(), best.expect("cam の best が null"));
+        assert_eq!(got.as_deref(), Some(want.as_str()));
+    }
+}
