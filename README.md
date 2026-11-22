@@ -274,7 +274,7 @@ Claude Town は、ブラウザから開けるインストール可能な PWA と
 - Service Worker（`public/sw.js`）は何もキャッシュしない。ホーム画面に追加するためだけに置いた。manifest は `public/manifest.webmanifest`、アイコンは `public/app-icon.svg` から `bun run pwa:icons` で作る。
 - デプロイは、既定ブランチへのマージで `.github/workflows/void-deploy.yml` が行う。
 
-会話の表示と承認への返事は、Rust の `conversation` と `answer_permission` と同じ処理を TS に移してある（`src/webConv.ts`、`src/webPerm.ts`）。承認への返事は、`src/webPerm.ts` だけが確認（まだ承認待ちか、許可でも拒否でも requestId が見せた中身と同じか、質問には全部の答えがあるか）をしてから送る。ただし送信の非常停止（`~/.family-computing/send-disabled`）は手元のファイルなので、ブラウザ版では効かない。会話の「今の動き」の行（`live`）と、保存した会話は移していない。
+会話の表示は、Rust の `conversation` と同じ処理を TS に移してある（`src/webConv.ts`）。承認への返事は、ccn を使っていたころの Rust の `answer_permission` を TS に移したもので、今の Rust には無い（`src/webPerm.ts`）。承認への返事は、`src/webPerm.ts` だけが確認（まだ承認待ちか、許可でも拒否でも requestId が見せた中身と同じか、質問には全部の答えがあるか）をしてから送る。ただし送信の非常停止（`~/.family-computing/send-disabled`）は手元のファイルなので、ブラウザ版では効かない。会話の「今の動き」の行（`live`）と、保存した会話は移していない。
 
 ブラウザ版で使えない機能は次のとおり。Rust にしか実装が無いものを、TS に移していない。
 
