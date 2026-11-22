@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { call as invoke } from "../bridge";
 import type { Agent } from "../model";
 import { BUILTINS, type Command } from "./commands";
-import { rankCommands, tokenAt } from "./edit";
+import { acceptFile, rankCommands, tokenAt } from "./edit";
 import { tagOf } from "./route";
 import type { Support } from "../session/control";
 import type { Search } from "./useHistorySearch";
@@ -62,10 +62,8 @@ export function useCompletion({ agent, local, text, caret, search, dismissed, cc
     }
     const f = files[i];
     if (!f) return "";
-    // フォルダは続けて中を選べるように空白を付けない
-    const add = f.endsWith("/") ? f : `${f} `;
-    const next = `${text.slice(0, token.from)}@${add}${text.slice(token.to).replace(/^[ \t]+/, "")}`;
-    replaceAll(next, token.from + 1 + add.length);
+    const { text: next, caret: at } = acceptFile(text, token, f);
+    replaceAll(next, at);
     return next;
   };
 
