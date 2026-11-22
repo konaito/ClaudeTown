@@ -214,17 +214,19 @@ in-process のチームメイトと sub-agent の hook は、リードの sessio
 安定版へ上げる:
 
 ```bash
-scripts/release-stable.sh <ref>    # 例: scripts/release-stable.sh feat/app-v1
+git fetch origin && scripts/release-stable.sh origin/feat/app-v1
 ```
+
+ローカルの `feat/app-v1` を渡さない。本体の checkout のローカルのブランチは pull されずに古いままのことがある。ローカルのブランチを渡したときは、上流より古ければスクリプトが止まる。
 
 スクリプトは次の順に進む。
 
-1. ref に `stable-YYYYMMDD-HHMM` のタグを打つ。既存の `stable-` のタグを渡すと、タグを打たずにそのタグを使う。
-2. 作業ツリーとは別の一時 worktree にタグを取り出し、`bun install --frozen-lockfile` と `tauri build --bundles app` を行う。Rust のビルド結果は `$HOME/.cache/claude-town/stable-target` に置き、次のリリースで使い回す。
+1. ref に `stable-YYYYMMDD-HHMM` のタグを打つ。既存の `stable-` のタグを渡すと、タグを打たずにそのタグを使う。ref が上流より古いローカルのブランチのときと、ref に `src-tauri/tauri.stable.conf.json` が無いときは、タグを打たずに止まる。
+2. 作業ツリーとは別の一時 worktree にタグを取り出し、`bun install --frozen-lockfile` と `tauri build --bundles app` を行う。`--config` には、一時 worktree の中の `src-tauri/tauri.stable.conf.json`（上げるタグの版）を渡す。スクリプトを動かした checkout の版は使わない。Rust のビルド結果は `$HOME/.cache/claude-town/stable-target` に置き、次のリリースで使い回す。
 3. できた .app の identifier と名前が安定版の値か確かめる。違えば入れずに中断する。
 4. 安定版が動いていれば終わらせる。終わらせるのは `/Applications/Claude Town.app` の実行ファイルの pid だけで、開発版や他のプロセスには触らない。
 5. 今の .app を `$HOME/.family-computing/stable/previous/` に退避し、新しい .app を入れる。タグの `hooks/` と `scripts/hook.py` を `$HOME/.family-computing/stable/` の下に同じ相対位置で写す。どのタグから写したかは同じ場所の `hooks.ref` に残る。
-6. 安定版を起動する。
+6. 安定版を起動する。5 で hook を写せなかったときは、起動まで済ませてから 1 で終わり、`releases.log` に `hooks-failed` の行を足す。`scripts/install-stable-hooks.sh <タグ>` で写し直す。
 
 入っている版は `$HOME/.family-computing/stable/current.ref`、履歴は同じ場所の `releases.log` に残る。
 
@@ -233,6 +235,8 @@ scripts/release-stable.sh <ref>    # 例: scripts/release-stable.sh feat/app-v1
 ```bash
 scripts/rollback-stable.sh    # 今の版と1つ前の版を入れ替える。もう一度回すと元に戻る
 ```
+
+スクリプトを直したら `scripts/test-stable-scripts.sh` を流す。一時のリポジトリと一時の置き場所だけを使い、tauri build は偽の bunx に替えるので、本物の安定版には触らない。
 
 戻すときも、状態 hook を戻した先の版のタグから写し直す。アプリを入れ替えずに hook だけを写し直すときは `scripts/install-stable-hooks.sh [タグ]` を使う（タグを省くと、いま入っている版のタグから写す）。
 
