@@ -1,5 +1,5 @@
 import { Suspense, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { ChevronLeft, ChevronRight, FileText, X } from "lucide-react";
 import { perfEnd, perfMark, perfWaitingPrompt } from "../term/perf";
 import { TerminalView } from "../term/lazyTerminal";
 import { ScrollEdgeGradient } from "../ScrollEdgeGradient";
@@ -14,7 +14,7 @@ import { withNotes, type PendingItem } from "../conv";
 import { Bubble, collapseTools, withResults } from "../chat/Bubble";
 import { LiveLine } from "../chat/LiveLine";
 import { TownCtx } from "../contexts";
-import { DocIcon } from "../icons";
+import { ICON, STROKE } from "../icons";
 import { CardActions } from "../card/CardActions";
 import { StateTab } from "./StateTab";
 import { useConversation } from "./useConversation";
@@ -152,7 +152,7 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
     <aside className={`panel pm-${mood}`}>
       {mobile ? (
         <div className="m-head">
-          <button className="m-back" onClick={onBack} aria-label="一覧へ戻る"><svg width="12" height="20" viewBox="0 0 12 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10 2 2 10l8 8" /></svg></button>
+          <button className="m-back" onClick={onBack} aria-label="一覧へ戻る"><ChevronLeft size={28} strokeWidth={2} /></button>
           <div className="p-avatar"><Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(lineage.length - 1)} size={40} /></div>
           <div className="p-id">
             <div className="p-name"><span className="pn">{agent.name}</span><span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}</span></div>
@@ -168,9 +168,9 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
             {agent.account && <span className="acct" title={`アカウント: ${accountText(agent)}。このセッションの claude が動いているアカウント`}>{agent.account}</span>}
           </div>
           <div className="p-line">{lineage.map((a, i) => (
-            <span key={a.id}>{i > 0 && <b>›</b>}<button className="lnk" onClick={() => onSelect(a)}>{a.name}</button></span>
+            <span key={a.id}>{i > 0 && <ChevronRight className="p-line-sep" size={ICON.sm} strokeWidth={STROKE} aria-hidden />}<button className="lnk" onClick={() => onSelect(a)}>{a.name}</button></span>
           ))}</div>
-          <div className="p-task"><DocIcon />{linkify(taskOf(agent, mood))}</div>
+          <div className="p-task"><FileText className="p-task-icon" size={ICON.sm} strokeWidth={STROKE} aria-hidden />{linkify(taskOf(agent, mood))}</div>
         </div>
         <div className="p-actions">
           {onClose && <button className="p-close" onClick={onClose} aria-label="チャットを閉じる" title="チャットを閉じる"><X size={16} strokeWidth={1.8} /></button>}

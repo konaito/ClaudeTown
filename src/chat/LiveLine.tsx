@@ -1,6 +1,8 @@
 import { memo, useEffect, useState } from "react";
+import { CornerDownRight } from "lucide-react";
 import { elapsedText, liveSummary, msOf, type Live } from "../conv";
 import { isVisible, onVisibleChange } from "../visible";
+import { ICON, STROKE } from "../icons";
 
 /**
  * 作業中の末尾の1行（#59）。結果がまだ無い道具か「考え中」と、その動きを始めてからの経過、ターン全体の経過を出す。
@@ -29,7 +31,7 @@ export const LiveLine = memo(function LiveLine({ live, turnAt }: { live: Live; t
           {turn != null && <>{sum.since != null ? " · " : ""}このターン {elapsedText(now - turn)}</>}
         </span>
       </div>
-      {sum.heads.map((h, i) => <div key={i} className="ll-head">{h}</div>)}
+      {sum.heads.map((h, i) => <div key={i} className="ll-head"><CornerDownRight className="inline-icon ll-head-icon" size={ICON.xs} strokeWidth={STROKE} aria-hidden />{h}</div>)}
     </div>
   );
 });

@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
+import { Plus } from "lucide-react";
+import { ICON, STROKE } from "../icons";
 import { call as invoke } from "../bridge";
 import { lastTermSize } from "../term/size";
 import { perfMark, perfSetId, perfStart } from "../term/perf";
@@ -25,7 +27,7 @@ type Load = { state: "loading" } | { state: "ok"; list: RecentPlace[]; defaultPl
 
 /**
  * 左のペイン（#89）。新しい世帯を作るためだけのペインで、最近使った場所を新しい順に出し、押した場所で親を立てる。
- * 先頭の「＋ 新しい世帯」は一覧を待たずに押せる。立てる場所は設定（place、#92）で、無ければ ~/Documents/meta。
+ * 先頭の「新しい世帯」は一覧を待たずに押せる。立てる場所は設定（place、#92）で、無ければ ~/Documents/meta。
  * 一覧からは、その立てる場所を除く（withoutPlace）。見出しは出さない（2026-11-21 本人の決定）
  */
 export function NewHousePane({ place, onCreated, onError }: { place: string | null; onCreated: (r: CreatedSession | null) => void; onError: (m: string) => void }) {
@@ -61,7 +63,7 @@ export function NewHousePane({ place, onCreated, onError }: { place: string | nu
     <aside className="nh">
       <div className="nh-top">
         <button className="pane-btn new-house nh-new" disabled={off} onClick={() => go(place, true)} title={`${place ? placeLabel(place) : DEFAULT_PLACE_LABEL} で親を立てる（場所は右上の設定で変えられる）`}>
-          {busy === "" ? "立てている…" : "＋ 新しい世帯"}
+          {busy === "" ? "立てている…" : <><Plus size={ICON.md} strokeWidth={STROKE} aria-hidden />新しい世帯</>}
         </button>
       </div>
       <div className="nh-sub">最近の場所</div>

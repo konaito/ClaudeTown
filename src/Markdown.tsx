@@ -3,7 +3,9 @@
 // 「できたこと」「やったこと」などの見出しの下の箇条書きと、✓ で始まる行は、チェックの付いた一覧にする。
 // HTML は解釈しない（文字列のまま出す）。
 import { memo, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { Check, Copy, X } from "lucide-react";
 import { copyText } from "./bridge";
+import { ICON, STROKE } from "./icons";
 import { chatPerf } from "./chatPerf";
 import { openExternal, safeUrl, splitLinks } from "./links";
 
@@ -103,6 +105,7 @@ function CodeBlock({ text, k }: { text: string; k: number }) {
     <div className="md-code">
       <div className="md-copy-bar">
         <button type="button" className={`md-copy${done ? " " + done : ""}`} onClick={copy} title="コードをコピー">
+          {(() => { const I = done === "ok" ? Check : done === "ng" ? X : Copy; return <I size={ICON.xs} strokeWidth={STROKE} aria-hidden />; })()}
           {done === "ok" ? "コピーしました" : done === "ng" ? "コピーできませんでした" : "コピー"}
         </button>
       </div>

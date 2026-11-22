@@ -43,7 +43,7 @@ export function recentPlaces(input: PlacesInput, limit = RECENT_PLACES_MAX): Rec
 
 /**
  * 新しい世帯の置き場所（設定した場所、無ければ既定の場所）を一覧から除く（2026-11-21 本人の決定）。
- * 「＋ 新しい世帯」のボタンがその場所で立てるので、一覧に同じ場所を並べない。設定を変えたら、変えた先を除く。どちらも無ければ除かない
+ * 「新しい世帯」のボタンがその場所で立てるので、一覧に同じ場所を並べない。設定を変えたら、変えた先を除く。どちらも無ければ除かない
  */
 export function withoutPlace(list: RecentPlace[], place: string | null, defaultPlace: string | null | undefined): RecentPlace[] {
   const target = place ?? defaultPlace ?? null;

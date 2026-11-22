@@ -1,4 +1,6 @@
 import { memo, useContext } from "react";
+import { ArrowRight, ChevronRight, CircleStop, TriangleAlert, Wrench } from "lucide-react";
+import { ICON, STROKE } from "../icons";
 import { resolvePeer } from "../letters";
 import type { Agent, ConvItem } from "../model";
 import { Markdown, linkify } from "../Markdown";
@@ -62,12 +64,12 @@ export const Bubble = memo(BubbleView, (a: BubbleProps, b: BubbleProps) =>
  */
 function ToolLine({ item }: { item: Shown }) {
   const group = item.group ?? [item];
-  const head = <>🔧 {linkify(item.text)}{item.more ? ` ほか${item.more}件` : ""}</>;
+  const head = <><Wrench className="inline-icon" size={ICON.xs} strokeWidth={STROKE} aria-hidden /> {linkify(item.text)}{item.more ? ` ほか${item.more}件` : ""}</>;
   if (!item.done) return <div className="tool-line">{head}</div>;
   const bad = group.some((g) => g.result?.error);
   return (
     <details className="tool-line tool-open">
-      <summary>{head}{bad && <span className="tl-bad">失敗あり</span>}</summary>
+      <summary>{head}<ChevronRight className="inline-icon tl-caret" size={ICON.xs} strokeWidth={STROKE} aria-hidden />{bad && <span className="tl-bad">失敗あり</span>}</summary>
       <div className="tl-list">
         {group.map((g, i) => (
           <div key={g.id ?? i} className="tl-item">
@@ -84,7 +86,7 @@ function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
   chatPerf.bubble++;
   if (item.role === "tool" && item.sent) return <SentLetter item={item} agent={agent} lineageDepth={lineageDepth} />;
   if (item.role === "tool") return <ToolLine item={item} />;
-  if (item.role === "event") return <div className={`turn-event te-${item.kind ?? "error"}`}>{item.kind === "interrupted" ? "⏹ " : item.kind === "command" ? "" : "⚠️ "}{item.text}<span className="te-at">{timeOf(item.at)}</span></div>;
+  if (item.role === "event") return <div className={`turn-event te-${item.kind ?? "error"}`}>{item.kind === "interrupted" ? <CircleStop className="inline-icon" size={ICON.sm} strokeWidth={STROKE} aria-hidden /> : item.kind === "command" ? null : <TriangleAlert className="inline-icon" size={ICON.sm} strokeWidth={STROKE} aria-hidden />}{item.text}<span className="te-at">{timeOf(item.at)}</span></div>;
   if (item.role === "result") return null;
   if (item.role === "user" && item.letter) return <LetterBubble item={item} agent={agent} />;
   if (item.role === "user") {
@@ -134,15 +136,15 @@ function LetterBubble({ item, agent }: { item: ConvItem; agent: Agent }) {
   return <LetterView pick={who?.avatar} seed={who?.id ?? name} role={peer?.role ?? "parent"} name={name} at={item.at} text={item.text} />;
 }
 
-/** 送ったお手紙。このセッション自身の発言として出し、名前の行に宛先（→ 名前）を添える。吹き出しは肌色 */
+/** 送ったお手紙。このセッション自身の発言として出し、名前の行に宛先（lucide の arrow-right と名前）を添える。吹き出しは肌色 */
 function SentLetter({ item, agent, lineageDepth }: { item: ConvItem; agent: Agent; lineageDepth: number }) {
   const s = item.sent!;
   const who = useLetterPeer(s.to ?? null, s.to ?? null, agent)?.who;
   const to = s.create ? "新しい子" : who?.name ?? (s.to ? String(s.to).replace(/^uds:.*\/(\d+)\.sock$/, "pid $1") : "相手");
-  return <LetterView pick={agent.avatar} seed={agent.id} role={roleOf(lineageDepth)} name={agent.name} to={`→ ${to}${s.peer ? `（${s.peer}）` : ""}`} at={item.at} text={s.text || s.summary || ""} />;
+  return <LetterView pick={agent.avatar} seed={agent.id} role={roleOf(lineageDepth)} name={agent.name} to={`${to}${s.peer ? `（${s.peer}）` : ""}`} at={item.at} text={s.text || s.summary || ""} />;
 }
 
-type LetterViewProps = { pick?: Agent["avatar"]; seed: string; role: Role; name: string; to?: string; at?: string | number | null; text: string };
+type LetterViewProps = { pick?: Agent["avatar"]; seed: string; role: Role; name: string; /** 送ったお手紙の宛先の名前。矢印は LetterView が付ける（memo は文字列で比べる） */ to?: string; at?: string | number | null; text: string };
 
 /**
  * お手紙の吹き出しの見た目。お手紙の相手は町の一覧（TownCtx）から引くので、一覧を取るたびに上の2つは描き直される。
@@ -154,7 +156,7 @@ const LetterView = memo(function LetterView({ pick, seed, role, name, to, at, te
     <div className="msg kid letter">
       <div className="mini-av"><Avatar pick={pick} seed={seed} mood="idle" role={role} size={32} /></div>
       <div>
-        <div className="meta"><b>{name}</b>{to && <span className="to">{to}</span>}{timeOf(at)}</div>
+        <div className="meta"><b>{name}</b>{to && <span className="to"><ArrowRight className="inline-icon" size={ICON.xs} strokeWidth={STROKE} aria-label="宛先" />{to}</span>}{timeOf(at)}</div>
         <div className="b"><Markdown text={text} /></div>
       </div>
     </div>

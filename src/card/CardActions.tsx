@@ -1,4 +1,6 @@
 import { memo, useContext, useEffect, useRef, useState } from "react";
+import { MessageCircleQuestionMark, Power, ThumbsUp, type LucideIcon } from "lucide-react";
+import { ICON, STROKE } from "../icons";
 import type { Agent } from "../model";
 import { KillCtx, SendCtx } from "../contexts";
 import { canStop as abilityStop } from "../abilities";
@@ -9,12 +11,12 @@ import { canStop as abilityStop } from "../abilities";
  * kind が kill のボタンはセッションを閉じる（前のカードの × と同じ動き）。send のボタンは text をチャットの送信と同じ口で送る。
  * 見本は本人のスクショ（2026-11-13）。角丸のカードの右下の縁に、角丸の四角いボタンが縁にまたがって並ぶ
  */
-export type CardAction = { key: string; icon: string; name: string } & ({ kind: "kill" } | { kind: "send"; text: string });
+export type CardAction = { key: string; icon: LucideIcon; name: string } & ({ kind: "kill" } | { kind: "send"; text: string });
 
 const CARD_ACTIONS: CardAction[] = [
-  { key: "kill", icon: "🐺", name: "閉じる", kind: "kill" },
-  { key: "howdy", icon: "🚪", name: "様子を聞く", kind: "send", text: "調子どうですか" },
-  { key: "go", icon: "👍", name: "許可する", kind: "send", text: "許可します、やってくださいお願いします。" },
+  { key: "kill", icon: Power, name: "閉じる", kind: "kill" },
+  { key: "howdy", icon: MessageCircleQuestionMark, name: "様子を聞く", kind: "send", text: "調子どうですか" },
+  { key: "go", icon: ThumbsUp, name: "許可する", kind: "send", text: "許可します、やってくださいお願いします。" },
 ];
 
 /** true ならカードの右下のボタンをいつも出す。false ならカードに乗せたときと、選んでいるカードだけに出す */
@@ -63,7 +65,7 @@ export const CardActions = memo(function CardActions({ agent, place = "card" }: 
           <button key={act.key} type="button" className={`card-act ca-${act.key} ${off ? "off" : ""} ${fx}`}
             aria-disabled={off} title={title} aria-label={`${agent.name}: ${title}`}
             onClick={(e) => press(act, e)}>
-            <span aria-hidden>{act.icon}</span>
+            <act.icon size={place === "head" ? ICON.sm : ICON.xs} strokeWidth={STROKE} aria-hidden />
           </button>
         );
       })}

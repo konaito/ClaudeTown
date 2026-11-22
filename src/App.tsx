@@ -7,11 +7,11 @@ import { collectMail, type Mail } from "./mail";
 import { flightsOf } from "./letters";
 import { kickTown } from "./town";
 import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
-import { PanelLeftClose, PanelLeftOpen, Settings, Users } from "lucide-react";
+import { Maximize, Minus, PanelLeftClose, PanelLeftOpen, Plus, Settings, Users } from "lucide-react";
 import { NewHousePane } from "./newHouse/NewHousePane";
 import { NewHousehold } from "./newHouse/NewHousehold";
 import { Credits } from "./credits/Credits";
-import { HouseIcon } from "./icons";
+import { ICON, STROKE } from "./icons";
 import { groupSizeOf } from "./layout/params";
 import { useToasts } from "./hooks/useToasts";
 import { useTown } from "./hooks/useTown";
@@ -144,7 +144,7 @@ export default function App() {
   // 3枚のペイン（#89）。左の新しい世帯のペインはヘッダーのボタンとドラッグで開け閉めする。
   // 右のチャットは、セッションを選んでいないときに閉じ、選んだら開く。閉じても Panel は残す（入力欄の下書きを Panel が持っているため）
   const { housesRef, sideRef, housesOpen, setHousesOpen, sideOpen, setSideOpen, selRef, toggleHouses } = usePanes(!!sel, mobile);
-  // 設定（#92）。「＋ 新しい世帯」で親を立てる場所。null は既定（~/Documents/meta）
+  // 設定（#92）。「新しい世帯」で親を立てる場所。null は既定（~/Documents/meta）
   const [place, setPlace] = useState<string | null>(loadPlace);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
@@ -177,7 +177,6 @@ export default function App() {
                 title={housesOpen ? "新しい世帯のペインを閉じる" : "新しい世帯のペインを開く"} aria-expanded={housesOpen}>
                 {housesOpen ? <PanelLeftClose size={18} strokeWidth={1.8} /> : <PanelLeftOpen size={18} strokeWidth={1.8} />}
               </button>
-              <HouseIcon />
               <h1>Claude Town</h1>
             </div>
             <div className="top-mid" />
@@ -224,12 +223,12 @@ export default function App() {
 
           <div className="left-foot">
             <div className="zoom">
-              <button onClick={zoomOut}>−</button>
+              <button onClick={zoomOut} aria-label="小さくする" title="小さくする"><Minus size={ICON.md} strokeWidth={STROKE} /></button>
               <button className="zval" onClick={zoomFit} title="全体が入る大きさにする">
                 {zoom === "fit" ? "全体" : `${Math.round(zoom * 100)}%`}
               </button>
-              <button onClick={zoomIn}>＋</button>
-              <button className="fs" title="全画面" onClick={() => setFullscreen()}>⛶</button>
+              <button onClick={zoomIn} aria-label="大きくする" title="大きくする"><Plus size={ICON.md} strokeWidth={STROKE} /></button>
+              <button className="fs" title="全画面" aria-label="全画面" onClick={() => setFullscreen()}><Maximize size={ICON.md} strokeWidth={STROKE} /></button>
             </div>
             <span className="hint">クリックでチャット・右クリックでターミナル</span>
             <Credits skin={skin} onSkin={(v) => { setSkin(v); saveSkin(v); }} />

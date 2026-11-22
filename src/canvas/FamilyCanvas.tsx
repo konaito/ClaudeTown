@@ -8,6 +8,7 @@ import { LETTER_IMG } from "../useLetterMarks";
 import { CardActions } from "../card/CardActions";
 import { Since } from "../Since";
 import { watchOffscreen } from "../offscreen";
+import { ICON, ROLE_ICON, STROKE } from "../icons";
 
 /** グループ（根のセッション1つとその子孫）ごとの淡い色。名前から決まる */
 const GROUP_TINTS = ["#f3f7ff", "#fff6ec", "#f1faf3", "#f8f3ff", "#fff2f5", "#eff9f9", "#fbf8ec"];
@@ -209,7 +210,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
       title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}${acct ? `\nアカウント: ${acct}` : ""}\nクリックでチャット・右クリックでターミナル`}
     >
       <div className="card-top">
-        <span className="role">{ROLE_LABEL[Math.min(depth, 4)]}</span>
+        <RoleTag depth={depth} />
         <span className="task">{task}</span>
       </div>
       <div className="card-main">
@@ -223,4 +224,11 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
       </div>
     </button>
   );
+}
+
+/** カードの左上の札。文字（親、子、孫…）の代わりに lucide のアイコンを出し、文字は title と aria-label に残す */
+function RoleTag({ depth }: { depth: number }) {
+  const d = Math.min(depth, 4);
+  const I = ROLE_ICON[d];
+  return <span className="role" role="img" aria-label={ROLE_LABEL[d]} title={ROLE_LABEL[d]}><I size={ICON.sm} strokeWidth={STROKE} aria-hidden /></span>;
 }
