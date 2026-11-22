@@ -9,6 +9,7 @@
 // ファイルを読む命令は spawn_blocking で動かし、メインスレッドを止めない（下の「画面から呼ぶ命令」）。
 // 操作（送信、停止、端末）は、このアプリが立てたセッションにだけできる。ほかのセッションは記録から読むだけ。
 
+mod account;
 mod attach;
 mod avatars;
 mod composer;

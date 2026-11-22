@@ -336,6 +336,8 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
     }
     let path = login_path();
     let bin = claude_bin(path.as_deref())?;
+    // どのアカウントで起動するか（cam usage の best。account.rs）。resume も同じ選び方にする（会話の記録 projects と sessions は、cam が全プロファイルで ~/.claude のものを共有している）
+    let config_dir = crate::account::prepare(path.as_deref())?;
     let id = resume.map(String::from).unwrap_or_else(new_uuid);
     let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
     let pair = native_pty_system().openpty(size).map_err(|e| format!("端末を開けなかった: {e}"))?;
@@ -351,6 +353,10 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
     }
     if let Some(p) = &path {
         cmd.env("PATH", p);
+    }
+    // 選べたときだけ差し替える。アプリの環境に別の値があっても（cam の launcher から開いた開発版）、選んだプロファイルにする
+    if let Some(d) = &config_dir {
+        cmd.env("CLAUDE_CONFIG_DIR", d);
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -633,6 +639,89 @@ mod tests {
     }
 
     static BIN_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 偽の cam と偽の claude を置いた試験用のディレクトリ。cam usage --json は usage を返し、sync は呼ばれた名前を sync.log に足す。
+    /// claude は自分の環境を env.txt に書いてから寝る
+    fn fake_cam_dir(tag: &str, usage: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("fc-pty-cam-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("profiles/acct")).unwrap();
+        std::fs::write(dir.join("usage.json"), usage).unwrap();
+        let cam = format!(
+            "#!/bin/sh\ncase \"$1\" in\n  usage) cat '{d}/usage.json' ;;\n  sync) echo \"$2\" >> '{d}/sync.log' ;;\nesac\n",
+            d = dir.display()
+        );
+        let claude = format!("#!/bin/sh\nenv > '{d}/env.txt.tmp' && mv '{d}/env.txt.tmp' '{d}/env.txt'\nexec sleep 30\n", d = dir.display());
+        for (n, body) in [("cam", cam), ("claude", claude)] {
+            std::fs::write(dir.join(n), body).unwrap();
+            std::fs::set_permissions(dir.join(n), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        dir
+    }
+
+    /// 偽の cam と claude で起動し、claude の環境の CLAUDE_CONFIG_DIR を返す（無ければ None）。
+    /// アプリの環境に別の CLAUDE_CONFIG_DIR があっても（cam の launcher から開いた開発版）、選んだ値で上書きされることも見る
+    fn launched_config_dir(dir: &std::path::Path) -> Result<Option<String>, String> {
+        // 町の一覧を数える試験（lib.rs）に、この端末が混ざらないようにする。錠は端末が台帳から消えるまで持つ
+        let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("CLAUDE_CONFIG_DIR").ok();
+        unsafe {
+            std::env::set_var("FC_CLAUDE_BIN", dir.join("claude"));
+            std::env::set_var("FC_CAM_BIN", dir.join("cam"));
+            std::env::set_var("FC_CAM_PROFILES", dir.join("profiles"));
+            std::env::set_var("CLAUDE_CONFIG_DIR", "/nowhere/inherited");
+        }
+        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {});
+        unsafe {
+            std::env::remove_var("FC_CLAUDE_BIN");
+            std::env::remove_var("FC_CAM_BIN");
+            std::env::remove_var("FC_CAM_PROFILES");
+            match &prev { Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v), None => std::env::remove_var("CLAUDE_CONFIG_DIR") }
+        }
+        let id = r?["id"].as_str().unwrap().to_string();
+        let t0 = Instant::now();
+        let env = loop {
+            if let Ok(s) = std::fs::read_to_string(dir.join("env.txt")) { break s; }
+            assert!(t0.elapsed() < Duration::from_secs(5), "偽の claude が env.txt を書かなかった");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        kill(&id).unwrap();
+        while owns(&id) {
+            assert!(t0.elapsed() < Duration::from_secs(10), "止めた端末が台帳から消えない");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok(env.lines().find_map(|l| l.strip_prefix("CLAUDE_CONFIG_DIR=")).map(String::from))
+    }
+
+    /// cam usage の best のプロファイルで起動する。パスは launcher（~/.cam/bin/<名前>）と同じ <profiles>/<名前> の文字列のまま。
+    /// 直す前は CLAUDE_CONFIG_DIR を付けず、アプリの環境の値のまま起動していた（5時間枠を使い切った ~/.claude のアカウントで立った）
+    #[test]
+    fn launch_uses_the_cam_best_profile() {
+        let dir = fake_cam_dir("best", r#"{"best":"acct","choice":"normal","next_available":null,"accounts":[]}"#);
+        let want = format!("{}/acct", dir.join("profiles").display());
+        assert_eq!(launched_config_dir(&dir).unwrap().as_deref(), Some(want.as_str()));
+        assert_eq!(std::fs::read_to_string(dir.join("sync.log")).unwrap_or_default(), "acct\n", "起動の前に cam sync <名前> を掛ける");
+    }
+
+    /// 選べないとき（choice: unknown）は env を触らない。アプリの環境の値のまま起動する
+    #[test]
+    fn launch_keeps_the_env_when_cam_cannot_choose() {
+        let dir = fake_cam_dir("unknown", r#"{"best":null,"choice":"unknown","next_available":null,"accounts":[]}"#);
+        assert_eq!(launched_config_dir(&dir).unwrap().as_deref(), Some("/nowhere/inherited"));
+        assert!(!dir.join("sync.log").exists());
+    }
+
+    /// 全部のアカウントが上限で、戻る時刻が先にあるときは起動しない。理由に戻るアカウントを書く
+    #[test]
+    fn launch_refuses_when_every_account_is_at_the_limit() {
+        let at = crate::now_ms() as i64 / 1000 + 3600;
+        let dir = fake_cam_dir("none", &format!(r#"{{"best":null,"choice":"none","next_available":{{"name":"cto","at":{at}}},"accounts":[]}}"#));
+        let err = launched_config_dir(&dir).unwrap_err();
+        assert!(err.contains("cto"), "{err}");
+        assert!(!dir.join("env.txt").exists(), "claude を起動していない");
+    }
 
     #[test]
     fn start_args_from_the_settings() {
