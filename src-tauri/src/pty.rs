@@ -6,6 +6,9 @@
 // - 出力の末尾 KEEP_BYTES を持ち、端末を開いた画面には size と replay（持っている分）を送ってから、続きを data で流す。
 // - アプリを終えるとき、ここから立てた claude を全部止める（kill_all）。アプリが落ちたときは、PTY の親の側が閉じて
 //   claude に SIGHUP が届く（下の試験と README に結果を書いた）。どちらでも、アプリから立てた世帯はアプリと一緒に止まる。
+// - そのため、立てた端末の一覧（台帳）を terminals.json に残し、次に起動したときに `--resume <id>` で立て直す（#152）。
+//   台帳から外すのは、画面から閉じたときと claude が自分で終わったときだけ。アプリを終えるとき（kill_all）と、
+//   アプリが落ちたとき（SIGTERM など、終わりの処理を通らない）は台帳に触らないので、開いていた分が残る。
 // - 書き口（writer）は claude が動いている間は落とさない。portable-pty は書き口を落とすときに改行と EOT を書くので、
 //   動いている claude には Enter が届いてしまう。
 
@@ -15,6 +18,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -31,6 +35,10 @@ struct Proc {
     pid: u32,
     /// 起動のときに渡した id と、一覧で同じ pid に見えた id。最初が起動のときの id
     ids: Vec<String>,
+    /// 今の id（sessions/<pid>.json に今出ている id）。台帳にはこれを残す。/resume で前の id に戻ると ids は増えないので、別に持つ
+    cur: String,
+    /// 起動のときに --name で渡した名前
+    name: Option<String>,
     cwd: String,
     started_at: u64,
     size: (u16, u16),
@@ -66,14 +74,24 @@ pub fn owns(id: &str) -> bool {
 
 /// 一覧で見えた行（id と pid）を台帳に足す。/clear などで id が変わっても、同じ pid なら同じ端末として扱う
 pub fn note_ids(rows: &[(String, u32)]) {
-    with(|m| {
+    let changed = with(|m| {
+        let mut changed = false;
         for (id, pid) in rows {
-            if let Some(p) = m.get_mut(pid)
-                && !p.ids.contains(id) {
+            if let Some(p) = m.get_mut(pid) {
+                if !p.ids.contains(id) {
                     p.ids.push(id.clone());
                 }
+                if p.cur != *id {
+                    p.cur = id.clone();
+                    changed = true;
+                }
+            }
         }
+        changed
     });
+    if changed {
+        persist();
+    }
 }
 
 /// 台帳の1件の要約（一覧に足す行を作るため）
@@ -170,23 +188,161 @@ fn drop_env(k: &str) -> bool {
     k == "CLAUDECODE" || k == "CLAUDE_PID" || k == "CLAUDE_EFFORT" || k.starts_with("CLAUDE_CODE_") || k.starts_with("CLAUDE_PLUGIN_")
 }
 
+// ---------- 台帳（アプリを立ち上げ直したときに戻す、#152） ----------
+
+/// 台帳の1件。形は ~/.family-computing[/dev]/terminals.json の terminals の要素
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Entry {
+    pub id: String,
+    pub cwd: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default = "default_cols")]
+    pub cols: u16,
+    #[serde(default = "default_rows")]
+    pub rows: u16,
+    #[serde(default)]
+    pub started_at: u64,
+}
+fn default_cols() -> u16 { 120 }
+fn default_rows() -> u16 { 40 }
+
+/// 台帳の置き場所と、まだ立て直していない分（起動の後、立て直しが済むまで）。置き場所が無ければ書かない（試験）
+struct Ledger {
+    path: PathBuf,
+    pending: Vec<Entry>,
+}
+static LEDGER: Mutex<Option<Ledger>> = Mutex::new(None);
+/// アプリを終えている途中か。立っていれば台帳に書かない（終えるときに止めた分を、台帳から外さない）
+static SHUTTING: AtomicBool = AtomicBool::new(false);
+/// 台帳を書く順番の錠。中身を集めるところから書き終えるまで持つ（古い中身が後から書かれない）
+static WRITE: Mutex<()> = Mutex::new(());
+
+/// 台帳を読む。無ければ空。読めない（壊れている）ときは .bad に写して残し、空として扱う
+pub fn read_ledger(path: &std::path::Path) -> Vec<Entry> {
+    let Ok(t) = std::fs::read_to_string(path) else { return vec![] };
+    match serde_json::from_str::<Value>(&t).ok().and_then(|v| serde_json::from_value::<Vec<Entry>>(v["terminals"].clone()).ok()) {
+        Some(v) => v,
+        None => {
+            let bad = path.with_extension("json.bad");
+            let _ = std::fs::copy(path, &bad);
+            eprintln!("[pty] 台帳が読めなかったので {} に写して、空から始める", bad.display());
+            vec![]
+        }
+    }
+}
+
+/// 台帳の置き場所を決め、前回の分を読んで「まだ立て直していない分」にする。返すのは前回の分。
+/// 立て直すか飛ばすかを決めたら、1件ずつ settle で外す（外すまでは、台帳を書き直しても残る）
+pub fn open_ledger(path: PathBuf) -> Vec<Entry> {
+    let prev = read_ledger(&path);
+    *LEDGER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Ledger { path, pending: prev.clone() });
+    prev
+}
+
+/// まだ立て直していない分から id を外し、台帳を書き直す（立て直せた、または戻さないと決めた）
+pub fn settle(id: &str) {
+    if let Some(l) = LEDGER.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        l.pending.retain(|e| e.id != id);
+    }
+    persist();
+}
+
+/// 今の台帳（生きている端末と、まだ立て直していない分）を書く。アプリを終えている途中は書かない。
+/// 中身は台帳の錠（PROCS）の中で写し、ファイルには錠の外で書く。tmp に書いて rename する
+fn persist() {
+    let _w = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    if SHUTTING.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some((path, pending)) = LEDGER.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|l| (l.path.clone(), l.pending.clone())) else { return };
+    let mut list: Vec<Entry> = with(|m| {
+        m.values().map(|p| Entry { id: p.cur.clone(), cwd: p.cwd.clone(), name: p.name.clone(), cols: p.size.0, rows: p.size.1, started_at: p.started_at }).collect()
+    });
+    list.sort_by_key(|e| e.started_at);
+    for e in pending {
+        if !list.iter().any(|x| x.id == e.id) {
+            list.push(e);
+        }
+    }
+    let body = serde_json::to_string_pretty(&json!({ "version": 1, "terminals": list })).unwrap_or_default();
+    let tmp = path.with_extension(format!("json.tmp{}", std::process::id()));
+    if let Some(d) = path.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    if let Err(e) = std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &path)) {
+        eprintln!("[pty] 台帳を書けなかった {}: {e}", path.display());
+    }
+}
+
+/// アプリを終えるので、これより後は台帳に書かない
+fn begin_shutdown() {
+    let _w = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    SHUTTING.store(true, Ordering::SeqCst);
+}
+
 // ---------- 起動 ----------
 
 /// claude を PTY で起動し、セッションの id を返す。cwd はディレクトリでなければ断る
-pub fn spawn(cwd: &str, name: Option<&str>, cols: u16, rows: u16, notice: impl Fn() + Send + 'static) -> Result<Value, String> {
+/// start は、新しく立てるときだけ足す引数（設定の既定のモデルと権限モード、start_args）
+pub fn spawn(cwd: &str, name: Option<&str>, start: &[String], cols: u16, rows: u16, notice: impl Fn() + Send + 'static) -> Result<Value, String> {
+    launch(cwd, None, name, start, cols, rows, notice)
+}
+
+/// 新しい世帯を立てるときのモデルと権限モード（設定の既定、src/session/defaults.ts）を、claude の --model と --permission-mode にする。
+/// 空の値は渡さない（この Mac の Claude Code の既定になる）。空白を含む値や、知らない権限モードは断る（引数を1つずつ渡すので混ざりはしないが、打ち間違いを起動の前に止める）
+pub fn start_args(model: Option<&str>, mode: Option<&str>) -> Result<Vec<String>, String> {
+    const MODES: [&str; 6] = ["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"];
+    let mut a = vec![];
+    if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        if m.chars().any(char::is_whitespace) || m.starts_with('-') {
+            return Err(format!("モデルの名前が読めない: {m}"));
+        }
+        a.extend(["--model".to_string(), m.to_string()]);
+    }
+    if let Some(p) = mode.map(str::trim).filter(|p| !p.is_empty()) {
+        if !MODES.contains(&p) {
+            return Err(format!("知らない権限モード: {p}"));
+        }
+        a.extend(["--permission-mode".to_string(), p.to_string()]);
+    }
+    Ok(a)
+}
+
+/// 前の会話 id を `claude --resume <id>` で立て直す。id は変わらない（2.1.330 の --help: 新しい id にするのは --fork-session のとき）。
+/// 会話の jsonl があるか、よそで同じ id が動いていないかは、呼ぶ側が先に確かめる（session_ops.rs）
+pub fn resume(id: &str, cwd: &str, name: Option<&str>, cols: u16, rows: u16, notice: impl Fn() + Send + 'static) -> Result<Value, String> {
+    if pid_of_id(id).is_some() {
+        return Err(format!("このセッションはもう Claude Town で開いている: {id}"));
+    }
+    // resume では設定の既定を足さない。前の会話のモデルと権限モードのまま立て直す
+    launch(cwd, Some(id), name, &[], cols, rows, notice)
+}
+
+/// claude の引数。resume なら `--resume <id>`、新しく立てるなら `--session-id <id>` と、名前があれば `--name`。
+/// resume のときは名前を渡さない（後から /rename した名前を、起動のときの名前で上書きしない。名前は会話の記録から戻る）
+fn launch_args(id: &str, resume: bool, name: Option<&str>) -> Vec<String> {
+    let mut a = vec![if resume { "--resume" } else { "--session-id" }.to_string(), id.to_string()];
+    if let Some(n) = name.filter(|n| !resume && !n.trim().is_empty()) {
+        a.extend(["--name".to_string(), n.to_string()]);
+    }
+    a
+}
+
+fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String], cols: u16, rows: u16, notice: impl Fn() + Send + 'static) -> Result<Value, String> {
     if !std::path::Path::new(cwd).is_dir() {
         return Err(format!("場所が無いか、ディレクトリではない: {cwd}"));
     }
     let path = login_path();
     let bin = claude_bin(path.as_deref())?;
-    let id = new_uuid();
+    let id = resume.map(String::from).unwrap_or_else(new_uuid);
     let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
     let pair = native_pty_system().openpty(size).map_err(|e| format!("端末を開けなかった: {e}"))?;
     let mut cmd = CommandBuilder::new(&bin);
-    cmd.args(["--session-id", &id]);
-    if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
-        cmd.args(["--name", n]);
-    }
+    cmd.args(launch_args(&id, resume.is_some(), name));
+    cmd.args(start);
+    let name = name.filter(|n| !n.trim().is_empty()).map(String::from);
     cmd.cwd(cwd);
     for (k, _) in std::env::vars() {
         if drop_env(&k) {
@@ -209,9 +365,10 @@ pub fn spawn(cwd: &str, name: Option<&str>, cols: u16, rows: u16, notice: impl F
     let killer = child.clone_killer();
     let started_at = crate::now_ms() as u64;
     with(|m| {
-        m.insert(pid, Proc { pid, ids: vec![id.clone()], cwd: cwd.to_string(), started_at, size: (cols, rows), master: pair.master, writer: Arc::new(Mutex::new(writer)), killer, out: vec![], screen: new_screen(cols, rows), sub: None, carry: vec![] });
+        m.insert(pid, Proc { pid, ids: vec![id.clone()], cur: id.clone(), name, cwd: cwd.to_string(), started_at, size: (cols, rows), master: pair.master, writer: Arc::new(Mutex::new(writer)), killer, out: vec![], screen: new_screen(cols, rows), sub: None, carry: vec![] });
     });
-    eprintln!("[pty] claude を起動した pid {pid} id {id} cwd {cwd}");
+    eprintln!("[pty] claude を{}した pid {pid} id {id} cwd {cwd}", if resume.is_some() { "resume で起動" } else { "起動" });
+    persist();
     std::thread::spawn(move || read_loop(pid, reader));
     std::thread::spawn(move || {
         let st = child.wait();
@@ -224,6 +381,8 @@ pub fn spawn(cwd: &str, name: Option<&str>, cols: u16, rows: u16, notice: impl F
             && let Some((_, tx)) = &p.sub {
                 let _ = tx.send(TermOut::Event("exit".into(), json!({ "reason": "終わった", "code": code })));
             }
+        // 閉じた、または claude が自分で終わったので、次の起動で戻さない（アプリを終えている途中なら persist は書かない）
+        persist();
         notice();
     });
     Ok(json!({ "id": id, "pid": pid, "cwd": cwd }))
@@ -376,6 +535,8 @@ pub fn kill(id: &str) -> Result<(), String> {
 
 /// アプリを終えるときに、ここから立てた claude を全部止める。SIGHUP を全部に送り、1秒待って残りに SIGKILL
 pub fn kill_all() {
+    // 台帳はアプリを終える前のまま残す（次の起動で戻す）
+    begin_shutdown();
     let pids: Vec<u32> = with(|m| m.keys().copied().collect());
     if pids.is_empty() {
         return;
@@ -452,7 +613,7 @@ mod tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
-        let r = spawn(dir.to_str().unwrap(), None, 80, 24, || {}).unwrap();
+        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {}).unwrap();
         unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
         let id = r["id"].as_str().unwrap().to_string();
         let id2 = id.clone();
@@ -468,6 +629,131 @@ mod tests {
 
     static BIN_LOCK: Mutex<()> = Mutex::new(());
 
+    #[test]
+    fn start_args_from_the_settings() {
+        assert_eq!(start_args(Some("sonnet"), Some("plan")).unwrap(), vec!["--model", "sonnet", "--permission-mode", "plan"]);
+        // 設定していない項目と空の値は渡さない
+        assert!(start_args(None, Some(" ")).unwrap().is_empty());
+        assert!(start_args(Some("opus 1"), None).is_err());
+        assert!(start_args(Some("--x"), None).is_err());
+        assert!(start_args(None, Some("yolo")).is_err());
+    }
+
+    #[test]
+    fn resume_args_keep_the_id_and_drop_the_name() {
+        assert_eq!(launch_args("a", false, Some("n")), vec!["--session-id", "a", "--name", "n"]);
+        assert_eq!(launch_args("a", false, Some(" ")), vec!["--session-id", "a"]);
+        assert_eq!(launch_args("a", true, Some("n")), vec!["--resume", "a"]);
+    }
+
+    #[test]
+    fn a_broken_ledger_is_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("fc-ledger-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("terminals.json");
+        assert!(read_ledger(&p).is_empty());
+        std::fs::write(&p, "{ not json").unwrap();
+        assert!(read_ledger(&p).is_empty());
+        assert_eq!(std::fs::read_to_string(dir.join("terminals.json.bad")).unwrap(), "{ not json");
+        std::fs::write(&p, r#"{"version":1,"terminals":[{"id":"x","cwd":"/tmp"}]}"#).unwrap();
+        assert_eq!(read_ledger(&p), vec![Entry { id: "x".into(), cwd: "/tmp".into(), name: None, cols: 120, rows: 40, started_at: 0 }]);
+    }
+
+    /// 台帳の出入り（#152）。閉じたものと自分で終わったものは外れ、アプリを終えるときに止めたものは残り、
+    /// id が変わったら新しい id になり、resume は `--resume <id>` を元の cwd で渡す。
+    /// 台帳と SHUTTING はプロセスで1つなので、場合を1つの試験に並べ、BIN_LOCK の中で回す（ほかの試験の端末は id で除いて見る）
+    #[test]
+    fn ledger_keeps_only_what_was_open_when_the_app_ended() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fc-ledger-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let args_out = dir.join("args");
+        // 引数と cwd を書き、1行読んだら終わる claude の代わり
+        let bin = dir.join("claude");
+        std::fs::write(&bin, format!("#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\" > '{}'\nread x\nexit 0\n", args_out.display())).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cwd = dir.join("place");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let cwd = cwd.canonicalize().unwrap().to_string_lossy().to_string();
+        let ledger = dir.join("terminals.json");
+        // 前回の分が1件（まだ立て直していない）
+        std::fs::write(&ledger, r#"{"version":1,"terminals":[{"id":"prev-1","cwd":"/nowhere"}]}"#).unwrap();
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
+        let prev = open_ledger(ledger.clone());
+        assert_eq!(prev.len(), 1);
+        let ids = || -> Vec<String> { read_ledger(&ledger).into_iter().map(|e| e.id).collect() };
+        let wait_gone = |id: &str| {
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_secs(5) && owns(id) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            // 終わりを待つスレッドが台帳を書き直すまで
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!owns(id), "{id} が終わらない");
+        };
+
+        // 立てると載る。まだ立て直していない分も残る
+        let a = spawn(&cwd, Some("名前"), &[], 80, 24, || {}).unwrap()["id"].as_str().unwrap().to_string();
+        let l = read_ledger(&ledger);
+        let ea = l.iter().find(|e| e.id == a).expect("立てた端末が台帳に無い");
+        assert_eq!((ea.cwd.as_str(), ea.name.as_deref(), ea.cols, ea.rows), (cwd.as_str(), Some("名前"), 80, 24));
+        assert!(ids().contains(&"prev-1".to_string()));
+        // 閉じると外れる
+        kill(&a).unwrap();
+        wait_gone(&a);
+        assert!(!ids().contains(&a));
+
+        // 自分で終わると外れる
+        let b = spawn(&cwd, None, &[], 80, 24, || {}).unwrap()["id"].as_str().unwrap().to_string();
+        assert!(ids().contains(&b));
+        write(&b, "\r").unwrap();
+        wait_gone(&b);
+        assert!(!ids().contains(&b));
+
+        // /clear などで id が変わると、新しい id で残る。前の id でも同じ端末として扱う
+        let c = spawn(&cwd, None, &[], 80, 24, || {}).unwrap()["id"].as_str().unwrap().to_string();
+        let pc = pid_of_id(&c).unwrap();
+        note_ids(&[("cleared-c".to_string(), pc)]);
+        assert!(ids().contains(&"cleared-c".to_string()) && !ids().contains(&c));
+        assert!(owns(&c) && owns("cleared-c"));
+        // /resume で前の id に戻ると、前の id で残る
+        note_ids(&[(c.clone(), pc)]);
+        assert!(ids().contains(&c) && !ids().contains(&"cleared-c".to_string()));
+
+        // 立て直した分を外す
+        settle("prev-1");
+        assert!(!ids().contains(&"prev-1".to_string()));
+
+        // resume は --resume <id> を元の cwd で渡し、このアプリの端末になる
+        let r = resume("resumed-1", &cwd, Some("名前"), 80, 24, || {}).unwrap();
+        assert_eq!(r["id"], "resumed-1");
+        assert!(owns("resumed-1"));
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(5) && std::fs::read_to_string(&args_out).map(|t| !t.contains("resumed-1")).unwrap_or(true) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let got = std::fs::read_to_string(&args_out).unwrap();
+        assert_eq!(got.lines().collect::<Vec<_>>(), vec![cwd.as_str(), "--resume", "resumed-1"]);
+        assert!(ids().contains(&"resumed-1".to_string()));
+        // 同じ id をもう一度は立てない
+        assert!(resume("resumed-1", &cwd, None, 80, 24, || {}).is_err());
+
+        // アプリを終えるときに止めたものは残る（kill_all はほかの試験の端末も止めるので、前半だけを呼ぶ）
+        begin_shutdown();
+        let before = ids();
+        kill(&c).unwrap();
+        kill("resumed-1").unwrap();
+        wait_gone(&c);
+        wait_gone("resumed-1");
+        assert_eq!(ids(), before);
+        assert!(before.contains(&c) && before.contains(&"resumed-1".to_string()));
+        SHUTTING.store(false, Ordering::SeqCst);
+        *LEDGER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+    }
+
     /// 本物の PTY で、cat を起動して書き、読み、止める（claude の代わり）
     #[test]
     fn spawn_write_read_kill_with_a_stand_in() {
@@ -479,7 +765,7 @@ mod tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
-        let r = spawn(dir.to_str().unwrap(), None, 80, 24, || {}).unwrap();
+        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {}).unwrap();
         unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
         let id = r["id"].as_str().unwrap().to_string();
         assert!(owns(&id));
@@ -517,7 +803,7 @@ mod real {
     fn real_claude_pty() {
         use std::time::{Duration, Instant};
         let cwd = std::env::var("FC_PTY_TRY_CWD").expect("FC_PTY_TRY_CWD");
-        let r = super::spawn(&cwd, None, 120, 40, || {}).unwrap();
+        let r = super::spawn(&cwd, None, &[], 120, 40, || {}).unwrap();
         let (id, pid) = (r["id"].as_str().unwrap().to_string(), r["pid"].as_u64().unwrap());
         println!("spawned id={id} pid={pid}");
         let (tx, rx) = std::sync::mpsc::channel();
@@ -568,7 +854,7 @@ mod real_permission {
         use std::time::{Duration, Instant};
         let cwd = std::env::var("FC_PTY_TRY_CWD").expect("FC_PTY_TRY_CWD");
         println!("login_path = {:?}", super::login_path());
-        let r = super::spawn(&cwd, None, 120, 40, || {}).unwrap();
+        let r = super::spawn(&cwd, None, &[], 120, 40, || {}).unwrap();
         let (id, pid) = (r["id"].as_str().unwrap().to_string(), r["pid"].as_u64().unwrap() as u32);
         let root = crate::native::claude_home();
         let row = || crate::native::sessions::fresh_row(&root, pid);
@@ -597,5 +883,52 @@ mod real_permission {
         println!("second send while waiting: {second:?}");
         super::kill(&id).unwrap();
         std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+#[cfg(test)]
+mod real_boot {
+    /// 本物の claude で、起動の前に送った文を預かり、起動してから送るかを確かめる（課金がかかるので手で回す）。
+    /// 起動の直後に send_or_queue を呼び、預かったこと、起動するまで送らないこと、起動したら送ったことを、時刻つきで出す。
+    /// 信頼の確認の画面が出たら（sessions/<pid>.json が無いまま）、10秒待って預かったままかを見てから「Yes」を選ぶ。
+    /// FC_PTY_TRY_CWD=<場所> cargo test --lib real_boot_queue -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_boot_queue() {
+        use std::time::{Duration, Instant};
+        let cwd = std::env::var("FC_PTY_TRY_CWD").expect("FC_PTY_TRY_CWD");
+        let r = super::spawn(&cwd, None, &[], 120, 40, || {}).unwrap();
+        let id = r["id"].as_str().unwrap().to_string();
+        let t0 = Instant::now();
+        let msg = "この文には「了解」とだけ返して";
+        let q = crate::composer::send_or_queue(id.clone(), msg.into()).unwrap();
+        println!("{:?} send_or_queue -> {q}", t0.elapsed());
+        assert_eq!(q["queued"], true, "起動の直後は預かる");
+        let st = || crate::composer::boot_status(&id);
+        let mut trusted = false;
+        while t0.elapsed() < Duration::from_secs(60) {
+            let s = st();
+            if !s["done"].as_array().unwrap().is_empty() {
+                println!("{:?} done: {}", t0.elapsed(), s["done"]);
+                assert!(s["done"][0]["error"].is_null(), "送れた");
+                assert_eq!(s["booted"], true, "送ったときは起動済み");
+                break;
+            }
+            if !trusted && s["rowSeen"] == false && t0.elapsed() > Duration::from_secs(10) {
+                let screen = super::screen_text(&id).unwrap_or_default();
+                println!("{:?} 信頼の確認の画面らしい。booted={} queued={} 画面の末尾:\n{}", t0.elapsed(), s["booted"], s["queued"], screen.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n"));
+                assert_eq!(s["queued"].as_array().unwrap().len(), 1, "信頼の確認の画面の間は預かったまま");
+                // 「Yes」の行の番号を押す（行の並びは版で変わりうるので、画面から読む）
+                let yes = screen.lines().find(|l| l.contains("Yes")).and_then(|l| l.chars().find(|c| c.is_ascii_digit()));
+                println!("Yes の番号: {yes:?}");
+                match yes { Some(d) => super::write(&id, &d.to_string()).unwrap(), None => { super::write(&id, "\x1b[B").unwrap(); std::thread::sleep(Duration::from_millis(300)); super::write(&id, "\r").unwrap(); } }
+                trusted = true;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        std::thread::sleep(Duration::from_secs(8));
+        let screen = super::screen_text(&id).unwrap_or_default();
+        println!("画面:\n{}", screen.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n"));
+        super::kill(&id).unwrap();
     }
 }

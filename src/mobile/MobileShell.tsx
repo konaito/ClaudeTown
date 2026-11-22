@@ -3,7 +3,7 @@
 import { useEffect, type ReactNode } from "react";
 import { Avatar, roleOf } from "../kid/Avatar";
 import type { Mail } from "../mail";
-import { MOOD_LABEL, houseNameOf, moodOf, nowOf, taskOf, type Agent, type Mood, type Snapshot } from "../model";
+import { MOOD_LABEL, statusClass, statusLabel, houseNameOf, moodOf, nowOf, taskOf, type Agent, type Mood, type Snapshot } from "../model";
 
 type Tree = { byId: Map<string, Agent>; childrenOf: Map<string, Agent[]>; families: { root: Agent; all: Agent[] }[] };
 
@@ -42,7 +42,7 @@ function Row({ a, depth, onPick, mood }: { a: Agent; depth: number; onPick: (a: 
         <span className="mr-name">{a.name}</span>
         <span className="mr-line">{line}</span>
       </span>
-      <span className={`mr-st st st-${m}`}><i />{MOOD_LABEL[m]}</span>
+      <span className={`mr-st ${statusClass(a, m)}`}><i />{statusLabel(a, m)}</span>
     </button>
   );
 }

@@ -26,6 +26,8 @@ export type Agent = {
   /** 一覧の出どころ。app はこのアプリが立てた端末で、送信、停止、端末ができる。native は Claude Code の記録（~/.claude）から読んでいるだけで、
    *  capabilities が全部 false。ccn はブラウザ版（PWA）だけが持つ、ccn の一覧の行 */
   source?: "app" | "native" | "ccn";
+  /** アプリが立てた端末で、claude がまだ入力を受け付けるところまで起動していない（信頼の確認の画面を含む）。Rust の town_rows が付ける */
+  booting?: boolean;
   state: "running" | "waiting_permission" | "idle";
   cwd: string;
   /** cwd のプロジェクトの名前（worktree なら本体の名前。Rust が .git を読んで出す）。モックと古い一覧には無い */
@@ -66,6 +68,8 @@ export type ConvItem = {
   role: "user" | "assistant" | "tool" | "result" | "event"; text: string; from?: string | null; at?: string | number | null; pending?: boolean;
   /** 作業中に打たれて、まだ読まれていない文（順番待ち）。conversation の live.queued から画面が付ける */
   queued?: boolean;
+  /** claude の起動を待って、まだ送っていない文（Rust の composer.rs が預かっている）。起動したら送る */
+  waitBoot?: boolean;
   /** 通し番号（このセッションで何件目か。Rust の conversation が付ける）。吹き出しの key に使う。送ったばかりの仮の項目には無い */
   n?: number;
   /** 別のセッションからのお手紙なら、送り手（from-name と、uds のソケットか agent:<ノード>/<sid8>/<役割>） */
@@ -105,6 +109,16 @@ export const MOOD_LABEL: Record<Mood, string> = {
   done: "完了",
   idle: "待機",
 };
+
+/** 様子の札の文。起動中は様子に関係なく「起動中」と出す（起動の前は sessions/<pid>.json が無く、様子は待機になる） */
+export function statusLabel(a: Pick<Agent, "booting">, mood: Mood): string {
+  return a.booting ? "起動中" : MOOD_LABEL[mood];
+}
+
+/** 様子の札の class。起動中は点を回る輪にする（App.css の .st-boot） */
+export function statusClass(a: Pick<Agent, "booting">, mood: Mood): string {
+  return `st st-${mood}${a.booting ? " st-boot" : ""}`;
+}
 
 export const NEEDS_YOU: Mood[] = ["approval", "reply"];
 

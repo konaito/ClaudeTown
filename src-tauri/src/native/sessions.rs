@@ -182,6 +182,49 @@ pub fn fresh_row(root: &Path, pid: u32) -> Option<Value> {
     }))
 }
 
+/// id の会話の jsonl を projects/*/ から探す。無ければ None（resume すると exit 1 で終わるので、立て直す前に見る）
+pub fn find_jsonl(root: &Path, id: &str) -> Option<PathBuf> {
+    let name = format!("{id}.jsonl");
+    fs::read_dir(root.join("projects")).ok()?.flatten().map(|d| d.path().join(&name)).find(|p| p.is_file())
+}
+
+/// id を名乗っている、生きているプロセスの pid（sessions/<pid>.json を今読む）。無ければ None
+pub fn live_pid_of(root: &Path, id: &str) -> Option<u32> {
+    fs::read_dir(root.join("sessions")).ok()?.flatten().find_map(|e| {
+        let v: Value = serde_json::from_str(&fs::read_to_string(e.path()).ok()?).ok()?;
+        let pid = v["pid"].as_u64()? as u32;
+        (v["sessionId"].as_str() == Some(id) && pid_alive(pid)).then_some(pid)
+    })
+}
+
+/// id を名乗るプロセスが消えるのを、limit まで待つ。消えた（もともと無い）なら true。
+/// アプリを入れ替えた直後は、前のアプリの claude が SIGHUP を受けてから終わるまでに1秒ほどかかる（2026-11-22 の実測で 1.27 秒）。
+/// その間に立て直しを判定すると「よそで動いている」と見て外してしまうので、起動のときの立て直しはここで待ってから判定する
+pub fn wait_gone(root: &Path, id: &str, limit: std::time::Duration) -> bool {
+    let t0 = std::time::Instant::now();
+    loop {
+        if live_pid_of(root, id).is_none() {
+            return true;
+        }
+        if t0.elapsed() >= limit {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// resume するときの cwd。jsonl の行の cwd のうち、projects/ の下のディレクトリ名（project_dir_name）が jsonl の置き場所と合うもの。
+/// claude は cwd から projects/ の下を引いて jsonl を探すので、合わない cwd では resume できない。途中で cd したセッションは最初の行の cwd が合う
+pub fn resume_cwd(jsonl: &Path) -> Option<String> {
+    let dir = jsonl.parent()?.file_name()?.to_str()?.to_string();
+    let f = fs::File::open(jsonl).ok()?;
+    BufReader::new(f).lines().take(2000).map_while(Result::ok).find_map(|l| {
+        let v: Value = serde_json::from_str(&l).ok()?;
+        let c = v["cwd"].as_str()?;
+        (project_dir_name(c) == dir).then(|| c.to_string())
+    })
+}
+
 /// 生きている対話セッション（開始の古い順）
 pub fn live(root: &Path, stats: &mut Stats) -> Vec<Session> {
     let mut raw = vec![];

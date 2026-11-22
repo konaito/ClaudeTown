@@ -53,7 +53,7 @@ type BubbleProps = { item: Shown; agent: Agent; lineageDepth: number };
  * まとめた道具の行は毎回作り直すので、n と件数と文で比べる
  */
 export const Bubble = memo(BubbleView, (a: BubbleProps, b: BubbleProps) =>
-  (a.item === b.item || (a.item.n != null && a.item.n === b.item.n && a.item.more === b.item.more && a.item.done === b.item.done && a.item.text === b.item.text && a.item.pending === b.item.pending && a.item.queued === b.item.queued))
+  (a.item === b.item || (a.item.n != null && a.item.n === b.item.n && a.item.more === b.item.more && a.item.done === b.item.done && a.item.text === b.item.text && a.item.pending === b.item.pending && a.item.waitBoot === b.item.waitBoot && a.item.queued === b.item.queued))
   && a.lineageDepth === b.lineageDepth
   && a.agent.id === b.agent.id && a.agent.name === b.agent.name && a.agent.cwd === b.agent.cwd && a.agent.parent === b.agent.parent
   && a.agent.avatar?.char === b.agent.avatar?.char && a.agent.avatar?.hue === b.agent.avatar?.hue);
@@ -93,7 +93,7 @@ function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
     const who = item.from ? fromLabel(item.from) : null;
     return (
       <div className={`msg me ${item.pending ? "pending" : ""}`}>
-        <div className="meta">{who && <span className="from">{who}</span>}{item.queued ? "順番待ち・まだ読まれていない" : item.pending ? "届けた・まだ読まれていない" : timeOf(item.at)}</div>
+        <div className="meta">{who && <span className="from">{who}</span>}{item.waitBoot ? <span className="st st-idle st-boot"><i />起動したら送る</span> : item.queued ? "順番待ち・まだ読まれていない" : item.pending ? "届けた・まだ読まれていない" : timeOf(item.at)}</div>
         <div className="b"><Markdown text={item.text} /></div>
       </div>
     );
