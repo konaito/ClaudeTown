@@ -1,7 +1,7 @@
 import { memo, useContext } from "react";
 import { type Agent, houseNameOf, moodOf, nowOf, accountText, taskOf, statusClass, statusLabel } from "../model";
 import { layoutFamily, type LNode } from "../layout/layout";
-import { LAYOUT, boxOf } from "../layout/params";
+import { LAYOUT, boxOf, groupCssVars } from "../layout/params";
 import { Avatar, hash as hashOf, roleOf, ROLE_LABEL } from "../kid/Avatar";
 import { KillCtx, LetterCtx } from "../contexts";
 import { LETTER_IMG } from "../useLetterMarks";
@@ -21,7 +21,7 @@ export function Group({ root, count, size, hasNeeds, children }: {
   const tint = hashOf(root.id) % GROUP_TINTS.length;
   return (
     <section className={`group ${hasNeeds ? "has-needs" : ""}`}
-      style={{ width: size.w, height: size.h, background: GROUP_TINTS[tint], borderColor: hasNeeds ? undefined : GROUP_LINES[tint] }}>
+      style={{ ...groupCssVars(), width: size.w, height: size.h, background: GROUP_TINTS[tint], borderColor: hasNeeds ? undefined : GROUP_LINES[tint] }}>
       <div className="g-head" title="親のプロジェクトのディレクトリの名前">
         <span className="g-name">{houseNameOf(root)}</span>
         <span className="g-sub">{count}人</span>
@@ -86,11 +86,11 @@ const sameCanvas = (a: CanvasProps, b: CanvasProps) => a.result === b.result && 
 
 export const FamilyCanvas = memo(function FamilyCanvas({ all, result, selected, onSelect, onFocus }: CanvasProps) {
   if (import.meta.env.DEV) renders.canvas++;
-  const pad = LAYOUT.framePad;
+  // 余白は世帯の枠（.group）の 1 層だけ。この中は配置の外接の箱そのままで、一番左上のカードの箱が (0, 0) に来る
   const minX = Math.min(...result.nodes.map((n) => n.x - n.w / 2));
   const minY = Math.min(...result.nodes.map((n) => n.y - n.h / 2));
-  const W = result.metrics.width + pad * 2, H = result.metrics.height + pad * 2;
-  const ox = pad - minX, oy = pad - minY;
+  const W = result.metrics.width, H = result.metrics.height;
+  const ox = -minX, oy = -minY;
   const byId = new Map(all.map((a) => [a.id, a]));
   const pos = new Map(result.nodes.map((n) => [n.id, n]));
   const kill = useContext(KillCtx);
