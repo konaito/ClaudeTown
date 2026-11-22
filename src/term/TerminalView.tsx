@@ -11,6 +11,8 @@ import { TERM_URL_RE, openExternal } from "../links";
 import { perfCounters, perfMark, perfEnd, perfTerm, perfWaitingPrompt } from "./perf";
 import { benchParams } from "./bench";
 import { SIZE_KEY } from "./size";
+import { createWriteGate } from "./writeGate";
+import { isVisible, onVisibleChange } from "../visible";
 
 /** ほかの画面の大きさが右パネルに収まらないとき、こちらの大きさを送り返す間隔の下限 */
 const FOREIGN_RECLAIM_MS = 5000;
@@ -85,6 +87,9 @@ export function TerminalView({ sessionId, onError }: { sessionId: string; onErro
     // 前に開いたセッションの画面と、大きさの記録を消す。中身はこのあと replay で書き直す
     term.reset();
     if (import.meta.env.DEV) perfTerm.current = term;
+    // 窓が見えていない間は xterm に書かずにため、見えたときにまとめて書く（#8）
+    const gate = createWriteGate((s, done) => term.write(s, done), isVisible());
+    const offVisible = onVisibleChange((v) => gate.setOpen(v));
     let pendingReset = false;
     // replay を書いている間に xterm.js が返す自動応答（カーソル位置の報告など）は PTY に送らない（claude の入力に混ざるため）
     let replaying = 0;
@@ -154,7 +159,7 @@ export function TerminalView({ sessionId, onError }: { sessionId: string; onErro
           let reclaimNow = false;
           if (sentSize && e.data?.cols && `${e.data.cols}x${e.data.rows}` !== sentSize) {
             const fits = fit.proposeDimensions();
-            const tooBig = !!fits && (e.data.cols > fits.cols || e.data.rows > fits.rows);
+            const tooBig = !!fits && (e.data.cols > fits.cols || (e.data.rows ?? 0) > fits.rows);
             if (tooBig && Date.now() - reclaimedAt > FOREIGN_RECLAIM_MS) { following = false; reclaimedAt = Date.now(); reclaimNow = true; }
             else following = true;
           }
@@ -165,15 +170,15 @@ export function TerminalView({ sessionId, onError }: { sessionId: string; onErro
           if (reclaimNow) { lastSize = ""; pushSize(); }
           break;
         case "replay":
-          if (pendingReset) { term.reset(); pendingReset = false; }
+          if (pendingReset) { gate.drop(); term.reset(); pendingReset = false; }
           replaying++;
           // 書き終えたら、右パネルの大きさに合わせ直して PTY にも伝える。ほかの画面の大きさに合わせている間は送り返さない
-          term.write(e.data?.s ?? "", () => { replaying--; if (!following) { lastSize = ""; pushSize(); } afterWrite(); });
+          gate.push(e.data?.s ?? "", () => { replaying--; if (!following) { lastSize = ""; pushSize(); } afterWrite(); });
           if (e.data?.s) onFirstOutput();
           break;
         case "data":
           pendingReset = false;
-          term.write(e.data?.s ?? "", afterWrite);
+          gate.push(e.data?.s ?? "", afterWrite);
           onFirstOutput();
           break;
         case "exit":
@@ -202,6 +207,8 @@ export function TerminalView({ sessionId, onError }: { sessionId: string; onErro
     ro.observe(box.current);
     return () => {
       closed = true;
+      offVisible();
+      gate.drop();
       ro.disconnect();
       for (const ev of ["keydown", "paste", "compositionend"]) ta?.removeEventListener(ev, reclaim);
       disposeInput.dispose();

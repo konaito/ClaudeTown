@@ -10,7 +10,7 @@
 import { BUILTINS, type Command } from "./commands";
 import { isSlashCommand } from "./edit";
 import type { Agent } from "../model";
-import { noRoute, type Support } from "../session/control";
+import { bodyObj, noRoute, type Support } from "../session/control";
 
 /** command の口へ送るもの */
 export const RUN = new Set(["compact", "clear", "context", "cost", "usage"]);
@@ -89,9 +89,9 @@ export function tagOf(c: Command, kind: Agent["kind"], support: Support): { text
 }
 
 /** command の口が断ったときの文言。成功なら null */
-export function commandError(r: { status: number; body: any }): string | null {
+export function commandError(r: { status: number; body: unknown }): string | null {
   if (r.status >= 200 && r.status < 300) return null;
-  const b = typeof r.body === "object" && r.body ? r.body : {};
+  const b = bodyObj(r.body);
   const msg = typeof b.error === "string" ? b.error : typeof r.body === "string" ? r.body : JSON.stringify(r.body);
   if (noRoute(r)) return NO_COMMANDS;
   if (r.status === 404) return "セッションが見つからなかった（終わったか、別のノードに移った）";

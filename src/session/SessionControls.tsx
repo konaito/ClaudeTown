@@ -2,12 +2,13 @@
 // 選択はいつでも押せる。今は替えられなければ予約し、予約中であることと、いつ替えるかを下に出す。今の値を選び直すと予約を取り消す。
 // - アプリ（Tauri）: 今の値と予約は Rust の session_settings で読む（switch.rs）。アプリの端末は switch_session で替えるか予約する。
 //   アプリの外のセッションは、transcript から読んだ今の値を出し、選んだら代わりの手（そのターミナルで /model を打つ、など）を出す
-// - ブラウザ版（PWA）の ccn の行: 今の値は ccn の GET /api/sessions/<id>（session_detail）で読み、替えたら PATCH の応答で置き換える。予約は reserve.ts
+// - ブラウザ版（PWA）の ccn の行: 今の値は ccn の GET /api/sessions/<id>（session_detail）で読み、替えたら PATCH の応答で置き換える。予約は src/webReserve.ts
 import { useEffect, useRef, useState } from "react";
 import { call as invoke, IS_WEB } from "../bridge";
 import type { Agent } from "../model";
+import type { SessionDetail } from "../types";
 import { modelOptions, modeOptions, planOf, routeOf, supportOf, viaCcn, type Plan, type Support, type What } from "./control";
-import { cancel as cancelCcn, configure, reserve as reserveCcn, usePending } from "./reserve";
+import { cancel as cancelCcn, configure, reserve as reserveCcn, usePending } from "../webReserve";
 
 // ノードごとに、口があるかを覚える。あれば以後は確かめない。無ければ1分たったら確かめ直す（ノードを新しくしたとき）
 const supportByNode = new Map<string, { v: Support; at: number }>();
@@ -18,7 +19,7 @@ type Pend = { model?: string; mode?: string };
 /** Rust の switch::status が返す形 */
 type Settings = { model: string | null; permissionMode: string | null; pending: { model: string | null; permissionMode: string | null }; last: { what: What; value: string; ok: boolean; error?: string; at: number } | null };
 
-/** 予約を当てる見張り（reserve.ts）が使う。ノードは1つなので、どのセッションも同じ値 */
+/** 予約を当てる見張り（src/webReserve.ts）が使う。ノードは1つなので、どのセッションも同じ値 */
 export const supportFor = (a: Agent): Support => cachedSupport(viaCcn(a) ? a.kind : "terminal", "");
 
 const cachedSupport = (kind: Agent["kind"], nodeKey: string): Support => {
@@ -66,7 +67,7 @@ export function SessionControls({ agent, support, onNoSupport, onSwitching, onDo
   const route = routeOf(agent);
   const [cur, setCur] = useState<Cur>({ model: null, mode: null });
   const [switching, setSwitching] = useState(false);
-  // アプリの端末の予約（Rust が持つ）。ccn の行の予約は reserve.ts が持つ
+  // アプリの端末の予約（Rust が持つ）。ccn の行の予約は src/webReserve.ts が持つ
   const [appPend, setAppPend] = useState<Pend>({});
   const ccnPend = usePending(agent.id);
   const pend: Pend = route === "app" ? appPend : route === "ccn" ? ccnPend : {};
@@ -97,7 +98,7 @@ export function SessionControls({ agent, support, onNoSupport, onSwitching, onDo
     let on = true;
     const read = () => {
       if (IS_WEB) {
-        invoke<any>("session_detail", { sessionId: agent.id })
+        invoke<SessionDetail | null>("session_detail", { sessionId: agent.id })
           .then((d) => { if (on && d && typeof d === "object") setCur({ model: str(d.model), mode: str(d.permissionMode) }); })
           .catch(() => {});
       } else {

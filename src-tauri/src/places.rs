@@ -13,7 +13,9 @@ use std::sync::Mutex;
 /// 返す件数の上限（画面は新しい順に20件を出す。除く場所があっても足りるように多めに返す）
 const MAX: usize = 300;
 
-static CACHE: Mutex<Option<((u64, u128), Vec<(String, u64)>)>> = Mutex::new(None);
+/// 覚えた一覧。(history.jsonl の (大きさ, 更新時刻), (場所, 最後に使った時刻) の一覧)
+type Cached = ((u64, u128), Vec<(String, u64)>);
+static CACHE: Mutex<Option<Cached>> = Mutex::new(None);
 
 /// worktree の中なら、リポジトリの場所
 pub fn group(path: &str) -> String {

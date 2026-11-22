@@ -88,15 +88,15 @@ pub fn request(id: &str, model: Option<String>, mode: Option<String>) -> Result<
     if !super::pty::owns(id) {
         return Err(super::native::READ_ONLY.into());
     }
-    if let Some(m) = &model {
-        if picker_name(m).is_none() {
-            return Err(format!("{m} は /model のピッカーの上の段に無いので、ここからは替えられない。ターミナルで /model を開いて選ぶ"));
-        }
+    if let Some(m) = &model
+        && picker_name(m).is_none()
+    {
+        return Err(format!("{m} は /model のピッカーの上の段に無いので、ここからは替えられない。ターミナルで /model を開いて選ぶ"));
     }
-    if let Some(m) = &mode {
-        if !MODE_LABELS.iter().any(|(_, v)| v == m) {
-            return Err(format!("{m} は Shift+Tab の順に無いので、ここからは替えられない"));
-        }
+    if let Some(m) = &mode
+        && !MODE_LABELS.iter().any(|(_, v)| v == m)
+    {
+        return Err(format!("{m} は Shift+Tab の順に無いので、ここからは替えられない"));
     }
     let start = with(|b| {
         let p = b.pending.entry(id.to_string()).or_default();
@@ -367,6 +367,27 @@ pub fn status(id: &str) -> Value {
         "status": state,
         "ready": ready,
     })
+}
+
+pub(crate) mod cmd {
+    use serde_json::Value;
+    /// モデルと権限モード（always-switch）。今の値、予約、最後の結果。アプリの外のセッションは transcript から読んだ今の値だけ
+    #[tauri::command]
+    pub async fn session_settings(session_id: String) -> Result<Value, String> {
+        crate::blocking(move || Ok(super::status(&session_id))).await
+    }
+    /// モデルか権限モードを替える。今は替えられなければ予約し、替えられるようになったら替える
+    #[tauri::command]
+    pub async fn switch_session(session_id: String, model: Option<String>, permission_mode: Option<String>) -> Result<Value, String> {
+        crate::app_guard(&session_id)?;
+        crate::refuse_if_disabled()?;
+        crate::blocking(move || super::request(&session_id, model, permission_mode)).await
+    }
+    /// 予約を取り消す。what は model か mode
+    #[tauri::command]
+    pub async fn cancel_switch(session_id: String, what: String) -> Result<Value, String> {
+        crate::blocking(move || Ok(super::cancel(&session_id, &what))).await
+    }
 }
 
 #[cfg(test)]

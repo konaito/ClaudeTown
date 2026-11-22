@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { flightsOf, resolve, type LetterRec } from "./letters";
+import { flightsOf, resolve, resolvePeer, type LetterRec } from "./letters";
 import type { Agent } from "./model";
 
 const ag = (id: string, name: string, pid?: number, parent: string | null = null): Agent => ({
@@ -74,5 +74,56 @@ describe("飛ばす封筒", () => {
       recv("r1", KO, 1000, { from_raw: "uds:/tmp/cc-socks/1.sock" }),
     ], town);
     expect(f).toEqual([]);
+  });
+});
+
+describe("会話を開いているセッションを起点にした結び付け（agent teams）", () => {
+  const sub = (id: string, name: string, parent: string): Agent => ({ ...ag(id, name, undefined, parent), kind: "subagent" });
+  const LEAD = "dddddddd-0000-0000-0000-000000000004";
+  const LEAD2 = "eeeeeeee-0000-0000-0000-000000000005";
+  const A = sub("sub-accn-removal@dddddddd", "ccn-removal", LEAD);
+  const B = sub("sub-aletter-lead-avatar@dddddddd", "letter-lead-avatar", LEAD);
+  // 別のチームに同じ名前のチームメイトがいる
+  const A2 = sub("sub-accn-removal@eeeeeeee", "ccn-removal", LEAD2);
+  const team = [...town, ag(LEAD, "family-computing", 70000), ag(LEAD2, "family-computing", 70001), A, B, A2];
+  const leadOf = (id: string) => team.find((a) => a.id === id)!;
+
+  test("teammate:team-lead は、受け取ったチームメイトの親（リード）", () => {
+    expect(resolvePeer("teammate:team-lead", "team-lead", A, team)).toBe(LEAD);
+    expect(resolvePeer("teammate:team-lead", "team-lead", A2, team)).toBe(LEAD2);
+  });
+
+  test("teammate:<名前> は、同じリードの下のチームメイト。リードが受けたときはリードの子から引く", () => {
+    expect(resolvePeer("teammate:letter-lead-avatar", "letter-lead-avatar", A, team)).toBe(B.id);
+    expect(resolvePeer("teammate:ccn-removal", "ccn-removal", leadOf(LEAD), team)).toBe(A.id);
+    expect(resolvePeer("teammate:ccn-removal", "ccn-removal", leadOf(LEAD2), team)).toBe(A2.id);
+  });
+
+  test("チームの中にいない teammate は、町の同名に結ばない", () => {
+    expect(resolvePeer("teammate:ccn-removal", "ccn-removal", ag("x", "solo", 1), team)).toBeNull();
+    expect(resolvePeer("teammate:meta-fc", "meta-fc", A, team)).toBeNull();
+    // リードが町にいなければ結ばない
+    expect(resolvePeer("teammate:team-lead", "team-lead", sub("s", "orphan", "gone"), team)).toBeNull();
+  });
+
+  test("チームメイトを kind: teammate で出す一覧でも引ける", () => {
+    const t = (a: Agent) => ({ ...a, kind: "teammate" }) as unknown as Agent;
+    const team2 = team.map((a) => (a === A || a === B ? t(a) : a));
+    expect(resolvePeer("teammate:team-lead", "team-lead", t(A), team2)).toBe(LEAD);
+    expect(resolvePeer("teammate:letter-lead-avatar", "letter-lead-avatar", t(A), team2)).toBe(B.id);
+  });
+
+  test("送ったお手紙の宛先: main と team-lead はリード、名前はチームの中から", () => {
+    expect(resolvePeer("main", "main", B, team)).toBe(LEAD);
+    expect(resolvePeer("team-lead", "team-lead", B, team)).toBe(LEAD);
+    expect(resolvePeer("ccn-removal", "ccn-removal", B, team)).toBe(A.id);
+    expect(resolvePeer("ccn-removal", "ccn-removal", leadOf(LEAD2), team)).toBe(A2.id);
+  });
+
+  test("チームの形でない宛先は、これまでどおり町の一覧から引く", () => {
+    expect(resolvePeer("family-computing", "family-computing", ag(OYA, "meta-fc"), town)).toBe(KO);
+    expect(resolvePeer("uds:/tmp/cc-socks/86003.sock", "meta-fc", B, team)).toBe(KO);
+    expect(resolvePeer("konaito-pro/cccccccc/x", null, B, team)).toBe(MAGO);
+    expect(resolvePeer("main", "main", ag(OYA, "meta-fc"), town)).toBeNull();
   });
 });

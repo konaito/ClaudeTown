@@ -2,9 +2,9 @@
 // 今は替えられないときに選んだ値を、ここで持つ。一覧が届くたびに useCcnReservations が見て、替えられるようになったら ccn の PATCH で替える。
 // 画面を開き直すと消える（持ち越さない）。ccn の pty は次の待機で、node は承認に答えた後に当たるので、長く持つものではない。
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import { call as invoke } from "../bridge";
-import type { Agent } from "../model";
-import { configureError, isHttp, noRoute, planOf, type Support, type What } from "./control";
+import { call as invoke, IS_WEB } from "./bridge";
+import type { Agent } from "./model";
+import { bodyObj, configureError, isHttp, noRoute, planOf, type Support, type What } from "./session/control";
 
 export type Pend = { model?: string; mode?: string };
 
@@ -43,7 +43,7 @@ export async function configure(agent: Agent, what: What, value: string): Promis
     const err = configureError(r);
     if (err) return { ok: false, error: err, noRoute: noRoute(r) };
     const s = (v: unknown) => (typeof v === "string" && v ? v : null);
-    return { ok: true, model: s(r.body?.model), mode: s(r.body?.permissionMode) };
+    return { ok: true, model: s(bodyObj(r.body).model), mode: s(bodyObj(r.body).permissionMode) };
   } catch (e) {
     return { ok: false, error: `替えられなかった: ${e}`, noRoute: false };
   }
@@ -54,6 +54,8 @@ export function useCcnReservations(agents: Agent[], supportOf: (a: Agent) => Sup
   const busy = useRef(new Set<string>());
   useSyncExternalStore((f) => { subs.add(f); return () => subs.delete(f); }, () => version);
   useEffect(() => {
+    // アプリ（Tauri）には ccn の行が無く、予約は Rust が持つ（switch.rs）ので、ブラウザ版のほかでは何もしない
+    if (!IS_WEB) return;
     for (const [id, p] of book) {
       const a = agents.find((x) => x.id === id);
       // セッションが一覧から消えたら予約も捨てる

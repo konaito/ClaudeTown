@@ -135,12 +135,6 @@ export function sinceText(ms?: number | null): string {
   return `${(s / 3600).toFixed(1)}時間`;
 }
 
-export function clip(s: string, n: number): string {
-  return s.length <= n ? s : s.slice(0, n - 1) + "…";
-}
-
-export type Family = { root: Agent; all: Agent[] };
-
 export function buildTree(agents: Agent[]) {
   const byId = new Map(agents.map((a) => [a.id, a]));
   const childrenOf = new Map<string, Agent[]>();
@@ -201,11 +195,6 @@ export function cardNames(ws: Who[]): Map<string, string> {
   return new Map(
     ws.map((w) => [w.id, !w.cwd ? w.title || w.id.slice(0, 8) : w.project || projectFromPath(w.cwd) || "/"] as [string, string]),
   );
-}
-
-/** cwd のプロジェクトの名前（worktree なら本体の名前）。Rust が出した分が無ければパスの形で出す */
-export function projectOf(a: Agent): string {
-  return a.project || projectFromPath(a.cwd) || a.cwd;
 }
 
 /** 返事の最後の段落が問いで、その中に短い選択肢の行があれば取り出す（ボタンにする） */

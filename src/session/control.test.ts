@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { configureError, modelOptions, modeOptions, NO_SUPPORT, planOf, routeOf, supportOf } from "./control";
-import { cancel, pendingOf, reserve } from "./reserve";
+import { cancel, pendingOf, reserve } from "../webReserve";
 
 describe("supportOf", () => {
   test("新しいノードは空の文を not_command で断る", () => {
@@ -83,7 +83,7 @@ describe("planOf（いつ当てるか）", () => {
   });
 });
 
-describe("予約（ccn の行、reserve.ts）", () => {
+describe("予約（ccn の行、src/webReserve.ts）", () => {
   test("作業中に選ぶと予約が残り、今の値を選び直すと取り消せる", () => {
     reserve("s1", "model", "haiku");
     reserve("s1", "mode", "plan");

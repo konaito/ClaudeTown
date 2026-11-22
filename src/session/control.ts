@@ -4,13 +4,18 @@
 // - app（このアプリが PTY で立てた claude）: 端末に /model と Shift+Tab を書く（src-tauri/src/switch.rs）。予約も Rust が持つ。
 //   モデルは作業中でもすぐ効く。承認待ちだけ待つ。モードは待機中に替える（作業中と承認待ちは予約）
 // - ccn（ブラウザ版の ccn の行）: node（-p の子）は SDK で替えるので、承認待ちのほかはいつでも受ける。
-//   pty（ノードが端末で動かす対話の claude）は、待機中だけ受ける。同じ id で起動し直すので約3秒かかる（実測 2.9 秒）。予約は画面が持つ（reserve.ts）
+//   pty（ノードが端末で動かす対話の claude）は、待機中だけ受ける。同じ id で起動し直すので約3秒かかる（実測 2.9 秒）。予約は画面が持つ（src/webReserve.ts）
 // - none（端末で起動したセッション、記録から読むだけのセッション、チームメイト、sub-agent）: 外から届ける口が無い。代わりの手を出す
 
 import type { Agent } from "../model";
 
 /** Rust の session_controls と configure_session が返す形。HTTP の応答をそのまま渡す */
-export type Http = { status: number; body: any };
+export type Http = { status: number; body: unknown };
+
+/** 応答の本文がオブジェクトならそれ、でなければ空のオブジェクト。フィールドは unknown のまま、読む側が型を確かめる */
+export function bodyObj(body: unknown): Record<string, unknown> {
+  return typeof body === "object" && body ? (body as Record<string, unknown>) : {};
+}
 
 /** 候補は仕様書にある別名だけにする。今の値が別名でなければ（node は claude-sonnet-5-5 のような id で返る）、その値も選択肢に出す */
 export const MODELS: { value: string; label: string }[] = [
@@ -40,7 +45,7 @@ export type Support = "unknown" | "yes" | "no";
  */
 export function supportOf(r: unknown): Support {
   if (!isHttp(r)) return "unknown";
-  if (r.status === 400 && r.body?.code === "not_command") return "yes";
+  if (r.status === 400 && bodyObj(r.body).code === "not_command") return "yes";
   if (r.status === 409) return "yes";
   if (noRoute(r)) return "no";
   return "unknown";
@@ -48,7 +53,7 @@ export function supportOf(r: unknown): Support {
 
 /** 口そのものが無い（古いノード）。セッションが無い 404 とは本文で見分ける */
 export function noRoute(r: Http): boolean {
-  return r.status === 405 || (r.status === 404 && r.body?.error === "not found");
+  return r.status === 405 || (r.status === 404 && bodyObj(r.body).error === "not found");
 }
 
 export function isHttp(r: unknown): r is Http {
@@ -126,7 +131,7 @@ export function viaCcn(a: Pick<Agent, "kind" | "source">): boolean {
 /** configure_session が断られたときの文言。成功（2xx）なら null */
 export function configureError(r: Http): string | null {
   if (r.status >= 200 && r.status < 300) return null;
-  const b = typeof r.body === "object" && r.body ? r.body : {};
+  const b = bodyObj(r.body);
   const msg = typeof b.error === "string" ? b.error : typeof r.body === "string" ? r.body : JSON.stringify(r.body);
   if (noRoute(r)) return NO_SUPPORT;
   if (r.status === 404) return "セッションが見つからなかった（終わったか、別のノードに移った）";
