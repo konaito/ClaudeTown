@@ -6,4 +6,4 @@
 export type CreatedSession = { id?: string; cwd?: string };
 
 /** session_detail（ccn の GET /sessions/<id>）の応答のうち、承認とモデル切り替えが読む部分。pending は読む側で配列かどうかを確かめる */
-export type SessionDetail = { pending?: unknown; model?: unknown; permissionMode?: unknown };
+export type SessionDetail = { pending?: unknown; model?: unknown; permissionMode?: unknown; blocked?: unknown };

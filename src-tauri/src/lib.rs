@@ -12,6 +12,7 @@
 mod attach;
 mod avatars;
 mod composer;
+mod dialog;
 mod naming;
 mod places;
 mod pty;
@@ -217,6 +218,10 @@ fn town_rows() -> Vec<Value> {
         if mine {
             r["capabilities"] = app_caps();
             r["source"] = json!("app");
+            // claude が入力を受け付けるところまで起動していない（信頼の確認の画面を含む）。画面は「起動中」と出す
+            if r["id"].as_str().and_then(composer::booted) == Some(false) {
+                r["booting"] = json!(true);
+            }
         } else if r["capabilities"].is_null() {
             r["capabilities"] = native::read_only_caps();
         }
@@ -236,9 +241,9 @@ fn town_rows() -> Vec<Value> {
     rows
 }
 
-/// このアプリが立てたセッションでできること。承認は端末で答える（構造化した承認の口は無い）
+/// このアプリが立てたセッションでできること。承認は、端末の承認の画面にキーを書いて答える（dialog.rs、#83）
 fn app_caps() -> Value {
-    json!({ "send": true, "permissions": false, "interrupt": true, "stop": true, "terminal": true, "events": false })
+    json!({ "send": true, "permissions": true, "interrupt": true, "stop": true, "terminal": true, "events": false })
 }
 
 /// 一覧の行を、画面に渡すセッションの形に直す。hook の報告と close-check の判定を足す。キャラの割り当ては足さない
@@ -296,6 +301,8 @@ fn agents_from(rows: Vec<Value>) -> Vec<Value> {
             "pid": s["pid"],
             "startedAt": s["startedAt"],
             "lastActivityAt": s["lastActivityAt"],
+            // claude が入力を受け付けるところまで起動していない（town_rows が付ける）。起動していれば null
+            "booting": s["booting"].as_bool().filter(|b| *b),
             "canSend": s["capabilities"]["send"],
             "parent": parent,
             "capabilities": s["capabilities"],
@@ -477,8 +484,8 @@ pub fn run() {
             session_ops::cmd::create_session, session_ops::cmd::resume_session, session_ops::cmd::stop_session, session_ops::cmd::house_places, repo::cmd::place_repos,
             term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
-            composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files,
-            switch::cmd::session_settings, switch::cmd::switch_session, switch::cmd::cancel_switch
+            composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::send_or_queue, composer::cmd::cancel_queued, composer::cmd::boot_status, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files,
+            switch::cmd::session_settings, dialog::cmd::session_detail, dialog::cmd::answer_dialog, switch::cmd::switch_session, switch::cmd::cancel_switch
         ])
         .build(context)
         .expect("error while building tauri application")

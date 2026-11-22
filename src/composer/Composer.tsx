@@ -44,7 +44,9 @@ const HELP: [string, string][] = [
   ["Ctrl+C", "作業を止める（作業中）・打ちかけを消す"],
 ];
 
-export function Composer({ agent, text, setText, busy, running, support = "no", onSubmit, onError, touch }: {
+export function Composer({ agent, text, setText, busy, running, booting = false, support = "no", onSubmit, onError, touch }: {
+  /** claude の起動を待っている。送った文は Rust が預かり、起動したら送る（入力欄の案内だけ替える） */
+  booting?: boolean;
   /** ノードに command の口があるか（#97）。/ のコマンドの振り分けと、補完の印に使う */
   support?: Support;
   /** スマホ（ソフトキーボード）。Enter は改行にし、送るのは送信ボタンだけにする */
@@ -313,7 +315,7 @@ export function Composer({ agent, text, setText, busy, running, support = "no", 
           {...{ writingsuggestions: "false" }}
           value={search ? searchMatch ?? search.original : text}
           readOnly={!!search}
-          placeholder={agent.canSend ? `${agent.name}に注文する…` : "このセッションには送れない"}
+          placeholder={!agent.canSend ? "このセッションには送れない" : booting ? `${agent.name}は起動中。送ると起動後に届く` : `${agent.name}に注文する…`}
           disabled={!agent.canSend}
           onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart); setDismissed(null); histSt.current = { index: -1, draft: "" }; }}
           onSelect={(e) => setCaret(e.currentTarget.selectionStart)}

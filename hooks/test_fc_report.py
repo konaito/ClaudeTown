@@ -49,7 +49,7 @@ class HookCase(unittest.TestCase):
 
     def env(self, **extra):
         env = {k: v for k, v in os.environ.items() if k not in ("CLOSE_CHECK_CHILD", "FC_REPORT_OFF")}
-        env.update(FC_STATE_DIR=str(self.state), FC_LETTERS=str(self.letters), **extra)
+        env.update(FC_STATE_DIR=str(self.state), FC_LETTERS=str(self.letters), FC_PERM_DIR=str(self.dir / "perm"), **extra)
         return env
 
     def run_hook(self, event, sid=SID, env=None, **fields):
@@ -354,3 +354,43 @@ class LettersShape(HookCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PermInputTest(HookCase):
+    """承認の画面に出る道具の input 全体を perm/<session_id>.json に残す（Claude Town の承認の欄、#83）。
+    transcript には、承認の画面が出ている間に道具の行がまだ書かれていないことがあった（2026-11-22、v2.1.330）"""
+
+    def perm(self, sid=SID):
+        return json.loads((self.dir / "perm" / f"{sid}.json").read_text())
+
+    def test_keeps_the_full_input_and_prints_nothing(self):
+        qs = {"questions": [{"question": "色は？", "header": "色", "options": [{"label": "赤"}, {"label": "青"}], "multiSelect": False}]}
+        r = self.run_hook("PermissionRequest", tool_name="AskUserQuestion", tool_input=qs)
+        # PermissionRequest の hook の標準出力は、許可か拒否の答えとして読まれる。何も出さない
+        self.assertEqual(r.stdout, "")
+        items = self.perm()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["tool_name"], "AskUserQuestion")
+        self.assertEqual(items[0]["tool_input"], qs)
+        self.assertIsNone(items[0]["agent_id"])
+        self.assertIsInstance(items[0]["at"], int)
+
+    def test_teammate_requests_are_marked(self):
+        self.run_hook("PermissionRequest", tool_name="Bash", tool_input={"command": "ls"}, **MATE)
+        self.assertEqual(self.perm()["items"][0]["agent_id"], MATE["agent_id"])
+
+    def test_keeps_only_the_last_eight(self):
+        for i in range(10):
+            self.run_hook("PermissionRequest", tool_name="Bash", tool_input={"command": f"echo {i}"})
+        items = self.perm()["items"]
+        self.assertEqual([x["tool_input"]["command"] for x in items], [f"echo {i}" for i in range(2, 10)])
+
+    def test_state_dir_is_not_used_for_it(self):
+        # 安定版も読む state/ には新しいファイルを置かない（state/*.json は古い版も読む）
+        self.run_hook("PermissionRequest", tool_name="Bash", tool_input={"command": "ls"})
+        self.assertEqual(sorted(p.name for p in self.state.glob("*.json")), [f"{SID}.json"])
+
+    def test_session_end_removes_it(self):
+        self.run_hook("PermissionRequest", tool_name="Bash", tool_input={"command": "ls"})
+        self.run_hook("SessionEnd")
+        self.assertFalse((self.dir / "perm" / f"{SID}.json").exists())

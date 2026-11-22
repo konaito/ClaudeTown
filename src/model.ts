@@ -26,6 +26,8 @@ export type Agent = {
   /** 一覧の出どころ。app はこのアプリが立てた端末で、送信、停止、端末ができる。native は Claude Code の記録（~/.claude）から読んでいるだけで、
    *  capabilities が全部 false。ccn はブラウザ版（PWA）だけが持つ、ccn の一覧の行 */
   source?: "app" | "native" | "ccn";
+  /** アプリが立てた端末で、claude がまだ入力を受け付けるところまで起動していない（信頼の確認の画面を含む）。Rust の town_rows が付ける */
+  booting?: boolean;
   state: "running" | "waiting_permission" | "idle";
   cwd: string;
   /** cwd のプロジェクトの名前（worktree なら本体の名前。Rust が .git を読んで出す）。モックと古い一覧には無い */
@@ -64,6 +66,10 @@ export type Snapshot = {
 export type ConvItem = {
   /** result は道具の結果（画面は道具の行に付け直し、吹き出しにしない）。event は止めた・失敗したターンの印（#83） */
   role: "user" | "assistant" | "tool" | "result" | "event"; text: string; from?: string | null; at?: string | number | null; pending?: boolean;
+  /** 作業中に打たれて、まだ読まれていない文（順番待ち）。conversation の live.queued から画面が付ける */
+  queued?: boolean;
+  /** claude の起動を待って、まだ送っていない文（Rust の composer.rs が預かっている）。起動したら送る */
+  waitBoot?: boolean;
   /** 通し番号（このセッションで何件目か。Rust の conversation が付ける）。吹き出しの key に使う。送ったばかりの仮の項目には無い */
   n?: number;
   /** 別のセッションからのお手紙なら、送り手（from-name と、uds のソケットか agent:<ノード>/<sid8>/<役割>） */
@@ -103,6 +109,16 @@ export const MOOD_LABEL: Record<Mood, string> = {
   done: "完了",
   idle: "待機",
 };
+
+/** 様子の札の文。起動中は様子に関係なく「起動中」と出す（起動の前は sessions/<pid>.json が無く、様子は待機になる） */
+export function statusLabel(a: Pick<Agent, "booting">, mood: Mood): string {
+  return a.booting ? "起動中" : MOOD_LABEL[mood];
+}
+
+/** 様子の札の class。起動中は点を回る輪にする（App.css の .st-boot） */
+export function statusClass(a: Pick<Agent, "booting">, mood: Mood): string {
+  return `st st-${mood}${a.booting ? " st-boot" : ""}`;
+}
 
 export const NEEDS_YOU: Mood[] = ["approval", "reply"];
 
@@ -197,16 +213,35 @@ export function cardNames(ws: Who[]): Map<string, string> {
   );
 }
 
-/** 返事の最後の段落が問いで、その中に短い選択肢の行があれば取り出す（ボタンにする） */
+/**
+ * 返事の最後の問いに付いた選択肢の行を取り出す（ボタンにする）。選択肢は、問いの行のすぐ後ろ（無ければすぐ前）に続く箇条書き。
+ * - と * は後ろに空白があるときだけ箇条書きとみる（「**太字**」の行を箇条書きにしない、2026-11-22）
+ * 長すぎる行が混じったら、黙って落とさずに何も出さない（落とすと残りだけの違う選択肢になる、2026-11-22）
+ */
 export function choicesOf(text: string): string[] {
-  const paras = text.trim().split(/\n\s*\n/);
-  const tail = paras.slice(-2).join("\n");
-  if (!/[?？]/.test(tail)) return [];
-  const opts: string[] = [];
-  for (const line of tail.split("\n")) {
-    const m = line.match(/^\s*(?:[-*・]|\d+[.)．]|[A-DＡ-Ｄ][:：.)])\s*(.+?)\s*$/);
-    if (m && m[1].length <= 40) opts.push(m[1].replace(/\*\*/g, ""));
-  }
+  const lines = text.trim().split("\n").slice(-40);
+  const item = (line: string): string | null => {
+    const m = line.match(/^\s*(?:[-*]\s+|・\s*|\d+[.)．]\s*|[A-DＡ-Ｄ][:：.)]\s*)(.+?)\s*$/);
+    return m ? m[1].replace(/\*\*/g, "").trim() : null;
+  };
+  let q = -1;
+  lines.forEach((l, i) => { if (/[?？]/.test(l) && item(l) === null) q = i; });
+  if (q < 0) return [];
+  // 問いの後ろの段落か前の段落。間の空行は1つまで
+  const block = (from: number, step: 1 | -1): string[] => {
+    const out: string[] = [];
+    let i = from;
+    if (lines[i] !== undefined && !lines[i].trim()) i += step;
+    for (; i >= 0 && i < lines.length; i += step) {
+      const it = item(lines[i]);
+      if (it === null) break;
+      out.push(it);
+    }
+    return step === 1 ? out : out.reverse();
+  };
+  const after = block(q + 1, 1);
+  const opts = after.length ? after : block(q - 1, -1);
+  if (opts.some((o) => !o || o.length > 200)) return [];
   return opts.length >= 2 && opts.length <= 5 ? opts : [];
 }
 

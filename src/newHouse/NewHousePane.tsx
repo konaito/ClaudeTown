@@ -7,17 +7,20 @@ import { perfMark, perfSetId, perfStart } from "../term/perf";
 import { benchName } from "../term/bench";
 import { onVisibleChange } from "../visible";
 import { DEFAULT_PLACE_LABEL, placeFailure } from "./placeSetting";
+import { loadDefaults } from "../session/defaults";
 import { RECENT_PLACES_MAX, placeLabel, placeName, placeTime, recentPlaces, withoutPlace, type PlaceRepos, type PlacesInput, type RecentPlace } from "./places";
 import type { CreatedSession } from "../types";
 
 /**
  * 新しい世帯（親なしの claude）を立てる。アプリではこのアプリの中の端末で claude を起動する（src-tauri/src/pty.rs）。
- * cwd が null なら ~/Documents/meta（Rust の create_session の既定）。前に開いたターミナルの大きさで起動する
+ * cwd が null なら ~/Documents/meta（Rust の create_session の既定）。前に開いたターミナルの大きさで起動する。
+ * モデルと権限モードは設定の既定（src/session/defaults.ts）で起動する（claude の --model と --permission-mode）。設定していない項目は渡さず、この Mac の Claude Code の既定になる
  */
 export async function createHousehold(cwd: string | null): Promise<CreatedSession> {
   perfStart("new");
   const { cols, rows } = lastTermSize() ?? { cols: null, rows: null };
-  const r = await invoke<CreatedSession>("create_session", { cwd, name: benchName(), cols, rows });
+  const { model, permissionMode } = loadDefaults();
+  const r = await invoke<CreatedSession>("create_session", { cwd, name: benchName(), cols, rows, model, permissionMode });
   perfMark("create");
   if (r?.id) perfSetId(r.id);
   return r;

@@ -10,10 +10,11 @@ ccn から取れる状態は running / waiting_permission / idle の3つだけ�
   UserPromptSubmit  phase=working、asked=頼まれた文の1行目
   PreToolUse        phase=working、doing=道具の種類と対象（例「コマンド: bun test」）
   PostToolUse       phase=working（承認待ちを解く）
-  PermissionRequest 承認の画面が出る道具を perm_queue に足す（画面の「許可する」は1件のときだけ使える）
+  PermissionRequest 承認の画面が出る道具を perm_queue に足す（画面の「許可する」は1件のときだけ使える）。
+                    道具の input 全体は perm/<session_id>.json に、新しい順の8件まで残す（承認の欄が読む）
   Notification      承認や質問の通知なら phase=needs_you、needs=理由
   Stop              phase=resting か needs_you、said=最後の返事の1行目、next=次の一手
-  SessionEnd        状態ファイルを消す
+  SessionEnd        状態ファイルと perm/<session_id>.json を消す
 
 in-process のチームメイトと sub-agent の入力は、session_id がリードのもので、agent_id が付いて届く。
 これはリードの様子ではないので、リードの状態ファイルにもお手紙にも書かない。例外は承認だけにする。
@@ -32,6 +33,9 @@ from pathlib import Path
 
 STATE_DIR = Path(os.environ.get("FC_STATE_DIR", Path.home() / ".family-computing" / "state"))
 LETTERS = Path(os.environ.get("FC_LETTERS", Path.home() / ".family-computing" / "letters.jsonl"))
+# 承認の画面に出る道具の input 全体（Claude Town の承認の欄が読む、#83）。安定版も読む state/ とは別の置き場にする
+PERM_DIR = Path(os.environ.get("FC_PERM_DIR", Path.home() / ".family-computing" / "perm"))
+PERM_KEEP = 8
 LETTERS_MAX = 1024 * 1024
 # 子を作る道具。ccn の MCP の create_session（親は from 行で ccn に残る）と、Specter の spawn_child（ccn には親が残らない）
 MAKE_CHILD = ("mcp__ccn__create_session", "mcp__specter-agents__spawn_child")
@@ -166,6 +170,24 @@ def perm_item(name, inp):
     return {"tool": name, "summary": describe_tool(name, inp), "detail": str(detail)[:400], "id": "h:" + hashlib.sha1(key.encode()).hexdigest()[:16]}
 
 
+def keep_input(sid, data):
+    """承認の画面に出る道具の名前と input 全体を残す。transcript には、承認の画面が出ている間に道具の行が
+    まだ書かれていないことがあった（2026-11-22、Claude Code 2.1.330）。PermissionRequest は画面が出る前に必ず届く。
+    agent_id はチームメイトと sub-agent の印で、Claude Town はその承認には答えない"""
+    PERM_DIR.mkdir(parents=True, exist_ok=True)
+    p = PERM_DIR / f"{sid}.json"
+    try:
+        items = json.loads(p.read_text()).get("items") or []
+    except Exception:
+        items = []
+    agent = data.get("agent_id")
+    items.append({"tool_name": data.get("tool_name", ""), "tool_input": data.get("tool_input"),
+                  "agent_id": agent if isinstance(agent, str) and agent else None, "at": int(time.time() * 1000)})
+    tmp = p.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({"items": items[-PERM_KEEP:]}, ensure_ascii=False))
+    os.replace(tmp, p)
+
+
 def read_queue(sid):
     try:
         return json.loads((STATE_DIR / f"{sid}.json").read_text()).get("perm_queue") or []
@@ -279,7 +301,7 @@ def emit_context(event, text):
 
 def sweep():
     now = time.time()
-    for p in STATE_DIR.glob("*.json"):
+    for p in [*STATE_DIR.glob("*.json"), *PERM_DIR.glob("*.json")]:
         try:
             if now - p.stat().st_mtime > KEEP_SEC:
                 p.unlink()
@@ -292,6 +314,7 @@ def from_agent(sid, ev, data):
     2026-11-21 の実機（Claude Code 2.1.330、in-process）では、チームメイトの PermissionRequest と承認後の PostToolUse に
     agent_id が付き、承認の Notification には付かなかった。承認の画面はリードの端末に出た"""
     if ev == "PermissionRequest":
+        keep_input(sid, data)
         q = read_queue(sid)
         item = perm_item(data.get("tool_name", ""), data.get("tool_input"))
         if not any(x["id"] == item["id"] for x in q):
@@ -351,6 +374,7 @@ def main():
         write(sid, {"phase": "working", "doing": describe_tool(name, inp), "needs": None, "tools": n}, data)
     elif ev == "PermissionRequest":
         # 承認の画面が出る道具を、並びの末尾に足す。画面からの許可は、並びがちょうど1件のときだけにする
+        keep_input(sid, data)
         q = read_queue(sid)
         item = perm_item(data.get("tool_name", ""), data.get("tool_input"))
         if not any(x["id"] == item["id"] for x in q):
@@ -391,10 +415,11 @@ def main():
         sweep()
         write(sid, {"phase": "resting", "doing": None, "needs": None}, data)
     elif ev == "SessionEnd":
-        try:
-            (STATE_DIR / f"{sid}.json").unlink()
-        except FileNotFoundError:
-            pass
+        for p in (STATE_DIR / f"{sid}.json", PERM_DIR / f"{sid}.json"):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
 
 
 if __name__ == "__main__":

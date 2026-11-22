@@ -10,6 +10,7 @@
     "opener:default",
     "core:window:allow-set-fullscreen",
     "core:window:allow-is-fullscreen",
-    "clipboard-manager:allow-write-text"
+    "clipboard-manager:allow-write-text",
+    "core:webview:allow-set-webview-zoom"
   ]
 }

@@ -8,10 +8,10 @@ import { SessionControls, useNodeSupport } from "../session/SessionControls";
 import { Approval } from "../approval/Approval";
 import { openPlan } from "../approval/answers";
 import { Avatar, roleOf } from "../kid/Avatar";
-import { type Agent, MOOD_LABEL, accountText, choicesOf, moodOf, targetLabel, taskOf } from "../model";
+import { type Agent, accountText, choicesOf, moodOf, statusClass, statusLabel, targetLabel, taskOf } from "../model";
 import { linkify } from "../Markdown";
-import { withNotes, type PendingItem } from "../conv";
-import { Bubble, collapseTools, withResults } from "../chat/Bubble";
+import { withNotes, withQueued, type PendingItem } from "../conv";
+import { Bubble, collapseTools, withResults, type Shown } from "../chat/Bubble";
 import { LiveLine } from "../chat/LiveLine";
 import { TownCtx } from "../contexts";
 import { ICON, STROKE } from "../icons";
@@ -19,6 +19,9 @@ import { CardActions } from "../card/CardActions";
 import { StateTab } from "./StateTab";
 import { useConversation } from "./useConversation";
 import { usePanelSend } from "./usePanelSend";
+import { useBoot } from "./useBoot";
+import { isSlashCommand } from "../composer/edit";
+import { call as invoke } from "../bridge";
 import { canAnswerPermission, hasTerminal } from "../abilities";
 
 const NO_NOTES: PendingItem[] = [];
@@ -85,15 +88,32 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
   // 以前は stick を読み込みの effect でしか戻さず、タブの切り替えでは前の値が残り、容れ物も作り直されるのに items が変わらないので下へ送られなかった
   useLayoutEffect(() => { stick.current = true; }, [id, tab, chatReq]);
   const { items, live, pending, setPending, convErr, convKick } = useConversation(id, isFast, working, stick, agent?.kind !== "node");
-  const { busy, send } = usePanelSend({ agent, hasTerm, items, switching, support, markNoSupport, addNote, setTab, setPending, setText, stick, convKick, onSent, onError });
+  // claude の起動の様子（アプリが立てた端末だけ）。起動前に送った文は Rust が預かり、起動したら送る（composer.rs の send_or_queue）。
+  // 送れたら「届けた」の仮の吹き出しに替え、送れなかったら理由を出して入力欄に戻す
+  const boot = useBoot(agent,
+    // / と ! の文は会話に user として出ないことがあるので、すぐ送ったときと同じく仮の吹き出しを足さない（usePanelSend の plain）
+    (t) => { if (!(t.startsWith("!") || isSlashCommand(t))) setPending((p) => [...p, { role: "user", text: t, pending: true, at: new Date().toISOString(), after: items[items.length - 1]?.n ?? -1 }]); convKick.current(); },
+    (t, e) => { onError(`${agent?.name ?? ""} に届かなかった: ${e}`); if (!text.trim()) setText(t); });
+  const { busy, send } = usePanelSend({ agent, hasTerm, items, switching, support, markNoSupport, addNote, setTab, setPending, setText, stick, convKick, onSent, onError, onQueued: boot.kick });
+  // 預かった文を取り消して、入力欄に戻す（打ちかけがあれば、その前に置く）
+  const cancelQueued = async () => {
+    if (!agent) return;
+    const back = await invoke<string[] | null>("cancel_queued", { sessionId: agent.id }).catch(() => null);
+    boot.kick();
+    if (back?.length) setText([...back, text].filter((x) => x.trim()).join("\n"));
+  };
 
   // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
   // -p の子は返事が出ると、送った文の仮の印が外れる（#55、answerPending）。外れた分は after の位置に置く（withNotes）
+  // 作業中に打たれた文（順番待ち）は、送った文の後ろ、今の動きの行の前に出す。CLI の端末と同じ並び
+  const running = !!agent && (moodOf(agent) === "working" || moodOf(agent) === "approval");
+  const liveQueued = live?.queued;
   const shown = useMemo(() => {
-    const waiting = pending.filter((x) => x.pending);
-    const placed = pending.length === waiting.length ? notes : [...notes, ...pending.filter((x) => !x.pending)].sort((a, b) => a.after - b.after);
-    return collapseTools(withResults(withNotes([...items, ...waiting], placed)));
-  }, [items, pending, notes]);
+    const { waiting, queued } = withQueued(pending.filter((x) => x.pending), liveQueued, running);
+    const placed = pending.every((x) => x.pending) ? notes : [...notes, ...pending.filter((x) => !x.pending)].sort((a, b) => a.after - b.after);
+    const waitBoot: Shown[] = boot.queued.map((q) => ({ role: "user", text: q.text, pending: true, waitBoot: true, at: q.at }));
+    return [...collapseTools(withResults(withNotes([...items, ...waiting], placed))), ...queued, ...waitBoot];
+  }, [items, pending, notes, liveQueued, running, boot.queued]);
   // 読めなかった印が出ているか。出ている間は中身の上に余白を足す（下の has-note）
   const hasNote = shown.length > 0 && !!convErr;
   // 会話の最後のまだ答えていない計画（ExitPlanMode の本文）。承認の hook の入力が空のとき、承認の欄に出す（#83）
@@ -121,7 +141,7 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
     const raf = requestAnimationFrame(() => { if (stick.current) el.scrollTop = el.scrollHeight; });
     return () => cancelAnimationFrame(raf);
     // 印が出て余白が付くと中身が伸びるので、一番下にいたら送り直す（開いたまま切れたとき、items は変わらない）
-  }, [items, pending, id, tab, chatReq, hasNote, live, working]);
+  }, [items, pending, id, tab, chatReq, hasNote, live, working, boot.queued.length]);
 
   if (!agent) {
     quickSend.current = null;
@@ -139,6 +159,8 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
   }
 
   const mood = moodOf(agent);
+  // 見出しの札は、起動の様子を Rust から読み直した値で出す（町の一覧は2〜8秒おきなので遅れる）
+  const view = { booting: boot.booting };
   // 承認の欄から答えられるか。答えられるのはブラウザ版（PWA）の ccn の行だけ。アプリが立てたセッションは、端末の承認の画面で答える
   const canAnswer = canAnswerPermission(agent);
   // 同じ名前の人が町にいたら、送信先に ID の先頭8字を添える（#36）。見出しは幅が足りず ID が切れるので名前だけにする
@@ -154,7 +176,7 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
           <button className="m-back" onClick={onBack} aria-label="一覧へ戻る"><ChevronLeft size={28} strokeWidth={2} /></button>
           <div className="p-avatar"><Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(lineage.length - 1)} size={40} /></div>
           <div className="p-id">
-            <div className="p-name"><span className="pn">{agent.name}</span><span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}</span></div>
+            <div className="p-name"><span className="pn">{agent.name}</span><span className={statusClass(view, mood)}><i />{statusLabel(view, mood)}</span></div>
             <div className="p-task">{linkify(taskOf(agent, mood))}</div>
           </div>
         </div>
@@ -163,13 +185,13 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
         <div className="p-avatar"><Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(lineage.length - 1)} size={64} /></div>
         <div className="p-id">
           <div className="p-name">
-            <span className="pn">{agent.name}</span><span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}</span>
+            <span className="pn">{agent.name}</span><span className={statusClass(view, mood)}><i />{statusLabel(view, mood)}</span>
             {agent.account && <span className="acct" title={`アカウント: ${accountText(agent)}。このセッションの claude が動いているアカウント`}>{agent.account}</span>}
           </div>
           <div className="p-line">{lineage.map((a, i) => (
             <span key={a.id}>{i > 0 && <ChevronRight className="p-line-sep" size={ICON.sm} strokeWidth={STROKE} aria-hidden />}<button className="lnk" onClick={() => onSelect(a)}>{a.name}</button></span>
           ))}</div>
-          <div className="p-task"><FileText className="p-task-icon" size={ICON.sm} strokeWidth={STROKE} aria-hidden />{linkify(taskOf(agent, mood))}</div>
+          <div className="p-task"><FileText className="p-task-icon" size={ICON.sm} strokeWidth={STROKE} aria-hidden /><span className="p-task-text" title={taskOf(agent, mood)}>{linkify(taskOf(agent, mood))}</span></div>
         </div>
         <div className="p-actions">
           {onClose && <button className="p-close" onClick={onClose} aria-label="チャットを閉じる" title="チャットを閉じる"><X size={16} strokeWidth={1.8} /></button>}
@@ -184,10 +206,10 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
         {hasTerm && <button className={tab === "term" ? "on" : ""} onClick={() => setTab("term")}>ターミナル</button>}
       </div>
       {mood === "approval" && tab === "state" && (
-        <div className="ap-float">{canAnswer ? <Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} /> : <AnswerInTerminal agent={agent} onTerm={() => setTab("term")} />}</div>
+        <div className="ap-float">{canAnswer ? <Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} onTerm={hasTerm ? () => setTab("term") : undefined} /> : <AnswerInTerminal agent={agent} onTerm={() => setTab("term")} />}</div>
       )}
       {mood === "approval" && tab === "term" && canAnswer && (
-        <div className="ap-float"><Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} /></div>
+        <div className="ap-float"><Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} onTerm={hasTerm ? () => setTab("term") : undefined} /></div>
       )}
 
       {tab === "term" ? (
@@ -206,8 +228,19 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
           {shown.map((x, i) => <Bubble key={x.n ?? `p${x.at ?? i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "working" && live && <LiveLine live={live} turnAt={agent.report?.turn_started_at ?? null} />}
           {mood === "approval" && (canAnswer
-            ? <Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} />
+            ? <Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} onTerm={hasTerm ? () => setTab("term") : undefined} />
             : <AnswerInTerminal agent={agent} onTerm={() => setTab("term")} />)}
+          {boot.queued.length > 0 && (
+            <div className="boot-wait" role="status">
+              <p className="hint">{boot.trustSuspect
+                ? "起動が終わらない。信頼の確認の画面で止まっているかもしれない。ターミナルで答えると、上の文を送る。"
+                : "claude の起動を待っている。起動したら上の文を送る。"}</p>
+              <div className="boot-wait-btns">
+                {hasTerm && <button className="choice" onClick={() => setTab("term")}>ターミナルを開く</button>}
+                <button className="choice" onClick={() => void cancelQueued()}>送るのをやめる</button>
+              </div>
+            </div>
+          )}
           {choices.length > 0 && (
             <div className="choices">
               {choices.map((c) => <button key={c} className="choice" disabled={busy} onClick={() => send(c)}>{c}</button>)}
@@ -222,7 +255,7 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
         <div className="to"><span className="to-name">送信先: {target}</span>
           <SessionControls key={agent.id} agent={agent} support={support} onNoSupport={markNoSupport} onSwitching={setSwitching} onDone={onSent2} onError={onError} />
         </div>
-        <Composer key={agent.id} touch={mobile} agent={agent} text={text} setText={setText} busy={busy || switching} running={mood === "working"} support={support} onSubmit={send} onError={onError} />
+        <Composer key={agent.id} touch={mobile} agent={agent} text={text} setText={setText} busy={busy || switching} running={mood === "working"} booting={boot.booting} support={support} onSubmit={send} onError={onError} />
       </div>}
     </aside>
   );
