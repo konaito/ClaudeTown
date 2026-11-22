@@ -1048,8 +1048,9 @@ while True:
     /// 代役を立て、送ってよい状態（gate が Ready）になるまで待つ。TEST_HOME はこのスレッドだけに効く
     fn stand_in(on_paste: &str) -> Stand {
         use std::os::unix::fs::PermissionsExt;
-        let guard = crate::pty::BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 錠の順は NATIVE_TEST_LOCK、BIN_LOCK（feat/app-v1 の pty.rs の試験と同じ。逆に取る試験があると互いに待って止まる）
         let native = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = crate::pty::BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("fc-168-{}-{}", std::process::id(), fastrand::u64(..)));
         fs::create_dir_all(dir.join("home/sessions")).unwrap();
         let dir = dir.canonicalize().unwrap();

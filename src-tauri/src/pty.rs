@@ -684,9 +684,9 @@ mod tests {
     /// resume が Some なら、その id で resume として起動する
     fn launched_config_dir_as(dir: &std::path::Path, resume_id: Option<&str>) -> Result<Option<String>, String> {
         // 町の一覧を数える試験（lib.rs）に、この端末が混ざらないようにする。錠は端末が台帳から消えるまで持つ。
-        // 取る順は lib.rs と composer.rs と同じ BIN_LOCK、NATIVE_TEST_LOCK（逆に取ると互いに待って止まる）
-        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 取る順は lib.rs と composer.rs と同じ NATIVE_TEST_LOCK、BIN_LOCK（逆に取ると互いに待って止まる）
         let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("CLAUDE_CONFIG_DIR").ok();
         unsafe {
             std::env::set_var("FC_CLAUDE_BIN", dir.join("claude"));

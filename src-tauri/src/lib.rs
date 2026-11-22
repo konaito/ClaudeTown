@@ -704,11 +704,11 @@ mod tests {
 
     #[test]
     fn town_reads_native_sessions_and_subagents() {
-        // 代役の端末を立てる試験（pty.rs、composer.rs）の端末も町の一覧に出て、数がずれる。立てる錠を先に取り（順は BIN_LOCK、NATIVE_TEST_LOCK）、
+        // 代役の端末を立てる試験（pty.rs、composer.rs）の端末も町の一覧に出て、数がずれる。立てる錠も取り（順は NATIVE_TEST_LOCK、BIN_LOCK）、
         // 前の試験の端末が終わるのを待つ
-        let _bin = pty::BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 会話を読む先の登録（native::register）はプロセスで1つなので、使う試験を1本ずつ動かす
         let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _bin = pty::BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let t0 = std::time::Instant::now();
         while !pty::list().is_empty() && t0.elapsed() < std::time::Duration::from_secs(5) {
             std::thread::sleep(std::time::Duration::from_millis(50));
