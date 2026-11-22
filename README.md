@@ -292,10 +292,11 @@ Claude Town は、ブラウザから開けるインストール可能な PWA と
 - 入力欄は画面の下に固定する。キーボードが出ると、`visualViewport` の高さ（`--vv-h`）に合わせて縮む。Enter は改行で、送るのは送信ボタンだけである。
 - スマホの見た目の確認は、`bun run dev` を `?layout=mobile` で開き、agent-browser を 390x844、倍率 3 にして行う。モックの ccn（`scripts/mock-ccn-town.ts`）は ccn を外したときに消した。
 
-Void アプリの確認は `web/` で行う。
+Void アプリの確認は `web/` で行う。`web/src` は `../src` へのリンクで、画面が読む react や @xterm/* はリポジトリ直下の node_modules にある。先に直下で install する。
 
 ```sh
-cd web && bun install
+bun install --frozen-lockfile   # リポジトリ直下
+cd web && bun install --frozen-lockfile
 bun run build   # .cloudflare/ に Worker と画面が出る
 ```
 
