@@ -80,6 +80,8 @@ export function TerminalView({ sessionId, onError }: { sessionId: string; onErro
     if (!box.current) return;
     // 後始末のときには ref が外れているので、容れ物を今のうちに持っておく
     const host = box.current;
+    // セッションを切り替えても部品は作り直されないので、前のセッションの表示（開けなかった理由や「終わった」）を戻す
+    setStatus("起動中…");
     perfMark("mount", sessionId);
     const sh = sharedTerm();
     const { term, fit, el } = sh;
