@@ -15,10 +15,12 @@ type Opts = {
   setPending: React.Dispatch<React.SetStateAction<PendingItem[]>>; setText: (v: string) => void;
   stick: React.MutableRefObject<boolean>; convKick: React.MutableRefObject<() => void>;
   onSent: (a: Agent) => void; onError: (m: string) => void;
+  /** 起動前に送って Rust が預かったとき（起動の見張りを読み直させる） */
+  onQueued: () => void;
 };
 
 /** パネルからの送信。send は毎回の描画で作り直す（busy や items を読むため）。agent が無いときは何も送らない */
-export function usePanelSend({ agent, hasTerm, items, switching, support, markNoSupport, addNote, setTab, setPending, setText, stick, convKick, onSent, onError }: Opts) {
+export function usePanelSend({ agent, hasTerm, items, switching, support, markNoSupport, addNote, setTab, setPending, setText, stick, convKick, onSent, onError, onQueued }: Opts) {
   const [busy, setBusy] = useState(false);
   /** quick はカードのボタンから送るとき。入力欄の下書きは消さない */
   const send = async (body: string, quick = false) => {
@@ -44,11 +46,19 @@ export function usePanelSend({ agent, hasTerm, items, switching, support, markNo
           throw new Error(err);
         }
         addNote(agent.id, { role: "event", kind: "command", text: `/${route.name} を実行した${route.note ? `。${route.note}` : ""}`, at: new Date().toISOString(), after });
+      } else if (direct && !viaCcn(agent)) {
+        // claude の起動前（信頼の確認の画面を含む）なら、Rust が預かって起動したら送る（composer.rs の send_or_queue）。
+        // 預かった文は会話の末尾に「起動したら送る」として出す（Panel が boot_status から出す）
+        const r = await invoke<{ queued?: boolean } | null>("send_or_queue", { sessionId: agent.id, text: body });
+        if (r?.queued) onQueued();
+        else {
+          // 画面を開くコマンド（/model など）は、ターミナルで操作してもらう
+          if (!plain && opensDialog(body, BUILTINS)) setTab("term");
+          if (plain) setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
+        }
       } else if (direct) {
         await invoke("send_direct", { sessionId: agent.id, text: body });
-        // 画面を開くコマンド（/model など）は、ターミナルで操作してもらう
         if (!plain && opensDialog(body, BUILTINS)) setTab("term");
-        if (plain) setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
       } else {
         await invoke("send_message", { sessionId: agent.id, text: body });
         setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);

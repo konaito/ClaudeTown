@@ -216,6 +216,10 @@ fn town_rows() -> Vec<Value> {
         r["capabilities"] = if mine { app_caps() } else { native::read_only_caps() };
         if mine {
             r["source"] = json!("app");
+            // claude が入力を受け付けるところまで起動していない（信頼の確認の画面を含む）。画面は「起動中」と出す
+            if r["id"].as_str().and_then(composer::booted) == Some(false) {
+                r["booting"] = json!(true);
+            }
         }
     }
     native::register(native::paths_of(&rows.iter().collect::<Vec<_>>()));
@@ -474,7 +478,7 @@ pub fn run() {
             session_ops::cmd::create_session, session_ops::cmd::resume_session, session_ops::cmd::stop_session, session_ops::cmd::house_places, repo::cmd::place_repos,
             term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
-            composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files,
+            composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::send_or_queue, composer::cmd::cancel_queued, composer::cmd::boot_status, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files,
             switch::cmd::session_settings, switch::cmd::switch_session, switch::cmd::cancel_switch
         ])
         .build(context)

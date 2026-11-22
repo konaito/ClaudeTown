@@ -17,7 +17,11 @@ export function useCardSend(toast: (text: string, bad?: boolean) => void) {
     if (viaPanel) return viaPanel;
     try {
       if (viaCcn(a)) await invoke("send_message", { sessionId: a.id, text });
-      else await invoke("send_direct", { sessionId: a.id, text });
+      else {
+        // 起動前なら Rust が預かり、起動したら送る（composer.rs の send_or_queue）
+        const r = await invoke<{ queued?: boolean } | null>("send_or_queue", { sessionId: a.id, text });
+        if (r?.queued) { toast(`${a.name} は起動中。起動したら届ける`); return true; }
+      }
       kickTown();
       toast(`${a.name} に届けた`);
       return true;
