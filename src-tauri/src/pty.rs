@@ -134,9 +134,20 @@ pub fn new_uuid() -> String {
 /// claude が呼ぶ git や bun も見つからない。ターミナルで開いたときと同じ PATH をログインシェルに聞き、取れた値だけを覚える（#175）。
 /// 取れなかったときは None で、claude はアプリの PATH で動く。次に端末を立てるときにもう一度聞く
 fn login_path() -> Option<String> {
-    static LOGIN: LoginPath = LoginPath::new();
-    let shell = std::env::var("SHELL").ok().filter(|s| s.starts_with('/')).unwrap_or_else(|| "/bin/zsh".into());
-    LOGIN.get(&shell, LOGIN_WAIT, LOGIN_LIMIT)
+    LOGIN.get(&login_shell(), LOGIN_WAIT, LOGIN_LIMIT)
+}
+
+/// 起動のときの立て直しの前に、ログインシェルの返事を LOGIN_LIMIT まで待つ。取れたら true。
+/// 立て直しは端末を1つずつ立て、聞いている最中の2つ目からは待たないので、ここで待たないと、
+/// .zshrc が5秒を超える Mac では立て直した端末が全部アプリの PATH になる（#175）。立て直しは別のスレッドなので、画面は止まらない
+pub fn wait_login_path() -> bool {
+    LOGIN.get(&login_shell(), LOGIN_LIMIT, LOGIN_LIMIT).is_some()
+}
+
+static LOGIN: LoginPath = LoginPath::new();
+
+fn login_shell() -> String {
+    std::env::var("SHELL").ok().filter(|s| s.starts_with('/')).unwrap_or_else(|| "/bin/zsh".into())
 }
 
 /// 端末を立てる側が、ログインシェルの返事を待つ上限。過ぎたらアプリの PATH で立てる
@@ -691,6 +702,18 @@ mod tests {
         std::fs::read_to_string(count).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
     }
 
+    /// Some を返すまで5秒まで呼び続ける（ほかの試験と並んで、台本の起動が遅れても落ちないように）
+    fn poll(f: impl Fn() -> Option<String>) -> Option<String> {
+        let t0 = Instant::now();
+        loop {
+            let r = f();
+            if r.is_some() || t0.elapsed() > Duration::from_secs(5) {
+                return r;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     fn fresh_login() -> &'static LoginPath {
         Box::leak(Box::new(LoginPath::new()))
     }
@@ -727,10 +750,9 @@ mod tests {
         let t1 = Instant::now();
         assert_eq!(login.get(sh, wait, limit), None);
         assert!(t1.elapsed() < Duration::from_millis(100), "{:?}", t1.elapsed());
-        // 1回目が limit で止められるのを待つ。ここまでに起こしたシェルは1つだけ
-        std::thread::sleep(Duration::from_millis(800));
-        assert_eq!(asked(&count), 1);
-        assert_eq!(login.get(sh, wait, limit).as_deref(), Some("/fake/bin:/usr/bin"));
+        // 1回目が limit で止められた後の呼び出しは、もう一度聞いて速い返事を取る。
+        // 止められる前の呼び出しは None を返すだけでシェルを起こさないので、取れるまで回しても起こしたシェルは2つになる
+        assert_eq!(poll(|| login.get(sh, wait, limit)).as_deref(), Some("/fake/bin:/usr/bin"));
         assert_eq!(asked(&count), 2);
         assert_eq!(login.get(sh, wait, limit).as_deref(), Some("/fake/bin:/usr/bin"));
         assert_eq!(asked(&count), 2);
@@ -744,8 +766,7 @@ mod tests {
         let login = fresh_login();
         let (wait, limit) = (Duration::from_millis(100), Duration::from_secs(5));
         assert_eq!(login.get(sh, wait, limit), None);
-        std::thread::sleep(Duration::from_millis(1200));
-        assert_eq!(login.get(sh, wait, limit).as_deref(), Some("/fake/bin:/usr/bin"));
+        assert_eq!(poll(|| login.get(sh, wait, limit)).as_deref(), Some("/fake/bin:/usr/bin"));
         assert_eq!(asked(&count), 1);
     }
 
