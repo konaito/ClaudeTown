@@ -5,7 +5,7 @@ import { viaCcn } from "./control";
 export type SendCommand = "send_or_queue" | "send_direct" | "send_message";
 
 /**
- * 文を送るときに呼ぶ Rust の命令を選ぶ（#225）。右パネルの送信（src/panel/usePanelSend.ts）と同じ分け方で、カードのボタンもこれを使う。
+ * 文を送るときに呼ぶ Rust の命令を選ぶ（#225）。右パネルの送信（src/panel/usePanelSend.ts）と同じ分け方にしてある。今はカードのボタンだけが使い、パネルは同じ分け方を自分で書いている。
  * - アプリが立てた端末（端末を持つ行）は send_or_queue。claude の起動前なら Rust が預かり、起動したら送る
  * - Claude Town の外で起動したセッション（native の行）は send_direct。Rust が受信ソケットで送り（#156）、ソケットが無ければ理由を返して断る
  * - ブラウザ版（PWA）の ccn の行は send_message。ただし端末の行で先頭が / か ! の文（plain が false）は send_direct で入力欄へ貼る
