@@ -40,6 +40,9 @@ struct Proc {
     killer: Box<dyn ChildKiller + Send + Sync>,
     /// 出力の末尾
     out: Vec<u8>,
+    /// 出力を端末として解いた今の画面（vt100、MIT）。モデルのピッカーと権限モードの表示を読むのに使う（switch.rs）。
+    /// 出力の生の文字列は、語の間の空白がカーソルの移動の印になり、ピッカーの行も ❯ の1文字だけを描き直すので、そのままでは読めない
+    screen: vt100::Parser,
     /// 開いている画面（世代、送り口）と、送りかけの文字の残り
     sub: Option<(u64, Sender<TermOut>)>,
     carry: Vec<u8>,
@@ -206,7 +209,7 @@ pub fn spawn(cwd: &str, name: Option<&str>, cols: u16, rows: u16, notice: impl F
     let killer = child.clone_killer();
     let started_at = crate::now_ms() as u64;
     with(|m| {
-        m.insert(pid, Proc { pid, ids: vec![id.clone()], cwd: cwd.to_string(), started_at, size: (cols, rows), master: pair.master, writer: Arc::new(Mutex::new(writer)), killer, out: vec![], sub: None, carry: vec![] });
+        m.insert(pid, Proc { pid, ids: vec![id.clone()], cwd: cwd.to_string(), started_at, size: (cols, rows), master: pair.master, writer: Arc::new(Mutex::new(writer)), killer, out: vec![], screen: new_screen(cols, rows), sub: None, carry: vec![] });
     });
     eprintln!("[pty] claude を起動した pid {pid} id {id} cwd {cwd}");
     std::thread::spawn(move || read_loop(pid, reader));
@@ -237,6 +240,7 @@ fn read_loop(pid: u32, mut reader: Box<dyn Read + Send>) {
         let alive = with(|m| {
             let Some(p) = m.get_mut(&pid) else { return false };
             p.out.extend_from_slice(bytes);
+            p.screen.process(bytes);
             if p.out.len() > KEEP_BYTES {
                 let cut = p.out.len() - KEEP_BYTES;
                 p.out.drain(..cut);
@@ -309,6 +313,21 @@ pub fn unsubscribe(id: &str, generation: Option<u64>) {
     });
 }
 
+fn new_screen(cols: u16, rows: u16) -> vt100::Parser {
+    let nz = |v: u16, d: u16| std::num::NonZeroU16::new(v).unwrap_or(std::num::NonZeroU16::new(d).expect("0 ではない"));
+    vt100::Parser::new(nz(rows, 24), nz(cols, 80), 0)
+}
+
+/// 今の画面の文字（行ごとに改行で区切る）。台帳に無ければ None
+pub fn screen_text(id: &str) -> Option<String> {
+    with(|m| {
+        let p = m.get(&pid_of(m, id)?)?;
+        let sc = p.screen.screen();
+        let cols = sc.size().1.get();
+        Some(sc.rows(0, cols).collect::<Vec<_>>().join("\n"))
+    })
+}
+
 pub fn write(id: &str, text: &str) -> Result<(), String> {
     let w = with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| p.writer.clone())).ok_or("このセッションの端末はこのアプリに無い")?;
     let mut w = w.lock().unwrap_or_else(|e| e.into_inner());
@@ -332,6 +351,9 @@ pub fn resize(id: &str, cols: u16, rows: u16) -> Result<(), String> {
         }
         p.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| format!("ターミナルの大きさを変えられなかった: {e}"))?;
         p.size = (cols, rows);
+        if let (Some(r), Some(c)) = (std::num::NonZeroU16::new(rows), std::num::NonZeroU16::new(cols)) {
+            p.screen.set_size(r, c);
+        }
         Ok(())
     })
 }

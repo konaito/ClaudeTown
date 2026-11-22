@@ -21,6 +21,8 @@ import { useZoom } from "./hooks/useZoom";
 import { useHidden } from "./hooks/useHidden";
 import { useKill } from "./hooks/useKill";
 import { useCardSend } from "./hooks/useCardSend";
+import { supportFor } from "./session/SessionControls";
+import { useCcnReservations } from "./webReserve";
 import { Stage } from "./canvas/Stage";
 import { FamilyCanvas, Group, layoutOf } from "./canvas/FamilyCanvas";
 import { KillConfirm } from "./confirm/Confirm";
@@ -97,6 +99,8 @@ export default function App() {
   const { kill, killAsk, setKillAsk, killCtx } = useKill({ tree, selected, setSelected, toast, setHidden });
   // お手紙（記録はこの機械の hook が書く）
   const flights = useMemo(() => flightsOf(snap?.letters ?? [], agents), [snap, agents]);
+  // ブラウザ版の ccn の行で予約したモデルと権限モードを、替えられるようになったら替える（always-switch）。アプリの端末の予約は Rust が当てる（switch.rs）
+  useCcnReservations(agents, supportFor, (m) => toast(m), (m) => toast(m, true));
   const letterMarks = useLetterMarks(flights);
   const { panelSend, cardSend } = useCardSend(toast);
   const counts = useMemo(() => {

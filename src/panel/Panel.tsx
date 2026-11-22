@@ -20,7 +20,6 @@ import { StateTab } from "./StateTab";
 import { useConversation } from "./useConversation";
 import { usePanelSend } from "./usePanelSend";
 import { canAnswerPermission, hasTerminal } from "../abilities";
-import { viaCcn } from "../session/control";
 
 const NO_NOTES: PendingItem[] = [];
 
@@ -221,7 +220,7 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
 
       {tab !== "term" && <div className="composer" ref={composerBox}>
         <div className="to"><span className="to-name">送信先: {target}</span>
-          {viaCcn(agent) && <SessionControls key={agent.id} agent={agent} support={support} onNoSupport={markNoSupport} onSwitching={setSwitching} onDone={onSent2} onError={onError} />}
+          <SessionControls key={agent.id} agent={agent} support={support} onNoSupport={markNoSupport} onSwitching={setSwitching} onDone={onSent2} onError={onError} />
         </div>
         <Composer key={agent.id} touch={mobile} agent={agent} text={text} setText={setText} busy={busy || switching} running={mood === "working"} support={support} onSubmit={send} onError={onError} />
       </div>}

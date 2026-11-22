@@ -5,6 +5,7 @@
 // - term_open / term_close / term_input / term_resize: このアプリが立てた端末を読み書きし、開いた画面の Channel へ流す
 // - house_places: 新しい世帯のペインの「最近の場所」の材料（places.rs）
 // - prompt_history / slash_commands / file_suggestions / send_direct / interrupt_session: チャットの入力欄を CLI と同じ動きにする（composer.rs）
+// - session_settings / switch_session / cancel_switch: モデルと権限モードを読む、替える、予約を取り消す（switch.rs）
 // ファイルを読む命令は spawn_blocking で動かし、メインスレッドを止めない（下の「画面から呼ぶ命令」）。
 // 操作（送信、停止、端末）は、このアプリが立てたセッションにだけできる。ほかのセッションは記録から読むだけ。
 
@@ -15,6 +16,7 @@ mod naming;
 mod places;
 mod pty;
 mod repo;
+mod switch;
 mod native;
 mod perf;
 use perf::*;
@@ -468,7 +470,8 @@ pub fn run() {
             session_ops::cmd::create_session, session_ops::cmd::stop_session, session_ops::cmd::house_places, repo::cmd::place_repos,
             term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
-            composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files
+            composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files,
+            switch::cmd::session_settings, switch::cmd::switch_session, switch::cmd::cancel_switch
         ])
         .build(context)
         .expect("error while building tauri application")

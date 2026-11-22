@@ -1,18 +1,26 @@
-// チャット欄の「送信先」の行に置く、モデルと権限モードの切り替え（#97）。決まりは control.ts。
-// ccn の口を使うので、出すのはブラウザ版（PWA）の ccn の行だけ。アプリ（Tauri）では出さない（モデルはターミナルで /model を打つ）。
-// 今の値は ccn の GET /api/sessions/<id>（session_detail）の model と permissionMode で読み、替えたら PATCH の応答で置き換える。
-// 一覧（snapshot）には載せない（Rust の一覧の取り込みは別の作業が触っているので、こちらは詳細を読む）。
+// チャット欄の「送信先」の行に置く、モデルと権限モードの切り替え（#97、always-switch）。決まりは control.ts。
+// 選択はいつでも押せる。今は替えられなければ予約し、予約中であることと、いつ替えるかを下に出す。今の値を選び直すと予約を取り消す。
+// - アプリ（Tauri）: 今の値と予約は Rust の session_settings で読む（switch.rs）。アプリの端末は switch_session で替えるか予約する。
+//   アプリの外のセッションは、transcript から読んだ今の値を出し、選んだら代わりの手（そのターミナルで /model を打つ、など）を出す
+// - ブラウザ版（PWA）の ccn の行: 今の値は ccn の GET /api/sessions/<id>（session_detail）で読み、替えたら PATCH の応答で置き換える。予約は src/webReserve.ts
 import { useEffect, useRef, useState } from "react";
-import { call as invoke } from "../bridge";
+import { call as invoke, IS_WEB } from "../bridge";
 import type { Agent } from "../model";
 import type { SessionDetail } from "../types";
-import { bodyObj, configureError, isHttp, lockReason, noRoute, viaCcn, modelOptions, modeOptions, showReason, supportOf, type Support } from "./control";
+import { modelOptions, modeOptions, planOf, routeOf, supportOf, viaCcn, type Plan, type Support, type What } from "./control";
+import { cancel as cancelCcn, configure, reserve as reserveCcn, usePending } from "../webReserve";
 
 // ノードごとに、口があるかを覚える。あれば以後は確かめない。無ければ1分たったら確かめ直す（ノードを新しくしたとき）
 const supportByNode = new Map<string, { v: Support; at: number }>();
 const RECHECK_NO_MS = 60_000;
 
 type Cur = { model: string | null; mode: string | null };
+type Pend = { model?: string; mode?: string };
+/** Rust の switch::status が返す形 */
+type Settings = { model: string | null; permissionMode: string | null; pending: { model: string | null; permissionMode: string | null }; last: { what: What; value: string; ok: boolean; error?: string; at: number } | null };
+
+/** 予約を当てる見張り（src/webReserve.ts）が使う。ノードは1つなので、どのセッションも同じ値 */
+export const supportFor = (a: Agent): Support => cachedSupport(viaCcn(a) ? a.kind : "terminal", "");
 
 const cachedSupport = (kind: Agent["kind"], nodeKey: string): Support => {
   if (kind === "terminal") return "no";
@@ -52,64 +60,146 @@ export function useNodeSupport(agent: Agent | null): [Support, () => void] {
 export function SessionControls({ agent, support, onNoSupport, onSwitching, onDone, onError }: {
   agent: Agent;
   support: Support; onNoSupport: () => void;
-  /** 替えている間（pty は起動し直しの約3秒）。この間はチャットの送信も止める */
+  /** 替えている間（ccn の pty は起動し直しの約3秒）。この間はチャットの送信も止める */
   onSwitching: (on: boolean) => void;
   onDone: (m: string) => void; onError: (m: string) => void;
 }) {
+  const route = routeOf(agent);
   const [cur, setCur] = useState<Cur>({ model: null, mode: null });
   const [switching, setSwitching] = useState(false);
+  // アプリの端末の予約（Rust が持つ）。ccn の行の予約は src/webReserve.ts が持つ
+  const [appPend, setAppPend] = useState<Pend>({});
+  const ccnPend = usePending(agent.id);
+  const pend: Pend = route === "app" ? appPend : route === "ccn" ? ccnPend : {};
+  // 外から届ける口が無いセッションで選んだときの、代わりの手
+  const [note, setNote] = useState<string | null>(null);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  // 最後の結果は1回だけ知らせる。開いたときに残っていた結果は知らせない
+  const seenAt = useRef<number | null | undefined>(undefined);
 
-  // 今の値。開いたとき、状態が変わったとき（承認に答えた後、計画の承認でモードが替わる）に読み直す
-  useEffect(() => {
-    let on = true;
-    invoke<SessionDetail | null>("session_detail", { sessionId: agent.id })
-      .then((d) => { if (on && d && typeof d === "object") setCur({ model: str(d.model), mode: str(d.permissionMode) }); })
-      .catch(() => {});
-    return () => { on = false; };
-  }, [agent.id, agent.state]);
-
-  const reason = lockReason(agent, support, switching);
-  const apply = async (change: { model?: string; permissionMode?: string }) => {
-    if (reason) return;
-    setSwitching(true);
-    onSwitching(true);
-    try {
-      const r = await invoke<unknown>("configure_session", { sessionId: agent.id, model: change.model ?? null, permissionMode: change.permissionMode ?? null });
-      if (!isHttp(r)) throw new Error("ccn の応答が読めなかった");
-      const err = configureError(r);
-      if (err) {
-        if (noRoute(r)) onNoSupport();
-        onError(`${agent.name}: ${err}`);
-        return;
-      }
-      if (alive.current) setCur({ model: str(bodyObj(r.body).model), mode: str(bodyObj(r.body).permissionMode) });
-      onDone(change.model ? `${agent.name} のモデルを ${change.model} にした` : `${agent.name} の権限モードを ${change.permissionMode} にした`);
-    } catch (e) {
-      onError(`${agent.name}: 替えられなかった: ${e}`);
-    } finally {
-      if (alive.current) setSwitching(false);
-      onSwitching(false);
+  const take = (s: Settings) => {
+    if (!alive.current || !s || typeof s !== "object") return;
+    setCur({ model: str(s.model), mode: str(s.permissionMode) });
+    setAppPend({ model: str(s.pending?.model) ?? undefined, mode: str(s.pending?.permissionMode) ?? undefined });
+    const at = s.last?.at ?? null;
+    if (seenAt.current !== undefined && at && at !== seenAt.current && s.last) {
+      const label = s.last.what === "model" ? "モデル" : "権限モード";
+      if (s.last.ok) onDone(`${agent.name} の${label}を ${s.last.value} にした`);
+      else onError(`${agent.name}: ${label}を ${s.last.value} にできなかった: ${s.last.error ?? ""}`);
     }
+    seenAt.current = at;
   };
 
-  const tip = (what: string) => reason ?? (agent.kind === "pty" ? `${what}を替える。端末のセッションは claude を起動し直す（約3秒。裏のシェルとサブエージェントは止まる）` : `${what}を替える。このセッションだけに効き、設定ファイルは書き換えない`);
+  // 今の値。開いたとき、状態が変わったとき（承認に答えた後、計画の承認でモードが替わる）に読み直す。
+  // アプリの端末で予約がある間は、1秒ごとに読む（当たったら予約が消える）
+  const hasPend = !!(appPend.model || appPend.mode);
+  useEffect(() => {
+    let on = true;
+    const read = () => {
+      if (IS_WEB) {
+        invoke<SessionDetail | null>("session_detail", { sessionId: agent.id })
+          .then((d) => { if (on && d && typeof d === "object") setCur({ model: str(d.model), mode: str(d.permissionMode) }); })
+          .catch(() => {});
+      } else {
+        invoke<Settings>("session_settings", { sessionId: agent.id }).then((s) => { if (on) take(s); }).catch(() => {});
+      }
+    };
+    read();
+    const t = route === "app" && hasPend ? setInterval(read, 1000) : null;
+    return () => { on = false; if (t) clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agent.id, agent.state, route, hasPend]);
+
+  const planFor = (what: What, v: string | null): Plan => planOf(agent, what, v, support, switching);
+
+  const applyCcn = async (what: What, v: string) => {
+    setSwitching(true);
+    onSwitching(true);
+    const r = await configure(agent, what, v);
+    if (alive.current) setSwitching(false);
+    onSwitching(false);
+    if (!r.ok) {
+      if (r.noRoute) onNoSupport();
+      onError(`${agent.name}: ${r.error}`);
+      return;
+    }
+    if (alive.current) setCur({ model: r.model, mode: r.mode });
+    onDone(what === "model" ? `${agent.name} のモデルを ${v} にした` : `${agent.name} の権限モードを ${v} にした`);
+  };
+
+  const choose = async (what: What, v: string) => {
+    setNote(null);
+    const now = what === "model" ? cur.model : cur.mode;
+    // 今の値を選び直したら、予約を取り消す
+    if (v === now) {
+      if (!pend[what]) return;
+      if (route === "app") take(await invoke<Settings>("cancel_switch", { sessionId: agent.id, what }));
+      else cancelCcn(agent.id, what);
+      onDone(`${agent.name} の${what === "model" ? "モデル" : "権限モード"}の予約を取り消した`);
+      return;
+    }
+    const plan = planFor(what, v);
+    if (plan.kind === "none") { setNote(plan.why); return; }
+    if (route === "app") {
+      try {
+        take(await invoke<Settings>("switch_session", { sessionId: agent.id, model: what === "model" ? v : null, permissionMode: what === "mode" ? v : null }));
+      } catch (e) {
+        onError(`${agent.name}: ${e}`);
+      }
+      return;
+    }
+    if (plan.kind === "wait") { reserveCcn(agent.id, what, v); return; }
+    await applyCcn(what, v);
+  };
+
+  // 予約中の文。すぐ当てられる予約は「替えている」と出す（アプリの端末は、Rust の見張りが0.5秒以内に当てる）
+  const lines: string[] = [];
+  for (const what of ["model", "mode"] as What[]) {
+    const v = pend[what];
+    if (!v) continue;
+    const p = planFor(what, v);
+    const label = what === "model" ? "モデル" : "権限モード";
+    lines.push(p.kind === "wait" ? `${label}を ${v} に予約した。${p.when}` : `${label}を ${v} に替えている`);
+  }
+  if (note) lines.push(note);
+  if (switching && route === "ccn") lines.push(agent.kind === "pty" ? "起動し直している（約3秒）" : "替えている");
+
+  const tip = (what: What) => {
+    const label = what === "model" ? "モデル" : "権限モード";
+    const p = planFor(what, null);
+    if (p.kind === "none") return `${label}: ${p.why}`;
+    const when = p.kind === "wait" ? `いまは替えられないので予約する（${p.when}）` : "すぐ替える";
+    if (route === "app") {
+      return what === "model"
+        ? `${label}を替える（${when}）。端末で /model のピッカーを開いて s を押すのと同じで、このセッションだけに効く（新しいセッションの既定は変えない）`
+        : `${label}を替える（${when}）。端末で Shift+Tab を押すのと同じ。dontAsk は端末からは選べない`;
+    }
+    return `${label}を替える（${when}）。` + (agent.kind === "pty" ? "端末のセッションは claude を起動し直す（約3秒。裏のシェルとサブエージェントは止まる）" : "このセッションだけに効き、設定ファイルは書き換えない");
+  };
+  const shownModel = pend.model ?? cur.model;
+  const shownMode = pend.mode ?? cur.mode;
   return (
     <div className="sc">
-      {showReason(reason, support) && <span className="sc-why" title={reason!}>{reason}</span>}
-      <select className="sc-sel" aria-label="モデル" value={cur.model ?? ""} disabled={!!reason} title={tip("モデル")}
-        onChange={(e) => { const v = e.target.value; if (v && v !== cur.model) apply({ model: v }); }}>
-        {!cur.model && <option value="">モデル</option>}
-        {modelOptions(cur.model).map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+      {lines.map((l) => <span key={l} className="sc-why" title={l}>{l}</span>)}
+      <select className={`sc-sel ${pend.model ? "sc-pend" : ""}`} aria-label="モデル" value={shownModel ?? ""} title={tip("model")}
+        onChange={(e) => { const v = e.target.value; if (v) void choose("model", v); }}>
+        {!shownModel && <option value="">モデル</option>}
+        {withCur(modelOptions(shownModel), cur.model).map((m) => <option key={m.value} value={m.value}>{m.value === cur.model && pend.model ? `${m.label}（今）` : m.label}</option>)}
       </select>
-      <select className="sc-sel" aria-label="権限モード" value={cur.mode ?? ""} disabled={!!reason} title={tip("権限モード")}
-        onChange={(e) => { const v = e.target.value; if (v && v !== cur.mode) apply({ permissionMode: v }); }}>
-        {!cur.mode && <option value="">権限モード</option>}
-        {modeOptions(cur.mode).map((m) => <option key={m.value} value={m.value} title={m.title}>{m.label}</option>)}
+      <select className={`sc-sel ${pend.mode ? "sc-pend" : ""}`} aria-label="権限モード" value={shownMode ?? ""} title={tip("mode")}
+        onChange={(e) => { const v = e.target.value; if (v) void choose("mode", v); }}>
+        {!shownMode && <option value="">権限モード</option>}
+        {withCur(modeOptions(shownMode), cur.mode).map((m) => <option key={m.value} value={m.value} title={(m as { title?: string }).title ?? m.label}>{m.value === cur.mode && pend.mode ? `${m.label}（今）` : m.label}</option>)}
       </select>
     </div>
   );
+}
+
+/** 予約中は選択肢の先頭に予約の値が来るので、今の値が候補に無ければ（id のモデルなど）足す。選び直して取り消せるように */
+function withCur<T extends { value: string; label: string }>(opts: T[], cur: string | null): T[] {
+  if (!cur || opts.some((o) => o.value === cur)) return opts;
+  return [{ value: cur, label: cur.replace(/^claude-/, "") } as T, ...opts];
 }
 
 function str(v: unknown): string | null {
