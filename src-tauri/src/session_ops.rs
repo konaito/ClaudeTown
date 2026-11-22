@@ -36,6 +36,41 @@ pub(crate) fn stop_session(session_id: String) -> Result<(), String> {
     Ok(())
 }
 
+// ---------- 再起動（カードの「再起動」） ----------
+
+/// 再起動で、前任の claude が消えるのを待つ上限（SIGHUP で2秒、効かなければ SIGKILL）
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// このアプリが立てたセッションを止め、同じ id を `claude --resume` で立て直す。
+/// アカウントは resume のときも cam usage の best で選び直す（account.rs）ので、利用上限で止まったアカウントから枠の残るアカウントへ替わる。
+/// id と会話の jsonl は変わらないので、親（最初の文の from 行）と名前は継がれる。モデルと権限モードは resume では渡さず、会話の記録のまま。
+/// ccn の引き継ぎ（succeed）は使わない。ccn は 2026-11-21 にアプリから外した
+pub(crate) fn restart_session(session_id: String) -> Result<Value, String> {
+    app_guard(&session_id)?;
+    refuse_if_disabled()?;
+    let root = native::claude_home();
+    // 止める前に、立て直せるかを確かめる（止めてから立て直せないと、会話が閉じたままになる）
+    let jsonl = native::sessions::find_jsonl(&root, &session_id).ok_or("会話の記録（jsonl）が無いので再起動できない（1通目の前に止まったセッション）")?;
+    let cwd = native::sessions::resume_cwd(&jsonl).ok_or("会話の記録から場所（cwd）が読めなかった")?;
+    if !std::path::Path::new(&cwd).is_dir() {
+        return Err(format!("場所が無いか、ディレクトリではない: {cwd}"));
+    }
+    let (cols, rows) = pty::size_of(&session_id).unwrap_or((120, 40));
+    pty::kill(&session_id)?;
+    let t0 = std::time::Instant::now();
+    // このアプリの台帳から消え、claude の sessions/<pid>.json の pid も終わるまで待つ
+    while pty::pid_of_id(&session_id).is_some() || native::sessions::live_pid_of(&root, &session_id).is_some() {
+        if t0.elapsed() >= RESTART_WAIT {
+            town_kick();
+            return Err("前任が終わらなかったので、立て直さなかった".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let r = pty::resume(&session_id, &cwd, None, cols, rows, town_kick)?;
+    town_kick();
+    Ok(r)
+}
+
 // ---------- 立て直す（#152） ----------
 
 /// 前回の台帳の1件をどうするか
@@ -139,6 +174,10 @@ pub(crate) mod cmd {
         crate::blocking(move || super::resume_session(session_id, cols, rows)).await
     }
     #[tauri::command]
+    pub async fn restart_session(session_id: String) -> Result<Value, String> {
+        crate::blocking(move || super::restart_session(session_id)).await
+    }
+    #[tauri::command]
     pub async fn house_places() -> Result<Value, String> { crate::blocking(super::house_places).await }
     #[tauri::command]
     pub async fn stop_session(session_id: String) -> Result<(), String> {
@@ -149,6 +188,13 @@ pub(crate) mod cmd {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// このアプリが立てていないセッションは、止める前に断る（外で動いている claude を止めない）
+    #[test]
+    fn restart_refuses_sessions_the_app_did_not_start() {
+        let e = restart_session("55555555-5555-4555-8555-555555555555".into()).unwrap_err();
+        assert_eq!(e, native::READ_ONLY);
+    }
 
     /// 立て直す前の確かめ（#152）。jsonl が無いもの、よそで同じ id が動いているもの、場所が無いものは飛ばす
     #[test]

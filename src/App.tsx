@@ -20,6 +20,7 @@ import { useSelection } from "./hooks/useSelection";
 import { useZoom } from "./hooks/useZoom";
 import { useHidden } from "./hooks/useHidden";
 import { useKill } from "./hooks/useKill";
+import { useRestart } from "./hooks/useRestart";
 import { useCardSend } from "./hooks/useCardSend";
 import { supportFor } from "./session/SessionControls";
 import { useCcnReservations } from "./webReserve";
@@ -29,7 +30,7 @@ import { KillConfirm } from "./confirm/Confirm";
 import { NextRow } from "./NextRow";
 import { useLetterMarks } from "./useLetterMarks";
 import { Panel } from "./panel/Panel";
-import { DepthCtx, KillCtx, LetterCtx, SendCtx, TownCtx } from "./contexts";
+import { DepthCtx, KillCtx, LetterCtx, RestartCtx, SendCtx, TownCtx } from "./contexts";
 import { loadPlace, savePlace } from "./newHouse/placeSetting";
 import { SettingsDialog } from "./settings/SettingsDialog";
 import { loadDefaults, sameDefaults, saveDefaults } from "./session/defaults";
@@ -98,6 +99,7 @@ export default function App() {
   const pick = useCallback((a: Agent) => setSelected(a.id), []);
 
   const { kill, killAsk, setKillAsk, killCtx } = useKill({ tree, selected, setSelected, toast, setHidden });
+  const { restartCtx } = useRestart(toast);
   // お手紙（記録はこの機械の hook が書く）
   const flights = useMemo(() => flightsOf(snap?.letters ?? [], agents), [snap, agents]);
   // ブラウザ版の ccn の行で予約したモデルと権限モードを、替えられるようになったら替える（always-switch）。アプリの端末の予約は Rust が当てる（switch.rs）
@@ -156,6 +158,7 @@ export default function App() {
   return (
     <SkinCtx.Provider value={skinCtx}>
     <KillCtx.Provider value={killCtx}>
+    <RestartCtx.Provider value={restartCtx}>
     <SendCtx.Provider value={cardSend}>
     <LetterCtx.Provider value={letterMarks.marks}>
     <TownCtx.Provider value={agents}><DepthCtx.Provider value={depthOf}>
@@ -271,6 +274,7 @@ export default function App() {
     </DepthCtx.Provider></TownCtx.Provider>
     </LetterCtx.Provider>
     </SendCtx.Provider>
+    </RestartCtx.Provider>
     </KillCtx.Provider>
     </SkinCtx.Provider>
   );

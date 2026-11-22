@@ -1,9 +1,9 @@
 import { memo, useContext, useEffect, useRef, useState } from "react";
-import { MessageCircleQuestionMark, Power, ThumbsUp, type LucideIcon } from "lucide-react";
+import { MessageCircleQuestionMark, Power, RotateCw, ThumbsUp, type LucideIcon } from "lucide-react";
 import { ICON, STROKE } from "../icons";
 import type { Agent } from "../model";
-import { KillCtx, SendCtx } from "../contexts";
-import { canStop as abilityStop } from "../abilities";
+import { KillCtx, RestartCtx, SendCtx } from "../contexts";
+import { canRestart as abilityRestart, canStop as abilityStop } from "../abilities";
 
 /**
  * カードの右下のボタン（#63）。左から並べる順に書く。送る文を足し替えるときはここだけを直す。
@@ -11,12 +11,13 @@ import { canStop as abilityStop } from "../abilities";
  * kind が kill のボタンはセッションを閉じる（前のカードの × と同じ動き）。send のボタンは text をチャットの送信と同じ口で送る。
  * 見本は本人のスクショ（2026-11-13）。角丸のカードの右下の縁に、角丸の四角いボタンが縁にまたがって並ぶ
  */
-export type CardAction = { key: string; icon: LucideIcon; name: string } & ({ kind: "kill" } | { kind: "send"; text: string });
+export type CardAction = { key: string; icon: LucideIcon; name: string } & ({ kind: "kill" } | { kind: "restart" } | { kind: "send"; text: string });
 
 const CARD_ACTIONS: CardAction[] = [
   { key: "kill", icon: Power, name: "閉じる", kind: "kill" },
   { key: "howdy", icon: MessageCircleQuestionMark, name: "様子を聞く", kind: "send", text: "調子どうですか" },
   { key: "go", icon: ThumbsUp, name: "許可する", kind: "send", text: "許可します、やってくださいお願いします。" },
+  { key: "restart", icon: RotateCw, name: "再起動", kind: "restart" },
 ];
 
 /** true ならカードの右下のボタンをいつも出す。false ならカードに乗せたときと、選んでいるカードだけに出す */
@@ -33,6 +34,7 @@ const CARD_ACT_FLASH_MS = 700;
  */
 export const CardActions = memo(function CardActions({ agent, place = "card" }: { agent: Agent; place?: "card" | "head" }) {
   const kill = useContext(KillCtx);
+  const restart = useContext(RestartCtx);
   const send = useContext(SendCtx);
   // 押したあとの一瞬の反応。key は押したボタン、ok は届いたか
   const [flash, setFlash] = useState<{ key: string; ok: boolean } | null>(null);
@@ -41,9 +43,11 @@ export const CardActions = memo(function CardActions({ agent, place = "card" }: 
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
   const canSend = agent.canSend;
   const canStop = abilityStop(agent);
+  const canRestart = abilityRestart(agent);
   const press = async (act: CardAction, e: React.MouseEvent) => {
     e.stopPropagation();
     if (act.kind === "kill") { if (canStop) kill.ask(agent, e.metaKey); return; }
+    if (act.kind === "restart") { if (canRestart && !restart.busy.has(agent.id)) restart.run(agent); return; }
     if (!canSend || sending) return;
     setSending(act.key);
     const ok = await send(agent, act.text);
@@ -56,11 +60,13 @@ export const CardActions = memo(function CardActions({ agent, place = "card" }: 
     <div className={`card-acts ${place === "head" ? "in-head" : CARD_ACTIONS_ALWAYS ? "always" : ""}`}
       onClick={(e) => e.stopPropagation()} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}>
       {CARD_ACTIONS.map((act) => {
-        const off = act.kind === "kill" ? !canStop : !canSend;
+        const off = act.kind === "kill" ? !canStop : act.kind === "restart" ? !canRestart : !canSend;
         const title = act.kind === "kill"
           ? (canStop ? `${act.name}: このセッションを止める。子孫がいれば一緒に止める（⌘ を押しながらで確認なし）` : "閉じられない: Claude Town の外で起動したセッション")
+          : act.kind === "restart"
+          ? (canRestart ? `${act.name}: 止めて、枠の残るアカウントで同じ会話を続ける（利用上限で止まったとき）` : "再起動できない: Claude Town の外で起動したセッション")
           : (canSend ? `${act.name}: 「${act.text}」を送る` : `${act.name}を送れない: Claude Town の外で起動したセッション`);
-        const fx = flash?.key === act.key ? (flash.ok ? "sent" : "failed") : sending === act.key ? "sending" : "";
+        const fx = flash?.key === act.key ? (flash.ok ? "sent" : "failed") : sending === act.key || (act.kind === "restart" && restart.busy.has(agent.id)) ? "sending" : "";
         return (
           <button key={act.key} type="button" className={`card-act ca-${act.key} ${off ? "off" : ""} ${fx}`}
             aria-disabled={off} title={title} aria-label={`${agent.name}: ${title}`}

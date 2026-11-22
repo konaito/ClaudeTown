@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { NEW_HOUSE_CAPS, NO_CAPS, canAnswerPermission, canInterrupt, canStop, hasTerminal, type HasCaps } from "./abilities";
+import { NEW_HOUSE_CAPS, NO_CAPS, canAnswerPermission, canRestart, canInterrupt, canStop, hasTerminal, type HasCaps } from "./abilities";
 
 const ALL = { send: true, permissions: true, interrupt: true, stop: true, terminal: true };
 type Want = { stop: boolean; interrupt: boolean; answer: boolean; term: boolean };
@@ -32,5 +32,19 @@ describe("abilities", () => {
   test("仮の capabilities の定数の値", () => {
     expect(NEW_HOUSE_CAPS).toEqual({ terminal: true, send: true, stop: true, interrupt: true });
     expect(NO_CAPS).toEqual({ send: false, permissions: false, interrupt: false, stop: false, terminal: false });
+  });
+});
+
+describe("canRestart", () => {
+  test("アプリが立てた端末（stop が true）は再起動できる", () => {
+    expect(canRestart({ capabilities: NEW_HOUSE_CAPS })).toBe(true);
+  });
+  test("止められないセッション（外で起動、記録から読むだけ）は再起動できない", () => {
+    expect(canRestart({ capabilities: NO_CAPS })).toBe(false);
+    expect(canRestart({ capabilities: null })).toBe(false);
+    expect(canRestart(null)).toBe(false);
+  });
+  test("ブラウザ版の ccn の行は、止められても再起動できない", () => {
+    expect(canRestart({ capabilities: { stop: true }, source: "ccn" })).toBe(false);
   });
 });

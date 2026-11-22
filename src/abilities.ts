@@ -10,6 +10,9 @@ export type HasCaps = { capabilities?: { send?: unknown; permissions?: unknown; 
 /** ここから止められるか（閉じるの前提）。アプリが立てたセッションだけ */
 export const canStop = (a: HasCaps): boolean => a?.capabilities?.stop === true;
 
+/** 止めて立て直せるか（再起動の前提）。アプリが立てた端末だけ。ブラウザ版の ccn の行は、アプリの端末ではないので対象外 */
+export const canRestart = (a: (HasCaps & { source?: string }) | null | undefined): boolean => canStop(a) && a?.source !== "ccn";
+
 /** 作業中のターンを割り込んで止められるか */
 export const canInterrupt = (a: HasCaps): boolean => a?.capabilities?.interrupt === true;
 
