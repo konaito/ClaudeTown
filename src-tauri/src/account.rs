@@ -33,7 +33,7 @@ fn valid_name(s: &str) -> bool {
     c.next().is_some_and(|f| f.is_ascii_lowercase()) && c.all(|x| x.is_ascii_lowercase() || x.is_ascii_digit() || x == '_' || x == '-')
 }
 
-/// `cam usage --json` の出力から選ぶ。is_dir は、プロファイルのディレクトリがあるか（無いのは --default のコマンドで、env を触らない）
+/// `cam usage --json` の出力から選ぶ。is_dir は、プロファイルのディレクトリがあるか（無いのは --default のコマンドで、CLAUDE_CONFIG_DIR を外して起動する）
 pub fn choose(stdout: &str, profiles: &Path, is_dir: impl Fn(&Path) -> bool) -> Choice {
     let v: serde_json::Value = match serde_json::from_str(stdout) {
         Ok(v) => v,

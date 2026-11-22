@@ -726,7 +726,8 @@ mod tests {
     }
 
     /// cam の best が --default のコマンド（プロファイルのディレクトリが無い）なら、~/.claude で起動する。
-    /// アプリの環境の CLAUDE_CONFIG_DIR（cam のプロファイルで動く子が開いた開発版）を外す（#251）。直す前は親の値のまま起動していた
+    /// アプリの環境の CLAUDE_CONFIG_DIR を外す（#251）。開いたのが cam のプロファイルで動くセッションだと、この値が入る。
+    /// 開発版だけでなく、そうしたセッションから release-stable.sh の `open` で開いた安定版も受け継ぐ。直す前は親の値のまま起動していた
     #[test]
     fn launch_drops_the_inherited_config_dir_for_a_default_command() {
         let dir = fake_cam_dir("default", r#"{"best":"main","choice":"normal","next_available":null,"accounts":[]}"#);
