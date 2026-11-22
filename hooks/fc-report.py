@@ -16,6 +16,9 @@ ccn から取れる状態は running / waiting_permission / idle の3つだけ�
   Stop              phase=resting か needs_you、said=最後の返事の1行目、next=次の一手
   SessionEnd        状態ファイルと perm/<session_id>.json を消す
 
+どのイベントでも、claude のプロセス（環境変数 CLAUDE_PID）が名乗った id の並びを ids/<pid>.json に残す（#266）。
+/clear で id が変わっても pid は変わらないので、アプリはこれで前の id と今の id を結び、親子をつなぐ。
+
 in-process のチームメイトと sub-agent の入力は、session_id がリードのもので、agent_id が付いて届く。
 これはリードの様子ではないので、リードの状態ファイルにもお手紙にも書かない。例外は承認だけにする。
 チームメイトの承認の画面はリードの端末に出て、人はそこで答えるので、並び（perm_queue）には足して外す。
@@ -36,6 +39,9 @@ LETTERS = Path(os.environ.get("FC_LETTERS", Path.home() / ".family-computing" / 
 # 承認の画面に出る道具の input 全体（Claude Town の承認の欄が読む、#83）。安定版も読む state/ とは別の置き場にする
 PERM_DIR = Path(os.environ.get("FC_PERM_DIR", Path.home() / ".family-computing" / "perm"))
 PERM_KEEP = 8
+# claude のプロセスごとの id の並び（#266）。state/ は安定版も読むので、別の置き場にする
+IDS_DIR = Path(os.environ.get("FC_IDS_DIR", Path.home() / ".family-computing" / "ids"))
+IDS_KEEP = 32
 LETTERS_MAX = 1024 * 1024
 # 子を作る道具。ccn の MCP の create_session（親は from 行で ccn に残る）と、Specter の spawn_child（ccn には親が残らない）
 MAKE_CHILD = ("mcp__ccn__create_session", "mcp__specter-agents__spawn_child")
@@ -299,6 +305,16 @@ def emit_context(event, text):
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=False))
 
 
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def sweep():
     now = time.time()
     for p in [*STATE_DIR.glob("*.json"), *PERM_DIR.glob("*.json")]:
@@ -307,6 +323,47 @@ def sweep():
                 p.unlink()
         except Exception:
             pass
+    # id の並びは id が変わったときしか書かないので、古さではなく pid が生きているかで消す
+    for p in IDS_DIR.glob("*.json"):
+        try:
+            if not pid_alive(int(p.stem)):
+                p.unlink()
+        except Exception:
+            pass
+
+
+def note_id(sid, ev, data):
+    """claude のプロセスが名乗った id を、ids/<pid>.json の並び（古い順）の末尾に足す。
+    2026-11-23 の実機（Claude Code 2.1.330）では、/clear で SessionEnd（reason=clear、前の id）と SessionStart（source=clear、
+    新しい id）が同じ CLAUDE_PID で届き、どちらの入力にももう一方の id は無かった。計画の承認で id が変わるときに SessionStart が
+    届くかは確かめられていないので、どのイベントでも並びの最後と今の id が違えば足す。
+    pid は使い回されるので、新しいプロセスの始まり（startup、--resume の resume）では並びを作り直す。SessionEnd は clear 以外なら消す"""
+    try:
+        pid = int(os.environ.get("CLAUDE_PID") or "")
+    except ValueError:
+        return
+    p = IDS_DIR / f"{pid}.json"
+    if ev == "SessionEnd":
+        if data.get("reason") != "clear":
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+        return
+    try:
+        cur = json.loads(p.read_text())
+        ids = [x for x in cur.get("ids") or [] if isinstance(x, str)] if cur.get("pid") == pid else []
+    except Exception:
+        ids = []
+    if ev == "SessionStart" and data.get("source") in ("startup", "resume"):
+        ids = []
+    if ids and ids[-1] == sid:
+        return
+    ids = [x for x in ids if x != sid] + [sid]
+    IDS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({"pid": pid, "ids": ids[-IDS_KEEP:], "updated_at": int(time.time() * 1000)}))
+    os.replace(tmp, p)
 
 
 def from_agent(sid, ev, data):
@@ -348,6 +405,12 @@ def main():
     if isinstance(agent, str) and agent:
         from_agent(sid, ev, data)
         return
+    if ev == "SessionStart":
+        sweep()
+    try:
+        note_id(sid, ev, data)
+    except Exception:
+        pass
 
     if ev == "UserPromptSubmit":
         prompt = data.get("prompt") or ""
@@ -412,7 +475,6 @@ def main():
             "pending_count": 0,
         }, data)
     elif ev == "SessionStart":
-        sweep()
         write(sid, {"phase": "resting", "doing": None, "needs": None}, data)
     elif ev == "SessionEnd":
         for p in (STATE_DIR / f"{sid}.json", PERM_DIR / f"{sid}.json"):

@@ -87,6 +87,12 @@ fn place(home: &std::path::Path, app_id: Option<&str>, app_home: Option<String>,
     dir.join(name)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// 試験のスレッドごとの hook の id の並びの置き場所（ids_dir）
+    static TEST_IDS_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 fn read_json(p: &PathBuf) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(p).ok()?).ok()
 }
@@ -277,17 +283,80 @@ fn break_cycles(rows: &[Value], parents: &mut [Option<String>]) {
     }
 }
 
+/// hook（hooks/fc-report.py）が、claude のプロセスごとに名乗った id の並び（古い順）を書く置き場所（#266）。中は ids/<pid>.json
+fn ids_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        TEST_IDS_DIR.with(|h| h.borrow().clone()).unwrap_or_else(|| PathBuf::from("/nonexistent/fc-ids"))
+    }
+    #[cfg(not(test))]
+    fc_path(Scope::Shared, "ids")
+}
+
+/// 生きている端末の行の id ごとに、同じプロセスが前に名乗った id（新しい順）。/clear で id が変わっても pid は変わらない（#248、#266）。
+/// hook の並びは、最後の id が同じ pid の今の行の id と合うときだけ使う（pid の使い回しや、hook が書き損ねた古い並びを当てない）。
+/// このアプリが立てた端末は、台帳の ids も足す
+fn earlier_ids(rows: &[Value], dir: &std::path::Path) -> HashMap<String, Vec<String>> {
+    let id_of_pid: HashMap<u64, &str> = rows.iter().filter(|r| r["kind"] == "terminal")
+        .filter_map(|r| Some((r["pid"].as_u64()?, r["id"].as_str()?))).collect();
+    let live: HashSet<&str> = rows.iter().filter_map(|r| r["id"].as_str()).collect();
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let Some(v) = read_json(&e.path()) else { continue };
+        let (Some(pid), Some(ids)) = (v["pid"].as_u64(), v["ids"].as_array()) else { continue };
+        let ids: Vec<&str> = ids.iter().filter_map(Value::as_str).collect();
+        let Some((cur, prev)) = ids.split_last() else { continue };
+        if id_of_pid.get(&pid) == Some(cur) {
+            out.entry(cur.to_string()).or_default().extend(prev.iter().rev().map(|s| s.to_string()));
+        }
+    }
+    for p in pty::list().into_iter().filter(|p| live.contains(p.cur.as_str())) {
+        out.entry(p.cur.clone()).or_default().extend(p.ids.into_iter().rev().filter(|i| *i != p.cur));
+    }
+    for (cur, prev) in out.iter_mut() {
+        let mut seen = HashSet::new();
+        prev.retain(|i| i != cur && seen.insert(i.clone()));
+    }
+    out
+}
+
+/// 前の id の記録の最初の文の from 行の呼び手（#266）。記録は後ろに書き足されるだけで最初の文は変わらないので、決まったものは覚える
+static EARLIER_CALLER: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
+
+fn caller_of_earlier(id: &str) -> Option<String> {
+    let mut g = EARLIER_CALLER.lock().unwrap_or_else(|e| e.into_inner());
+    let known = g.get_or_insert_with(HashMap::new);
+    if let Some(c) = known.get(id) {
+        return c.clone();
+    }
+    // 記録が無いなら、その id は文を受けずに終わった。まだ user の行が無いなら、次の回に読み直す
+    let found = match native::sessions::find_jsonl(&native::claude_home(), id) {
+        Some(p) => native::sessions::first_prompt_caller(&p)?,
+        None => None,
+    };
+    if known.len() >= 4096 {
+        known.clear();
+    }
+    known.insert(id.to_string(), found.clone());
+    found
+}
+
 /// 一覧の行を、画面に渡すセッションの形に直す。hook の報告と close-check の判定を足す。キャラの割り当ては足さない
 fn agents_from(rows: Vec<Value>) -> Vec<Value> {
     let live_ids: HashSet<String> = rows.iter().filter_map(|s| s["id"].as_str().map(String::from)).collect();
     // 親が /clear や計画の承認で id を変えると、前に立てた子の from 行は前の id を指したまま残る（#248）。
-    // このアプリが立てた端末は、同じ pid の前の id を台帳の ids に持つので、それに当たれば端末の今の id を親にする
-    let earlier: Vec<(Vec<String>, String)> = pty::list().into_iter().filter(|p| live_ids.contains(&p.cur)).map(|p| (p.ids, p.cur)).collect();
-    // 別のプロダクト（ccn など）が子に付ける from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）から親を引く。Claude Code の記録の1行目にある
+    // 同じ pid の前の id（アプリの端末は台帳の ids、ほかは hook の並び）に当たれば、そのプロセスの今の id を親にする（#266）
+    let earlier = earlier_ids(&rows, &ids_dir());
+    // 別のプロダクト（ccn など）が子に付ける from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）から親を引く。Claude Code の記録の1行目にある。
+    // 子が /clear すると今の記録に from 行が無いので、同じプロセスの前の id の記録の from 行を使う（#266）
     let parent_from_line = |s: &Value| -> Option<String> {
-        let sid8 = agent_sid8(s["parent"].as_str()?)?;
+        let caller = match s["parent"].as_str() {
+            Some(c) => c.to_string(),
+            None => earlier.get(s["id"].as_str()?)?.iter().find_map(|prev| caller_of_earlier(prev))?,
+        };
+        let sid8 = agent_sid8(&caller)?;
         live_ids.iter().find(|id| id.starts_with(sid8)).cloned()
-            .or_else(|| earlier.iter().find(|(ids, _)| ids.iter().any(|i| i.starts_with(sid8))).map(|(_, cur)| cur.clone()))
+            .or_else(|| earlier.iter().find(|(_, prev)| prev.iter().any(|i| i.starts_with(sid8))).map(|(cur, _)| cur.clone()))
     };
 
     // 名前は、そのセッションが作業しているプロジェクトの名前（src-tauri/src/naming.rs）
@@ -784,6 +853,58 @@ mod tests {
         assert_eq!(d.items.len(), 1);
         assert_eq!(LAST_SOURCES.lock().unwrap().as_ref().unwrap()["app"], 0);
         native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// hook（fc-report.py）が pid ごとに残した id の並び（ids/<pid>.json）で、/clear の前の id を引く（#266）。
+    /// 1. 子が /clear すると、新しい記録に from 行が無い。前の id の記録の from 行から親を引く
+    /// 2. アプリの外で起動した親が /clear すると、子の from 行は前の id を指したまま。並びの今の id を親にする
+    ///
+    /// 並びの最後の id が、同じ pid の今の行の id と合わないもの（pid の使い回し、古い並び）は使わない
+    #[test]
+    fn hook_id_chains_keep_parents_across_clear() {
+        use native::testtree::*;
+        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = tmp("hook-id-chains");
+        let ids_dir = root.join("fc-ids");
+        let a = "a1a1a1a1-0000-4000-8000-0000000000a1";
+        let b_old = "b0b0b0b0-0000-4000-8000-0000000000b0";
+        let b_new = "b1b1b1b1-0000-4000-8000-0000000000b1";
+        let p_old = "c0c0c0c0-0000-4000-8000-0000000000c0";
+        let p_new = "c1c1c1c1-0000-4000-8000-0000000000c1";
+        let d = "d1d1d1d1-0000-4000-8000-0000000000d1";
+        let e_old = "e0e0e0e0-0000-4000-8000-0000000000e0";
+        let e = "e1e1e1e1-0000-4000-8000-0000000000e1";
+        let jsonl = |sid: &str, first: &str| {
+            write(&root.join(format!("projects/-tmp-x/{sid}.jsonl")), &format!("{{\"type\":\"user\",\"message\":{{\"content\":\"{first}\"}}}}\n"));
+        };
+        // B は A の子として立ち（b_old の from 行）、/clear して b_new になった。b_new の記録に from 行は無い
+        jsonl(b_old, &format!("from agent:n/{}/r via n\\n\\nやって", &a[..8]));
+        jsonl(b_new, "続き");
+        write(&ids_dir.join("200.json"), &json!({ "pid": 200, "ids": [b_old, b_new] }).to_string());
+        // 親 P はアプリの外で起動し、/clear して p_new になった。子 D の from 行は p_old を指す
+        write(&ids_dir.join("300.json"), &json!({ "pid": 300, "ids": [p_old, p_new] }).to_string());
+        // E の並びは pid 401 のもの。E の今の pid は 400 なので使わない（e_old の from 行は A を指す）
+        jsonl(e_old, &format!("from agent:n/{}/r via n\\n\\nやって", &a[..8]));
+        write(&ids_dir.join("401.json"), &json!({ "pid": 401, "ids": [e_old, e] }).to_string());
+        let row = |id: &str, pid: u64, parent: Option<String>| json!({ "id": id, "kind": "terminal", "pid": pid, "startedAt": pid, "parent": parent });
+        let rows = vec![
+            row(a, 100, None),
+            row(b_new, 200, None),
+            row(p_new, 300, None),
+            row(d, 310, Some(format!("agent:n/{}/r", &p_old[..8]))),
+            row(e, 400, None),
+        ];
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        TEST_IDS_DIR.with(|h| *h.borrow_mut() = Some(ids_dir.clone()));
+        let agents = agents_from(rows);
+        TEST_IDS_DIR.with(|h| *h.borrow_mut() = None);
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        let by = |id: &str| agents.iter().find(|x| x["id"] == id).cloned().unwrap_or(Value::Null);
+        assert_eq!(by(b_new)["parent"], a, "子の前の id の from 行から親を引けていない");
+        assert_eq!(by(d)["parent"], p_new, "親の前の id を指す from 行から、親の今の id を引けていない");
+        assert_eq!(by(e)["parent"], Value::Null, "pid の合わない並びを使っている");
+        assert_eq!(by(a)["parent"], Value::Null);
+        assert_eq!(by(p_new)["parent"], Value::Null);
     }
 
     #[test]
