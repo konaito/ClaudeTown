@@ -512,6 +512,10 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 /* ウィンドウが見えていない間は、CSS のアニメを全部止める（#6、src/visible.ts が data-hidden を付ける） */
 :root[data-hidden] *, :root[data-hidden] *::before, :root[data-hidden] *::after { animation-play-state: paused !important; }
 
+/* 町の画面の外にあるカードのアニメを止める（#12、src/offscreen.ts が .fnode に data-offscreen を付ける）。
+   閉じる演出（.dying、.kill-*）は止めない。止めると、見えない間に消える処理の時刻とずれる */
+.fnode[data-offscreen]:not(.dying) *, .fnode[data-offscreen]:not(.dying) *::before, .fnode[data-offscreen]:not(.dying) *::after { animation-play-state: paused !important; }
+
 /* ---------- 3枚のペイン（#89） ---------- */
 /* ヘッダー左端の、左のペインの開け閉め。アイコンは lucide の panel-left-close / panel-left-open */
 .side-toggle { display: inline-grid; place-items: center; width: 30px; height: 30px; margin-left: -6px; border-radius: 8px; color: var(--sub); background: transparent; }
