@@ -8,6 +8,8 @@
 // - isMeta と isCompactSummary の user の行は出さない（スキルの本文、要約などの差し込み。全件で数えて決めた）
 // - teammate の受信文（<teammate-message teammate_id=…>本文</teammate-message>）は、お手紙と同じ形に直す
 // - API の失敗（isApiErrorMessage の assistant）は、失敗の印（type: result、is_error）に直す
+// - ターンの途中で取り込まれた人の文（attachment の queued_command）は、user の行に直す（queued の印付き）
+// - 順番待ちの出し入れ（queue-operation）と起動し直した印（SessionStart の attachment を session-start に直す）は、待ちの一覧のために通す
 // 知らない type の行は、黙って捨てずに数える（odd_counts）
 
 use serde_json::{json, Value};
@@ -24,10 +26,10 @@ pub const FIRST_BYTES: u64 = 4 << 20;
 pub const MAX_READ: u64 = 16 << 20;
 
 /// 画面に出さないが、形を知っている行の type（2.1.330 の実ファイルで数えた。cost-state は --native-list の数え上げで見つけた）
-const KNOWN_QUIET: [&str; 23] = [
-    "system", "attachment", "file-history-snapshot", "file-history-delta", "last-prompt", "mode", "permission-mode",
+const KNOWN_QUIET: [&str; 21] = [
+    "system", "file-history-snapshot", "file-history-delta", "last-prompt", "mode", "permission-mode",
     "session-owner", "atis-latch", "api-request-shape", "api-request-blob", "api-request", "ai-title", "custom-title",
-    "agent-name", "tools-used", "queue-operation", "summary", "fork-context-ref", "progress", "tag", "pr-link", "cost-state",
+    "agent-name", "tools-used", "summary", "fork-context-ref", "progress", "tag", "pr-link", "cost-state",
 ];
 
 static ODD: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
@@ -109,6 +111,21 @@ pub fn normalize(mut v: Value) -> Option<Value> {
                 return Some(json!({ "type": "result", "is_error": true, "result": text, "timestamp": v["timestamp"] }));
             }
             Some(v)
+        }
+        // 順番待ちの出し入れ。会話の項目にはせず、conversation の live_events が待ちの一覧に使う
+        "queue-operation" => Some(v),
+        "attachment" => {
+            let a = &v["attachment"];
+            match a["type"].as_str() {
+                // 作業中に打った文が、ターンの途中で取り込まれた印。この文は user の行にならず、ここにしか残らない（2.1.330）。
+                // 人が打った文（commandMode が prompt、origin が human）だけを user の行にし、queued の印を付ける
+                Some("queued_command") if a["commandMode"] == "prompt" && a["origin"]["kind"] == "human" && a["isMeta"].as_bool() != Some(true) => {
+                    Some(json!({ "type": "user", "timestamp": v["timestamp"], "queued": true, "message": { "role": "user", "content": a["prompt"] } }))
+                }
+                // 起動し直した印。CLI の待ちは起動し直すと空になる
+                _ if a["hookEvent"] == "SessionStart" => Some(json!({ "type": "session-start", "timestamp": v["timestamp"] })),
+                _ => None,
+            }
         }
         t if KNOWN_QUIET.contains(&t) => None,
         t => {

@@ -15,6 +15,8 @@ export type Live = {
   last_at: string | number | null;
   /** 最後に文が届いた時刻（ターンの始まり） */
   turn_at: string | number | null;
+  /** 作業中に打たれて、まだ読まれていない文（順番待ち、古い順）。無ければ来ない */
+  queued?: ConvItem[];
 };
 
 /** reset=true なら持っている分を捨てて items に置き換える。total は次の since に渡す。live は毎回全部が来る */
@@ -151,4 +153,16 @@ export function settlePending(items: ConvItem[], pending: PendingItem[]): Pendin
     if (hit >= 0) { used.add(hit); last = i; }
   });
   return last < 0 ? pending : pending.slice(last + 1);
+}
+
+/**
+ * 会話の末尾に出す順番待ちの文。作業中と承認待ちのときだけ出す（止まっているのに残った待ちは出さない）。
+ * このアプリから送った文も同じ待ちに入るので、同じ文の「届けた」の仮の項目は、待ちの項目に置き換える
+ */
+export function withQueued(waiting: PendingItem[], liveQueued: ConvItem[] | undefined, running: boolean): { waiting: PendingItem[]; queued: ConvItem[] } {
+  const q = running ? liveQueued ?? [] : [];
+  if (!q.length) return { waiting, queued: [] };
+  const texts = new Set(q.map((x) => x.text.trim()));
+  const rest = waiting.filter((x) => !texts.has(x.text.trim()));
+  return { waiting: rest.length === waiting.length ? waiting : rest, queued: q.map((x) => ({ ...x, pending: true, queued: true })) };
 }

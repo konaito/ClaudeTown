@@ -66,6 +66,8 @@ export type Snapshot = {
 export type ConvItem = {
   /** result は道具の結果（画面は道具の行に付け直し、吹き出しにしない）。event は止めた・失敗したターンの印（#83） */
   role: "user" | "assistant" | "tool" | "result" | "event"; text: string; from?: string | null; at?: string | number | null; pending?: boolean;
+  /** 作業中に打たれて、まだ読まれていない文（順番待ち）。conversation の live.queued から画面が付ける */
+  queued?: boolean;
   /** claude の起動を待って、まだ送っていない文（Rust の composer.rs が預かっている）。起動したら送る */
   waitBoot?: boolean;
   /** 通し番号（このセッションで何件目か。Rust の conversation が付ける）。吹き出しの key に使う。送ったばかりの仮の項目には無い */
