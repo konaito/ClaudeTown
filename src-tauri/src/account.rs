@@ -3,7 +3,8 @@
 // CLAUDE_CONFIG_DIR=~/.cam/profiles/<名前> で claude を起動する。ここも同じにする。
 // 選び方は ccn の src/engine/account.ts（claude-code-nodes）に合わせた。Claude Town が ccn を通さずに起動するようになったときに抜けていた。
 // 選べないとき（cam が無い、落ちる、5秒で返らない、JSON が読めない、best が null）は env を触らず、今まで通りに起動する。
-// 例外は cam が「枠の残るコマンドが無い」（choice: none）と答え、次に戻る時刻が先にあるとき。起動をやめて、その時刻を画面に出す（`cam auto` も起動しない）
+// 例外は新しく立てるときに、cam が「枠の残るコマンドが無い」（choice: none）と答え、次に戻る時刻が先にあるとき。起動をやめて、その時刻を画面に出す（`cam auto` も起動しない）。
+// resume は断らない。アプリを開いたときの立て直しで断ると、前回の端末が画面に何も出ずに戻らなくなる。上限のアカウントで立っても、送るまでは害がない
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -155,14 +156,14 @@ pub fn pick(path: Option<&str>) -> Choice {
     choice
 }
 
-/// 起動の直前の用意。返すのは claude に渡す CLAUDE_CONFIG_DIR（None なら env を触らない）。起動をやめるときは Err。
+/// 起動の直前の用意。返すのは claude に渡す CLAUDE_CONFIG_DIR（None なら env を触らない）。起動をやめるときは Err（refuse が true のときだけ。新しく立てるとき）。
 /// プロファイルを選んだら launcher と同じく `cam sync <名前>` を掛ける（共有のリンク、MCP、信頼済みフォルダの同期。失敗しても起動は続ける）。
 /// 信頼済みフォルダは cam sync が ~/.claude.json と全プロファイルの和をプロファイルに写すので、ccn のように cwd を書き足すことはしない
 /// （launcher も書かない。Claude Town は信頼の画面を端末で出す）
-pub fn prepare(path: Option<&str>) -> Result<Option<PathBuf>, String> {
+pub fn prepare(path: Option<&str>, refuse: bool) -> Result<Option<PathBuf>, String> {
     let choice = pick(path);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-    if let Some(why) = refuse_reason(&choice, now) {
+    if let Some(why) = refuse_reason(&choice, now).filter(|_| refuse) {
         eprintln!("[account] 起動をやめる: {why}");
         return Err(why);
     }
@@ -178,7 +179,7 @@ pub fn prepare(path: Option<&str>) -> Result<Option<PathBuf>, String> {
             Ok(Some(dir))
         }
         Choice::None { next } => {
-            eprintln!("[account] cam に使えるコマンドが無いが、戻る時刻が過ぎているか分からないので今まで通り起動する: {next:?}");
+            eprintln!("[account] cam に使えるコマンドが無いが、resume か、戻る時刻が過ぎているか分からないので今まで通り起動する: {next:?}");
             Ok(None)
         }
         Choice::Keep(why) => {

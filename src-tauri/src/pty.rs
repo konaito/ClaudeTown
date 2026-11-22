@@ -336,8 +336,9 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
     }
     let path = login_path();
     let bin = claude_bin(path.as_deref())?;
-    // どのアカウントで起動するか（cam usage の best。account.rs）。resume も同じ選び方にする（会話の記録 projects と sessions は、cam が全プロファイルで ~/.claude のものを共有している）
-    let config_dir = crate::account::prepare(path.as_deref())?;
+    // どのアカウントで起動するか（cam usage の best。account.rs）。resume も同じ選び方にする（会話の記録 projects と sessions は、cam が全プロファイルで ~/.claude のものを共有している）。
+    // 全部のアカウントが上限のとき起動をやめるのは、新しく立てるときだけ（resume を断ると、アプリを開いたときの立て直しで端末が黙って戻らない）
+    let config_dir = crate::account::prepare(path.as_deref(), resume.is_none())?;
     let id = resume.map(String::from).unwrap_or_else(new_uuid);
     let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
     let pair = native_pty_system().openpty(size).map_err(|e| format!("端末を開けなかった: {e}"))?;
@@ -663,6 +664,11 @@ mod tests {
     /// 偽の cam と claude で起動し、claude の環境の CLAUDE_CONFIG_DIR を返す（無ければ None）。
     /// アプリの環境に別の CLAUDE_CONFIG_DIR があっても（cam の launcher から開いた開発版）、選んだ値で上書きされることも見る
     fn launched_config_dir(dir: &std::path::Path) -> Result<Option<String>, String> {
+        launched_config_dir_as(dir, None)
+    }
+
+    /// resume が Some なら、その id で resume として起動する
+    fn launched_config_dir_as(dir: &std::path::Path, resume_id: Option<&str>) -> Result<Option<String>, String> {
         // 町の一覧を数える試験（lib.rs）に、この端末が混ざらないようにする。錠は端末が台帳から消えるまで持つ
         let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -673,7 +679,10 @@ mod tests {
             std::env::set_var("FC_CAM_PROFILES", dir.join("profiles"));
             std::env::set_var("CLAUDE_CONFIG_DIR", "/nowhere/inherited");
         }
-        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {});
+        let r = match resume_id {
+            Some(rid) => resume(rid, dir.to_str().unwrap(), None, 80, 24, || {}),
+            None => spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {}),
+        };
         unsafe {
             std::env::remove_var("FC_CLAUDE_BIN");
             std::env::remove_var("FC_CAM_BIN");
@@ -721,6 +730,24 @@ mod tests {
         let err = launched_config_dir(&dir).unwrap_err();
         assert!(err.contains("cto"), "{err}");
         assert!(!dir.join("env.txt").exists(), "claude を起動していない");
+    }
+
+    /// resume は全部のアカウントが上限でも断らず、今まで通り（env を触らずに）起動する
+    #[test]
+    fn resume_is_not_refused_when_every_account_is_at_the_limit() {
+        let at = crate::now_ms() as i64 / 1000 + 3600;
+        let dir = fake_cam_dir("none-resume", &format!(r#"{{"best":null,"choice":"none","next_available":{{"name":"cto","at":{at}}},"accounts":[]}}"#));
+        let id = new_uuid();
+        assert_eq!(launched_config_dir_as(&dir, Some(&id)).unwrap().as_deref(), Some("/nowhere/inherited"));
+    }
+
+    /// resume も best のプロファイルで起動する
+    #[test]
+    fn resume_uses_the_cam_best_profile() {
+        let dir = fake_cam_dir("best-resume", r#"{"best":"acct","choice":"normal","next_available":null,"accounts":[]}"#);
+        let want = format!("{}/acct", dir.join("profiles").display());
+        let id = new_uuid();
+        assert_eq!(launched_config_dir_as(&dir, Some(&id)).unwrap().as_deref(), Some(want.as_str()));
     }
 
     #[test]
