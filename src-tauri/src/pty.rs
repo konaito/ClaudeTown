@@ -285,8 +285,29 @@ fn begin_shutdown() {
 // ---------- 起動 ----------
 
 /// claude を PTY で起動し、セッションの id を返す。cwd はディレクトリでなければ断る
-pub fn spawn(cwd: &str, name: Option<&str>, cols: u16, rows: u16, notice: impl Fn() + Send + 'static) -> Result<Value, String> {
-    launch(cwd, None, name, cols, rows, notice)
+/// start は、新しく立てるときだけ足す引数（設定の既定のモデルと権限モード、start_args）
+pub fn spawn(cwd: &str, name: Option<&str>, start: &[String], cols: u16, rows: u16, notice: impl Fn() + Send + 'static) -> Result<Value, String> {
+    launch(cwd, None, name, start, cols, rows, notice)
+}
+
+/// 新しい世帯を立てるときのモデルと権限モード（設定の既定、src/session/defaults.ts）を、claude の --model と --permission-mode にする。
+/// 空の値は渡さない（この Mac の Claude Code の既定になる）。空白を含む値や、知らない権限モードは断る（引数を1つずつ渡すので混ざりはしないが、打ち間違いを起動の前に止める）
+pub fn start_args(model: Option<&str>, mode: Option<&str>) -> Result<Vec<String>, String> {
+    const MODES: [&str; 6] = ["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"];
+    let mut a = vec![];
+    if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        if m.chars().any(char::is_whitespace) || m.starts_with('-') {
+            return Err(format!("モデルの名前が読めない: {m}"));
+        }
+        a.extend(["--model".to_string(), m.to_string()]);
+    }
+    if let Some(p) = mode.map(str::trim).filter(|p| !p.is_empty()) {
+        if !MODES.contains(&p) {
+            return Err(format!("知らない権限モード: {p}"));
+        }
+        a.extend(["--permission-mode".to_string(), p.to_string()]);
+    }
+    Ok(a)
 }
 
 /// 前の会話 id を `claude --resume <id>` で立て直す。id は変わらない（2.1.330 の --help: 新しい id にするのは --fork-session のとき）。
@@ -295,7 +316,8 @@ pub fn resume(id: &str, cwd: &str, name: Option<&str>, cols: u16, rows: u16, not
     if pid_of_id(id).is_some() {
         return Err(format!("このセッションはもう Claude Town で開いている: {id}"));
     }
-    launch(cwd, Some(id), name, cols, rows, notice)
+    // resume では設定の既定を足さない。前の会話のモデルと権限モードのまま立て直す
+    launch(cwd, Some(id), name, &[], cols, rows, notice)
 }
 
 /// claude の引数。resume なら `--resume <id>`、新しく立てるなら `--session-id <id>` と、名前があれば `--name`。
@@ -308,7 +330,7 @@ fn launch_args(id: &str, resume: bool, name: Option<&str>) -> Vec<String> {
     a
 }
 
-fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, cols: u16, rows: u16, notice: impl Fn() + Send + 'static) -> Result<Value, String> {
+fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String], cols: u16, rows: u16, notice: impl Fn() + Send + 'static) -> Result<Value, String> {
     if !std::path::Path::new(cwd).is_dir() {
         return Err(format!("場所が無いか、ディレクトリではない: {cwd}"));
     }
@@ -319,6 +341,7 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, cols: u16, rows: 
     let pair = native_pty_system().openpty(size).map_err(|e| format!("端末を開けなかった: {e}"))?;
     let mut cmd = CommandBuilder::new(&bin);
     cmd.args(launch_args(&id, resume.is_some(), name));
+    cmd.args(start);
     let name = name.filter(|n| !n.trim().is_empty()).map(String::from);
     cmd.cwd(cwd);
     for (k, _) in std::env::vars() {
@@ -590,7 +613,7 @@ mod tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
-        let r = spawn(dir.to_str().unwrap(), None, 80, 24, || {}).unwrap();
+        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {}).unwrap();
         unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
         let id = r["id"].as_str().unwrap().to_string();
         let id2 = id.clone();
@@ -605,6 +628,16 @@ mod tests {
     }
 
     static BIN_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn start_args_from_the_settings() {
+        assert_eq!(start_args(Some("sonnet"), Some("plan")).unwrap(), vec!["--model", "sonnet", "--permission-mode", "plan"]);
+        // 設定していない項目と空の値は渡さない
+        assert!(start_args(None, Some(" ")).unwrap().is_empty());
+        assert!(start_args(Some("opus 1"), None).is_err());
+        assert!(start_args(Some("--x"), None).is_err());
+        assert!(start_args(None, Some("yolo")).is_err());
+    }
 
     #[test]
     fn resume_args_keep_the_id_and_drop_the_name() {
@@ -662,7 +695,7 @@ mod tests {
         };
 
         // 立てると載る。まだ立て直していない分も残る
-        let a = spawn(&cwd, Some("名前"), 80, 24, || {}).unwrap()["id"].as_str().unwrap().to_string();
+        let a = spawn(&cwd, Some("名前"), &[], 80, 24, || {}).unwrap()["id"].as_str().unwrap().to_string();
         let l = read_ledger(&ledger);
         let ea = l.iter().find(|e| e.id == a).expect("立てた端末が台帳に無い");
         assert_eq!((ea.cwd.as_str(), ea.name.as_deref(), ea.cols, ea.rows), (cwd.as_str(), Some("名前"), 80, 24));
@@ -673,14 +706,14 @@ mod tests {
         assert!(!ids().contains(&a));
 
         // 自分で終わると外れる
-        let b = spawn(&cwd, None, 80, 24, || {}).unwrap()["id"].as_str().unwrap().to_string();
+        let b = spawn(&cwd, None, &[], 80, 24, || {}).unwrap()["id"].as_str().unwrap().to_string();
         assert!(ids().contains(&b));
         write(&b, "\r").unwrap();
         wait_gone(&b);
         assert!(!ids().contains(&b));
 
         // /clear などで id が変わると、新しい id で残る。前の id でも同じ端末として扱う
-        let c = spawn(&cwd, None, 80, 24, || {}).unwrap()["id"].as_str().unwrap().to_string();
+        let c = spawn(&cwd, None, &[], 80, 24, || {}).unwrap()["id"].as_str().unwrap().to_string();
         let pc = pid_of_id(&c).unwrap();
         note_ids(&[("cleared-c".to_string(), pc)]);
         assert!(ids().contains(&"cleared-c".to_string()) && !ids().contains(&c));
@@ -732,7 +765,7 @@ mod tests {
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
-        let r = spawn(dir.to_str().unwrap(), None, 80, 24, || {}).unwrap();
+        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {}).unwrap();
         unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
         let id = r["id"].as_str().unwrap().to_string();
         assert!(owns(&id));
@@ -770,7 +803,7 @@ mod real {
     fn real_claude_pty() {
         use std::time::{Duration, Instant};
         let cwd = std::env::var("FC_PTY_TRY_CWD").expect("FC_PTY_TRY_CWD");
-        let r = super::spawn(&cwd, None, 120, 40, || {}).unwrap();
+        let r = super::spawn(&cwd, None, &[], 120, 40, || {}).unwrap();
         let (id, pid) = (r["id"].as_str().unwrap().to_string(), r["pid"].as_u64().unwrap());
         println!("spawned id={id} pid={pid}");
         let (tx, rx) = std::sync::mpsc::channel();
@@ -821,7 +854,7 @@ mod real_permission {
         use std::time::{Duration, Instant};
         let cwd = std::env::var("FC_PTY_TRY_CWD").expect("FC_PTY_TRY_CWD");
         println!("login_path = {:?}", super::login_path());
-        let r = super::spawn(&cwd, None, 120, 40, || {}).unwrap();
+        let r = super::spawn(&cwd, None, &[], 120, 40, || {}).unwrap();
         let (id, pid) = (r["id"].as_str().unwrap().to_string(), r["pid"].as_u64().unwrap() as u32);
         let root = crate::native::claude_home();
         let row = || crate::native::sessions::fresh_row(&root, pid);
@@ -864,7 +897,7 @@ mod real_boot {
     fn real_boot_queue() {
         use std::time::{Duration, Instant};
         let cwd = std::env::var("FC_PTY_TRY_CWD").expect("FC_PTY_TRY_CWD");
-        let r = super::spawn(&cwd, None, 120, 40, || {}).unwrap();
+        let r = super::spawn(&cwd, None, &[], 120, 40, || {}).unwrap();
         let id = r["id"].as_str().unwrap().to_string();
         let t0 = Instant::now();
         let msg = "この文には「了解」とだけ返して";

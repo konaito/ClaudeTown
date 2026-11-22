@@ -66,6 +66,9 @@ async function webCall<T>(cmd: string, a: Record<string, unknown> = {}): Promise
       const body: Record<string, unknown> = { terminal: true, cols: a.cols ?? 120, rows: a.rows ?? 40 };
       if (typeof a.cwd === "string" && a.cwd) body.cwd = a.cwd;
       if (typeof a.name === "string" && a.name.trim()) body.name = a.name;
+      // 設定の既定のモデルと権限モード（src/session/defaults.ts）。ccn は --model と --permission-mode で起動する
+      if (typeof a.model === "string" && a.model) body.model = a.model;
+      if (typeof a.permissionMode === "string" && a.permissionMode) body.permissionMode = a.permissionMode;
       return post("/sessions", body) as T;
     }
     case "term_input": return post(`/sessions/${a.sessionId}/terminal/input`, { text: a.text }) as T;

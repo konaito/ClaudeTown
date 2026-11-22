@@ -4,11 +4,13 @@ use super::*;
 
 /// 新しい世帯を立てる。claude をこのアプリの中の端末で起動する（pty.rs）。cwd を省くと ~/Documents/meta（本人の指定）。
 /// cols と rows は、画面のターミナルの今の大きさ。渡せば claude を最初からその大きさで起動し、開いた直後の描き直しを省く（#18）
-pub(crate) fn create_session(cwd: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>) -> Result<Value, String> {
+/// model と permission_mode は設定の既定（src/session/defaults.ts）。claude の --model と --permission-mode で起動する（pty::start_args）
+pub(crate) fn create_session(cwd: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, model: Option<String>, permission_mode: Option<String>) -> Result<Value, String> {
     refuse_if_disabled()?;
     let cwd = cwd.filter(|c| !c.is_empty()).unwrap_or_else(default_place);
     let ok = |v: Option<u16>, d: u16| v.filter(|n| (10..=1000).contains(n)).unwrap_or(d);
-    let r = pty::spawn(&cwd, name.as_deref(), ok(cols, 120), ok(rows, 40), town_kick)?;
+    let start = pty::start_args(model.as_deref(), permission_mode.as_deref())?;
+    let r = pty::spawn(&cwd, name.as_deref(), &start, ok(cols, 120), ok(rows, 40), town_kick)?;
     town_kick();
     Ok(r)
 }
@@ -129,8 +131,8 @@ pub(crate) mod cmd {
     use serde_json::Value;
 
     #[tauri::command]
-    pub async fn create_session(cwd: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>) -> Result<Value, String> {
-        crate::blocking(move || super::create_session(cwd, name, cols, rows)).await
+    pub async fn create_session(cwd: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, model: Option<String>, permission_mode: Option<String>) -> Result<Value, String> {
+        crate::blocking(move || super::create_session(cwd, name, cols, rows, model, permission_mode)).await
     }
     #[tauri::command]
     pub async fn resume_session(session_id: String, cols: Option<u16>, rows: Option<u16>) -> Result<Value, String> {
