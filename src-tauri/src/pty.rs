@@ -545,7 +545,12 @@ pub fn kill(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// アプリを終えるときに、ここから立てた claude を全部止める。SIGHUP を全部に送り、1秒待って残りに SIGKILL
+/// アプリを終えるとき、SIGHUP の後に claude が自分で終わるのを待つ長さ。これを過ぎて残っているものに SIGKILL を送る。
+/// claude は SIGHUP から終わるまで 1.27 秒かかった（2026-11-22 の実測、README）。前の1秒では足りず、SIGKILL で
+/// SessionEnd の hook と sessions/<pid>.json の片付けが飛んだ（#232）。全部が終われば、この長さを待たずに戻る
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
+
+/// アプリを終えるときに、ここから立てた claude を全部止める。SIGHUP を全部に送り、SHUTDOWN_WAIT まで待って残りに SIGKILL
 pub fn kill_all() {
     // 台帳はアプリを終える前のまま残す（次の起動で戻す）
     begin_shutdown();
@@ -553,17 +558,23 @@ pub fn kill_all() {
     if pids.is_empty() {
         return;
     }
-    for &pid in &pids {
+    hangup_all(&pids);
+    eprintln!("[pty] アプリを終えるので {} 体の claude を止めた", pids.len());
+}
+
+/// kill_all の止め方。pids に SIGHUP を送り、全部が終わるか SHUTDOWN_WAIT が過ぎるまで待ち、残りに SIGKILL を送る。
+/// 試験が代役の pid だけを渡して同じ処理を流せるように、台帳と SHUTTING には触らない
+fn hangup_all(pids: &[u32]) {
+    for &pid in pids {
         unsafe { libc::kill(pid as i32, libc::SIGHUP) };
     }
     let t0 = Instant::now();
-    while t0.elapsed() < Duration::from_secs(1) && pids.iter().any(|&p| alive(p)) {
+    while t0.elapsed() < SHUTDOWN_WAIT && pids.iter().any(|&p| alive(p)) {
         std::thread::sleep(Duration::from_millis(50));
     }
     for &pid in pids.iter().filter(|&&p| alive(p)) {
         unsafe { libc::kill(pid as i32, libc::SIGKILL) };
     }
-    eprintln!("[pty] アプリを終えるので {} 体の claude を止めた", pids.len());
 }
 
 fn alive(pid: u32) -> bool {
@@ -778,6 +789,56 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("terminals.json.bad")).unwrap(), "{ not json");
         std::fs::write(&p, r#"{"version":1,"terminals":[{"id":"x","cwd":"/tmp"}]}"#).unwrap();
         assert_eq!(read_ledger(&p), vec![Entry { id: "x".into(), cwd: "/tmp".into(), name: None, cols: 120, rows: 40, started_at: 0 }]);
+    }
+
+    /// アプリを終えるときの止め方（kill_all の hangup_all）で、SIGHUP を受けてから 1.5 秒かけて後始末をして終わる代役が、
+    /// SIGKILL されずに後始末を終える（#232）。本物の claude は SIGHUP から終わるまで 1.27 秒かかった（README）。
+    /// kill_all はほかの試験の端末も止めて SHUTTING も立てるので、代役の pid だけを hangup_all に渡す
+    #[test]
+    fn shutdown_waits_for_a_slow_hangup() {
+        use std::os::unix::fs::PermissionsExt;
+        // 町の一覧を数える試験（lib.rs）に、この端末が混ざらないようにする。錠は端末が台帳から消えるまで持つ
+        let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fc-pty-hup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (ready, hup, done) = (dir.join("ready"), dir.join("hup"), dir.join("done"));
+        // SIGHUP を受けたら hup を書き、1.5 秒寝てから done を書いて終わる。trap を張ってから ready を書く。
+        // 待つのは短い sleep の輪（sh は前面の子が終わるまで trap を動かさない）。試験が落ちても 30 秒で自分で終わる
+        let bin = dir.join("claude");
+        std::fs::write(&bin, format!(
+            "#!/bin/sh\ntrap ': > \"{hup}\"; sleep 1.5; : > \"{done}\"; exit 0' HUP\n: > \"{ready}\"\ni=0\nwhile [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done\n",
+            hup = hup.display(), done = done.display(), ready = ready.display()
+        )).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
+        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {});
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+        let id = r.unwrap()["id"].as_str().unwrap().to_string();
+        let pid = pid_of_id(&id).unwrap();
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(5) && !ready.exists() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(ready.exists(), "代役が ready を書かなかった");
+
+        let t0 = Instant::now();
+        hangup_all(&[pid]);
+        let took = t0.elapsed();
+        // SIGKILL で止まった後に done が遅れて書かれることは無いが、念のため少し待ってから見る
+        std::thread::sleep(Duration::from_millis(500));
+        let (got_hup, got_done) = (hup.exists(), done.exists());
+        let t1 = Instant::now();
+        while t1.elapsed() < Duration::from_secs(5) && owns(&id) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(got_hup, "代役に SIGHUP が届かなかった");
+        assert!(got_done, "SIGHUP の後始末の途中で SIGKILL された（{took:?} で戻った）");
+        // 全部が終わったら、待ちの上限まで待たずに戻る
+        assert!(took < SHUTDOWN_WAIT, "代役が終わった後も待ち続けた（{took:?}）");
+        assert!(!owns(&id));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 台帳の出入り（#152）。閉じたものと自分で終わったものは外れ、アプリを終えるときに止めたものは残り、
