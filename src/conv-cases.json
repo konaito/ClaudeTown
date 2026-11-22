@@ -28,6 +28,8 @@
   {"name": "result_text: 文字列", "fn": "result_text", "args": ["hello"], "expect": "hello"},
   {"name": "result_text: 前後の空白を落とす", "fn": "result_text", "args": ["  hi \n"], "expect": "hi"},
   {"name": "result_text: 空", "fn": "result_text", "args": [""], "expect": ""},
+  {"name": "result_text: CRLF は省いていなければそのまま返す", "fn": "result_text", "args": ["a\r\nb"], "expect": "a\r\nb"},
+  {"name": "result_text: CRLF と空行を含んでも省いていなければそのまま返す", "fn": "result_text", "args": ["a\r\nb\r\nc\r\n\r\nd"], "expect": "a\r\nb\r\nc\r\n\r\nd"},
   {"name": "result_text: null は空", "fn": "result_text", "args": [null], "expect": ""},
   {"name": "result_text: text と image の並び", "fn": "result_text", "args": [[{"type": "text", "text": "a"}, {"type": "image"}, {"type": "text", "text": "b"}]], "expect": "a\n[画像]\nb"},
   {"name": "result_text: 空の text と知らない型は飛ばす", "fn": "result_text", "args": [[{"type": "text", "text": ""}, {"type": "tool_reference"}, {"type": "text", "text": "z"}]], "expect": "z"},

@@ -344,7 +344,9 @@ pub(crate) fn result_text(content: &Value) -> String {
         _ => String::new(),
     };
     let t = t.trim();
-    let mut out: String = t.lines().take(RESULT_LINES).collect::<Vec<_>>().join("\n");
+    // lines() は行末の \r も落とすので、省いていないのに長さが縮んで「続きは省いた」が付く。\n だけで割り、TypeScript の split("\n") と合わせる
+    // lines() は行末の \r も落とすので、省いていないのに長さが縮んで「続きは省いた」が付く。\n だけで割り、TypeScript の split("\n") と合わせる
+    let mut out: String = t.split('\n').take(RESULT_LINES).collect::<Vec<_>>().join("\n");
     if out.chars().count() > RESULT_CHARS {
         out = out.chars().take(RESULT_CHARS).collect();
     }
