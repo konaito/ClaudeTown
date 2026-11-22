@@ -1,6 +1,7 @@
 // Tauri の命令を呼ぶ口。
-// ブラウザで開いたとき（開発中の見た目の確認）は、URL に ?mock があればモックのノード（scripts/mock-ccn-pty.ts、127.0.0.1:4399）に直接繋ぐ。
-// ?mock が無ければ public/dev-*.json を読み、送信はしない。
+// ビルドしたブラウザ版（PWA、town.fybe.jp）は Tauri の外で動き、同じオリジンの /api を web/ の Worker が ccn へ中継する。
+// アプリ（Tauri）は ccn を使わないが、ブラウザ版の扱いは本人が決めるまで今のまま残す（下の WEB の分岐、webConv.ts、webPerm.ts）。
+// 開発中にブラウザで開いたとき（見た目の確認）は、public/dev-*.json を読み、送信はしない。
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -11,21 +12,13 @@ import { newConvState, readConversation, type ConvState } from "./webConv";
 import { cardNames, projectFromPath, type ConvItem } from "./model";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-// ?mockport=<ポート> で、モック以外の口（本番のノードの前に置いた試験用の中継など）にも繋げる
-// ビルドした版（PWA）。Tauri の外で、ccn と同じオリジンの /api と /n/<町>/api に直接つなぐ（ccn は別オリジンからの要求を 403 で断る）。
+// ビルドした版（PWA）。Tauri の外で、ccn と同じオリジンの /api に直接つなぐ（ccn は別オリジンからの要求を 403 で断る）。
 // 本番では Worker（web/）が、この道を Access のリンクトークンを付けて ccn に中継する
 const WEB = !inTauri && import.meta.env.PROD && typeof location !== "undefined";
-const MOCK = !inTauri && typeof location !== "undefined" && location.search.includes("mock")
-  ? `http://127.0.0.1:${new URLSearchParams(location.search).get("mockport") ?? "4399"}/api` : WEB ? `${location.origin}/api` : null;
+const API = WEB ? `${location.origin}/api` : null;
 
 export const IS_WEB = WEB;
-/** ccn を使うかの設定（#96）を出すか。アプリの中と、見た目の確認用の ?mock（保存はしない）で出す。ブラウザ版はいつも ccn を使う */
-export const HAS_CCN_SETTING = inTauri || (!!MOCK && !WEB);
 const LOADED_AT = Date.now();
-// 見た目の確認用: ?offline を付けると、ccn に届かない状態を真似る。一覧は保存した一覧として出し、会話は読めず、
-// 保存してあった会話（?longconv と同じ仮の会話）を出す。Rust の保存（src-tauri/src/offline.rs）は通らない
-const OFFLINE = !inTauri && !MOCK && !WEB && typeof location !== "undefined" && location.search.includes("offline");
-const OFFLINE_ERR = `ccn が 502 を返した: {"error":"peer incertotech unreachable: fetch failed","peer":"incertotech"}`;
 
 async function devJson<T>(name: string, fallback: T): Promise<T> {
   const r = await fetch(`/${name}`, { cache: "no-store" });
@@ -36,9 +29,9 @@ async function devJson<T>(name: string, fallback: T): Promise<T> {
 const WEB_CONVS = new Map<string, ConvState>();
 const WEB_CONV_RUN = new Map<string, Promise<unknown>>();
 
-async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promise<T> {
-  // ビルドした版では、別の町への要求も中継の口（/n/<町>/api）へ向ける。?mock のモックは今までどおり peer を見ない
-  const base = WEB && a.peer ? `${MOCK!.replace(/\/api$/, "")}/n/${encodeURIComponent(String(a.peer))}/api` : MOCK;
+/** ブラウザ版（PWA）の命令。ccn の口を、同じオリジンの /api（web/ の Worker の中継）で呼ぶ。Rust と同じ形で返す */
+async function webCall<T>(cmd: string, a: Record<string, unknown> = {}): Promise<T> {
+  const base = API!;
   const j = async (path: string, init?: RequestInit) => {
     const r = await fetch(`${base}${path}`, { credentials: "same-origin", ...init });
     if (!r.ok) throw new Error(await r.text());
@@ -51,56 +44,41 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
     try { parsed = JSON.parse(t); } catch { /* 文字列のまま */ }
     return { status: r.status, body: parsed };
   };
-  const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
-    j(path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  const post = (path: string, body: unknown) =>
+    j(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   switch (cmd) {
     case "snapshot": {
-      // 別の町は、本物のノードと同じく中継の口（/n/<町>/api/...）から取る
-      const list = (a.peer
-        ? await fetch(`${MOCK!.replace(/\/api$/, "")}/n/${a.peer}/api/sessions`).then(async (r) => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
-        : await j("/sessions")) as Record<string, any>[];
+      const list = (await j("/sessions")) as Record<string, any>[];
       const live = list.filter((s) => s.state !== "exited");
       const parentOf = (s: Record<string, any>) => {
         const sid8 = typeof s.parent === "string" && s.parent.startsWith("agent:") ? s.parent.split("/")[1] : null;
         return sid8 ? live.find((x) => x.id.startsWith(sid8))?.id ?? null : null;
       };
+      // 名前は Rust の snapshot と同じ決め方（src/model.ts の cardNames）。.git は読めないので、パスの形だけで決める
+      const names = cardNames(live.map((s) => ({ id: s.id, cwd: s.cwd, title: s.title })));
       return {
-        ccn: MOCK, peer: null, ccn_ok: true, ccn_error: null, fetched_at: Date.now(),
-        // お手紙の試し: public/dev-letters.json（無ければ空）
-        letters: WEB ? [] : await fetch("/dev-letters.json", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
-        // 名前は Rust の snapshot と同じ決め方（src/model.ts の cardNames）。モックでは .git を読まないので、パスの形だけで決める
-        agents: (() => {
-          const names = cardNames(live.map((s) => ({ id: s.id, cwd: s.cwd, title: s.title })));
-          const rows = live.map((s) => ({ id: s.id, name: names.get(s.id), project: s.cwd ? projectFromPath(s.cwd) : null, kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities, account: s.account ?? null, accountEmail: s.accountEmail ?? null }));
-          return !WEB && location.search.includes("native") ? [...rows, ...mockNative(rows)] : rows;
-        })(),
+        fetched_at: Date.now(), letters: [], sources: null,
+        agents: live.map((s) => ({ id: s.id, name: names.get(s.id), project: s.cwd ? projectFromPath(s.cwd) : null, kind: s.kind, source: "ccn", state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities, account: s.account ?? null, accountEmail: s.accountEmail ?? null })),
       } as T;
     }
-    case "peers": if (WEB) return j("/peers") as T;
-      return [{ name: "mock", url: MOCK, status: "healthy", self: true }, { name: "vm", url: "", status: "healthy", self: false }] as T;
     case "create_session": {
-      const headers: Record<string, string> = a.parent ? { "x-ccn-from": `agent:mock/${String(a.parent).slice(0, 8)}/town` } : {};
-      // Rust の create_session と同じく、空の prompt と name は送らない（本番のノードは name: null を 400 で断る）
-      const body: Record<string, unknown> = { terminal: true, cwd: a.cwd || (new URLSearchParams(location.search).get("cwd") ?? "/tmp"), cols: a.cols ?? 120, rows: a.rows ?? 40 };
-      if (typeof a.prompt === "string" && a.prompt.trim()) body.prompt = a.prompt;
+      // Rust の create_session と同じ引数。ccn は空の name を 400 で断るので送らない
+      const body: Record<string, unknown> = { terminal: true, cols: a.cols ?? 120, rows: a.rows ?? 40 };
+      if (typeof a.cwd === "string" && a.cwd) body.cwd = a.cwd;
       if (typeof a.name === "string" && a.name.trim()) body.name = a.name;
-      // 引き継ぎ（src/succeed.ts）。Rust と同じく、resume があるときだけ fork を、fork があるときだけ succeed を送る
-      if (typeof a.resume === "string" && a.resume.trim()) { body.resume = a.resume; if (a.fork) { body.fork = true; if (a.succeed) body.succeed = true; } }
-      return post("/sessions", body, headers) as T;
+      return post("/sessions", body) as T;
     }
     case "term_input": return post(`/sessions/${a.sessionId}/terminal/input`, { text: a.text }) as T;
     case "term_resize": return post(`/sessions/${a.sessionId}/terminal/resize`, { cols: a.cols, rows: a.rows }) as T;
     case "session_detail": return j(`/sessions/${a.sessionId}`) as T;
-    // 新しい世帯のペイン（#89）の材料。Rust の house_places と同じ形で返す。新しい世帯は手元のノードにだけ作るので、peer は見ない。
-    // places は古い ccn やモックに無い（404）ので null にする。host が無いモックでは roots を空（絞らない）にする
+    // 新しい世帯のペイン（#89）の材料。Rust の house_places と同じ形で返す。places は古い ccn に無い（404）ので null にする
     case "house_places": {
-      const opt = (path: string) => fetch(`${MOCK}${path}`, { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-      const [host, sessions, places] = await Promise.all([opt("/host"), fetch(`${MOCK}/sessions`, { credentials: "same-origin" }).then((r) => r.json()), opt("/places?limit=300")]);
+      const opt = (path: string) => fetch(`${base}${path}`, { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      const [host, sessions, places] = await Promise.all([opt("/host"), j("/sessions"), opt("/places?limit=300")]);
       return { roots: host?.roots ?? [], lobby: host?.lobby ?? null, sessions, places: places?.places ?? null } as T;
     }
-    // 場所のリポジトリ名（#99）は .git を読む Rust にしか取れない。ブラウザ版（PWA）では空にして、ディレクトリ名だけを出す。
-    // ?mock では見た目の確認用に public/dev-place-repos.json（{"/path": "owner/repo"}）を読む
-    case "place_repos": return (WEB ? {} : await devJson("dev-place-repos.json", {})) as T;
+    // 場所のリポジトリ名（#99）は .git を読む Rust にしか取れない。ブラウザ版では空にして、ディレクトリ名だけを出す
+    case "place_repos": return {} as T;
     // Rust の send_direct と同じく、貼り付けてから Enter を押す
     case "send_direct": {
       await post(`/sessions/${a.sessionId}/terminal/input`, { text: `\x1b[200~${String(a.text)}\x1b[201~` });
@@ -108,7 +86,7 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
       return post(`/sessions/${a.sessionId}/terminal/input`, { text: "\r" }) as T;
     }
     case "interrupt_session": return post(`/sessions/${a.sessionId}/interrupt`, {}) as T;
-    // モデルと権限モード（#97）。Rust と同じく、HTTP の応答を { status, body } で返す（断られた理由は画面が status と code で決める）
+    // モデルと権限モード（#97）。HTTP の応答を { status, body } で返す（断られた理由は画面が status と code で決める）
     case "session_controls": return raw(`/sessions/${a.sessionId}/command`, "POST", { text: "" }) as T;
     case "configure_session": {
       const body: Record<string, unknown> = {};
@@ -118,21 +96,10 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
       return raw(`/sessions/${a.sessionId}`, "PATCH", body) as T;
     }
     case "run_command": return raw(`/sessions/${a.sessionId}/command`, "POST", { text: a.text }) as T;
-    case "teleport_info": return j(`/sessions/${a.sessionId}/teleport`) as T;
-    case "teleport": return post(`/sessions/${a.sessionId}/teleport`, { to: a.to, fork: a.fork, subtree: a.subtree, dryRun: a.dryRun }) as T;
     case "stop_session": return j(`/sessions/${a.sessionId}`, { method: "DELETE" }) as T;
-    // 会話の整形（Rust の simplify）と、承認の安全確認つきの返事（answer_permission）は、まだ TS に移していない。黙って成功させず、画面に理由を出す
     case "conversation": {
-      // ?mock&native の合成の行（mockNative）は ccn に無いので、合成の会話を返す
-      if (!WEB && (String(a.sessionId).startsWith("sub-") || String(a.sessionId).startsWith("9e9e9e9e"))) {
-        return deltaOf([
-          { role: "user", text: "（合成）ログの置き場所を探して", at: Date.now() - 50_000 },
-          { role: "tool", text: "探す: *.jsonl", at: Date.now() - 40_000, id: "t1", result: { text: "3件", error: false } },
-          { role: "assistant", text: "（合成）3件見つかった", at: Date.now() - 30_000 },
-        ], a.since as number | null) as T;
-      }
-      // ブラウザ版は Rust の代わりに、ここで ccn の messages を読んで縮める（src/webConv.ts）。?mock のモックも同じ道を通る。同じ会話への取得は1本ずつ順に通す
-      const key = `${a.peer ?? ""}|${a.sessionId}`;
+      // Rust の代わりに、ここで ccn の messages を読んで縮める（src/webConv.ts）。同じ会話への取得は1本ずつ順に通す
+      const key = String(a.sessionId);
       const st = WEB_CONVS.get(key) ?? newConvState();
       WEB_CONVS.set(key, st);
       const run = (WEB_CONV_RUN.get(key) ?? Promise.resolve()).catch(() => {}).then(() =>
@@ -140,70 +107,25 @@ async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promis
       WEB_CONV_RUN.set(key, run);
       return (await run) as T;
     }
-    case "conversation_cache": return null as T;
-    // ccn を使うかの設定（#96）はアプリにだけある。ブラウザ版はいつも ccn を使う
-    case "town_settings": return { ccn: true } as T;
-    case "set_town_settings": console.info("[モックでは保存しない]", cmd, a); return { ccn: a.ccn } as T;
-    // ブラウザ版は Rust の代わりに、同じ確認をここで行う（src/webPerm.ts）
-    case "answer_permission": if (WEB) return answerPermission((path) => j(path), (path, body) => post(path, body), String(a.sessionId), String(a.choice), (a.expectId as string | null) ?? null, (a.answers as Record<string, string> | null) ?? null, (a.message as string | null) ?? null, (a.suggestion as number | null) ?? null) as T; return null as T;
+    // Rust の代わりに、承認の安全確認をここで行う（src/webPerm.ts）
+    case "answer_permission": return answerPermission((path) => j(path), (path, body) => post(path, body), String(a.sessionId), String(a.choice), (a.expectId as string | null) ?? null, (a.answers as Record<string, string> | null) ?? null, (a.message as string | null) ?? null, (a.suggestion as number | null) ?? null) as T;
     case "send_message": {
-      if (!WEB) return null as T; // ?mock の試験では送らない（今までどおり）
       if (!String(a.text ?? "").trim()) throw new Error("文が空");
       const r = await j(`/sessions/${a.sessionId}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: a.text }) });
       return JSON.stringify(r) as T;
     }
-    default: console.info("[モックでは実行しない]", cmd, a); return null as T;
+    default: console.info("[ブラウザ版では実行しない]", cmd, a); return null as T;
   }
-}
-
-/**
- * 見た目の確認用（?mock&native）: Claude Code の記録から読んだ形の合成の行（#96）。最初の世帯の親の下に sub-agent を2体、
- * 子の下に teammate を1体、ccn に無い人のセッションを1つ足す。中身は合成で、本物の記録は読まない
- */
-function mockNative(rows: { id: string; parent: string | null; cwd: string }[]) {
-  const root = rows.find((r) => !r.parent);
-  if (!root) return [];
-  const kid = rows.find((r) => r.parent === root.id) ?? root;
-  const ro = { send: false, permissions: false, interrupt: false, stop: false, terminal: false };
-  const now = Date.now();
-  const sub = (id: string, parent: string, name: string, state: string, asked: string, said: string | null, doing: string | null) => ({
-    id, name, project: projectFromPath(root.cwd), kind: "subagent", source: "native", state, cwd: root.cwd, startedAt: now - 60_000, lastActivityAt: now,
-    canSend: false, parent, capabilities: ro, account: null, accountEmail: null,
-    report: { phase: state === "running" ? "working" : "resting", asked, said, doing },
-  });
-  return [
-    sub(`sub-a1@${root.id.slice(0, 8)}`, root.id, "Explore", "running", "ログの置き場所を探す", null, "探す: *.jsonl"),
-    sub(`sub-a2@${root.id.slice(0, 8)}`, root.id, "general-purpose", "idle", "型を確かめる", "型は合っていた", null),
-    sub(`sub-tm@${kid.id.slice(0, 8)}`, kid.id, "reviewer", "running", "差分を読む", null, "読む: src/model.ts"),
-    { id: "9e9e9e9e-0000-4000-8000-000000000001", name: "notes", project: "notes", kind: "terminal", source: "native", state: "idle", cwd: "/tmp/notes",
-      startedAt: now - 3_600_000, canSend: false, parent: null, capabilities: ro, account: null, accountEmail: null },
-  ];
 }
 
 export async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (inTauri) return invoke<T>(cmd, args);
-  // 別の町の一覧（#14）。ブラウザ表示では snapshot の agents で代える
-  if (cmd === "town_agents") {
-    const s = await call<{ ccn_ok: boolean; ccn_error: string | null; agents: unknown[] }>("snapshot", args);
-    if (!s.ccn_ok) throw new Error(s.ccn_error ?? "つながらない");
-    return s.agents as T;
-  }
-  if (MOCK) return mockCall<T>(cmd, args);
-  if (OFFLINE && cmd === "conversation_cache") {
-    return { savedAt: LOADED_AT - 25 * 60 * 1000, ...(() => { const d = deltaOf(fakeConv(), null); return { total: d.total, items: d.items }; })() } as T;
-  }
-  // 時間切れまで待つ様子も見せる（保存した履歴を出したまま「読み込み中」になる）
-  if (OFFLINE && cmd === "conversation") { await new Promise((r) => setTimeout(r, 1500)); throw new Error(OFFLINE_ERR); }
+  if (WEB) return webCall<T>(cmd, args);
   if (cmd === "snapshot") {
-    // 別の町は public/dev-snapshot-<町>.json（`--snapshot --peer <町>` で作る）。無ければ届かない町として扱う
-    const town = args?.peer ? `-${args.peer}` : "";
-    const r = await fetch(`/dev-snapshot${town}.json`, { cache: "no-store" });
-    if (town && (!r.ok || !(r.headers.get("content-type") ?? "").includes("json"))) throw new Error(`dev-snapshot${town}.json が無い`);
+    const r = await fetch("/dev-snapshot.json", { cache: "no-store" });
     if (!r.ok) throw new Error("dev-snapshot.json が無い。`src-tauri/target/debug/family-computing --snapshot > public/dev-snapshot.json` で作る");
-    const s = await r.json();
-    return (OFFLINE ? { ...s, ccn_ok: false, ccn_error: OFFLINE_ERR, cached_at: LOADED_AT - 25 * 60 * 1000 } : s) as T;
+    return (await r.json()) as T;
   }
-  if (cmd === "peers") return devJson<T>("dev-peers.json", [] as T);
   // 見た目の確認用: public/dev-house-places.json（Rust の house_places の出力）。無ければ空の一覧
   if (cmd === "house_places") return devJson<T>("dev-house-places.json", { roots: [], lobby: null, sessions: [], places: null } as T);
   if (cmd === "place_repos") return devJson<T>("dev-place-repos.json", {} as T);
@@ -214,7 +136,7 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
     return deltaOf(await devJson("dev-conversation.json", []), args?.since as number | null) as T;
   }
   if (cmd === "conversation" && location.search.includes("longconv")) return deltaOf(fakeConv(), args?.since as number | null) as T;
-  if (cmd === "conversation") return deltaOf([{ role: "assistant", text: `（ブラウザ表示の仮の会話）${String(args?.sessionId ?? "").slice(0, 8)} の会話は、Tauri の中で ccn から読む。` }], args?.since as number | null) as T;
+  if (cmd === "conversation") return deltaOf([{ role: "assistant", text: `（ブラウザ表示の仮の会話）${String(args?.sessionId ?? "").slice(0, 8)} の会話は、アプリの中で Claude Code の記録から読む。` }], args?.since as number | null) as T;
   console.info("[ブラウザ表示なので実行しない]", cmd, args);
   return "ブラウザ表示" as T;
 }
@@ -242,28 +164,27 @@ function fakeConv(): ConvItem[] {
 
 /**
  * 端末のイベント。ev は size / replay / data / exit / error / input_error。
- * replay と data は { s }（出力を UTF-8 の文字列に戻したもの）。Tauri では Rust が base64 を外し、16ms ごとにまとめて送る（#9）
+ * replay と data は { s }（出力を UTF-8 の文字列に戻したもの）。Tauri では Rust が PTY の出力を文字列にし、16ms ごとにまとめて送る（#9）
  */
 /** 端末のイベントの中身。ev ごとに入るものが違い、無いこともあるので全部省略可能にしてある */
 export type TermData = { cols?: number; rows?: number; s?: string; reason?: string; code?: number; message?: string };
 export type TermEvent = { id: string; ev: string; data: TermData };
 
 /** 1つのセッションの端末を開き、イベントを受ける。戻り値で閉じる */
-export async function openTerminal(sessionId: string, peer: string | null, on: (e: TermEvent) => void): Promise<() => void> {
+export async function openTerminal(sessionId: string, on: (e: TermEvent) => void): Promise<() => void> {
   if (inTauri) {
-    // このターミナルだけに送る口（Channel）。前は全部のウィンドウへの emit を受けて、セッションの ID で選んでいた
+    // このターミナルだけに送る口（Channel）
     let open = true;
     const ch = new Channel<{ ev: string; data: TermData }>((m) => {
       perfCounters.ipc++;
       perfCounters.bytes += m.data?.s?.length ?? 0;
       if (open) on({ id: sessionId, ev: m.ev, data: m.data });
     });
-    const generation = await invoke<number>("term_open", { sessionId, peer, onEvent: ch });
+    const generation = await invoke<number>("term_open", { sessionId, onEvent: ch });
     return () => { open = false; invoke("term_close", { sessionId, generation }).catch(() => {}); };
   }
-  if (MOCK) {
-    const base = WEB && peer ? `${MOCK.replace(/\/api$/, "")}/n/${encodeURIComponent(peer)}/api` : MOCK;
-    const es = new EventSource(`${base}/sessions/${sessionId}/terminal`);
+  if (WEB) {
+    const es = new EventSource(`${API}/sessions/${sessionId}/terminal`);
     // Tauri と同じ形（{ s }）に直す。文字の途中で切れた分は TextDecoder が次に回す
     const dec = new TextDecoder();
     for (const ev of ["size", "replay", "data", "exit"]) {
@@ -272,10 +193,10 @@ export async function openTerminal(sessionId: string, peer: string | null, on: (
         on({ id: sessionId, ev, data: typeof d?.b64 === "string" ? { s: dec.decode(Uint8Array.from(atob(d.b64), (c) => c.charCodeAt(0)), { stream: true }) } : d });
       });
     }
-    es.onerror = () => on({ id: sessionId, ev: "error", data: { message: WEB ? "ccn に繋がらない" : "モックに繋がらない" } });
+    es.onerror = () => on({ id: sessionId, ev: "error", data: { message: "ccn に繋がらない" } });
     return () => es.close();
   }
-  on({ id: sessionId, ev: "error", data: { message: "ブラウザ表示ではターミナルを開けない（?mock を付けるとモックに繋ぐ）" } });
+  on({ id: sessionId, ev: "error", data: { message: "ブラウザ表示ではターミナルを開けない" } });
   return () => {};
 }
 

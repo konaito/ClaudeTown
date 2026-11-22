@@ -1,60 +1,47 @@
-import { Suspense, createContext, lazy, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { IS_WEB, call as invoke, setFullscreen } from "./bridge";
-import { pickTown, savedTown, saveTown } from "./webTown";
-import { lastTermSize } from "./term/size";
-import { perfEnd, perfMark, perfStart, perfWaitingPrompt } from "./term/perf";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { IS_WEB, setFullscreen } from "./bridge";
+import { perfMark } from "./term/perf";
+import { loadTerminal } from "./term/lazyTerminal";
 import { useBench } from "./term/bench";
 import { collectMail, type Mail } from "./mail";
-import { flightsOf, resolve, type Flight } from "./letters";
-import { withGhosts } from "./ghost";
-import { ScrollEdgeGradient } from "./ScrollEdgeGradient";
-import { Composer } from "./composer/Composer";
-import { SessionControls, useNodeSupport } from "./session/SessionControls";
-import { commandError, routeOf } from "./composer/route";
-import { isHttp, noRoute, viaCcn } from "./session/control";
-import { Approval } from "./approval/Approval";
-import { openPlan } from "./approval/answers";
-import { BUILTINS, opensDialog } from "./composer/commands";
-import { isSlashCommand } from "./composer/edit";
-import { isVisible, onVisibleChange, pollBackoff, pollWhileVisible, shownAt } from "./visible";
-import { reuseAgents, reuseSnap } from "./snap";
-import { kickTown, otherTownRetryMs, watchTown } from "./town";
-import { SucceedError, kidsOf, startSuccessor, succeedBlock } from "./succeed";
-import { Group as SplitGroup, Panel as SplitPanel, Separator, usePanelRef, type Layout } from "react-resizable-panels";
-import {
-  ArrowRight, Check, ChevronLeft, ChevronRight, CircleStop, FileText, Hand, Handshake, Luggage, Maximize, MessageCircle,
-  MessageCircleQuestionMark, Minus, PanelLeftClose, PanelLeftOpen, Plus, Power, Settings, ThumbsUp, TriangleAlert, Users, Wrench, X, type LucideIcon,
-} from "lucide-react";
-import { ICON, ROLE_ICON, STROKE } from "./icons";
-import { NewHousePane, createHousehold } from "./newHouse/NewHousePane";
-import { loadPlace, placeFailure, savePlace } from "./newHouse/placeSetting";
+import { flightsOf } from "./letters";
+import { kickTown } from "./town";
+import { Group as SplitGroup, Panel as SplitPanel, Separator, type Layout } from "react-resizable-panels";
+import { Maximize, Minus, PanelLeftClose, PanelLeftOpen, Plus, Settings, Users } from "lucide-react";
+import { NewHousePane } from "./newHouse/NewHousePane";
+import { NewHousehold } from "./newHouse/NewHousehold";
+import { Credits } from "./credits/Credits";
+import { ICON, STROKE } from "./icons";
+import { groupSizeOf } from "./layout/params";
+import { useToasts } from "./hooks/useToasts";
+import { useTown } from "./hooks/useTown";
+import { usePanes } from "./hooks/usePanes";
+import { useSelection } from "./hooks/useSelection";
+import { useZoom } from "./hooks/useZoom";
+import { useHidden } from "./hooks/useHidden";
+import { useKill } from "./hooks/useKill";
+import { useCardSend } from "./hooks/useCardSend";
+import { Stage } from "./canvas/Stage";
+import { FamilyCanvas, Group, layoutOf } from "./canvas/FamilyCanvas";
+import { KillConfirm } from "./confirm/Confirm";
+import { NextRow } from "./NextRow";
+import { useLetterMarks } from "./useLetterMarks";
+import { Panel } from "./panel/Panel";
+import { DepthCtx, KillCtx, LetterCtx, SendCtx, TownCtx } from "./contexts";
+import { loadPlace, savePlace } from "./newHouse/placeSetting";
 import { SettingsDialog } from "./settings/SettingsDialog";
 import "./App.css";
 import "./mobile/mobile.css";
 import { MobileShell } from "./mobile/MobileShell";
 import { useMobileLayout, useVisualViewport } from "./mobile/useMobile";
-import { Avatar, hash as hashOf, roleOf, ROLE_LABEL, type Role } from "./kid/Avatar";
 import { SkinCtx, saveSkin, savedSkin, type Skin } from "./kid/pokemon";
 import {
-  type Agent, type ConvItem, type Mood, type Peer, type Snapshot,
-  MOOD_LABEL, NEEDS_YOU, accountText, buildTree, cardNames, choicesOf, houseNameOf, moodOf, nowOf, sinceText, targetLabel, taskOf,
+  type Agent, type Mood,
+  MOOD_LABEL, NEEDS_YOU, buildTree, cardNames, moodOf,
 } from "./model";
-import { Markdown, linkify } from "./Markdown";
-import { chatPerf } from "./chatPerf";
-import { elapsedText, liveSummary, mergeConv, msOf, sameLive, savedLabel, settlePending, withNotes, type PendingItem, type ConvCache, type ConvDelta, type Live } from "./conv";
-import { layoutFamily, type LNode } from "./layout/layout";
-import { LAYOUT, boxOf, groupSizeOf } from "./layout/params";
-import { packHouseholds } from "./layout/pack";
-import type { CreatedSession, TeleportInfo, TeleportPlan, TeleportResult } from "./types";
+import type { CreatedSession } from "./types";
+import { NEW_HOUSE_CAPS } from "./abilities";
 
-/**
- * 別の町（いま見ていない ccn のノード）のお便りを取りに行く間隔。町を1つずつ順に取り、前の回が終わるまで次の回を始めない。
- * 1回は町1つにつき手元のノード経由の GET /api/sessions 1本（中継先の ccn には 15 秒に1本）。peers が healthy でない町には取りに行かない。
- * 実測（2026-11-12）: 中継で incertotech 0.42 秒、vm 0.46 秒
- */
-const OTHER_TOWNS_POLL_MS = 15000;
-/** 別の町の一覧が取れなかったとき、前回の町を残す長さ */
-const OTHER_TOWN_KEEP_MS = 60000;
 /** 右パネルの幅（px）。最小と既定。最大はウィンドウ幅の半分（maxSize="50%"） */
 const SIDE_MIN = 380;
 const SIDE_DEFAULT = 380;
@@ -78,210 +65,22 @@ function keepSide(l: Layout, prev: Layout | undefined): Layout {
   return { houses: l.houses, town: Math.max(0, 100 - l.houses - side), side };
 }
 function saveSplit(l: Layout) { try { localStorage.setItem(SPLIT_KEY, JSON.stringify(l)); } catch { /* 保存できなくても動きは変えない */ } }
-/** 閉じる演出の長さ（ms）。CSS の kill-* と合わせる */
-const KILL_MS = 1150;
-/** 子孫を葉から順に倒すときのずらし（ms） */
-const KILL_STAGGER = 140;
-
-/**
- * カードの右下のボタン（#63）。左から並べる順に書く。送る文を足し替えるときはここだけを直す。
- * 右パネルの見出しにも、同じ定義から同じボタンを並べる（CardActions の place）。
- * kind が kill のボタンはセッションを閉じる（前のカードの × と同じ動き）。send のボタンは text をチャットの送信と同じ口で送る。
- * succeed のボタンは、利用上限で止まったセッションを同じ段の後継へ引き継ぐ（src/succeed.ts）。
- * 見本は本人のスクショ（2026-11-13）。角丸のカードの右下の縁に、角丸の四角いボタンが縁にまたがって並ぶ
- */
-type CardAction = { key: string; icon: LucideIcon; name: string } & ({ kind: "kill" } | { kind: "succeed" } | { kind: "send"; text: string });
-const CARD_ACTIONS: CardAction[] = [
-  { key: "kill", icon: Power, name: "閉じる", kind: "kill" },
-  { key: "succeed", icon: Handshake, name: "引き継ぐ", kind: "succeed" },
-  { key: "howdy", icon: MessageCircleQuestionMark, name: "様子を聞く", kind: "send", text: "調子どうですか" },
-  { key: "go", icon: ThumbsUp, name: "許可する", kind: "send", text: "許可します、やってくださいお願いします。" },
-];
-/** true ならカードの右下のボタンをいつも出す。false ならカードに乗せたときと、選んでいるカードだけに出す */
-const CARD_ACTIONS_ALWAYS = false;
-/** 押したあとの反応（ボタンの一瞬の変化）の長さ（ms）。CSS の card-act-* と合わせる */
-const CARD_ACT_FLASH_MS = 700;
-
 /** 世帯の要約の凡例に並べる順 */
 const LEGEND: Mood[] = ["working", "reply", "approval", "done", "idle"];
-
-/** いま見ている町のセッション（お手紙の送り手の名前を引くため） */
-const TownCtx = createContext<Agent[]>([]);
-/** 封筒の印（💌）を頭に出しているセッション */
-const LetterCtx = createContext<Set<string>>(new Set());
-/** 閉じる操作と演出の状態。カードの閉じるボタンと、倒れる演出が読む */
-const KillCtx = createContext<{ dying: Map<string, number>; ask: (a: Agent, instant: boolean) => void }>({ dying: new Map(), ask: () => {} });
-/** 引き継ぎの操作。local は手元のノードの町を見ているか。busy は、いま引き継いでいる前任の ID */
-const SucceedCtx = createContext<{ local: boolean; busy: Set<string>; ask: (a: Agent) => void }>({ local: false, busy: new Set(), ask: () => {} });
-/** カードのボタンから文を送る口（#63）。値は App で一度だけ作り、町の描き直しの合図にしない（#10） */
-const SendCtx = createContext<(a: Agent, text: string) => Promise<boolean>>(async () => false);
-const CONV_POLL_MS = 2500;
-/** 会話に新しい発言が無い回が続いたときの間隔の上限（#5）。新しい発言が来るか、文を送ったら CONV_POLL_MS に戻す */
-const CONV_POLL_MAX_MS = 10000;
-/** 相手が作業中のあいだの会話の取り直しの間隔（#59）。延ばさずに、この間隔で取り続ける */
-const CONV_POLL_LIVE_MS = 1000;
-
-type Toast = { id: number; text: string; bad?: boolean };
-
-// ターミナル（xterm と WebGL の addon）は起動のときに読まず、町を出した後に読む（#16）。
-// 起動から町を描くまでに解く JS を減らす。最初に開くときに待たないよう、起動の2秒後に先に読んでおく
-const loadTerminal = () => import("./term/TerminalView");
-const TerminalView = lazy(() => loadTerminal().then((m) => ({ default: m.TerminalView })));
 
 export default function App() {
   // スマホ専用の画面（src/mobile）。取得・選択・送信の状態はこの App が持ち、下の return の並べ方だけを切り替える
   const mobile = useMobileLayout();
   useVisualViewport(mobile);
   useEffect(() => { const t = setTimeout(() => { void loadTerminal(); }, 2000); return () => clearTimeout(t); }, []);
-  const [snap, setSnap] = useState<Snapshot | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [peer, setPeer] = useState<string>("");
-  const [peers, setPeers] = useState<Peer[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [toasts, setToasts] = useState<Toast[]>([]);
-  const [zoom, setZoom] = useState<number | "fit">("fit");
+  const { snap, err, reload } = useTown();
+  const { selected, setSelected, fresh, setFresh, termReq, chatReq, setChatReq, composeReq, setComposeReq, focus } = useSelection();
+  const { toasts, toast } = useToasts();
+  const { zoom, zoomOut, zoomIn, zoomFit } = useZoom();
 
-  const toast = useCallback((text: string, bad = false) => {
-    const id = Date.now() + Math.random();
-    setToasts((t) => [...t.slice(-2), { id, text, bad }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), bad ? 6000 : 2600);
-  }, []);
-
-  useEffect(() => {
-    invoke<Peer[]>("peers").then((p) => setPeers(Array.isArray(p) ? p : [])).catch(() => {});
-  }, []);
-  // オフラインで起動したときの peers は保存した一覧（別の機械の status が cached）。町の一覧が読めるようになったら取り直す
-  const snapOk = !!snap?.ccn_ok;
-  useEffect(() => {
-    if (snapOk && peers.some((p) => p.status === "cached")) invoke<Peer[]>("peers").then((p) => setPeers(Array.isArray(p) ? p : [])).catch(() => {});
-  }, [snapOk]);
-
-  // ブラウザ版は、最初の町を生きている子が最も多い町にする。町を選び直したら、その後は勝手に動かさない
-  const touched = useRef(false);
-  const chosen = useRef(false);
-  useEffect(() => {
-    if (!IS_WEB || chosen.current || !peers.length) return;
-    chosen.current = true;
-    const healthy = peers.filter((p) => p.self || p.status === "healthy");
-    Promise.all(healthy.map(async (p) => {
-      try { return { name: p.name, self: p.self, n: (await invoke<Agent[]>("town_agents", { peer: p.self ? null : p.name })).length }; }
-      catch { return { name: p.name, self: p.self, n: -1 }; }
-    })).then((counts) => {
-      if (touched.current) return;
-      const t = pickTown(counts.filter((c) => c.n >= 0), savedTown());
-      if (!t) return;
-      saveTown(t.name);
-      setPeer(t.self ? "" : t.name);
-    });
-  }, [peers]);
-
-  const selfPeer = peers.find((p) => p.self);
-  /** 町を切り替える（上の帯の選択と、スマホの町の選択で共通） */
-  const changeTown = (v: string) => { touched.current = true; setPeer(v); setSelected(null); if (IS_WEB) saveTown(v || selfPeer?.name || ""); };
-  const reload = useRef<() => void>(() => {});
-  // 一覧の取得が続けて失敗している数と、失敗し始めた時刻。1回の失敗では町を描き直さない
-  // （2026-11-12、ノードが一瞬詰まって一覧の取得が時間切れになり、町が「0世帯・0人」になった）
-  const [fail, setFail] = useState<{ n: number; since: number; msg: string } | null>(null);
-  useEffect(() => {
-    let alive = true;
-    const want = peer || null;
-    setFail(null);
-    // 失敗したら、同じ町の前回の一覧があればそれを出し続ける。無いときだけ、失敗した一覧（空の町と赤い帯）を出す
-    const failed = (msg: string, s?: Snapshot) => {
-      setFail((f) => ({ n: (f?.n ?? 0) + 1, since: f?.since ?? Date.now(), msg }));
-      setSnap((prev) => (prev?.ccn_ok && (prev.peer ?? null) === want ? prev : s ?? prev));
-      if (!s) setErr((e) => e ?? msg);
-    };
-    // 一覧は Rust の見張りが、変わったときだけ送ってくる（#5）。ウィンドウが見えていない間は止まる（#6）。
-    // 経過時間の表示は Since が自分で時計を回すので、ここで町全体を毎秒描き直さない（#4）
-    const stop = watchTown(want, (s) => {
-      if (!alive) return;
-      // 中身が前回と同じなら前回のオブジェクトのまま（描き直さない）。変わらないセッションも使い回す（#4）
-      if (s.ccn_ok) { setSnap((prev) => reuseSnap(prev, s)); setErr(null); setFail(null); }
-      else failed(s.ccn_error ?? "ccn につながらない", s);
-    }, (msg) => { if (alive) failed(msg); });
-    reload.current = kickTown;
-    return () => { alive = false; stop(); };
-  }, [peer]);
-
-  // 閉じたセッション。演出が終わったら隠し、ccn の一覧から消えたら忘れる（10秒たっても消えなければ戻して失敗を出す）
-  const [dying, setDying] = useState<Map<string, number>>(new Map());
-  const [hidden, setHidden] = useState<Map<string, number>>(new Map());
-  const [killAsk, setKillAsk] = useState<Agent | null>(null);
-  const agents = useMemo(() => (snap?.agents ?? []).filter((a) => !hidden.has(a.id)), [snap, hidden]);
-  // 隠したセッションがある間だけ、1秒ごとに下の判定を回す。一覧が前回と同じなら snap は変わらず（#4）、判定が動かないため
-  const [sweep, setSweep] = useState(0);
-  const hasHidden = hidden.size > 0;
-  useEffect(() => (hasHidden ? pollWhileVisible(() => setSweep((n) => n + 1), 1000) : undefined), [hasHidden]);
-  useEffect(() => {
-    if (!snap || hidden.size === 0) return;
-    const present = new Set(snap.agents.map((a) => a.id));
-    const now = Date.now();
-    const stuck = [...hidden].filter(([id, at]) => present.has(id) && now - at > 10000).map(([id]) => id);
-    const gone = [...hidden.keys()].filter((id) => !present.has(id));
-    if (!stuck.length && !gone.length) return;
-    setHidden((h) => { const n = new Map(h); for (const id of [...stuck, ...gone]) n.delete(id); return n; });
-    if (stuck.length) toast(`止まらなかった: ${stuck.map((id) => snap.agents.find((a) => a.id === id)?.name ?? id.slice(0, 8)).join("、")}`, true);
-  }, [snap, sweep]);
-  // 別の町のお便り。町の表示はいま選んだノードだけで、お便りは全部の町から集める
-  const selfName = peers.find((p) => p.self)?.name ?? "このMac";
-  const curTown = peer || selfName;
-  const [others, setOthers] = useState<Map<string, { agents: Agent[] } | { error: string }>>(new Map());
-  // 別の町の一覧が最後に取れた時刻。others に入れると取るたびに町が描き直されるので、別に持つ（#4）
-  const okAt = useRef<Map<string, number>>(new Map());
-  // 町ごとの、続けて失敗した回数と、次に取りに行ってよい時刻（#14）
-  const retry = useRef<Map<string, { fails: number; at: number }>>(new Map());
-  useEffect(() => {
-    let alive = true;
-    let running = false;
-    const towns: { key: string; name: string; healthy: boolean }[] = [
-      { key: "", name: selfName, healthy: true },
-      ...peers.filter((p) => !p.self).map((p) => ({ key: p.name, name: p.name, healthy: p.status === "healthy" })),
-    ].filter((t) => t.key !== peer);
-    setOthers((m) => new Map([...m].filter(([name]) => towns.some((t) => t.name === name))));
-    const load = async () => {
-      if (running) return;
-      running = true;
-      for (const t of towns) {
-        // 失敗が続いている町は、決めた時刻まで取りに行かない（前の結果を残す）
-        const r = retry.current.get(t.name);
-        if (r && Date.now() < r.at) continue;
-        let v: { agents: Agent[] } | { error: string };
-        if (!t.healthy) v = { error: "つながらない" };
-        else {
-          // 一覧と、前に決めたキャラの割り当てを読むだけの軽い命令（#14）。snapshot と違い、割り当ての保存も状態ファイルの読み込みもしない
-          try { v = { agents: await invoke<Agent[]>("town_agents", { peer: t.key || null }) }; }
-          catch (e) { v = { error: String(e) }; }
-        }
-        if (!alive) break;
-        if ("agents" in v) { okAt.current.set(t.name, Date.now()); retry.current.delete(t.name); }
-        else if (t.healthy) {
-          const fails = (r?.fails ?? 0) + 1;
-          retry.current.set(t.name, { fails, at: Date.now() + otherTownRetryMs(fails, OTHER_TOWNS_POLL_MS) });
-        }
-        // 取れなかった回は、60秒以内に取れた前回の町を残す（1回の時間切れで、お便りとゴーストが消えないように）
-        // 前回と同じなら Map を作り直さない（#4）
-        const got = v;
-        setOthers((m) => {
-          const prev = m.get(t.name);
-          if ("error" in got) {
-            if (prev && "agents" in prev && Date.now() - (okAt.current.get(t.name) ?? 0) < OTHER_TOWN_KEEP_MS) return m;
-            if (prev && "error" in prev && prev.error === got.error) return m;
-            return new Map(m).set(t.name, got);
-          }
-          const agents = reuseAgents(prev && "agents" in prev ? prev.agents : undefined, got.agents);
-          if (prev && "agents" in prev && agents === prev.agents) return m;
-          return new Map(m).set(t.name, { agents });
-        });
-      }
-      running = false;
-    };
-    const stop = pollWhileVisible(load, OTHER_TOWNS_POLL_MS);
-    return () => { alive = false; stop(); };
-  }, [peer, peers, selfName]);
-  // 木を作るときだけ、転出のゴースト（別の町にいる親子の影）を足す。お便りや数には入れない
-  const otherTowns = useMemo(() => [...others].flatMap(([town, v]) => ("agents" in v ? [{ town, agents: v.agents }] : [])), [others]);
-  const tree = useMemo(() => buildTree(withGhosts({ town: curTown, agents }, otherTowns)), [agents, otherTowns, curTown]);
+  // 閉じたセッション。演出が終わったら隠し、一覧から消えたら忘れる（10秒たっても消えなければ戻して失敗を出す）
+  const { setHidden, agents } = useHidden(snap, toast);
+  const tree = useMemo(() => buildTree(agents), [agents]);
   // キャラの見た目（いつもの / ポケモン）。ポケモンでは世帯の根で進化の系統を決めるので、ID から根を引けるようにして渡す
   const [skin, setSkin] = useState<Skin>(savedSkin);
   // 値を作り直すのは、見た目か親子の形が変わったときだけにする。snapshot のたびに作り直すと、全員の Avatar が描き直される
@@ -290,153 +89,16 @@ export default function App() {
   const shape = useMemo(() => tree.families.map((f) => f.all.map((a) => `${a.id}<${a.parent ?? ""}`).join(",")).join(";"), [tree]);
   const skinCtx = useMemo(() => ({
     skin,
-    // 根が転出のゴーストなら、相手の町にいる本物の ID で引く。親の町と子の町で系統をそろえるため
-    rootOf: (id: string) => { const t = treeRef.current; const a = t.byId.get(id); const r = a ? t.lineage(a)[0] : null; return r ? r.ghost?.realId ?? r.id : id; },
+    rootOf: (id: string) => { const t = treeRef.current; const a = t.byId.get(id); const r = a ? t.lineage(a)[0] : null; return r ? r.id : id; },
   }), [skin, shape]);
-  /** ゴーストを押したら、本物がいる町に切り替えてその子を選ぶ */
-  const pick = useCallback((a: Agent) => {
-    if (!a.ghost) { setSelected(a.id); return; }
-    setPeer(a.ghost.town === selfName ? "" : a.ghost.town);
-    setSelected(a.ghost.realId);
-  }, [selfName]);
+  const depthOf = useMemo(() => (id: string) => { const t = treeRef.current; const a = t.byId.get(id); return a ? t.lineage(a).length - 1 : null; }, [shape]);
+  const pick = useCallback((a: Agent) => setSelected(a.id), []);
 
-  /**
-   * a とその子孫を、葉から順に止める。倒れる演出も葉から少しずつずらして出す。
-   * alone なら a だけを止め、子孫は残す（引き継ぎで前任を止めるとき）。このときの知らせと選択の切り替えは呼び手が行う。全部止まったら true
-   */
-  const kill = useCallback(async (a: Agent, alone = false) => {
-    const order: Agent[] = [];
-    // ゴースト（別の町にいる本物の影）は閉じない
-    const walk = (x: Agent) => { for (const k of tree.childrenOf.get(x.id) ?? []) if (!k.ghost) walk(k); order.push(x); };
-    if (alone) order.push(a); else walk(a);
-    const targets = order.filter((x) => x.capabilities?.stop);
-    const skipped = order.filter((x) => !x.capabilities?.stop);
-    setDying((m) => { const n = new Map(m); targets.forEach((x, i) => n.set(x.id, i * KILL_STAGGER)); return n; });
-    if (!alone && selected && targets.some((x) => x.id === selected)) setSelected(null);
-    const failed: Agent[] = [];
-    for (const x of targets) {
-      try { await invoke("stop_session", { sessionId: x.id, peer: peer || null }); }
-      catch { failed.push(x); }
-    }
-    const ok = targets.filter((x) => !failed.includes(x));
-    // 一覧から消えたのをすぐ拾う。見張りは変化が無いと間隔を延ばしているため（#5）
-    kickTown();
-    // 止まらなかった分は演出を戻す。止まった分は演出が終わったら隠す
-    setDying((m) => { const n = new Map(m); for (const x of failed) n.delete(x.id); return n; });
-    const last = (targets.length - 1) * KILL_STAGGER + KILL_MS;
-    setTimeout(() => {
-      setHidden((h) => { const n = new Map(h); for (const x of ok) n.set(x.id, Date.now()); return n; });
-      setDying((m) => { const n = new Map(m); for (const x of ok) n.delete(x.id); return n; });
-    }, last);
-    if (alone) return failed.length === 0 && skipped.length === 0;
-    if (failed.length) toast(`止められなかった: ${failed.map((x) => x.name).join("、")}`, true);
-    else toast(`${a.name}${order.length > 1 ? ` と子孫 ${order.length - 1} 人` : ""}を閉じた`);
-    if (skipped.length) toast(`ccn から止められないので残した: ${skipped.map((x) => x.name).join("、")}`, true);
-    return failed.length === 0 && skipped.length === 0;
-  }, [tree, selected, peer, toast]);
-  // お手紙。この機械の町を見ているときだけ（記録はこの機械の hook が書く）
-  const flights = useMemo(() => (peer ? [] : flightsOf(snap?.letters ?? [], agents)), [snap, agents, peer]);
+  const { kill, killAsk, setKillAsk, killCtx } = useKill({ tree, selected, setSelected, toast, setHidden });
+  // お手紙（記録はこの機械の hook が書く）
+  const flights = useMemo(() => flightsOf(snap?.letters ?? [], agents), [snap, agents]);
   const letterMarks = useLetterMarks(flights);
-  const askKill = useCallback((a: Agent, instant: boolean) => { if (instant) kill(a); else setKillAsk(a); }, [kill]);
-  const killCtx = useMemo(() => ({ dying, ask: askKill }), [dying, askKill]);
-  // 引き継ぎ（src/succeed.ts）。確認を挟んでから、ccn に後継を立てさせる。新しい ccn は前任の停止と子の付け替えまで行う。
-  // 古い ccn では、後継が1通目を受け取ったら、ここで前任だけを止める
-  const [succeedAsk, setSucceedAsk] = useState<Agent | null>(null);
-  // 引き継げなかったときの、閉じるまで残る知らせ（枠の残るアカウントが無いとき。次に空く時刻を読めるように、消えるトーストにしない）
-  const [succeedNote, setSucceedNote] = useState<{ title: string; text: string } | null>(null);
-  const [succeeding, setSucceeding] = useState<Set<string>>(new Set());
-  // 同じ前任で二重に走らせない（確認の Enter の連打、カードと見出しの両方からの操作）。後継が2人立つと、同じ作業が二重に進む
-  const succeedRun = useRef<Set<string>>(new Set());
-  // 後継が立つまでの間に本人がほかを選んだら、選択を後継へ移さない。待った後の値を読むので ref で持つ
-  const selectedNow = useRef(selected);
-  selectedNow.current = selected;
-  const succeed = async (a0: Agent) => {
-    if (succeedRun.current.has(a0.id)) return;
-    // 確認を出している間に一覧が変わることがあるので、今の木の姿で見直す
-    const a = tree.byId.get(a0.id) ?? a0;
-    const why = succeedBlock(a, !peer);
-    if (why) { toast(`${a.name} を引き継げない: ${why}`, true); return; }
-    const mark = (on: boolean) => {
-      if (on) succeedRun.current.add(a.id); else succeedRun.current.delete(a.id);
-      setSucceeding(new Set(succeedRun.current));
-    };
-    mark(true);
-    toast(`${a.name} の後継を立てている…`);
-    try {
-      const { cols, rows } = lastTermSize() ?? { cols: null, rows: null };
-      const r = await startSuccessor({ agent: a, kids: kidsOf(tree.childrenOf.get(a.id) ?? []), cols, rows }, {
-        call: invoke, sleep: (ms) => new Promise((ok) => setTimeout(ok, ms)), now: Date.now,
-      });
-      // 一覧に載るまでは、作成の応答から作った仮の姿で右パネルを出す（新しい世帯と同じ）
-      const show = (term: boolean) => {
-        setFresh({
-          id: r.id, name: a.name, kind: "terminal", state: "running", cwd: r.cwd, canSend: true, parent: a.parent,
-          startedAt: Date.now(), capabilities: { terminal: true, send: true, stop: true },
-        });
-        setSelected(r.id);
-        if (term) setTermReq((n) => n + 1);
-      };
-      kickTown();
-      if (r.kind === "waiting") {
-        // 後継は生きているが、1通目をまだ受け取っていない。端末で確認の画面に止まっていることがあるので、端末を開いて見せる。前任は止めない
-        show(true);
-        toast(`${a.name} の後継（${r.id.slice(0, 8)}）は起動したが、引き継ぎの文をまだ受け取っていない。ターミナルを見る。${a.name} は止めていないので、後継が動いたら閉じる`, true);
-        return;
-      }
-      // 前任を選んでいたら、選択を後継へ移す（右パネルを空にしない）
-      if (selectedNow.current === a.id) show(false);
-      const id8 = r.id.slice(0, 8);
-      if (r.kind === "ccn") {
-        // 新しい ccn。後継の起動、子の付け替え、前任の停止まで ccn が済ませている
-        let stopped = r.stopped;
-        // 止まった前任は、一覧から消えるまで隠す。10秒たっても残っていれば、上の見張りが「止まらなかった」と出す。
-        // ccn が止められなかったときだけ、ここから1回止める
-        if (stopped) setHidden((h) => new Map(h).set(a.id, Date.now()));
-        else stopped = await kill(a, true);
-        kickTown();
-        // 付け替わった子の数は、町に出ていた子で数える（ccn の adopted には、止まって30分以内の子も入る）。
-        // 済んでいた引き継ぎ（already が付く）は、どの子が付け替わったかが分からないので書かない
-        const before = (tree.childrenOf.get(a.id) ?? []).filter((k) => !k.ghost);
-        const moved = before.filter((k) => r.adopted.includes(k.id)).length;
-        const left = r.already === undefined ? before.length - moved : 0;
-        const kids = `${moved ? `。子 ${moved} 人も後継の下に付けた` : ""}${left ? `。子 ${left} 人は付け替わらず、別の世帯に分かれる` : ""}`;
-        if (r.already) toast(`${a.name} は、すでに後継（${id8}）に引き継がれている`);
-        else if (stopped) toast(`${a.name} を後継（${id8}）へ引き継いだ${kids}${r.account ? `（アカウント: ${r.account}）` : ""}`, left > 0);
-        else toast(`${a.name} の後継（${id8}）は立ったが、${a.name} を止められなかった。手で閉じる`, true);
-        return;
-      }
-      // 古い ccn。後継が1通目を受け取ったので、前任だけを止める（子孫は止めない）
-      const stopped = await kill(a, true);
-      const note = r.depthChecked ? "" : "（前任の深さが ccn に無く、深さは比べていない）";
-      if (stopped) toast(`${a.name} を後継（${id8}）へ引き継いだ${note}`);
-      else toast(`${a.name} の後継（${id8}）は立ったが、${a.name} を止められなかった。手で閉じる${note}`, true);
-    } catch (e) {
-      if (e instanceof SucceedError && e.kind === "no_account") setSucceedNote({ title: `${a.name} を引き継げなかった`, text: e.message });
-      else toast(`${a.name} を引き継げなかった: ${e instanceof Error ? e.message : e}`, true);
-    } finally {
-      mark(false);
-    }
-  };
-  const local = !peer;
-  const succeedCtx = useMemo(() => ({ local, busy: succeeding, ask: setSucceedAsk }), [local, succeeding]);
-  // カードのボタンから文を送る（#63）。選んでいるセッションなら、右パネルの送信（仮の吹き出しと会話の取り直し）に任せる。
-  // ほかのセッションは send_message で送り、トーストを出す。参照を変えないよう ref を通し、町を描き直させない（#10）
-  const panelSend = useRef<((id: string, text: string) => Promise<boolean> | null) | null>(null);
-  const sendImpl = useRef<(a: Agent, text: string) => Promise<boolean>>(async () => false);
-  sendImpl.current = async (a, text) => {
-    const viaPanel = panelSend.current?.(a.id, text);
-    if (viaPanel) return viaPanel;
-    try {
-      await invoke("send_message", { sessionId: a.id, text, peer: peer || null });
-      kickTown();
-      toast(`${a.name} に届けた`);
-      return true;
-    } catch (e) {
-      toast(`${a.name} に届かなかった: ${e}`, true);
-      return false;
-    }
-  };
-  const cardSend = useCallback((a: Agent, text: string) => sendImpl.current(a, text), []);
+  const { panelSend, cardSend } = useCardSend(toast);
   const counts = useMemo(() => {
     const c: Record<Mood, number> = { approval: 0, reply: 0, working: 0, done: 0, idle: 0 };
     for (const a of agents) c[moodOf(a)]++;
@@ -448,98 +110,66 @@ export default function App() {
     [agents],
   );
 
-  const mails = useMemo(() => collectMail([
-    { town: curTown, agents },
-    ...[...others].flatMap(([town, v]) => ("agents" in v ? [{ town, agents: v.agents }] : [])),
-  ]), [agents, others, curTown]);
-  const unreachable = useMemo(() => [...others].filter(([, v]) => "error" in v).map(([t]) => t), [others]);
+  const mails = useMemo(() => collectMail([{ town: "", agents }]), [agents]);
   const openMail = useCallback((m: Mail, chat = false) => {
-    if (m.town !== curTown) setPeer(m.town === selfName ? "" : m.town);
     setSelected(m.agent.id);
     if (chat) setChatReq((n) => n + 1);
-  }, [curTown, selfName]);
+  }, []);
 
-  // 作った直後のセッション。一覧（snapshot）に載るまでは、create の応答から作った仮の姿で右パネルを出す（#18）。
-  // 一覧の取り直しを待つと、ccn が遅いときにその分だけ右パネルが出ない
-  const [fresh, setFresh] = useState<Agent | null>(null);
   // 作ったらチャットを開いて入力欄にフォーカスする（本人の指定）。端末は右クリックや「端末へ」で開く
   const newHousehold = useCallback((r: CreatedSession | null) => {
     if (!r?.id) return;
     setFresh({
       // 名前は一覧と同じ決め方（cardNames）。一覧に載ったときに名前が変わって見えないようにする
       id: r.id, name: cardNames([{ id: r.id, cwd: r.cwd ?? "" }]).get(r.id) ?? r.id.slice(0, 8), kind: "terminal", state: "running", cwd: r.cwd ?? "", canSend: true, parent: null,
-      startedAt: Date.now(), capabilities: { terminal: true, send: true, stop: true },
+      startedAt: Date.now(), capabilities: NEW_HOUSE_CAPS, source: IS_WEB ? "ccn" : "app",
     });
     setSelected(r.id);
     setComposeReq((n) => n + 1);
     reload.current();
   }, []);
 
-  // 右クリックや「端末へ」で、その子を選んで右パネルの端末を開く
-  const [termReq, setTermReq] = useState(0);
-  // お便りの「チャットへ」で、その子を選んで右パネルのチャットを開く
-  const [chatReq, setChatReq] = useState(0);
-  // 新しい世帯を作ったとき、右パネルのチャットを開いて入力欄にフォーカスする
-  const [composeReq, setComposeReq] = useState(0);
-  const focus = useCallback((a: Agent) => { perfStart("open", a.id); setSelected(a.id); setTermReq((n) => n + 1); }, []);
-  // 前回の町を出したまま、3回続けて、または10秒以上失敗している
-  const slow = !!fail && (fail.n >= 3 || Date.now() - fail.since > 10000);
   const sel = selected ? tree.byId.get(selected) ?? (fresh?.id === selected ? fresh : null) : null;
   // 一覧に載ったら仮の姿を捨てる
   useEffect(() => { if (fresh && tree.byId.has(fresh.id)) setFresh(null); }, [tree, fresh]);
   useEffect(() => { if (sel) perfMark("listed", sel.id); }, [sel?.id]);
   useBench({ ready: !!snap, select: setSelected, focusId: (id) => { const a = tree.byId.get(id); if (a) focus(a); } });
 
-  const connView = { cls: (!snap?.ccn_ok ? "bad" : slow ? "slow" : "ok") as "ok" | "slow" | "bad", label: snap ? (!snap.ccn_ok ? "つながらない" : slow ? "つながりにくい" : "接続中") : "よみこみ中", msg: fail?.msg ?? "" };
   const panelProps = {
-    agent: sel, peer, lineage: sel ? tree.lineage(sel) : [], descendants: sel ? descOf(tree.childrenOf, sel.id) : [], termReq, chatReq, composeReq, peers, sendHook: panelSend,
+    agent: sel, lineage: sel ? tree.lineage(sel) : [], termReq, chatReq, composeReq, sendHook: panelSend,
     onSent: (a: Agent) => { kickTown(); toast(`${a.name} に届けた`); }, onSent2: (m: string) => { kickTown(); toast(m); }, onError: (m: string) => toast(m, true),
     needs, onSelect: (a: Agent) => setSelected(a.id), onClose: () => setSelected(null),
   };
 
   // 3枚のペイン（#89）。左の新しい世帯のペインはヘッダーのボタンとドラッグで開け閉めする。
   // 右のチャットは、セッションを選んでいないときに閉じ、選んだら開く。閉じても Panel は残す（入力欄の下書きを Panel が持っているため）
-  const housesRef = usePanelRef();
-  const sideRef = usePanelRef();
-  const [housesOpen, setHousesOpen] = useState(true);
-  const [sideOpen, setSideOpen] = useState(false);
-  const hasSel = !!sel;
-  const selRef = useRef(hasSel);
-  selRef.current = hasSel;
-  useLayoutEffect(() => {
-    const r = sideRef.current;
-    if (!r || mobile) return;
-    if (hasSel && r.isCollapsed()) r.expand();
-    else if (!hasSel && !r.isCollapsed()) r.collapse();
-  }, [hasSel, mobile]);
-  // 設定（#92）。「＋ 新しい世帯」で親を立てる場所。null は既定（~/Documents/meta）
+  const { housesRef, sideRef, housesOpen, setHousesOpen, sideOpen, setSideOpen, selRef, toggleHouses } = usePanes(!!sel, mobile);
+  // 設定（#92）。「新しい世帯」で親を立てる場所。null は既定（~/Documents/meta）
   const [place, setPlace] = useState<string | null>(loadPlace);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const toggleHouses = () => { const r = housesRef.current; if (!r) return; if (r.isCollapsed()) r.expand(); else r.collapse(); };
 
   return (
     <SkinCtx.Provider value={skinCtx}>
     <KillCtx.Provider value={killCtx}>
-    <SucceedCtx.Provider value={succeedCtx}>
     <SendCtx.Provider value={cardSend}>
     <LetterCtx.Provider value={letterMarks.marks}>
-    <TownCtx.Provider value={agents}>
+    <TownCtx.Provider value={agents}><DepthCtx.Provider value={depthOf}>
     <div className={`app${mobile ? " mobile" : ""}`} onContextMenu={(e) => e.preventDefault()}>
       {mobile ? (
-        <MobileShell tree={tree} peers={peers} peer={peer} selfName={selfName} snap={snap} err={err} conn={connView} counts={counts} total={agents.length}
-          open={sel} mails={mails} curTown={curTown} unreachable={unreachable} onTown={changeTown} onPick={pick} onMail={(m) => openMail(m, true)} onBack={() => setSelected(null)}
+        <MobileShell tree={tree} snap={snap} err={err} counts={counts} total={agents.length}
+          open={sel} mails={mails} onPick={pick} onMail={(m) => openMail(m, true)} onBack={() => setSelected(null)}
           chat={(back) => <Panel {...panelProps} mobile onBack={back} />} />
       ) : (<>
       {/* 右のチャットが閉じている間は、左の幅と開閉だけを保存し、チャットの幅は前に保存した値を残す（0 を保存すると、次に開いたときのチャットの幅が最小に戻る） */}
       <SplitGroup className="body" orientation="horizontal" defaultLayout={savedSplit()} onLayoutChanged={(l) => saveSplit(sideRef.current?.isCollapsed() ? keepSide(l, savedSplit()) : l)}>
         <SplitPanel id="houses" panelRef={housesRef} collapsible collapsedSize={0} defaultSize={HOUSES_DEFAULT} minSize={HOUSES_MIN} maxSize="30%"
           onResize={() => setHousesOpen(!housesRef.current?.isCollapsed())}>
-          <NewHousePane disabled={!local} place={place} onCreated={newHousehold} onError={(m) => toast(m, true)} />
+          <NewHousePane place={place} onCreated={newHousehold} onError={(m) => toast(m, true)} />
         </SplitPanel>
         <Separator className={`split-handle${housesOpen ? "" : " closed"}`} />
         <SplitPanel id="town" minSize={TOWN_MIN}>
         <div className="left">
-          {/* アプリのヘッダー。#89 で窓の上から中央のペインの最上部へ移した（本人の指定）。ノードの選択と接続の表示は、前の実装のまま */}
+          {/* アプリのヘッダー。#89 で窓の上から中央のペインの最上部へ移した（本人の指定） */}
           <header className="top">
             <div className="brand">
               {/* 左の新しい世帯のペインの開け閉め（#89）。アイコンは lucide の panel-left-close / panel-left-open（ISC）。置き場所は仮置き */}
@@ -549,15 +179,7 @@ export default function App() {
               </button>
               <h1>Claude Town</h1>
             </div>
-            <div className="top-mid">
-              <select className="node" value={peer} onChange={(e) => changeTown(e.target.value)}>
-                <option value="">{IS_WEB && selfPeer ? selfPeer.name : `このMac${selfPeer ? `（${selfPeer.name}）` : ""}`}</option>
-                {peers.filter((p) => !p.self).map((p) => (
-                  <option key={p.name} value={p.name} disabled={p.status !== "healthy"}>{p.name}{p.status !== "healthy" ? "（つながらない）" : ""}</option>
-                ))}
-              </select>
-              <span className={`conn ${!snap?.ccn_ok ? "bad" : slow ? "slow" : "ok"}`} title={fail?.msg ?? ""}><i />{snap ? (!snap.ccn_ok ? "つながらない" : slow ? "つながりにくい" : "接続中") : "よみこみ中"}</span>
-            </div>
+            <div className="top-mid" />
             <div className="top-right">
               <button className="side-toggle" onClick={() => setSettingsOpen(true)} aria-label="設定" title="設定" aria-haspopup="dialog"><Settings size={18} strokeWidth={1.8} /></button>
             </div>
@@ -575,20 +197,14 @@ export default function App() {
               </span>
             )}
           </div>
-          <NextRow mails={mails} curTown={curTown} unreachable={unreachable} working={counts.working} total={agents.length} onOpen={openMail} />
+          <NextRow mails={mails} working={counts.working} total={agents.length} onOpen={openMail} />
 
-          {((err && !snap?.ccn_ok) || (snap && !snap.ccn_ok)) && (
-            <div className="banner bad">
-              {err ?? snap?.ccn_error}
-              {snap?.cached_at && <span>{savedLabel(snap.cached_at)} に保存した一覧と会話を出している</span>}
-              <span className="hint">次: ターミナルで <code>ccn doctor</code> を実行する</span>
-            </div>
-          )}
+          {err && <div className="banner bad">{err}</div>}
 
-          {snap && agents.length === 0 && snap.ccn_ok && (
+          {snap && agents.length === 0 && (
             <div className="empty">
               <p>町にはまだ誰もいない。最初の世帯を作ると、右にチャットが開いてすぐ打てる（親は {place ? place.replace(/^\/Users\/[^/]+/, "~") : "~/Documents/meta"} で起動する。設定で変えられる）。</p>
-              <NewHousehold disabled={!local} place={place} onCreated={newHousehold} onError={(m) => toast(m, true)} />
+              <NewHousehold place={place} onCreated={newHousehold} onError={(m) => toast(m, true)} />
             </div>
           )}
           <Stage zoom={zoom} onBlank={() => setSelected(null)} items={tree.families.map((f) => {
@@ -607,11 +223,11 @@ export default function App() {
 
           <div className="left-foot">
             <div className="zoom">
-              <button onClick={() => setZoom((z) => Math.max(0.4, +(((z === "fit" ? 1 : z) - 0.1).toFixed(2))))} aria-label="小さくする" title="小さくする"><Minus size={ICON.md} strokeWidth={STROKE} /></button>
-              <button className="zval" onClick={() => setZoom("fit")} title="全体が入る大きさにする">
+              <button onClick={zoomOut} aria-label="小さくする" title="小さくする"><Minus size={ICON.md} strokeWidth={STROKE} /></button>
+              <button className="zval" onClick={zoomFit} title="全体が入る大きさにする">
                 {zoom === "fit" ? "全体" : `${Math.round(zoom * 100)}%`}
               </button>
-              <button onClick={() => setZoom((z) => Math.min(1.6, +(((z === "fit" ? 1 : z) + 0.1).toFixed(2))))} aria-label="大きくする" title="大きくする"><Plus size={ICON.md} strokeWidth={STROKE} /></button>
+              <button onClick={zoomIn} aria-label="大きくする" title="大きくする"><Plus size={ICON.md} strokeWidth={STROKE} /></button>
               <button className="fs" title="全画面" aria-label="全画面" onClick={() => setFullscreen()}><Maximize size={ICON.md} strokeWidth={STROKE} /></button>
             </div>
             <span className="hint">クリックでチャット・右クリックでターミナル</span>
@@ -636,1224 +252,19 @@ export default function App() {
         <KillConfirm agent={killAsk} descendants={countDesc(tree.childrenOf, killAsk.id)}
           onCancel={() => setKillAsk(null)} onConfirm={() => { const a = killAsk; setKillAsk(null); kill(a); }} />
       )}
-      {succeedAsk && (
-        <SucceedConfirm agent={succeedAsk} parent={succeedAsk.parent ? tree.byId.get(succeedAsk.parent) ?? null : null}
-          kids={(tree.childrenOf.get(succeedAsk.id) ?? []).length}
-          onCancel={() => setSucceedAsk(null)} onConfirm={() => { const a = succeedAsk; setSucceedAsk(null); succeed(a); }} />
-      )}
-      {succeedNote && (
-        <Confirm title={succeedNote.title} ok="閉じる" single onCancel={() => setSucceedNote(null)} onConfirm={() => setSucceedNote(null)}>{succeedNote.text}</Confirm>
-      )}
-
       <div className="toasts">
         {toasts.map((t) => <div key={t.id} className={`toast ${t.bad ? "bad" : ""}`}>{t.text}</div>)}
       </div>
       <div className="letters-layer" ref={letterMarks.layer} aria-hidden />
     </div>
-    </TownCtx.Provider>
+    </DepthCtx.Provider></TownCtx.Provider>
     </LetterCtx.Provider>
     </SendCtx.Provider>
-    </SucceedCtx.Provider>
     </KillCtx.Provider>
     </SkinCtx.Provider>
   );
 }
 
-function descOf(childrenOf: Map<string, Agent[]>, id: string): Agent[] {
-  return (childrenOf.get(id) ?? []).filter((k) => !k.ghost).flatMap((k) => [k, ...descOf(childrenOf, k.id)]);
-}
-
-// ---------- お手紙 ----------
-
-const LETTER_IMG = "/sprites/noto/1f48c/64.webp";
-/** 封筒の印を残す長さ。読まれたら短く、読まれないままなら長くても MARK_MAX_MS で消す */
-const MARK_READ_MS = 2500;
-/** 飛ぶ封筒と、頭に残る印の大きさ（px）。App.css の .letter-fly と .letter-mark に合わせる */
-const FLY_SIZE = 30;
-const MARK_SIZE = 24;
-/** 印の中心の、カード（.fnode-body）の左上からの位置。.letter-mark の left: -9px、top: -11px と大きさから */
-const MARK_OFFSET = { x: -9 + MARK_SIZE / 2, y: -11 + MARK_SIZE / 2 };
-/** つなぎ線の上を進む割合。残りで印の位置へ寄せる */
-const LETTER_ALONG = 0.8;
-const MARK_MAX_MS = 30000;
-/** 飛ばした封筒の記録を覚える数。Rust の LETTERS_MAX（300）より十分多くする */
-const SEEN_MAX = 2000;
-
-/**
- * 新しいお手紙が来たら、送り手のカードから受け手のカードへ封筒を飛ばし、受け手の頭に印を残す。
- * 封筒はカードの中心どうしを結ぶ直線を飛ぶ（親子ならつなぎ線と重なる。世帯をまたぐときは町の上を直線で飛ぶ）。
- * 動きを減らす設定（prefers-reduced-motion）なら、飛ばさずに印だけ出す。
- * 起動したときにすでにある記録は飛ばさない（古いお手紙を再生しない）。
- */
-function useLetterMarks(flights: Flight[]) {
-  const layer = useRef<HTMLDivElement>(null);
-  const seen = useRef<Set<string> | null>(null);
-  const [marks, setMarks] = useState<Map<string, { flight: string; until: number }>>(new Map());
-  useEffect(() => {
-    if (seen.current === null) {
-      seen.current = new Set(flights.map((f) => f.id));
-      return;
-    }
-    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    const fresh = flights.filter((f) => !seen.current!.has(f.id));
-    // 見た記録は古い順に捨て、SEEN_MAX 件までにする（#15）。Rust が渡すのは最近10分の最大300件なので、
-    // 捨てた記録が一覧に戻ることはない。いまの一覧で捨てると、一覧の取得が一度欠けただけで同じ封筒を二度飛ばす
-    for (const f of fresh) seen.current.add(f.id);
-    for (const id of seen.current) { if (seen.current.size <= SEEN_MAX) break; seen.current.delete(id); }
-    fresh.forEach((f, i) => {
-      const land = () => setMarks((m) => new Map(m).set(f.to, { flight: f.id, until: Date.now() + (f.readAt ? MARK_READ_MS : MARK_MAX_MS) }));
-      const a = document.querySelector(`[data-aid="${f.from}"]`)?.getBoundingClientRect();
-      const toEl = document.querySelector<HTMLElement>(`[data-aid="${f.to}"]`);
-      const b = toEl?.getBoundingClientRect();
-      // ウィンドウが隠れている間に来たお手紙は、見えた後にまとめて飛ばさず、印だけ出す（#6）
-      if (reduce || f.at < shownAt() || !a || !b || !layer.current) { land(); return; }
-      const img = document.createElement("img");
-      img.src = LETTER_IMG;
-      img.className = "letter-fly";
-      layer.current.appendChild(img);
-      // 始点は送り手のカードの中心。つなぎ線（中心どうしを結ぶ線）の上を受け手の手前 LETTER_ALONG まで進み、
-      // 最後の区間で、届いた後に印が残る位置（受け手のカードの左上、.letter-mark と同じ中心）へ寄せ、印と同じ大きさで止まる
-      const ax = a.left + a.width / 2, ay = a.top + a.height / 2, cx = b.left + b.width / 2, cy = b.top + b.height / 2;
-      // 町は拡大縮小されるので、印の位置と大きさも同じ倍率にする
-      const k = toEl && toEl.offsetWidth ? b.width / toEl.offsetWidth : 1;
-      const mx = b.left + MARK_OFFSET.x * k, my = b.top + MARK_OFFSET.y * k;
-      const vx = ax + (cx - ax) * LETTER_ALONG, vy = ay + (cy - ay) * LETTER_ALONG;
-      const dist = Math.hypot(vx - ax, vy - ay) + Math.hypot(mx - vx, my - vy);
-      const ms = Math.min(1500, Math.max(700, dist * 1.6));
-      const at = (x: number, y: number, k: number) => `translate(${x}px, ${y}px) translate(-50%, -50%) scale(${k})`;
-      const anim = img.animate([
-        { transform: at(ax, ay, 0.6), opacity: 0 },
-        { transform: at(ax, ay, 1), opacity: 1, offset: 0.1 },
-        { transform: at(vx, vy, 1), opacity: 1, offset: 0.78 },
-        { transform: at(mx, my, (MARK_SIZE * k) / FLY_SIZE), opacity: 1 },
-      ], { duration: ms, delay: i * 180, easing: "cubic-bezier(.4,.1,.3,1)", fill: "both" });
-      // 印を出してから飛んできた封筒を消す（入れ替わりの継ぎ目を見せない）
-      anim.onfinish = () => { land(); requestAnimationFrame(() => requestAnimationFrame(() => img.remove())); };
-    });
-  }, [flights]);
-  // 読まれたら印を短くする。時間が来たら消す
-  useEffect(() => {
-    const read = new Map(flights.filter((f) => f.readAt).map((f) => [f.id, f.readAt!]));
-    setMarks((m) => {
-      let changed = false;
-      const n = new Map(m);
-      for (const [to, v] of m) {
-        if (read.has(v.flight) && v.until > Date.now() + MARK_READ_MS) { n.set(to, { ...v, until: Date.now() + MARK_READ_MS }); changed = true; }
-        if (v.until <= Date.now()) { n.delete(to); changed = true; }
-      }
-      return changed ? n : m;
-    });
-  }, [flights]);
-  useEffect(() => {
-    if (marks.size === 0) return;
-    const t = setInterval(() => setMarks((m) => {
-      const n = new Map([...m].filter(([, v]) => v.until > Date.now()));
-      return n.size === m.size ? m : n;
-    }), 500);
-    return () => clearInterval(t);
-  }, [marks.size]);
-  const ids = useMemo(() => new Set(marks.keys()), [marks]);
-  return { layer, marks: ids };
-}
-
 function countDesc(childrenOf: Map<string, Agent[]>, id: string): number {
   return (childrenOf.get(id) ?? []).reduce((n, k) => n + 1 + countDesc(childrenOf, k.id), 0);
-}
-
-/** セッションを止める操作の前の確認。Enter で進める、Esc でやめる。ok は進めるボタンの名前。single なら、やめるボタンを出さない（読んで閉じるだけの知らせ） */
-function Confirm({ title, ok, danger, single, onCancel, onConfirm, children }: { title: string; ok: string; danger?: boolean; single?: boolean; onCancel: () => void; onConfirm: () => void; children: React.ReactNode }) {
-  useEffect(() => {
-    const k = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { e.preventDefault(); onCancel(); }
-      if (e.key === "Enter") { e.preventDefault(); onConfirm(); }
-    };
-    window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
-  }, [onCancel, onConfirm]);
-  return (
-    <div className="modal-scrim" onMouseDown={onCancel}>
-      <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="modal-title">{title}</div>
-        <p className="hint">{children}</p>
-        <div className="modal-btns">
-          {!single && <button className="pane-btn" onClick={onCancel}>やめる（Esc）</button>}
-          <button className={danger ? "danger" : "primary"} autoFocus onClick={onConfirm}>{ok}（Enter）</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** 閉じる前の確認 */
-function KillConfirm({ agent, descendants, onCancel, onConfirm }: { agent: Agent; descendants: number; onCancel: () => void; onConfirm: () => void }) {
-  return (
-    <Confirm title={`${agent.name}${descendants ? ` と子孫 ${descendants} 人` : ""}を閉じる？`} ok="閉じる" danger onCancel={onCancel} onConfirm={onConfirm}>
-      ccn でセッションを止める。{descendants ? "子孫は孫から順に止める。" : ""}止まらなかった分は画面に残る。⌘ を押しながら閉じるボタン（<Power className="inline-icon" size={ICON.sm} strokeWidth={STROKE} aria-label="閉じる" />）を押すと、確認なしで閉じる。
-    </Confirm>
-  );
-}
-
-/** 引き継ぐ前の確認。前任を止める操作を含むので、閉じるときと同じ形で確かめる。parent は前任の親（根なら null）、kids は前任の子の数 */
-function SucceedConfirm({ agent, parent, kids, onCancel, onConfirm }: { agent: Agent; parent: Agent | null; kids: number; onCancel: () => void; onConfirm: () => void }) {
-  return (
-    <Confirm title={`${agent.name} を後継に引き継ぐ？`} ok="引き継ぐ" onCancel={onCancel} onConfirm={onConfirm}>
-      利用上限で止まったときに使う。同じ会話を複製した後継を、{parent ? `${parent.name} の下に` : "世帯の親として"}立てる。アカウントは ccn が枠の残るものを選ぶ。
-      後継が起動したのを確かめてから、{agent.name} を止める。後継が立たなかったら止めない。
-      {kids ? `子 ${kids} 人は止めない。ccn が子を後継の下に付け替える（古い ccn では付け替わらず、子は別の世帯に分かれる）。` : ""}
-    </Confirm>
-  );
-}
-
-// ---------- 上の段 ----------
-
-function NextRow({ mails, curTown, unreachable, working, total, onOpen }: {
-  mails: Mail[]; curTown: string; unreachable: string[]; working: number; total: number;
-  onOpen: (m: Mail, chat?: boolean) => void;
-}) {
-  // 先頭が大きい1枚、続く2件が小さいチップ、残りは「ほか N 件」。並びは src/mail.ts（親が先、その中は待ちが古い順）
-  const first = mails[0];
-  const rest = mails.slice(1, 3);
-  const hidden = mails.length - 1 - rest.length;
-  const icon = (k: Mail["kind"], size: number) => { const I = k === "approval" ? Hand : k === "reply" ? MessageCircle : Check; return <I size={size} strokeWidth={STROKE} aria-hidden />; };
-  const away = (m: Mail) => m.town !== curTown;
-  const mainText = (m: Mail) => {
-    const n = m.agent.name;
-    if (away(m)) return m.kind === "approval" ? `${n}が承認待ち` : m.kind === "reply" ? `${n}が返事待ち` : `${n}の報告を確認`;
-    return m.kind === "approval" ? `${n}の承認待ちを確認する` : m.kind === "reply" ? `${n}に返事する` : `${n}の報告を確認する`;
-  };
-  const chipText = (m: Mail) => (m.kind === "approval" ? `${m.agent.name}の承認待ち` : m.kind === "reply" ? `${m.agent.name}から返事待ち` : `${m.agent.name}の報告を確認`);
-  const stamp = (m: Mail) => away(m) && <span className="postmark" title={`${m.town} の町から`}>{m.town}</span>;
-  return (
-    <div className="next-row">
-      <span className="next-label">お便り</span>
-      {first ? (
-        <div className={`next-main nm-${first.kind} ${away(first) ? "away" : ""}`}>
-          <span className="next-icon">{icon(first.kind, ICON.lg)}</span>
-          {stamp(first)}
-          <button className="next-text" onClick={() => onOpen(first)}>{mainText(first)}</button>
-          <button className="pane-btn" onClick={() => onOpen(first, true)}>チャットへ</button>
-        </div>
-      ) : (
-        <div className="next-main nm-calm">
-          <span className="next-text calm">
-            {total === 0 ? "いまは誰もいない" : working > 0 ? `いまはあなたの番じゃない。${working}人が作業中` : "みんな待機中。頼みたい子をクリック"}
-          </span>
-        </div>
-      )}
-      {rest.length > 0 && <span className="next-sep" />}
-      {rest.map((m) => (
-        <button key={`${m.town}/${m.agent.id}`} className={`next-chip ${away(m) ? "away" : ""}`} onClick={() => onOpen(m)}>
-          <span className="chip-icon">{icon(m.kind, ICON.sm)}</span>{stamp(m)}{chipText(m)}
-        </button>
-      ))}
-      {hidden > 0 && <span className="next-more">ほか{hidden}件</span>}
-      {unreachable.length > 0 && <span className="next-unreach" title="この町のお便りは取れていない">{unreachable.join("、")}に届かない</span>}
-    </div>
-  );
-}
-
-// ---------- 家と木 ----------
-
-/**
- * 世帯モジュールを並べる場所（docs/design/household-packing.md、src/layout/pack.ts）。
- * 入力順（親の開始時刻、同じなら ID）に、決まった横幅の中へ上詰めで置く。大きさや状態で並べ替えない。
- * zoom が fit のときは、一番広い世帯が横幅に入る倍率にする（最小 0.4）。横幅はその倍率で割り戻した幅。
- */
-function Stage({ zoom, items, onBlank }: { zoom: number | "fit"; items: { id: string; w: number; h: number; node: React.ReactNode }[]; onBlank: () => void }) {
-  const outer = useRef<HTMLDivElement>(null);
-  const [avail, setAvail] = useState(1000);
-  useLayoutEffect(() => {
-    const measure = () => { if (outer.current) setAvail(outer.current.clientWidth - 36); };
-    measure();
-    const ro = new ResizeObserver(measure);
-    if (outer.current) ro.observe(outer.current);
-    return () => ro.disconnect();
-  }, []);
-  const widest = Math.max(1, ...items.map((b) => b.w));
-  const fit = Math.max(0.4, Math.min(1, avail / widest));
-  const scale = zoom === "fit" ? fit : zoom;
-  const width = Math.floor(avail / scale);
-  const packed = packHouseholds(items.map(({ id, w, h }) => ({ id, w, h })), width, LAYOUT.group.gap);
-  const at = new Map(packed.items.map((p) => [p.id, p]));
-  return (
-    <ScrollEdgeGradient className="stage" wrapClassName="seg-fill stage-bg" strength="town" ref={outer}
-      onClick={(e) => { if (!(e.target as HTMLElement).closest(".card, .mini, .pop, .g-head, .ghost-card, .card-acts, .letter-mark")) onBlank(); }}>
-      <div className="stage-inner" style={{ zoom: scale, width, height: packed.height + 20 }}>
-        {items.map((b) => {
-          const p = at.get(b.id)!;
-          return (
-            <div key={b.id} className="slot"
-              style={{ left: p.x, top: p.y, width: b.w, height: b.h, transition: `left ${LAYOUT.moveMs}ms ease, top ${LAYOUT.moveMs}ms ease` }}>
-              {b.node}
-            </div>
-          );
-        })}
-      </div>
-    </ScrollEdgeGradient>
-  );
-}
-
-/** グループ（根のセッション1つとその子孫）ごとの淡い色。名前から決まる */
-const GROUP_TINTS = ["#f3f7ff", "#fff6ec", "#f1faf3", "#f8f3ff", "#fff2f5", "#eff9f9", "#fbf8ec"];
-const GROUP_LINES = ["#d9e4fb", "#f6dfc4", "#d3ecd9", "#e4d8f6", "#f6d6df", "#cfe9e9", "#ece4c2"];
-
-function Group({ root, count, size, hasNeeds, children }: {
-  root: Agent; count: number; size: { w: number; h: number }; hasNeeds: boolean; children: React.ReactNode;
-}) {
-  const tint = hashOf(root.id) % GROUP_TINTS.length;
-  return (
-    <section className={`group ${hasNeeds ? "has-needs" : ""}`}
-      style={{ width: size.w, height: size.h, background: GROUP_TINTS[tint], borderColor: hasNeeds ? undefined : GROUP_LINES[tint] }}>
-      <div className="g-head" title="親のプロジェクトのディレクトリの名前">
-        <span className="g-name">{houseNameOf(root)}</span>
-        <span className="g-sub">{count}人</span>
-        {hasNeeds && <span className="g-needs">あなたの番</span>}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-
-/**
- * 家族の木を、配置計算（src/layout）が決めた座標に置いて描く。
- * 配置を計算し直すのは、家族の顔ぶれ（id、親、名前）が変わったときだけ。状態や会話の更新では動かさない。
- * 線は、配置の検査に使ったのと同じ「親の中心から子の中心」の線分を SVG で引く。
- */
-/**
- * 世帯の中の配置を計算する（src/layout/layout.ts）。顔ぶれ（id、親、名前、開始時刻）が変わったときだけ計算し直し、
- * 状態や会話の更新では動かさない。前に選んだ候補は引き継がず、顔ぶれだけで決める。
- */
-const layoutCache = new Map<string, { sig: string; result: ReturnType<typeof layoutFamily> }>();
-/** 覚えておく世帯の数。町に一度に出る世帯より十分多くする */
-const LAYOUT_CACHE_MAX = 64;
-function layoutOf(all: Agent[]) {
-  const rootId = all[0].id;
-  const sig = all.map((a) => `${a.id}|${a.parent ?? ""}|${a.name}|${a.startedAt ?? 0}`).join(",");
-  const hit = layoutCache.get(rootId);
-  if (hit && hit.sig === sig) return hit.result;
-  const inFam = new Set(all.map((a) => a.id));
-  const depthOf = new Map<string, number>();
-  const d = (a: Agent): number => {
-    if (depthOf.has(a.id)) return depthOf.get(a.id)!;
-    const p = a.parent && inFam.has(a.parent) ? all.find((x) => x.id === a.parent) : undefined;
-    const v = p ? d(p) + 1 : 0;
-    depthOf.set(a.id, v);
-    return v;
-  };
-  const nodes: LNode[] = all.map((a) => {
-    const b = boxOf(d(a), a.name);
-    return { id: a.id, parent: a.parent && inFam.has(a.parent) ? a.parent : null, order: a.startedAt ?? 0, w: b.w, h: b.h };
-  });
-  // 前に選んだ候補は引き継がない。引き継ぐと、子が増えるのを見ていた町と後から開いた町で形が変わる（docs/design/geometric-layout.md）
-  const r = layoutFamily(nodes);
-  if (!r.valid) console.warn("Claude Town: 配置の検査に通る候補が無かった", rootId, r.metrics, r.candidates);
-  layoutCache.delete(rootId);
-  layoutCache.set(rootId, { sig, result: r });
-  // 閉じた世帯の分を捨てる（#15）。Map は入れた順なので、計算し直していない古い世帯から消す
-  while (layoutCache.size > LAYOUT_CACHE_MAX) layoutCache.delete(layoutCache.keys().next().value!);
-  return r;
-}
-
-/**
- * 家族の木を、配置計算が決めた座標に置いて描く。
- * 線は、配置の検査に使ったのと同じ「親の中心から子の中心」の線分を SVG で引く。
- */
-type CanvasProps = { all: Agent[]; result: ReturnType<typeof layoutFamily>; selected: string | null; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void };
-/** 世帯の顔ぶれ（all の中身のオブジェクト）、配置、選択、手が同じなら描き直さない（#4）。all は木を作り直すたびに新しい配列になるので、中身で比べる */
-const sameCanvas = (a: CanvasProps, b: CanvasProps) => a.result === b.result && a.selected === b.selected && a.onSelect === b.onSelect && a.onFocus === b.onFocus
-  && a.all.length === b.all.length && a.all.every((x, i) => x === b.all[i]);
-const FamilyCanvas = memo(function FamilyCanvas({ all, result, selected, onSelect, onFocus }: CanvasProps) {
-  if (import.meta.env.DEV) renders.canvas++;
-  const pad = LAYOUT.framePad;
-  const minX = Math.min(...result.nodes.map((n) => n.x - n.w / 2));
-  const minY = Math.min(...result.nodes.map((n) => n.y - n.h / 2));
-  const W = result.metrics.width + pad * 2, H = result.metrics.height + pad * 2;
-  const ox = pad - minX, oy = pad - minY;
-  const byId = new Map(all.map((a) => [a.id, a]));
-  const pos = new Map(result.nodes.map((n) => [n.id, n]));
-  const kill = useContext(KillCtx);
-  const letters = useContext(LetterCtx);
-  return (
-    <div className="canvas" style={{ width: W, height: H }} data-valid={result.valid} data-arc={result.arcIndex}
-      data-metrics={JSON.stringify({ o: result.metrics.overlaps, c: result.metrics.crossings, t: result.metrics.edgeThroughNode, i: result.metrics.interleave, s: Number(result.metrics.s.toFixed(3)) })}>
-      {!result.valid && <span className="layout-warn" title={JSON.stringify(result.metrics)}>配置が重なっている</span>}
-      <svg className="edges" width={W} height={H}>
-        {result.nodes.filter((n) => n.parent).map((n) => {
-          const p = pos.get(n.parent!)!;
-          // ゴーストへの線は点線
-          const ghostEdge = !!(byId.get(n.id)?.ghost || byId.get(n.parent!)?.ghost);
-          return <line key={n.id} className={ghostEdge ? "ghost-edge" : undefined} x1={p.x + ox} y1={p.y + oy} x2={n.x + ox} y2={n.y + oy} />;
-        })}
-      </svg>
-      {result.nodes.map((n) => {
-        const a = byId.get(n.id);
-        if (!a) return null;
-        const delay = kill.dying.get(n.id);
-        return (
-          <div key={n.id} className={`fnode ${selected === n.id ? "open" : ""} ${delay !== undefined ? "dying" : ""} ${n.depth >= 2 ? "is-mini" : ""}`}
-            style={{ left: n.x - n.w / 2 + ox, top: n.y - n.h / 2 + oy, width: n.w, height: n.h, transition: `left ${LAYOUT.moveMs}ms ease, top ${LAYOUT.moveMs}ms ease`, ["--kd" as string]: `${delay ?? 0}ms` }}>
-            {/* 右下のボタンはカード（札）の縁を基準に置くので、カードと同じ大きさの包みに入れる（カードは overflow: hidden） */}
-            <div className={`fnode-body ${n.depth >= 2 ? "k-mini" : "k-card"}`} data-aid={n.id}
-              style={n.depth >= 2 ? { ["--kx-k" as string]: boxOf(n.depth, a.name).scale } : undefined}>
-              {a.ghost ? <GhostCard agent={a} depth={n.depth} onSelect={onSelect} /> : <Card agent={a} depth={n.depth} selected={selected === n.id} onSelect={onSelect} onFocus={onFocus} />}
-              {letters.has(n.id) && <img className="letter-mark" src={LETTER_IMG} alt="お手紙が届いた" title="お手紙が届いた" />}
-              {/* 孫より下の小さい札には付けない。選んだときに重なる大きいカード（.pop）の中で付ける（Card） */}
-              {!a.ghost && n.depth <= 1 && delay === undefined && <CardActions agent={a} />}
-            </div>
-            {delay !== undefined && <KillFx w={n.w} h={n.h} />}
-          </div>
-        );
-      })}
-    </div>
-  );
-}, sameCanvas);
-
-/** 描き直しの回数（開発版だけ数える）。待機中に増えないことを確かめる（#4）。ブラウザでは window.__fcRenders で読む */
-const renders = { canvas: 0, card: 0 };
-if (import.meta.env.DEV && typeof window !== "undefined") (window as unknown as { __fcRenders?: typeof renders }).__fcRenders = renders;
-
-const Card = memo(function Card(props: { agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void }) {
-  const { agent, depth, selected, onSelect, onFocus } = props;
-  const { dying } = useContext(KillCtx);
-  if (depth <= 1) return <FullCard {...props} />;
-  // 孫より下は小さい札。選んだときだけ、親や子と同じ大きさのカードを上に重ねる（周りは動かさない）
-  const mood = moodOf(agent);
-  const now = nowOf(agent, mood);
-  const acct = accountText(agent);
-  const box = boxOf(depth, agent.name);
-  return (
-    <>
-      <button
-        className={`mini m-${mood} ${selected ? "sel" : ""}`}
-        style={{ zoom: box.scale, width: box.w / box.scale, height: box.h / box.scale }}
-        onClick={() => onSelect(agent)}
-        onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
-        title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}${acct ? `\nアカウント: ${acct}` : ""}\nクリックで広げてチャット・右クリックでターミナル`}
-      >
-        <Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(depth)} size={32} dead={dying.has(agent.id)} />
-        <span className="mini-name"><i className={`dot st-${mood}`} />{agent.name}</span>
-      </button>
-      {selected && (
-        <div className="pop">
-          <FullCard {...props} />
-          {!dying.has(agent.id) && <CardActions agent={agent} />}
-        </div>
-      )}
-    </>
-  );
-});
-
-/**
- * カードの右下のボタン（#63）。並びと送る文は CARD_ACTIONS で決める。出し入れは CSS（.fnode:hover と .fnode.open）で行い、描き直さない。
- * 押してもカードの選択や右パネルの切り替えが起きないよう、クリックはここで止める。
- * place が head なら、右パネルの見出しに、いつも見える形で並べる（動きはカードと同じ）。
- * ボタンに乗せたときの説明は title で出す（WebView の標準のツールチップ）。押せるときは何をするか、押せないときは押せない理由を書く
- */
-const CardActions = memo(function CardActions({ agent, place = "card" }: { agent: Agent; place?: "card" | "head" }) {
-  const kill = useContext(KillCtx);
-  const suc = useContext(SucceedCtx);
-  const send = useContext(SendCtx);
-  // 押したあとの一瞬の反応。key は押したボタン、ok は届いたか
-  const [flash, setFlash] = useState<{ key: string; ok: boolean } | null>(null);
-  const [sending, setSending] = useState<string | null>(null);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
-  const canSend = agent.canSend;
-  const canStop = !!agent.capabilities?.stop;
-  // 引き継げない理由（引き継げるなら null）と、いま引き継いでいる最中か
-  const sucWhy = succeedBlock(agent, suc.local);
-  const sucBusy = suc.busy.has(agent.id);
-  const press = async (act: CardAction, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (act.kind === "kill") { if (canStop) kill.ask(agent, e.metaKey); return; }
-    if (act.kind === "succeed") { if (!sucWhy && !sucBusy) suc.ask(agent); return; }
-    if (!canSend || sending) return;
-    setSending(act.key);
-    const ok = await send(agent, act.text);
-    setSending(null);
-    setFlash({ key: act.key, ok });
-    if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => setFlash(null), CARD_ACT_FLASH_MS);
-  };
-  return (
-    <div className={`card-acts ${place === "head" ? "in-head" : CARD_ACTIONS_ALWAYS ? "always" : ""}`}
-      onClick={(e) => e.stopPropagation()} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}>
-      {CARD_ACTIONS.map((act) => {
-        const off = act.kind === "kill" ? !canStop : act.kind === "succeed" ? !!sucWhy || sucBusy : !canSend;
-        const title = act.kind === "kill"
-          ? (canStop ? `${act.name}: このセッションを止める。子孫がいれば一緒に止める（⌘ を押しながらで確認なし）` : "閉じられない: ccn から止められないセッション")
-          : act.kind === "succeed"
-            ? (sucBusy ? "引き継いでいる…" : sucWhy ? `引き継げない: ${sucWhy}` : `${act.name}: 利用上限で止まったとき、同じ会話の後継を立てて、このセッションを止める`)
-            : (canSend ? `${act.name}: 「${act.text}」を送る` : `${act.name}を送れない: このセッションには文を送れない`);
-        const fx = flash?.key === act.key ? (flash.ok ? "sent" : "failed") : sending === act.key || (act.kind === "succeed" && sucBusy) ? "sending" : "";
-        return (
-          <button key={act.key} type="button" className={`card-act ca-${act.key} ${off ? "off" : ""} ${fx}`}
-            aria-disabled={off} title={title} aria-label={`${agent.name}: ${title}`}
-            onClick={(e) => press(act, e)}>
-            <act.icon size={place === "head" ? ICON.sm : ICON.xs} strokeWidth={STROKE} aria-hidden />
-          </button>
-        );
-      })}
-    </div>
-  );
-});
-
-/**
- * 人狼の「夜に襲われる」風の演出。暗くなる → 赤い爪痕の3本線が順に走る → 倒れて灰色 → 幽霊が昇って消える。
- * 爪痕は本人の見本（/tmp/fc-claw-ref.png）どおりの約55度の太い赤線3本を、等間隔に置く。引く向きは右上の端から左下の端へ（2026-11-12 に上から下へ変えた）。ずらしは右の線から 70ms ずつ。
- * 太さはノードの高さの 5.5%。ノードの角丸の内側で切れる（.kill-fx の overflow: hidden）。
- */
-const CLAW = { color: "#E8352B", angleDeg: 55, width: 0.055, starts: [0.11, 0.37, 0.63] };
-function KillFx({ w, h }: { w: number; h: number }) {
-  const dx = h / Math.tan((CLAW.angleDeg * Math.PI) / 180);
-  return (
-    <div className="kill-fx" aria-hidden>
-      <div className="kill-night" />
-      <svg className="kill-claws" width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
-        {CLAW.starts.map((s, i) => {
-          // 上から下へ引く: 描き始め（x1, y1）を右上の端、描き終わり（x2, y2）を左下の端にする。線の位置と角度は見本のまま
-          const x2 = s * w, y2 = h + 2, x1 = x2 + dx, y1 = -2;
-          const len = Math.hypot(x2 - x1, y2 - y1);
-          return (
-            <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke={CLAW.color} strokeWidth={Math.max(2, h * CLAW.width)} strokeLinecap="butt"
-              style={{ strokeDasharray: len, strokeDashoffset: len, ["--cl" as string]: `${len}`, ["--cd" as string]: `${(CLAW.starts.length - 1 - i) * 70}ms` }} />
-          );
-        })}
-      </svg>
-      <img className="kill-ghost" src="/sprites/noto/1f47b/64.webp" alt="" draggable={false} />
-    </div>
-  );
-}
-
-/**
- * 転出のゴースト（src/ghost.ts）。別の町にいる親か子の影。半透明、点線の枠、旅行かばんの印で、閉じる演出の 👻 と分ける。
- * 押すと本物がいる町に切り替えて、その子を選ぶ。右下のボタンは出さない（ここからは閉じない）。
- */
-const GhostCard = memo(function GhostCard({ agent, depth, onSelect }: { agent: Agent; depth: number; onSelect: (a: Agent) => void }) {
-  const g = agent.ghost!;
-  const mini = depth >= 2;
-  const box = mini ? boxOf(depth, agent.name) : { w: LAYOUT.card.w, h: LAYOUT.card.h, scale: 1 };
-  const label = g.role === "parent" ? `親は ${g.town}` : `${g.town} へ転出`;
-  return (
-    <button className={`ghost-card ${mini ? "is-mini" : ""}`} style={{ width: box.w, height: box.h }}
-      onClick={() => onSelect(agent)} title={`${agent.name}（${label}）\nクリックで ${g.town} の町に切り替える`}>
-      <span className="ghost-tag"><Luggage size={ICON.sm} strokeWidth={STROKE} aria-hidden />{label}</span>
-      <span className="ghost-body">
-        <span className="ghost-av"><Avatar pick={agent.avatar} seed={agent.id} mood="idle" role={roleOf(depth)} size={mini ? 26 : 40} /></span>
-        <span className="ghost-name">{agent.name}</span>
-      </span>
-    </button>
-  );
-});
-
-/**
- * 作業中の経過時間（sinceText）。この部品の中だけで時計を回し、町全体は描き直さない（#4）。
- * 1分までは1秒ごと、1時間までは30秒ごと、それより後は6分ごとに描き直す。ウィンドウが見えていない間は止め、見えたらすぐ描き直す（#6）
- */
-function Since({ at }: { at: number }) {
-  const [, bump] = useState(0);
-  useEffect(() => {
-    let t: ReturnType<typeof setTimeout> | null = null;
-    const plan = () => {
-      const age = Date.now() - at;
-      t = setTimeout(() => { t = null; bump((x) => x + 1); plan(); }, age < 60_000 ? 1000 : age < 3_600_000 ? 30_000 : 360_000);
-    };
-    const stop = () => { if (t !== null) { clearTimeout(t); t = null; } };
-    const off = onVisibleChange((v) => { stop(); if (v) { bump((x) => x + 1); plan(); } });
-    if (isVisible()) plan();
-    return () => { off(); stop(); };
-  }, [at]);
-  return <>{sinceText(at)}</>;
-}
-
-function FullCard({ agent, depth, selected, onSelect, onFocus }: {
-  agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;
-}) {
-  const { dying } = useContext(KillCtx);
-  if (import.meta.env.DEV) renders.card++;
-  const mood = moodOf(agent);
-  const task = taskOf(agent, mood);
-  const now = nowOf(agent, mood);
-  const started = mood === "working" ? agent.report?.turn_started_at : null;
-  const acct = accountText(agent);
-  return (
-    <button
-      className={`card m-${mood} ${selected ? "sel" : ""}`}
-      style={{ width: LAYOUT.card.w, height: LAYOUT.card.h }}
-      onClick={() => onSelect(agent)}
-      onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
-      title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}${acct ? `\nアカウント: ${acct}` : ""}\nクリックでチャット・右クリックでターミナル`}
-    >
-      <div className="card-top">
-        <RoleTag depth={depth} />
-        <span className="task">{task}</span>
-      </div>
-      <div className="card-main">
-        <Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(depth)} size={48} dead={dying.has(agent.id)} />
-        <div className="card-info">
-          {/* このセッションの claude が動いているアカウント（cam のコマンド名）。ccn が載せたときだけ出す */}
-          {agent.account && <span className="cacct">{agent.account}</span>}
-          <span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}{started ? <em><Since at={started} /></em> : null}</span>
-          <span className="cname">{agent.name}</span>
-        </div>
-      </div>
-    </button>
-  );
-}
-
-// ---------- 右のパネル ----------
-
-const NO_NOTES: PendingItem[] = [];
-
-function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq, peers, sendHook, onSent, onSent2, onError, needs, onSelect, mobile, onBack, onClose }: {
-  /** スマホ専用の画面（src/mobile）。見出しを戻るつきの1行にし、転出と細かいボタンは出さない */
-  mobile?: boolean; onBack?: () => void;
-  /** 見出しの × で選ぶのをやめる（#89）。右パネルが閉じる */
-  onClose?: () => void;
-  agent: Agent | null; peer: string; lineage: Agent[]; descendants: Agent[]; termReq: number; chatReq: number; composeReq: number; peers: Peer[];
-  /** カードのボタン（#63）が、選んでいるセッションへの送信をこのパネルに任せる口。選んでいないセッションなら null を返す */
-  sendHook: React.MutableRefObject<((id: string, text: string) => Promise<boolean> | null) | null>;
-  onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
-}) {
-  const hasTerm = !!agent?.capabilities?.terminal;
-  const town = useContext(TownCtx);
-  const [tab, setTab] = useState<"term" | "talk" | "state">("talk");
-  const [sheet, setSheet] = useState<"teleport" | null>(null);
-  // セッションを選んだときと新しい世帯を作ったときはチャットを出す。右クリックなどの termReq だけ端末を開く
-  useEffect(() => { setTab("talk"); setSheet(null); }, [agent?.id, hasTerm]);
-  useEffect(() => { if (termReq && hasTerm) setTab("term"); }, [termReq]);
-  useEffect(() => { if (chatReq) setTab("talk"); }, [chatReq]);
-  // composeReq が来たら、チャットの入力欄にフォーカスする。前に選んでいた子が端末を開いていると、
-  // 最初の描画ではまだ tab が "term" で入力欄が無いので、入力欄が出てからフォーカスする
-  // 入力欄は Composer（#53）の中にあり、子を替えるたびに作り直されるので、枠から textarea を探す
-  const composerBox = useRef<HTMLDivElement>(null);
-  const wantCompose = useRef(false);
-  useEffect(() => { if (composeReq) { wantCompose.current = true; setTab("talk"); } }, [composeReq]);
-  useEffect(() => {
-    const el = composerBox.current?.querySelector<HTMLTextAreaElement>("textarea");
-    if (!wantCompose.current || !el || el.disabled) return;
-    wantCompose.current = false;
-    el.focus();
-    if (agent) { perfMark("composer", agent.id); if (perfWaitingPrompt(agent.id)) perfEnd(); }
-  });
-  const [items, setItems] = useState<ConvItem[]>([]);
-  // 今の動き（#59）。中身が変わったときだけ入れ替え、末尾の行のほかは描き直さない
-  const [live, setLive] = useState<Live | null>(null);
-  // 送ったばかりの文。after は送り始めたときに持っていた最後の番号で、これより後に届いた発言とだけ比べる
-  const [pending, setPending] = useState<PendingItem[]>([]);
-  const [convErr, setConvErr] = useState<string | null>(null);
-  // 保存してあった会話を出しているときの、保存した時刻。ccn から読めたら null に戻す
-  const [cachedAt, setCachedAt] = useState<number | null>(null);
-  // 下書きは宛先ごとに持つ。宛先を切り替えたとき、打ちかけの文が次の宛先に送られないようにする
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const text = agent ? drafts[agent.id] ?? "" : "";
-  const setText = (v: string) => { if (agent) setDrafts((d) => ({ ...d, [agent.id]: v })); };
-  const [busy, setBusy] = useState(false);
-  // モデルか権限モードを替えている間（#97）。pty は claude を起動し直すので、その間は送らない
-  const [switching, setSwitching] = useState(false);
-  useEffect(() => { setSwitching(false); }, [agent?.id]);
-  // ノードにモデルの切り替えとコマンドの口があるか（#97）
-  const [support, markNoSupport] = useNodeSupport(agent, peer);
-  // チャットからコマンドを実行した印（#97）。画面だけで出す。セッションごとに持ち、ほかのセッションを見て戻っても残す（アプリを閉じたら消える）
-  const notesBy = useRef(new Map<string, PendingItem[]>());
-  const [, bumpNotes] = useState(0);
-  const notes = (agent && notesBy.current.get(agent.id)) || NO_NOTES;
-  const addNote = (sid: string, n: PendingItem) => { notesBy.current.set(sid, [...(notesBy.current.get(sid) ?? []), n].slice(-20)); bumpNotes((x) => x + 1); };
-  // カードのボタンからの送信（#63）。描くたびに今の send に差し替える。パネルが消えたら口を外す
-  const quickSend = useRef<((id: string, text: string) => Promise<boolean> | null) | null>(null);
-  useEffect(() => {
-    sendHook.current = (id, text) => quickSend.current?.(id, text) ?? null;
-    return () => { sendHook.current = null; };
-  }, [sendHook]);
-  const scroller = useRef<HTMLDivElement>(null);
-  const stick = useRef(true);
-  // 会話をすぐ取り直させる口（文を送った直後に使う）
-  const convKick = useRef<() => void>(() => {});
-  const id = agent?.id;
-  // 作業中でチャットを開いているあいだは、会話を CONV_POLL_LIVE_MS ごとに取る。取り直しの間隔は回るたびにこの値を読む（#59）。
-  // 作業中になったときも終わったときも、すぐ取り直す（終わった直後の答えを待たせない）
-  const working = !!agent && moodOf(agent) === "working";
-  const isFast = working && tab === "talk";
-  const fast = useRef(false);
-  fast.current = isFast;
-  useEffect(() => { convKick.current(); }, [working, isFast]);
-
-  // チャットを開いたとき（セッションを選んだ、タブを切り替えた）は、必ず一番下から始める。
-  // 以前は stick を読み込みの effect でしか戻さず、タブの切り替えでは前の値が残り、容れ物も作り直されるのに items が変わらないので下へ送られなかった
-  useLayoutEffect(() => { stick.current = true; }, [id, tab, chatReq]);
-  useEffect(() => {
-    setItems([]); setPending([]); setLive(null); setConvErr(null); setCachedAt(null); stick.current = true;
-    if (!id) return;
-    let alive = true;
-    // ccn から一度でも読めたか。読めたあとに保存分が届いても出さない
-    let live = false;
-    // 画面が持っている数。Rust は、これより後の発言だけを返す（#10）。増えていなければ items を変えず、描き直さない。
-    // 保存分を出している間は null のままにし、読めた最初の回は全部（reset）で差し替える（保存分の番号 n と混ぜない）
-    let since: number | null = null;
-    // 開いた直後に保存分を出す。ネットが切れていると ccn の時間切れまで数秒かかるので、失敗を待たない
-    invoke<ConvCache | null>("conversation_cache", { sessionId: id, peer: peer || null }).then((c) => {
-      if (!alive || live || !c?.items.length) return;
-      setItems(c.items);
-      setCachedAt(c.savedAt);
-    }).catch(() => {});
-    const load = async () => {
-      try {
-        const d = await invoke<ConvDelta>("conversation", { sessionId: id, peer: peer || null, since });
-        if (!alive) return false;
-        live = true;
-        since = Math.max(since ?? 0, d.total);
-        if (d.reset) since = d.total;
-        setConvErr(null);
-        setCachedAt(null);
-        if (d.reset || d.items.length) setItems((prev) => mergeConv(prev, d));
-        const nextLive = d.live ?? null;
-        setLive((prev) => (sameLive(prev, nextLive) ? prev : nextLive));
-        return d.reset || d.items.length > 0;
-      } catch (e) {
-        if (alive) setConvErr(String(e));
-        return false;
-      }
-    };
-    const p = pollBackoff(load, () => (fast.current ? CONV_POLL_LIVE_MS : CONV_POLL_MS), () => (fast.current ? CONV_POLL_LIVE_MS : CONV_POLL_MAX_MS));
-    convKick.current = p.kick;
-    return () => { alive = false; p.stop(); convKick.current = () => {}; };
-  }, [id, peer]);
-
-  // 送ったばかりの文は、送り始めたあとに会話に出たら仮の項目を消す（前の同じ文、「はい」や選択肢では消さない）。
-  // 後に送った文が出たら、前に送った仮の項目も消す（#69、送った順と並びを入れ替えない）
-  useEffect(() => { setPending((p) => settlePending(items, p)); }, [items, pending.length]);
-
-  // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
-  const shown = useMemo(() => collapseTools(withResults(withNotes([...items, ...pending], notes))), [items, pending, notes]);
-  // 保存した履歴の印が出ているか。出ている間は中身の上に余白を足す（下の has-note）
-  const hasNote = shown.length > 0 && !!(convErr || cachedAt);
-  // 会話の最後のまだ答えていない計画（ExitPlanMode の本文）。承認の hook の入力が空のとき、承認の欄に出す（#83）
-  const lastPlan = useMemo(() => openPlan(items), [items]);
-  const lastChoices = useMemo(() => {
-    const lastAssistant = [...items].reverse().find((x) => x.role === "assistant");
-    const lastIsAssistant = items.filter((x) => x.role === "user" || x.role === "assistant").slice(-1)[0]?.role === "assistant";
-    return lastAssistant && lastIsAssistant ? choicesOf(lastAssistant.text) : [];
-  }, [items]);
-
-  // スマホでキーボードが出入りして会話の欄の高さが変わったとき、一番下にいたら下へ送り直す
-  useEffect(() => {
-    const vv = window.visualViewport;
-    if (!mobile || !vv) return;
-    const on = () => { const el = scroller.current; if (el && stick.current) el.scrollTop = el.scrollHeight; };
-    vv.addEventListener("resize", on);
-    return () => vv.removeEventListener("resize", on);
-  }, [mobile]);
-
-  useLayoutEffect(() => {
-    const el = scroller.current;
-    if (!el || !stick.current) return;
-    el.scrollTop = el.scrollHeight;
-    // 吹き出しの高さが描画のあとに決まる分（Markdown など）を拾う
-    const raf = requestAnimationFrame(() => { if (stick.current) el.scrollTop = el.scrollHeight; });
-    return () => cancelAnimationFrame(raf);
-    // 印が出て余白が付くと中身が伸びるので、一番下にいたら送り直す（開いたまま切れたとき、items は変わらない）
-  }, [items, pending, id, tab, chatReq, hasNote, live, working]);
-
-  if (!agent) {
-    quickSend.current = null;
-    return (
-      <aside className="panel empty-panel">
-        <div className="ep">
-          <p className="ep-title">子供をクリックすると、ここで話せる</p>
-          {needs[0] && (
-            <button className="primary" onClick={() => onSelect(needs[0])}>{needs[0].name}をひらく</button>
-          )}
-          <p className="hint">右クリックで、その子のターミナルを開く</p>
-        </div>
-      </aside>
-    );
-  }
-
-  const mood = moodOf(agent);
-  // 同じ名前の人が町にいたら、送信先に ID の先頭8字を添える（#36）。見出しは幅が足りず ID が切れるので名前だけにする
-  const target = targetLabel(agent, town);
-  /** quick はカードのボタンから送るとき。入力欄の下書きは消さない */
-  const send = async (body: string, quick = false) => {
-    if (!body.trim() || busy || switching) return false;
-    // / で始まる組み込みのコマンドの振り分け（#97、src/composer/route.ts）。使えないものは送らずに理由を出す
-    // ccn を通さないセッション（#96）は端末のセッションと同じく振り分けない（送る口のほうが断る）
-    const route = routeOf(body, viaCcn(agent) ? agent.kind : "terminal", support);
-    if (route?.kind === "blocked") { onError(route.reason); return false; }
-    setBusy(true);
-    const after = items[items.length - 1]?.n ?? -1;
-    // 先頭が / か ! の文は、端末のあるセッションなら入力欄へ直接貼る。ccn の send_message は from の1行を前に付けるので、
-    // CLI のコマンドやシェルモードとして動かない（docs/research/cli-input.md）
-    const direct = hasTerm && (body.startsWith("!") || isSlashCommand(body));
-    try {
-      if (route?.kind === "command") {
-        const r = await invoke<unknown>("run_command", { sessionId: agent.id, text: route.text, peer: peer || null });
-        if (!isHttp(r)) throw new Error("ccn の応答が読めなかった");
-        const err = commandError(r);
-        if (err) {
-          if (noRoute(r)) markNoSupport();
-          throw new Error(err);
-        }
-        addNote(agent.id, { role: "event", kind: "command", text: `/${route.name} を実行した${route.note ? `。${route.note}` : ""}`, at: new Date().toISOString(), after });
-      } else if (direct) {
-        await invoke("send_direct", { sessionId: agent.id, text: body, peer: peer || null });
-        // 画面を開くコマンド（/model など）は、ターミナルで操作してもらう
-        if (opensDialog(body, BUILTINS)) setTab("term");
-      } else {
-        await invoke("send_message", { sessionId: agent.id, text: body, peer: peer || null });
-        setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
-      }
-      if (!quick) setText("");
-      stick.current = true;
-      // 返事が来るまでは間隔を縮めて取る（#5）
-      convKick.current();
-      onSent(agent);
-      return true;
-    } catch (e) {
-      onError(`${agent.name} に届かなかった: ${e}`);
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  quickSend.current = (to, body) => (to === agent.id ? send(body, true) : null);
-
-  const choices = mood !== "working" ? lastChoices : [];
-
-  return (
-    <aside className={`panel pm-${mood}`}>
-      {mobile ? (
-        <div className="m-head">
-          <button className="m-back" onClick={onBack} aria-label="一覧へ戻る"><ChevronLeft size={28} strokeWidth={2} /></button>
-          <div className="p-avatar"><Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(lineage.length - 1)} size={40} /></div>
-          <div className="p-id">
-            <div className="p-name"><span className="pn">{agent.name}</span><span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}</span></div>
-            <div className="p-task">{linkify(taskOf(agent, mood))}</div>
-          </div>
-        </div>
-      ) : (
-      <div className="p-head">
-        <div className="p-avatar"><Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(lineage.length - 1)} size={64} /></div>
-        <div className="p-id">
-          <div className="p-name">
-            <span className="pn">{agent.name}</span><span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}</span>
-            {agent.account && <span className="acct" title={`アカウント: ${accountText(agent)}。このセッションの claude が動いているアカウント`}>{agent.account}</span>}
-          </div>
-          <div className="p-line">{lineage.map((a, i) => (
-            <span key={a.id}>{i > 0 && <ChevronRight className="p-line-sep" size={ICON.sm} strokeWidth={STROKE} aria-hidden />}<button className="lnk" onClick={() => onSelect(a)}>{a.name}</button></span>
-          ))}</div>
-          <div className="p-task"><FileText className="p-task-icon" size={ICON.sm} strokeWidth={STROKE} aria-hidden />{linkify(taskOf(agent, mood))}</div>
-        </div>
-        <div className="p-actions">
-          {onClose && <button className="p-close" onClick={onClose} aria-label="チャットを閉じる" title="チャットを閉じる"><X size={16} strokeWidth={1.8} /></button>}
-          <button className="pane-btn" disabled={!!peer} title={peer ? "転出できない: 別の機械のセッションの転出は、まだ出していない" : "転出: このセッションを別の機械（ccn のノード）へ移すか、複製する"} onClick={() => setSheet(sheet === "teleport" ? null : "teleport")}>転出</button>
-          {/* カードの右下と同じボタン（CARD_ACTIONS）。カードに乗せなくても押せるよう、ここにも並べる */}
-          {!agent.ghost && <CardActions agent={agent} place="head" />}
-        </div>
-      </div>
-      )}
-      {!mobile && sheet === "teleport" && <Teleport agent={agent} descendants={descendants} peers={peers} onDone={(m) => { setSheet(null); onSent2(m); }} onError={onError} />}
-      <div className="tabs">
-        <button className={tab === "talk" ? "on" : ""} onClick={() => setTab("talk")}>チャット</button>
-        <button className={tab === "state" ? "on" : ""} onClick={() => setTab("state")}>状態</button>
-        {hasTerm && <button className={tab === "term" ? "on" : ""} onClick={() => setTab("term")}>ターミナル</button>}
-      </div>
-      {mood === "approval" && (tab === "term" || tab === "state") && (
-        <div className="ap-float"><Approval agent={agent} peer={peer} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} /></div>
-      )}
-
-      {tab === "term" ? (
-        <Suspense fallback={<div className="term-wrap"><div className="term" /></div>}><TerminalView sessionId={agent.id} peer={peer || null} onError={onError} /></Suspense>
-      ) : tab === "talk" ? (<div className="talk-box">
-        {/* 保存した履歴を出しているときの印。会話の欄の流れに入れると欄とグラデーションの始まりがずれ、タブの行は端末のタブがあると幅が足りない。
-            そのため、欄の上端の中央に重ねる（position: absolute）。中身の失敗は title に入れる */}
-        {convErr && shown.length > 0 ? (
-          <span className="offline-note" title={convErr}><i /><span>つながらない・{cachedAt ? `${savedLabel(cachedAt)} 時点の履歴` : "最後に読めた履歴"}</span></span>
-        ) : !convErr && cachedAt ? (
-          <span className="offline-note wait" title="最新を読み込んでいる"><i /><span>{savedLabel(cachedAt)} 時点の履歴・更新中</span></span>
-        ) : null}
-        {/* 印が出ている間は、中身の上に印の高さぶんの余白を足す（上端まで送ったとき、いちばん古い行が印の下に入らない）。外枠とグラデーションの位置は変えない */}
-        <ScrollEdgeGradient className={`talk ${hasNote ? "has-note" : ""}`} wrapClassName="seg-fill" ref={scroller}
-          onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
-          {convErr && shown.length === 0 && <div className="banner bad small">{convErr}</div>}
-          {shown.length === 0 && !convErr && <p className="hint center">まだチャットが無い</p>}
-          {shown.map((x, i) => <Bubble key={x.n ?? `p${x.at ?? i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
-          {mood === "working" && live && <LiveLine live={live} turnAt={agent.report?.turn_started_at ?? null} />}
-          {mood === "approval" && (
-            <Approval agent={agent} peer={peer} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} />
-          )}
-          {choices.length > 0 && (
-            <div className="choices">
-              {choices.map((c) => <button key={c} className="choice" disabled={busy} onClick={() => send(c)}>{c}</button>)}
-            </div>
-          )}
-        </ScrollEdgeGradient>
-      </div>) : (
-        <StateTab agent={agent} mood={mood} />
-      )}
-
-      {tab !== "term" && <div className="composer" ref={composerBox}>
-        <div className="to"><span className="to-name">送信先: {target}</span>
-          {!agent.ghost && <SessionControls key={agent.id} agent={agent} peer={peer} support={support} onNoSupport={markNoSupport} onSwitching={setSwitching} onDone={onSent2} onError={onError} />}
-        </div>
-        <Composer key={agent.id} touch={mobile} agent={agent} peer={peer} text={text} setText={setText} busy={busy || switching} running={mood === "working"} support={support} onSubmit={send} onError={onError} />
-      </div>}
-    </aside>
-  );
-}
-
-// ---------- 新しい世帯・転出 ----------
-
-/** 町が空のときの「最初の世帯を作る」。最初の依頼の欄は出さず、すぐ ~/Documents/meta で親（端末のセッション）を立て、右のチャットを開く。
- *  ふだんの作る口は左の新しい世帯のペイン（#89、src/newHouse） */
-function NewHousehold({ disabled, place, onCreated, onError }: { disabled?: boolean; place: string | null; onCreated: (r: CreatedSession | null) => void; onError: (m: string) => void }) {
-  const [busy, setBusy] = useState(false);
-  const go = async () => {
-    setBusy(true);
-    try {
-      // 前に開いたターミナルの大きさで起動する。開いた直後に大きさを変えて、claude が全部描き直すのを省く（createHousehold の中）
-      onCreated(await createHousehold(place));
-    } catch (e) { onCreated(null); onError(placeFailure(place, e)); } finally { setBusy(false); }
-  };
-  return (
-    <button className="primary new-house big" disabled={disabled || busy} onClick={go}>
-      {busy ? "立てている…" : "最初の世帯を作る"}
-    </button>
-  );
-}
-
-/**
- * 転出（ccn の teleport）。行き先のノードと move / fork を選び、下見（移動元の説明）を見てから実行する。
- * 実行は1回の要求で最大95秒かかる。行き先の下見（clone することがある）は実行の中で ccn が行う。
- */
-function Teleport({ agent, descendants, peers, onDone, onError }: { agent: Agent; descendants: Agent[]; peers: Peer[]; onDone: (m: string) => void; onError: (m: string) => void }) {
-  // 子孫がいれば、子孫ごと移す（2026-11-12 本人の判断）。ccn の部分木の口（subtree）を使い、先に計画（dryRun）を見せる
-  const subtree = descendants.length > 0;
-  const [plan, setPlan] = useState<TeleportPlan | null>(null);
-  const dests = peers.filter((p) => !p.self && p.status === "healthy");
-  const [to, setTo] = useState(dests[0]?.name ?? "");
-  const [fork, setFork] = useState(false);
-  const [info, setInfo] = useState<TeleportInfo | null>(null);
-  const [infoErr, setInfoErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<TeleportResult | null>(null);
-  useEffect(() => {
-    invoke<TeleportInfo>("teleport_info", { sessionId: agent.id, peer: null }).then(setInfo).catch((e) => setInfoErr(String(e)));
-  }, [agent.id]);
-  useEffect(() => {
-    if (!subtree || !to) { setPlan(null); return; }
-    invoke<TeleportPlan>("teleport", { sessionId: agent.id, to, fork, subtree: true, dryRun: true, peer: null })
-      .then(setPlan).catch((e) => setPlan({ error: String(e) }));
-  }, [agent.id, to, fork, subtree]);
-  // 作業中か承認待ちの人が1人でもいたら押せなくする。ccn は動いているセッションを移さず、全員が止まるまで待つと終わりが読めないため
-  const busyOnes = [agent, ...descendants].filter((x) => x.state === "running" || x.state === "waiting_permission");
-  const running = busyOnes.length > 0;
-  const go = async () => {
-    setBusy(true);
-    try {
-      const r = await invoke<TeleportResult>("teleport", { sessionId: agent.id, to, fork, subtree, dryRun: false, peer: null });
-      setResult(r);
-      if (subtree) {
-        const moved = r?.moved?.length ?? 0, failed = r?.failed?.length ?? 0;
-        onDone(`${agent.name} の世帯を ${to} へ${fork ? "複製" : "移動"}した（${moved}人${failed ? `、失敗 ${failed}人` : ""}）`);
-      } else {
-        onDone(`${agent.name} を ${r?.node ?? to} へ${fork ? "複製" : "移動"}した（新しい id ${String(r?.id ?? "").slice(0, 8)}）`);
-      }
-    } catch (e) { onError(`${agent.name} を転出できなかった: ${e}`); } finally { setBusy(false); }
-  };
-  return (
-    <div className="sheet">
-      <div className="sheet-title">{agent.name} を別の機械へ転出する</div>
-      <div className="tp-row">
-        <label>行き先</label>
-        <select value={to} onChange={(e) => setTo(e.target.value)}>
-          {dests.length === 0 && <option value="">（つながっている機械が無い）</option>}
-          {dests.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
-        </select>
-        <label className="tp-radio"><input type="radio" checked={!fork} onChange={() => setFork(false)} />移す（ここは止める）</label>
-        <label className="tp-radio"><input type="radio" checked={fork} onChange={() => setFork(true)} />複製（ここも残す）</label>
-      </div>
-      <div className="tp-info">
-        {infoErr ? <span className="bad-text">下見できない: {infoErr}</span> : !info ? "下見している…" : (
-          <>
-            <div>状態: {info.state}{info.live ? "（動いている）" : ""}・作業場所: {String(info.from?.cwd ?? "").replace(/^\/Users\/[^/]+/, "~")}</div>
-            <div>git: {info.git ? `${info.git.repoName}（${info.git.branch}）` : "git のリポジトリではない"}</div>
-          </>
-        )}
-        {subtree && (
-          <div className="tp-plan">
-            <div><b>子孫 {descendants.length} 人も一緒に移る</b>（親子の関係は行き先でも保つ）</div>
-            {plan?.error ? <div className="bad-text">計画を出せない: {plan.error}</div> : !plan ? <div className="hint">計画を出している…</div> : (
-              <ul>{(plan.plan ?? []).map((m) => <li key={m.sourceId}>{m.title ?? m.sourceId.slice(0, 8)} <ArrowRight className="inline-icon" size={ICON.sm} strokeWidth={STROKE} aria-hidden /> {String(m.cwd ?? "").replace(/^\/Users\/[^/]+/, "~")}</li>)}
-                {(plan.skipped ?? []).map((m) => <li key={m.sourceId} className="bad-text">{m.sourceId.slice(0, 8)}: 対象外（{m.reason}）</li>)}</ul>
-            )}
-          </div>
-        )}
-        {running && <div className="bad-text">作業中か承認待ちの人がいるので転出できない（{busyOnes.map((x) => x.name).join("、")}）。全員が待機になってから転出する。</div>}
-        <div className="hint">行き先に同じリポジトリが無ければ、ccn が行き先の ~/Documents に clone する。実行には最大95秒かかる。{agent.capabilities?.terminal ? "ターミナルのセッションは、行き先ではまだターミナルとして再開しない（ccn 側の対応待ち）。" : ""}</div>
-      </div>
-      {result ? (
-        subtree ? (
-          <div className="tp-result">
-            {to} へ移した: {(result.moved ?? []).length}人。
-            {(result.failed ?? []).length > 0 && <span className="bad-text"> 失敗: {(result.failed ?? []).map((f) => `${f.sourceId.slice(0, 8)}（${f.error}）`).join("、")}</span>}
-            画面上のノードを {to} に切り替えると見える。
-          </div>
-        ) : (
-          <div className="tp-result">行き先 {result.node} の新しい id: {result.id}{result.cloned ? "（clone した）" : ""}。画面上のノードを {result.node} に切り替えると見える。</div>
-        )
-      ) : (
-        <div className="sheet-foot">
-          <span className="hint">{subtree ? "全員を下見してから止めるので、下見で落ちたら何も変わらない" : ""}</span>
-          <button className="primary" disabled={busy || !to || running || !info} onClick={go}>{busy ? "転出している…（最大95秒）" : fork ? "複製する" : "移す"}</button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * 作業中の末尾の1行（#59）。結果がまだ無い道具か「考え中」と、その動きを始めてからの経過、ターン全体の経過を出す。
- * 1秒の時計はこの部品の中だけで回す。ほかの吹き出しは描き直さない。ウィンドウが見えていない間は止める（#6）
- */
-const LiveLine = memo(function LiveLine({ live, turnAt }: { live: Live; turnAt: number | null }) {
-  const [, bump] = useState(0);
-  useEffect(() => {
-    let t: ReturnType<typeof setInterval> | null = null;
-    const start = () => { if (t === null) t = setInterval(() => bump((x) => x + 1), 1000); };
-    const stop = () => { if (t !== null) { clearInterval(t); t = null; } };
-    const off = onVisibleChange((v) => { if (v) { bump((x) => x + 1); start(); } else stop(); });
-    if (isVisible()) start();
-    return () => { off(); stop(); };
-  }, []);
-  const sum = liveSummary(live);
-  const now = Date.now();
-  const turn = turnAt ?? msOf(live.turn_at);
-  return (
-    <div className="live-line" aria-live="off">
-      <div className="ll-main">
-        <i className="ll-dot" />
-        <span className="ll-label">{sum.label}</span>
-        <span className="ll-time">
-          {sum.since != null && <>{elapsedText(now - sum.since)}</>}
-          {turn != null && <>{sum.since != null ? " · " : ""}このターン {elapsedText(now - turn)}</>}
-        </span>
-      </div>
-      {sum.heads.map((h, i) => <div key={i} className="ll-head">{h}</div>)}
-    </div>
-  );
-});
-
-/** 道具の行が続いたら1行にまとめる。まとめた行の n は最初の行の n にする（後ろに道具が増えても key が変わらない） */
-type Shown = ConvItem & { more?: number; group?: ConvItem[]; done?: number };
-function collapseTools(items: ConvItem[]): Shown[] {
-  const out: Shown[] = [];
-  for (const x of items) {
-    const last = out[out.length - 1];
-    if (x.role === "tool" && last?.role === "tool") {
-      const group = [...(last.group ?? [last]), x];
-      out[out.length - 1] = { ...x, n: last.n, more: (last.more ?? 0) + 1, group, done: group.filter((g) => g.result).length };
-    } else out.push(x.role === "tool" ? { ...x, group: [x], done: x.result ? 1 : 0 } : x);
-  }
-  return out;
-}
-
-/**
- * 後から届いた道具の結果（role が result の項目）を、同じ id の道具の行に付け直し、結果の項目は外す（#83）。
- * Rust は、同じ読み出しで届いた結果を初めから道具の行に付けて渡す
- */
-function withResults(items: ConvItem[]): ConvItem[] {
-  if (!items.some((x) => x.role === "result")) return items;
-  const late = new Map<string, { text: string; error: boolean }>();
-  for (const x of items) if (x.role === "result" && x.id) late.set(x.id, { text: x.text, error: !!x.error });
-  return items.filter((x) => x.role !== "result").map((x) => (x.role === "tool" && !x.result && x.id && late.has(x.id) ? { ...x, result: late.get(x.id) } : x));
-}
-
-/** 時刻の書式。toLocaleTimeString は呼ぶたびに ICU の書式を作り直すので、1つを使い回す（#10） */
-const HM = new Intl.DateTimeFormat("ja-JP", { hour: "2-digit", minute: "2-digit" });
-/** at は node のセッションなら ISO の文字列、pty のセッションなら ms の数 */
-function timeOf(at?: string | number | null): string {
-  chatPerf.time++;
-  if (!at) return "";
-  const d = new Date(at);
-  return isNaN(+d) ? "" : HM.format(d);
-}
-
-type BubbleProps = { item: Shown; agent: Agent; lineageDepth: number };
-/**
- * 吹き出しは、中身か見た目に使う値が変わったときだけ描き直す（#10）。
- * agent は一覧を取るたびに別の物になるので、使う値（id、名前、cwd、絵）だけを比べる。
- * まとめた道具の行は毎回作り直すので、n と件数と文で比べる
- */
-const Bubble = memo(BubbleView, (a: BubbleProps, b: BubbleProps) =>
-  (a.item === b.item || (a.item.n != null && a.item.n === b.item.n && a.item.more === b.item.more && a.item.done === b.item.done && a.item.text === b.item.text && a.item.pending === b.item.pending))
-  && a.lineageDepth === b.lineageDepth
-  && a.agent.id === b.agent.id && a.agent.name === b.agent.name && a.agent.cwd === b.agent.cwd
-  && a.agent.avatar?.char === b.agent.avatar?.char && a.agent.avatar?.hue === b.agent.avatar?.hue);
-
-/**
- * 道具の行。結果が届いた道具があれば、押すと開いて、道具ごとの1行と結果の頭を出す（#83）。
- * 続いた道具は1行にまとめたまま（「ほか N 件」）。結果が1つも無いうちは開けない
- */
-function ToolLine({ item }: { item: Shown }) {
-  const group = item.group ?? [item];
-  const head = <><Wrench className="inline-icon" size={ICON.xs} strokeWidth={STROKE} aria-hidden /> {linkify(item.text)}{item.more ? ` ほか${item.more}件` : ""}</>;
-  if (!item.done) return <div className="tool-line">{head}</div>;
-  const bad = group.some((g) => g.result?.error);
-  return (
-    <details className="tool-line tool-open">
-      <summary>{head}<ChevronRight className="inline-icon tl-caret" size={ICON.xs} strokeWidth={STROKE} aria-hidden />{bad && <span className="tl-bad">失敗あり</span>}</summary>
-      <div className="tl-list">
-        {group.map((g, i) => (
-          <div key={g.id ?? i} className="tl-item">
-            <div className="tl-name">{linkify(g.text)}{g.result?.error && <span className="tl-bad">失敗</span>}</div>
-            {g.result ? (g.result.text ? <pre className={`tl-out${g.result.error ? " bad" : ""}`}>{g.result.text}</pre> : <div className="hint">（出力なし）</div>) : <div className="hint">結果を待っている</div>}
-          </div>
-        ))}
-      </div>
-    </details>
-  );
-}
-
-function BubbleView({ item, agent, lineageDepth }: BubbleProps) {
-  chatPerf.bubble++;
-  if (item.role === "tool" && item.sent) return <SentLetter item={item} agent={agent} lineageDepth={lineageDepth} />;
-  if (item.role === "tool") return <ToolLine item={item} />;
-  if (item.role === "event") return <div className={`turn-event te-${item.kind ?? "error"}`}>{item.kind === "interrupted" ? <CircleStop className="inline-icon" size={ICON.sm} strokeWidth={STROKE} aria-hidden /> : item.kind === "command" ? null : <TriangleAlert className="inline-icon" size={ICON.sm} strokeWidth={STROKE} aria-hidden />}{item.text}<span className="te-at">{timeOf(item.at)}</span></div>;
-  if (item.role === "result") return null;
-  if (item.role === "user" && item.letter) return <LetterBubble item={item} />;
-  if (item.role === "user") {
-    const who = item.from ? fromLabel(item.from) : null;
-    return (
-      <div className={`msg me ${item.pending ? "pending" : ""}`}>
-        <div className="meta">{who && <span className="from">{who}</span>}{item.pending ? "届けた・まだ読まれていない" : timeOf(item.at)}</div>
-        <div className="b"><Markdown text={item.text} /></div>
-      </div>
-    );
-  }
-  return (
-    <div className="msg kid">
-      <div className="mini-av"><Avatar pick={agent.avatar} seed={agent.id} mood="idle" role={roleOf(lineageDepth)} size={32} /></div>
-      <div>
-        <div className="meta"><b>{agent.name}</b>{timeOf(item.at)}</div>
-        <div className="b"><Markdown text={item.text} /></div>
-      </div>
-    </div>
-  );
-}
-
-/** お手紙の相手（送り手か宛先）を町の一覧から引く。見つからなければ null */
-function useLetterPeer(raw: string | null | undefined, name?: string | null): Agent | null {
-  const town = useContext(TownCtx);
-  const sid8 = raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? null;
-  const id = resolve(raw, town) ?? resolve(sid8, town) ?? resolve(name, town);
-  return (id && town.find((a) => a.id === id)) || null;
-}
-
-/**
- * 受け取ったお手紙。並びは普通の発言と同じ（顔、名前と時刻、吹き出し）で、吹き出しの色だけ肌色にする（2026-11-12 本人の指示）。
- * 顔は送り手のキャラ（町と同じ絵）。送り手が町にいなければ、名前から決まる仮の顔
- */
-function LetterBubble({ item }: { item: ConvItem }) {
-  const raw = item.letter?.fromRaw ?? null;
-  const who = useLetterPeer(raw, item.letter?.fromName);
-  const name = who?.name ?? item.letter?.fromName ?? raw?.match(/^[^/\s]+\/([0-9a-f]{8})/i)?.[1] ?? "別のセッション";
-  return <LetterView pick={who?.avatar} seed={who?.id ?? name} role={who?.parent ? "child" : "parent"} name={name} at={item.at} text={item.text} />;
-}
-
-/** 送ったお手紙。このセッション自身の発言として出し、名前の行に宛先（→ 名前）を添える。吹き出しは肌色 */
-function SentLetter({ item, agent, lineageDepth }: { item: ConvItem; agent: Agent; lineageDepth: number }) {
-  const s = item.sent!;
-  const who = useLetterPeer(s.to ?? null, s.to ?? null);
-  const to = s.create ? "新しい子" : who?.name ?? (s.to ? String(s.to).replace(/^uds:.*\/(\d+)\.sock$/, "pid $1") : "相手");
-  return <LetterView pick={agent.avatar} seed={agent.id} role={roleOf(lineageDepth)} name={agent.name} to={`→ ${to}${s.peer ? `（${s.peer}）` : ""}`} at={item.at} text={s.text || s.summary || ""} />;
-}
-
-type LetterViewProps = { pick?: Agent["avatar"]; seed: string; role: Role; name: string; to?: string; at?: string | number | null; text: string };
-/**
- * お手紙の吹き出しの見た目。お手紙の相手は町の一覧（TownCtx）から引くので、一覧を取るたびに上の2つは描き直される。
- * 見た目に使う値が変わらなければ、ここで止める（#10）
- */
-const LetterView = memo(function LetterView({ pick, seed, role, name, to, at, text }: LetterViewProps) {
-  chatPerf.bubble++;
-  return (
-    <div className="msg kid letter">
-      <div className="mini-av"><Avatar pick={pick} seed={seed} mood="idle" role={role} size={32} /></div>
-      <div>
-        <div className="meta"><b>{name}</b>{to && <span className="to">{to}</span>}{timeOf(at)}</div>
-        <div className="b"><Markdown text={text} /></div>
-      </div>
-    </div>
-  );
-}, (a, b) => a.seed === b.seed && a.role === b.role && a.name === b.name && a.to === b.to && a.at === b.at && a.text === b.text
-  && a.pick?.char === b.pick?.char && a.pick?.hue === b.pick?.hue);
-
-function fromLabel(from: string): string {
-  // "from agent:<名前> via <ノード>" / "from local via <ノード>" / "from <メール> via <ノード>"
-  const m = from.match(/^from (\S+) via (\S+)/);
-  if (!m) return from;
-  if (m[1] === "local") return "このアプリから";
-  if (m[1].startsWith("agent:")) return `${m[1].slice(6)} から`;
-  return `${m[2]} から`;
-}
-
-function StateTab({ agent, mood }: { agent: Agent; mood: Mood }) {
-  const r = agent.report;
-  const rows: [string, React.ReactNode][] = [
-    ["いま", nowOf(agent, mood)],
-    ["頼まれたこと", r?.asked],
-    ["最後の報告", r?.said],
-    ["次の一手", r?.next],
-    ["閉じていい？", agent.closeCheck ? (agent.closeCheck.status === "ok" ? "閉じてOK" : agent.closeCheck.status === "ng" ? `まだ: ${agent.closeCheck.short ?? ""}` : "判定中") : null],
-    ["作業中の時間", mood === "working" && r?.turn_started_at ? <Since at={r.turn_started_at} /> : null],
-    ["アカウント", accountText(agent)],
-    ["場所", agent.cwd.replace(/^\/Users\/[^/]+/, "~")],
-    ["セッション", agent.id],
-  ];
-  return (
-    <ScrollEdgeGradient className="state-scroll" wrapClassName="seg-fill"><dl className="state-tab">
-      {rows.filter(([, v]) => v).map(([k, v]) => (<div key={k}><dt>{k}</dt><dd>{typeof v === "string" ? linkify(v) : v}</dd></div>))}
-      {!r && <p className="hint">状態 hook が入っていないので、頼まれたことと次の一手は出ない（README の「hook」を参照）。</p>}
-    </dl></ScrollEdgeGradient>
-  );
-}
-
-// ---------- 素材のクレジット ----------
-
-/** 素材の表示と、キャラの見た目（いつもの / ポケモン）の切り替え。見た目で使う素材が変わるので同じ所に置く */
-function Credits({ skin, onSkin }: { skin: Skin; onSkin: (s: Skin) => void }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <span className="credits">
-      <button className="credit-btn" onClick={() => setOpen((o) => !o)}>素材</button>
-      {open && (
-        <span className="credit-pop" onMouseLeave={() => setOpen(false)}>
-          <span className="skin-pick" title="ポケモンでは、親を最終進化、子を2段目、孫を1段目で描く">
-            キャラの見た目
-            {([["default", "いつもの"], ["pokemon", "ポケモン"]] as const).map(([v, label]) => (
-              <button key={v} className={skin === v ? "on" : ""} onClick={() => onSkin(v)}>{label}</button>
-            ))}
-          </span>
-          <b>キャラ</b>: Ninja Adventure Asset Pack（Pixel-boy、AAA）、CC0 1.0。
-          <br /><b>状態の印、幽霊、お手紙</b>: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0
-          （creativecommons.org/licenses/by/4.0）。Source: googlefonts.github.io/noto-emoji-animation
-          <br />キャラは配布元のファイルのまま表示のときに縮めている。Noto は 64px に縮め、コマを半分に間引いた。
-          {skin === "pokemon" && (<>
-            <br /><b>ポケモン（キャラの見た目で選んだとき）</b>: ブラック・ホワイトの形の2Dのドット絵（アニメ GIF と止め絵）を、PokeAPI/sprites（github.com/PokeAPI/sprites）の配布から
-            {"表示中のキャラの分だけ実行時に読む。このアプリには画像を含めない。Pokémon © Nintendo / Creatures Inc. / GAME FREAK inc."}
-          </>)}
-        </span>
-      )}
-    </span>
-  );
-}
-
-// ---------- 小さい絵 ----------
-
-/** カードの左上の札。文字（親、子、孫…）の代わりに lucide のアイコンを出し、文字は title と aria-label に残す */
-function RoleTag({ depth }: { depth: number }) {
-  const d = Math.min(depth, 4);
-  const I = ROLE_ICON[d];
-  return <span className="role" role="img" aria-label={ROLE_LABEL[d]} title={ROLE_LABEL[d]}><I size={ICON.sm} strokeWidth={STROKE} aria-hidden /></span>;
 }

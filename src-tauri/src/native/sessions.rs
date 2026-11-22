@@ -1,7 +1,7 @@
 // 生きている対話セッション。~/.claude/sessions/<pid>.json を読み、pid が生きているものだけを残す。
 // 形（2.1.330 で実ファイルを読んだ）: pid、sessionId、cwd、startedAt、kind（interactive）、entrypoint（cli）、
 // status（busy、waiting、idle）、updatedAt、name、messagingSocketPath など。
-// ccn と同じく、制御端末が無く引数に -p か --print がある裏方（Stop hook や launchd のジョブ）は外す（claude-code-nodes の agents.ts）。
+// 制御端末が無く引数に -p か --print がある裏方（Stop hook や launchd のジョブ）は外す（決め方は claude-code-nodes の agents.ts から借りた）。
 
 use super::Stats;
 use serde_json::{json, Value};
@@ -24,7 +24,7 @@ pub struct Session {
     pub kind: String,
     /// 会話の jsonl（まだ無ければ、書かれるはずの場所）
     pub jsonl: PathBuf,
-    /// 最初の文の from 行の呼び手（agent:<ノード>/<sid8>/<役割>）。ccn の一覧の parent と同じ値
+    /// 最初の文の from 行の呼び手（agent:<ノード>/<sid8>/<役割>）。ccn などが子を立てるときに付ける
     pub parent_raw: Option<String>,
 }
 
@@ -52,7 +52,7 @@ pub fn project_dir_name(cwd: &str) -> String {
     cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
-/// ccn の agents.ts と同じ status の読み替え
+/// status の読み替え（claude-code-nodes の agents.ts と同じ）
 fn state_of(status: Option<&str>, stats: &mut Stats) -> &'static str {
     match status {
         Some("busy") => "running",
@@ -84,7 +84,7 @@ fn headless_of(list: &[(u32, u64)]) -> HashMap<u32, bool> {
     if !ask.is_empty() {
         let found = ps_headless(&ask);
         for k in list.iter().filter(|k| ask.contains(&k.0)) {
-            // ps に出なかった（読めなかった）ものは残す（ccn と同じ）
+            // ps に出なかった（読めなかった）ものは残す
             known.insert(*k, found.get(&k.0).copied().unwrap_or(false));
         }
     }
@@ -169,6 +169,17 @@ pub fn caller_of(text: &str) -> Option<String> {
     let mut it = rest.split_whitespace();
     let who = it.next()?;
     (it.next()? == "via" && it.next().is_some()).then(|| who.to_string())
+}
+
+/// pid の sessions/<pid>.json を、覚えた値を使わずに今読む。返すのは state、startedAt、lastActivityAt（無ければ None）
+pub fn fresh_row(root: &Path, pid: u32) -> Option<Value> {
+    let v: Value = serde_json::from_str(&fs::read_to_string(root.join(format!("sessions/{pid}.json"))).ok()?).ok()?;
+    let mut st = Stats::default();
+    Some(json!({
+        "state": state_of(v["status"].as_str(), &mut st),
+        "startedAt": v["startedAt"],
+        "lastActivityAt": v["updatedAt"].as_u64().or(v["startedAt"].as_u64()),
+    }))
 }
 
 /// 生きている対話セッション（開始の古い順）

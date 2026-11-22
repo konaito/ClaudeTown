@@ -1,6 +1,5 @@
-// 「＋ 新しい世帯」を押したときに親を立てる場所の設定（#92）。
-// 新しい世帯は手元のノードにだけ作る（NewHousePane は別の町を見ている間は disabled、create_session の peer は null）ので、
-// 場所はノードごとに分けず、この画面（この Mac のアプリ、ブラウザ版ではそのブラウザ）に1つだけ持つ。
+// 「新しい世帯」を押したときに親を立てる場所の設定（#92）。
+// 場所は、この画面（この Mac のアプリ、ブラウザ版ではそのブラウザ）に1つだけ持つ。
 // 保存先は localStorage（ペインの幅 claude-town.split3 と開発版のスキンと同じ。Tauri の WebView でもブラウザ版でも使える）。
 // null は「設定していない」で、そのとき create_session は cwd を渡さず、Rust の既定（~/Documents/meta）で立つ。
 
@@ -26,9 +25,8 @@ const under = (p: string, dir: string) => p === dir || p.startsWith(dir + "/");
 export type PlaceCheck = { ok: true; path: string } | { ok: false; reason: string };
 
 /**
- * 入力した場所が、ccn が新しいセッションを立てられる範囲か（画面でわかる範囲の確認）。
- * ccn は cwd が roots の外だと 400（cwd is outside roots）で断る。存在とディレクトリかどうかは ccn だけが調べられる（画面からは調べない）ので、
- * 立てたときの失敗で伝える。roots が空（絞らないモック）のときは範囲で断らない。受け口（lobby）は新しい世帯の行き先にしない
+ * 入力した場所の確認（画面でわかる範囲）。存在とディレクトリかどうかは Rust（pty.rs の spawn）が調べるので、立てたときの失敗で伝える。
+ * roots と lobby はブラウザ版（PWA）の ccn の分で、ccn は cwd が roots の外だと 400 で断る。アプリでは roots が空なので、範囲で断らない
  */
 export function checkPlace(input: string, roots: string[], lobby: string | null): PlaceCheck {
   const raw = input.trim();

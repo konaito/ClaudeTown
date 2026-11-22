@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { answerPermission, PLAN_DENY_DEFAULT } from "./webPerm";
+import { allowedSuggestion, answerPermission, DENY_DEFAULT, permissionBody, PLAN_DENY_DEFAULT, type Pending } from "./webPerm";
+import permCases from "./perm-cases.json";
 
 const detail = (o: Record<string, unknown> = {}) => ({ state: "waiting_permission", capabilities: { permissions: true }, pending: [{ requestId: "r1", toolName: "Bash", input: {} }], ...o });
 const run = (d: unknown, choice: string, expect: string | null) => {
@@ -83,4 +84,34 @@ describe("常に許可", () => {
     await expect(go("deny", null, 0).p).rejects.toThrow("付けない");
     await expect(go("allow", "old", 0).p).rejects.toThrow("変わった");
   });
+});
+
+// src-tauri/src/permission.rs の shared_cases と同じ事例
+describe("承認の返事の組み立て（src/perm-cases.json）", () => {
+  type A = { first: Pending; choice: string; expectId: string | null; answers: Record<string, string> | null; message: string | null; suggestion: number | null };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const run = (fn: string, a: any): unknown => {
+    switch (fn) {
+      case "const":
+        if (a[0] === "DENY_DEFAULT") return DENY_DEFAULT;
+        if (a[0] === "PLAN_DENY_DEFAULT") return PLAN_DENY_DEFAULT;
+        throw new Error(`知らない文: ${a[0]}`);
+      case "allowed_suggestion": return allowedSuggestion(a[0]);
+      case "permission_body": {
+        const x = a as A;
+        try {
+          return permissionBody(x.first, x.choice, x.expectId, x.answers, x.message, x.suggestion);
+        } catch (e) {
+          return { error: (e as Error).message };
+        }
+      }
+    }
+    throw new Error(`知らない関数: ${fn}`);
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const c of permCases as { name: string; fn: string; args: any; expect: unknown }[]) {
+    test(c.name, () => {
+      expect(JSON.parse(JSON.stringify(run(c.fn, c.args)))).toEqual(c.expect);
+    });
+  }
 });

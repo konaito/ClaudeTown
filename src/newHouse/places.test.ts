@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { placeLabel, placeName, placeTime, recentPlaces } from "./places";
+import { placeLabel, placeName, placeTime, recentPlaces, withoutPlace } from "./places";
 
 const H = "/Users/k";
 const base = { roots: [H], lobby: `${H}/.local/share/ccn/lobby` };
@@ -87,5 +87,22 @@ describe("placeName（#99）", () => {
     expect(placeName("/private/tmp")).toBe("tmp");
     expect(placeName("/Users/me")).toBe("~");
     expect(placeName("/")).toBe("/");
+  });
+});
+
+describe("withoutPlace（新しい世帯の置き場所を除く、2026-11-21 本人の決定）", () => {
+  const list = [
+    { path: `${H}/Documents/meta`, at: 3 },
+    { path: `${H}/Documents/app`, at: 2 },
+    { path: `${H}/Documents/meta-old`, at: 1 },
+  ];
+  test("設定が無ければ既定の場所（~/Documents/meta）を除く。名前の似た場所は残す", () => {
+    expect(withoutPlace(list, null, `${H}/Documents/meta`).map((p) => p.path)).toEqual([`${H}/Documents/app`, `${H}/Documents/meta-old`]);
+  });
+  test("設定を変えたら、変えた先を除き、既定の場所は出す", () => {
+    expect(withoutPlace(list, `${H}/Documents/app/`, `${H}/Documents/meta`).map((p) => p.path)).toEqual([`${H}/Documents/meta`, `${H}/Documents/meta-old`]);
+  });
+  test("どちらも分からなければ除かない（ブラウザ版）", () => {
+    expect(withoutPlace(list, null, undefined)).toBe(list);
   });
 });

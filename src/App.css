@@ -235,7 +235,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .ll-label { color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .ll-time { flex: none; font-variant-numeric: tabular-nums; }
 .ll-head { padding-left: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ll-head::before { content: "└ "; }
+.ll-head-icon { margin-right: 3px; }
 @keyframes ll-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
 .md p { margin: 0 0 6px; }
 .md p:last-child { margin-bottom: 0; }
@@ -502,6 +502,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
    文字 #2f2d36 と地 #f6e7d6 の明暗差は 11.18:1（WCAG AA の 4.5:1 を満たす） */
 .msg.letter .b { background: #f6e7d6; border-color: #ecd6bd; }
 .msg.letter .meta .to { color: var(--sub); margin-right: 6px; }
+.msg.letter .meta .to .inline-icon { margin-right: 2px; }
 
 /* 転出のゴースト。別の町にいる親か子の影。半透明と点線で、閉じる演出の 👻 と分ける */
 .ghost-card {
@@ -523,6 +524,10 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 
 /* ウィンドウが見えていない間は、CSS のアニメを全部止める（#6、src/visible.ts が data-hidden を付ける） */
 :root[data-hidden] *, :root[data-hidden] *::before, :root[data-hidden] *::after { animation-play-state: paused !important; }
+
+/* 町の画面の外にあるカードのアニメを止める（#12、src/offscreen.ts が .fnode に data-offscreen を付ける）。
+   閉じる演出（.dying、.kill-*）は止めない。止めると、見えない間に消える処理の時刻とずれる */
+.fnode[data-offscreen]:not(.dying) *, .fnode[data-offscreen]:not(.dying) *::before, .fnode[data-offscreen]:not(.dying) *::after { animation-play-state: paused !important; }
 
 /* ---------- 3枚のペイン（#89） ---------- */
 /* ヘッダー左端の、左のペインの開け閉め。アイコンは lucide の panel-left-close / panel-left-open */

@@ -9,6 +9,7 @@ import type { Agent } from "../model";
 import type { SessionDetail } from "../types";
 import { answerText, emptyPick, type Pick, type Question } from "./answers";
 import { alwaysOptions } from "./suggestions";
+import { canAnswerPermission } from "../abilities";
 
 type PendingReq = { requestId: string; toolName: string; input: Record<string, unknown>; suggestions?: unknown };
 type Answer = (choice: "allow" | "deny", extra?: { answers?: Record<string, string>; message?: string; suggestion?: number }) => Promise<void>;
@@ -19,30 +20,30 @@ type Answer = (choice: "allow" | "deny", extra?: { answers?: Record<string, stri
  * 質問（AskUserQuestion）は選んだ答えを、計画の確認（ExitPlanMode）は承認か見直しの頼みを、同じ口で返す（#83）。
  * 人が端末で開いたセッション（ccn から答えられない）は、その端末で答える。
  */
-export function Approval({ agent, peer, planHint, onDone, onError }: {
-  agent: Agent; peer: string; onDone: (m: string) => void; onError: (m: string) => void;
+export function Approval({ agent, planHint, onDone, onError }: {
+  agent: Agent; onDone: (m: string) => void; onError: (m: string) => void;
   /** 会話の最後の計画の本文。ExitPlanMode の hook の入力は、計画ファイルが無いと空で来るので、そのときに出す */
   planHint?: string | null;
 }) {
   const [busy, setBusy] = useState<"allow" | "deny" | null>(null);
   const [pending, setPending] = useState<PendingReq[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const canAnswer = !!agent.capabilities?.permissions;
+  const canAnswer = canAnswerPermission(agent);
   useEffect(() => {
     let alive = true;
-    const load = () => invoke<SessionDetail | null>("session_detail", { sessionId: agent.id, peer: peer || null })
+    const load = () => invoke<SessionDetail | null>("session_detail", { sessionId: agent.id })
       .then((d) => { if (alive) { setPending(Array.isArray(d?.pending) ? d.pending : []); setErr(null); } })
       .catch((e) => { if (alive) setErr(String(e)); });
     const stop = pollWhileVisible(load, 2000);
     return () => { alive = false; stop(); };
-  }, [agent.id, peer]);
+  }, [agent.id]);
   const p = pending?.[0];
   const answer: Answer = async (choice, extra) => {
     setBusy(choice);
     try {
       const r = await invoke<string>("answer_permission", {
         sessionId: agent.id, choice, expectId: p?.requestId ?? null,
-        answers: extra?.answers ?? null, message: extra?.message ?? null, suggestion: extra?.suggestion ?? null, peer: peer || null,
+        answers: extra?.answers ?? null, message: extra?.message ?? null, suggestion: extra?.suggestion ?? null,
       });
       onDone(`${agent.name}: ${r}`);
     } catch (e) {
