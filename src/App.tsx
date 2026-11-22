@@ -27,7 +27,7 @@ import { KillConfirm } from "./confirm/Confirm";
 import { NextRow } from "./NextRow";
 import { useLetterMarks } from "./useLetterMarks";
 import { Panel } from "./panel/Panel";
-import { KillCtx, LetterCtx, SendCtx, TownCtx } from "./contexts";
+import { DepthCtx, KillCtx, LetterCtx, SendCtx, TownCtx } from "./contexts";
 import { loadPlace, savePlace } from "./newHouse/placeSetting";
 import { SettingsDialog } from "./settings/SettingsDialog";
 import "./App.css";
@@ -91,6 +91,7 @@ export default function App() {
     skin,
     rootOf: (id: string) => { const t = treeRef.current; const a = t.byId.get(id); const r = a ? t.lineage(a)[0] : null; return r ? r.id : id; },
   }), [skin, shape]);
+  const depthOf = useMemo(() => (id: string) => { const t = treeRef.current; const a = t.byId.get(id); return a ? t.lineage(a).length - 1 : null; }, [shape]);
   const pick = useCallback((a: Agent) => setSelected(a.id), []);
 
   const { kill, killAsk, setKillAsk, killCtx } = useKill({ tree, selected, setSelected, toast, setHidden });
@@ -152,7 +153,7 @@ export default function App() {
     <KillCtx.Provider value={killCtx}>
     <SendCtx.Provider value={cardSend}>
     <LetterCtx.Provider value={letterMarks.marks}>
-    <TownCtx.Provider value={agents}>
+    <TownCtx.Provider value={agents}><DepthCtx.Provider value={depthOf}>
     <div className={`app${mobile ? " mobile" : ""}`} onContextMenu={(e) => e.preventDefault()}>
       {mobile ? (
         <MobileShell tree={tree} snap={snap} err={err} counts={counts} total={agents.length}
@@ -257,7 +258,7 @@ export default function App() {
       </div>
       <div className="letters-layer" ref={letterMarks.layer} aria-hidden />
     </div>
-    </TownCtx.Provider>
+    </DepthCtx.Provider></TownCtx.Provider>
     </LetterCtx.Provider>
     </SendCtx.Provider>
     </KillCtx.Provider>

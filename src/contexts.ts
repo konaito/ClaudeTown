@@ -4,6 +4,9 @@ import type { Agent } from "./model";
 /** いま見ている町のセッション（お手紙の送り手の名前を引くため） */
 export const TownCtx = createContext<Agent[]>([]);
 
+/** 町の木での世代の深さ。根が0。お手紙の相手の顔を、町と同じ役割（親、子、孫）で描くため */
+export const DepthCtx = createContext<(id: string) => number | null>(() => null);
+
 /** 封筒の印（💌）を頭に出しているセッション */
 export const LetterCtx = createContext<Set<string>>(new Set());
 
