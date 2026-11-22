@@ -1,0 +1,59 @@
+name: Check
+on:
+  pull_request:
+  push:
+    branches: [feat/app-v1] # このリポジトリの既定ブランチ
+
+concurrency:
+  group: check-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # 同じ PR に後から push したら前の確認を止める。feat/app-v1 への push は1回ずつ最後まで回す
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  types:
+    name: tsc と web の check
+    # void-deploy.yml と同じ手順。ubuntu で通ることはデプロイの回で分かっている
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          check-latest: true
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit
+      - run: bun install --frozen-lockfile
+        working-directory: web
+      - run: bun run check
+        working-directory: web
+
+  tests:
+    name: bun test と hooks の試験
+    # アプリは macOS 専用で、手元で確かめたのも macOS なので、同じ OS で回す
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: python3 -m unittest discover -s hooks -v
+
+  rust:
+    name: cargo test
+    # アプリは macOS 専用（osascript、BSD の ps を呼ぶ）。Linux では Tauri の webkit2gtk も要るので macOS で回す
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: cargo test --locked
+        working-directory: src-tauri
