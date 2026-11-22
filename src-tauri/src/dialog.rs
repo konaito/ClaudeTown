@@ -524,11 +524,27 @@ pub fn match_tool(d: &Dialog, hook: &[HookItem], open: &[Tool]) -> Result<(Tool,
             }
             // 画面の本文に一番長く出ている候補を取る。頭だけで比べると、頭の同じ別の道具（画面に出ていないほう）を取ることがあった（#169）
             // 折り返した command と複数行の command は、各行の頭に「│ 」が付いて出る（2026-11-23、v2.1.330）。行頭の1つだけ外して比べる
-            let b = norm(&body.lines().map(|l| { let t = l.trim_start(); t.strip_prefix('│').unwrap_or(t) }).collect::<Vec<_>>().join("\n"));
+            let lines: Vec<&str> = body.lines().map(|l| { let t = l.trim(); t.strip_prefix('│').map(str::trim_start).unwrap_or(t) }).collect();
+            // 本文の1行目は承認の種類の見出し（実物で見たのは「Bash command」「Create file」「Edit file」）。見出しで候補の道具を絞る。
+            // 答えた後も残る hook の古い記録が、Write の中身や Edit の diff に出ていると、今の承認より長く合ってしまうため。
+            // ファイルの承認は、見出しのすぐ下のパスの行（中身の行「  1 hi」の前まで）だけで比べる。知らない見出しは今まで通り本文の全体で比べる
+            const FILE_TOOLS: [&str; 5] = ["Write", "Edit", "MultiEdit", "Read", "NotebookEdit"];
+            let head_at = lines.iter().position(|l| !l.is_empty());
+            let content_row = |l: &str| { let d = l.chars().take_while(char::is_ascii_digit).count(); d > 0 && l[d..].starts_with(char::is_whitespace) };
+            let (only, area): (Option<&[&str]>, &[&str]) = match head_at.map(|i| (i, lines[i])) {
+                Some((_, "Bash command")) => (Some(&["Bash"]), &lines[..]),
+                Some((i, "Create file" | "Edit file")) => {
+                    let end = lines[i + 1..].iter().position(|l| content_row(l)).map_or(lines.len(), |k| i + 1 + k);
+                    (Some(&FILE_TOOLS), &lines[i + 1..end])
+                }
+                _ => (None, &lines[..]),
+            };
+            let b = norm(&area.join("\n"));
             // cands の hook.len() 番目からが transcript の分
             struct Scored<'a> { c: &'a (Tool, bool), st: (usize, bool), full: String, open: bool }
             let scored: Vec<Scored> = cands.iter().enumerate()
                 .filter(|(_, (t, _))| !matches!(t.1.as_str(), "AskUserQuestion" | "ExitPlanMode" | "Agent" | "Task"))
+                .filter(|(_, (t, _))| only.is_none_or(|o| o.contains(&t.1.as_str())))
                 .filter_map(|(i, c)| hint_of(&c.0 .1, &c.0 .2).and_then(|h| strength(&h, &b).map(|st| Scored { c, st, full: h.full, open: i >= hook.len() })))
                 .collect();
             let best = scored.iter().map(|x| x.st).max();
@@ -1061,6 +1077,24 @@ mod tests {
             assert_eq!(match_tool(&d, &[], &[right.clone(), wrong.clone()]).unwrap().0.0, "t1", "{screen}");
             assert_eq!(match_tool(&d, &[], &[wrong.clone(), right.clone()]).unwrap().0.0, "t1");
         }
+    }
+
+    #[test]
+    fn old_records_in_the_file_content_do_not_win() {
+        // 答えた後も残る古い Bash の記録の command が、Write の中身に出ている。前と同じく Write を取る
+        let screen = WRITE.replace("  1 hi", "  1 echo probe-ok > probe2.txt");
+        let hook = vec![
+            hk("Bash", json!({ "command": "echo probe-ok > probe2.txt" }), None, 5),
+            hk("Write", json!({ "file_path": "/private/tmp/fc-ask-probe/hi.txt", "content": "echo probe-ok > probe2.txt" }), None, 6),
+        ];
+        assert_eq!(match_tool(&parse(&screen).unwrap(), &hook, &[]).unwrap().0.0, "hook:6");
+        // 古い Edit の記録のパスが、今の Edit の diff に出ている。画面のパスの行で比べる
+        let screen = edit_screen("src/x.ts").replace("  1 hi", "  1 import { c } from \"/Users/a/proj/src/b/config.ts\"");
+        let hook = vec![
+            hk("Edit", json!({ "file_path": "/Users/a/proj/src/b/config.ts", "old_string": "a", "new_string": "b" }), None, 5),
+            hk("Edit", json!({ "file_path": "/Users/a/proj/src/x.ts", "old_string": "a", "new_string": "b" }), None, 6),
+        ];
+        assert_eq!(match_tool(&parse(&screen).unwrap(), &hook, &[]).unwrap().0.0, "hook:6");
     }
 
     #[test]
