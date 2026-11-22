@@ -132,6 +132,23 @@ pub(crate) fn user_text(content: &Value) -> String {
     }
 }
 
+/// スラッシュコマンドの入力を、端末と同じ「/名前 引数」の文に直す（#157）。コマンドの行でなければ None。
+/// jsonl には <command-message>、<command-name>、<command-args> の組で残る。並び順は2通りあり、引数は無いこともある。
+/// 引数には `<` を含む本文も入るので、引数の終わりは最後の </command-args> で決める
+pub(crate) fn slash_command(text: &str) -> Option<String> {
+    let t = text.trim_start();
+    if !(t.starts_with("<command-name>") || t.starts_with("<command-message>")) {
+        return None;
+    }
+    let name = t.split_once("<command-name>")?.1.split("</command-name>").next()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let name = if name.starts_with('/') { name.to_string() } else { format!("/{name}") };
+    let args = t.split_once("<command-args>").and_then(|(_, r)| r.rfind("</command-args>").map(|i| r[..i].trim())).unwrap_or("");
+    Some(if args.is_empty() { name } else { format!("{name} {args}") })
+}
+
 /// 会話の1行から、今の動きに効く出来事を取り出す。simplify と同じく、jsonl の行と data で包んだ形の両方を読む
 pub(crate) fn live_events(m: &Value) -> Vec<LiveEv> {
     let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
@@ -152,7 +169,8 @@ pub(crate) fn live_events(m: &Value) -> Vec<LiveEv> {
                 let text = user_text(content);
                 // hook やシステムの差し込み（<...>、Caveat:）はターンの始まりにしない。お手紙（<cross-session-message>）は始まりにする
                 let letter = text.contains("<cross-session-message");
-                if !text.is_empty() && !m["isMeta"].as_bool().unwrap_or(false) && (letter || !(text.starts_with('<') || text.starts_with("Caveat:"))) {
+                let command = slash_command(&text).is_some();
+                if !text.is_empty() && !m["isMeta"].as_bool().unwrap_or(false) && (letter || command || !(text.starts_with('<') || text.starts_with("Caveat:"))) {
                     out.push(LiveEv::User(at));
                 }
             }
@@ -406,6 +424,9 @@ pub(crate) fn simplify(m: &Value) -> Vec<Value> {
                 out.push(json!({ "role": "event", "kind": "interrupted", "text": "ここで止めた", "at": at }));
                 return out;
             }
+            // スラッシュコマンドの入力は「/名前 引数」の文にしてから見る。そのままだと `<` で始まり、下の除外で落ちる（#157）
+            let command = slash_command(text);
+            let text = command.as_deref().unwrap_or(text);
             // 道具の結果だけの user、hook やシステムの差し込み（<...> で始まる）は出さない
             if text.is_empty() || text.starts_with('<') || text.starts_with("Caveat:") {
                 return out;
@@ -828,8 +849,29 @@ mod tests {
             assert!(matches!(live_events(m).as_slice(), [LiveEv::User(_)]));
         }
         // hook の差し込みは今までどおり落とす
-        let hook = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": "<command-name>/clear</command-name>"}});
+        let hook = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": "<system-reminder>x</system-reminder>"}});
         assert!(simplify(&hook).is_empty());
+    }
+
+    // 2026-11-22 に fix-storage-gui（e545f8a7）で本人が打った /merge の行。当時の形のまま。`<` で始まるので会話から落ちていた（#157）
+    #[test]
+    fn slash_commands_show_as_user_text() {
+        let line = |c: &str| json!({"type": "user", "timestamp": "2026-11-22T12:53:39.294Z", "message": {"role": "user", "content": c}});
+        let merge = line("<command-message>merge</command-message>\n<command-name>/merge</command-name>");
+        let out = simplify(&merge);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[0]["text"], "/merge");
+        assert!(matches!(live_events(&merge).as_slice(), [LiveEv::User(_)]));
+        // 名前が先で、引数が付く形（字下げも当時のまま）
+        let login = line("<command-name>/login</command-name>\n            <command-message>login</command-message>\n            <command-args></command-args>");
+        assert_eq!(simplify(&login)[0]["text"], "/login");
+        // 引数に < を含む本文が入る形
+        let surf = line("<command-message>surf</command-message>\n<command-name>/surf</command-name>\n<command-args>https://a.example/x <b>強</b></command-args>");
+        assert_eq!(simplify(&surf)[0]["text"], "/surf https://a.example/x <b>強</b>");
+        // 本文の配列で来ても同じ
+        let arr = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": [{"type": "text", "text": "<command-name>/clear</command-name>"}]}});
+        assert_eq!(simplify(&arr)[0]["text"], "/clear");
     }
 
     // 2026-11-14、写した画像のパスを入れて送った文を、CLI が画像の添付にした形（当時の会話の形のまま、#69）
