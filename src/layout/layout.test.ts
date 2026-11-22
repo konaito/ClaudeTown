@@ -160,20 +160,22 @@ describe("家族の木の配置", () => {
 
   // 子5人と6人は 2026-11-21 から格子の固定の座標に置く。試験9〜11 の数字は弧の計算（余白を指定した呼び出し）で出し、直したときの記録として残す
 
-  test("9. 親の町（親が本物、子がゴースト）と子の町（親がゴースト、子が本物）で同じ配置になる（弧の計算と、子5人と6人の格子）", () => {
-    const local = layoutFamily(town("e8c798cd", KIDS.map((k) => `ghost:${k}`)), RADIAL);
-    const remote = layoutFamily(town("ghost:e8c798cd", KIDS), RADIAL);
-    // ゴーストの箱は本物と同じ大きさ（深さ 0、1 はカード、2 以降は boxOf。App.tsx の GhostCard も同じ値で描く）
-    expect(boxOf(1, "ghost:b599aaf0")).toEqual(boxOf(1, "b599aaf0"));
-    expect(shape(local)).toEqual(shape(remote));
-    expect(local.arcIndex).toBe(remote.arcIndex);
-    report.push({ ケース: 9, 親の町の候補: local.arcIndex, 子の町の候補: remote.arcIndex, 候補ごと: JSON.stringify(local.candidates), ...local.metrics });
+  test("9. ID だけが違う同じ形の世帯は、同じ配置になる（弧の計算と、子5人、6人、8人の格子）", () => {
+    // 別の ID は、子の ID の大小の順を元の世帯と逆にしてある。配置は生成順と箱の大きさで決まり、ID には左右されない。
+    // 座標は生成順に並べて比べる（ID の順で子を並べ替えると、ここで食い違う）
+    const renamed = (kids: string[]) => kids.map((_, i) => `z${String(kids.length - i).padStart(7, "0")}`);
+    const inOrder = (r: { nodes: Placed[] }, ids: string[]) => ids.map((id) => { const n = get(r.nodes, id); return [n.depth, n.x.toFixed(3), n.y.toFixed(3), n.w, n.h].join(","); });
+    const a = layoutFamily(town("e8c798cd", KIDS), RADIAL);
+    const b = layoutFamily(town("0a1b2c3d", renamed(KIDS)), RADIAL);
+    expect(inOrder(a, ["e8c798cd", ...KIDS])).toEqual(inOrder(b, ["0a1b2c3d", ...renamed(KIDS)]));
+    expect(a.arcIndex).toBe(b.arcIndex);
+    report.push({ ケース: 9, 元のIDの候補: a.arcIndex, 別のIDの候補: b.arcIndex, 候補ごと: JSON.stringify(a.candidates), ...a.metrics });
     for (const kids of [KIDS, KIDS6, KIDS8]) {
-      const gl = layoutFamily(town("e8c798cd", kids.map((k) => `ghost:${k}`)));
-      const gr = layoutFamily(town("ghost:e8c798cd", kids));
-      expect(shape(gl)).toEqual(shape(gr));
-      expect(gl.arcIndex).toBe(-1);
-      expect(gr.arcIndex).toBe(-1);
+      const ga = layoutFamily(town("e8c798cd", kids));
+      const gb = layoutFamily(town("0a1b2c3d", renamed(kids)));
+      expect(inOrder(ga, ["e8c798cd", ...kids])).toEqual(inOrder(gb, ["0a1b2c3d", ...renamed(kids)]));
+      expect(ga.arcIndex).toBe(-1);
+      expect(gb.arcIndex).toBe(-1);
     }
   });
 
