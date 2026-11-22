@@ -337,19 +337,15 @@ def note_id(sid, ev, data):
     2026-11-23 の実機（Claude Code 2.1.330）では、/clear で SessionEnd（reason=clear、前の id）と SessionStart（source=clear、
     新しい id）が同じ CLAUDE_PID で届き、どちらの入力にももう一方の id は無かった。計画の承認で id が変わるときに SessionStart が
     届くかは確かめられていないので、どのイベントでも並びの最後と今の id が違えば足す。
-    pid は使い回されるので、新しいプロセスの始まり（startup、--resume の resume）では並びを作り直す。SessionEnd は clear 以外なら消す"""
+    pid は使い回されるので、新しいプロセスの始まり（startup、--resume の resume）では並びを作り直す。
+    SessionEnd では消さない（id が変わる道で clear 以外の reason が届いても並びを切らない）。終わったプロセスの並びは sweep が消す"""
     try:
         pid = int(os.environ.get("CLAUDE_PID") or "")
     except ValueError:
         return
-    p = IDS_DIR / f"{pid}.json"
     if ev == "SessionEnd":
-        if data.get("reason") != "clear":
-            try:
-                p.unlink()
-            except FileNotFoundError:
-                pass
         return
+    p = IDS_DIR / f"{pid}.json"
     try:
         cur = json.loads(p.read_text())
         ids = [x for x in cur.get("ids") or [] if isinstance(x, str)] if cur.get("pid") == pid else []

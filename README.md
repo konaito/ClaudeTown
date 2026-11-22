@@ -58,7 +58,7 @@ Claude Town の違いは3つある。データ源をこの Mac の Claude Code �
 | 会話 | `~/.claude/projects/<cwd を直した名前>/<session id>.jsonl` を、前に読んだ位置から続けて読む（`native/conv.rs`） |
 | sub-agent と in-process のチームメイト | 親のセッションの `<session id>/subagents/agent-<agent id>.jsonl` と `.meta.json`。meta の taskKind が in_process_teammate ならチームメイトとして出す（`native/subagents.rs`） |
 | tmux のチームメイト | `~/.claude/teams/<チーム名>/config.json` の members と、ps で見た claude の起動の引数（`--agent-id`、`--parent-session-id`）。会話は同じ cwd の jsonl のうち、teamName と agentName が合うもの（`native/teams.rs`） |
-| 親子 | sub-agent とチームメイトは、置き場所と config.json から親を決める。ほかのセッションは、最初の文の from 行（`from agent:<ノード>/<親の sid 先頭8>/<役割> via <ノード>`）から引く。from 行は ccn などのプロダクトが子を立てるときに付ける。sid 先頭8が16進の8文字でない from 行（ccn が session id を知らないときの `agent:<ノード>/<役割>`）からは親を引かない。/clear で id が変わっても pid は変わらないので、同じ pid の前の id を使って親子をつなぐ。前の id は、アプリの端末なら台帳の ids から、ほかの端末なら状態 hook が claude のプロセスごとに書く `~/.family-computing/ids/<pid>.json`（名乗った id の並び）から引く。子の from 行が親の前の id を指していれば、親の今の id を親にする。子が /clear して今の記録に from 行が無ければ、子の前の id の記録の from 行を使う。hook の並びは、最後の id が同じ pid の今の id と合うときだけ使う。並びは新しいプロセスの始まり（SessionStart の source が startup か resume）で作り直し、/clear 以外の SessionEnd で消す。この hook が動く前に変わった id と、hook の環境に CLAUDE_PID が無い版の claude の id は、並びに無いので引けない。親子が輪になったら、輪の中で最も早く始まったセッションを根にする |
+| 親子 | sub-agent とチームメイトは、置き場所と config.json から親を決める。ほかのセッションは、最初の文の from 行（`from agent:<ノード>/<親の sid 先頭8>/<役割> via <ノード>`）から引く。from 行は ccn などのプロダクトが子を立てるときに付ける。sid 先頭8が16進の8文字でない from 行（ccn が session id を知らないときの `agent:<ノード>/<役割>`）からは親を引かない。/clear で id が変わっても pid は変わらないので、同じ pid の前の id を使って親子をつなぐ。前の id は、アプリの端末なら台帳の ids から、ほかの端末なら状態 hook が claude のプロセスごとに書く `~/.family-computing/ids/<pid>.json`（名乗った id の並び）から引く。子の from 行が親の前の id を指していれば、親の今の id を親にする。子が /clear して今の記録に from 行が無ければ、子の前の id の記録の from 行を使う。hook の並びは、最後の id が同じ pid の今の id と合うときだけ使う。並びは新しいプロセスの始まり（SessionStart の source が startup か resume）で作り直し、pid が死んだものを SessionStart の掃除で消す。この hook が動く前に変わった id と、hook の環境に CLAUDE_PID が無い版の claude の id は、並びに無いので引けない。親子が輪になったら、輪の中で最も早く始まったセッションを根にする |
 | 頼まれたこと、いまやっていること、最後の報告、次の一手 | hook が書く `~/.family-computing/state/<session_id>.json` |
 | 閉じてよいか | close-check-state hook が書く `~/.claude/close-check/<session_id>.json` |
 | 新しい世帯の「最近の場所」 | Claude Code の入力の履歴 `~/.claude/history.jsonl` の project と timestamp（`src-tauri/src/places.rs`） |
@@ -236,11 +236,11 @@ scripts/rollback-stable.sh    # 今の版と1つ前の版を入れ替える。�
 
 戻すときも、状態 hook を戻した先の版のタグから写し直す。アプリを入れ替えずに hook だけを写し直すときは `scripts/install-stable-hooks.sh [タグ]` を使う（タグを省くと、いま入っている版のタグから写す）。
 
-作業ツリーの hook を試すときは、手で見本の入力を流す。`FC_STATE_DIR`、`FC_LETTERS` を一時の場所に向けると、本物の状態ファイルに書かない。
+作業ツリーの hook を試すときは、手で見本の入力を流す。`FC_STATE_DIR`、`FC_LETTERS`、`FC_PERM_DIR`、`FC_IDS_DIR` を一時の場所に向けると、本物の状態ファイルに書かない。claude の中で流すと環境変数 `CLAUDE_PID` が付いているので、`FC_IDS_DIR` を向けないと本物の `ids/` に書く。
 
 ```bash
 echo '{"session_id":"0123abcd-0000-0000-0000-000000000001","hook_event_name":"UserPromptSubmit","prompt":"試し"}' \
-  | FC_STATE_DIR=/tmp/fc-try FC_LETTERS=/tmp/fc-try/letters.jsonl python3 hooks/fc-report.py
+  | FC_STATE_DIR=/tmp/fc-try FC_LETTERS=/tmp/fc-try/letters.jsonl FC_PERM_DIR=/tmp/fc-try/perm FC_IDS_DIR=/tmp/fc-try/ids python3 hooks/fc-report.py
 ```
 
 hook が書く状態ファイルとお手紙の形は、`python3 -m unittest discover -s hooks -v` で確かめる（`hooks/test_fc_report.py`、標準ライブラリだけ、一時の場所にだけ書く）。

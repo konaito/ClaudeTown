@@ -283,14 +283,15 @@ fn break_cycles(rows: &[Value], parents: &mut [Option<String>]) {
     }
 }
 
-/// hook（hooks/fc-report.py）が、claude のプロセスごとに名乗った id の並び（古い順）を書く置き場所（#266）。中は ids/<pid>.json
+/// hook（hooks/fc-report.py）が、claude のプロセスごとに名乗った id の並び（古い順）を書く置き場所（#266）。中は ids/<pid>.json。
+/// 試すときは FC_IDS_DIR で差し替える（hook と同じ変数）
 fn ids_dir() -> PathBuf {
     #[cfg(test)]
     {
         TEST_IDS_DIR.with(|h| h.borrow().clone()).unwrap_or_else(|| PathBuf::from("/nonexistent/fc-ids"))
     }
     #[cfg(not(test))]
-    fc_path(Scope::Shared, "ids")
+    std::env::var("FC_IDS_DIR").ok().filter(|s| !s.is_empty()).map(Into::into).unwrap_or_else(|| fc_path(Scope::Shared, "ids"))
 }
 
 /// 生きている端末の行の id ごとに、同じプロセスが前に名乗った id（新しい順）。/clear で id が変わっても pid は変わらない（#248、#266）。
@@ -320,7 +321,8 @@ fn earlier_ids(rows: &[Value], dir: &std::path::Path) -> HashMap<String, Vec<Str
     out
 }
 
-/// 前の id の記録の最初の文の from 行の呼び手（#266）。記録は後ろに書き足されるだけで最初の文は変わらないので、決まったものは覚える
+/// 前の id の記録の最初の文の from 行の呼び手（#266）。前の id の記録にはもう行が増えないので、from 行が無いことも含めて覚え、
+/// snapshot のたびに projects/ を探し直さない
 static EARLIER_CALLER: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
 
 fn caller_of_earlier(id: &str) -> Option<String> {
@@ -329,11 +331,8 @@ fn caller_of_earlier(id: &str) -> Option<String> {
     if let Some(c) = known.get(id) {
         return c.clone();
     }
-    // 記録が無いなら、その id は文を受けずに終わった。まだ user の行が無いなら、次の回に読み直す
-    let found = match native::sessions::find_jsonl(&native::claude_home(), id) {
-        Some(p) => native::sessions::first_prompt_caller(&p)?,
-        None => None,
-    };
+    // 記録が無い、または user の行が無いなら、その id は人や親の文を受けずに終わった（/clear だけ打ったなど）
+    let found = native::sessions::find_jsonl(&native::claude_home(), id).and_then(|p| native::sessions::first_prompt_caller(&p).flatten());
     if known.len() >= 4096 {
         known.clear();
     }
@@ -905,6 +904,30 @@ mod tests {
         assert_eq!(by(e)["parent"], Value::Null, "pid の合わない並びを使っている");
         assert_eq!(by(a)["parent"], Value::Null);
         assert_eq!(by(p_new)["parent"], Value::Null);
+    }
+
+    /// 前の id の記録は、from 行が無いことも覚えて、2回目は読まない（snapshot のたびに projects/ を探し直さない）
+    #[test]
+    fn caller_of_earlier_reads_once() {
+        use native::testtree::*;
+        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = tmp("caller-of-earlier");
+        let none = "f0f0f0f0-0000-4000-8000-0000000000f0";
+        let some = "f1f1f1f1-0000-4000-8000-0000000000f1";
+        let p_none = root.join(format!("projects/-tmp-x/{none}.jsonl"));
+        let p_some = root.join(format!("projects/-tmp-x/{some}.jsonl"));
+        // none は /clear だけで終わった記録（user の行が無い）
+        write(&p_none, "{\"type\":\"system\"}\n");
+        write(&p_some, "{\"type\":\"user\",\"message\":{\"content\":\"from agent:n/0123abcd/r via n\\n\\nやって\"}}\n");
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        assert_eq!(caller_of_earlier(none), None);
+        assert_eq!(caller_of_earlier(some).as_deref(), Some("agent:n/0123abcd/r"));
+        // 記録を書き換えても、覚えた値を返す
+        write(&p_none, "{\"type\":\"user\",\"message\":{\"content\":\"from agent:n/aaaaaaaa/r via n\\n\\nやって\"}}\n");
+        fs::remove_file(&p_some).unwrap();
+        assert_eq!(caller_of_earlier(none), None);
+        assert_eq!(caller_of_earlier(some).as_deref(), Some("agent:n/0123abcd/r"));
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
     }
 
     #[test]

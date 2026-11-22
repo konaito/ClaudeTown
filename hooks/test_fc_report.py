@@ -443,12 +443,12 @@ class IdChain(HookCase):
         self.hook("SessionStart", sid=SID2, source="compact")
         self.assertEqual(self.ids()["ids"], [SID, SID2])
 
-    def test_session_end_removes_it_unless_clear(self):
+    def test_session_end_keeps_it(self):
+        # 終わったプロセスの並びは、次の SessionStart の sweep が pid を見て消す
         self.hook("SessionStart", source="startup")
         self.hook("SessionEnd", reason="clear")
-        self.assertEqual(self.ids()["ids"], [SID])
         self.hook("SessionEnd", reason="prompt_input_exit")
-        self.assertIsNone(self.ids())
+        self.assertEqual(self.ids()["ids"], [SID])
 
     def test_without_claude_pid_writes_nothing(self):
         self.run_hook("SessionStart", source="startup")
