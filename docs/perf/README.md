@@ -15,3 +15,11 @@
 - 町はモック（`scripts/mock-ccn-town.ts`）が毎回同じに作る。小さな町は4世帯・10人で全員待機、大きな町は30世帯・100人で作業中20・承認待ち5。モックは ccn と同じく一覧の SSE（`/api/sessions/stream`）を返す。口が無い ccn と比べるときは、`scripts/mock-ccn-town.ts` に `--no-stream` を渡す。
 - お手紙の記録（letters.jsonl）は、既定で 56KB（2026-11-13 の本人の Mac の大きさ）にし、時刻は24時間前にそろえる。#11 の 1MB の場合は `--letters-kb 1024` で測る。
 - 起動の時間は、プロセスが始まってから、一覧を読んだ町の最初の描画までの時間。vite の開発サーバーから読むので、製品版より長い。
+
+## headless の WebKit での計測（`scripts/bench-crowd-webkit.ts`）
+
+開発版の窓が隠れて描かれない間も、headless の WebKit（Playwright）なら同じ条件で CPU を測れる。`bun run build` した dist を `bun scripts/bench-crowd-webkit.ts <ラベル> <dist> <人数> <running|waiting_permission|idle> [回数]` で開く。町のモックは script の中で動くので、別のプロセスは要らない。段ごとの経過秒を標準エラーに出すので、止まったときは最後の段が止まった箇所である。
+
+- 必要なもの: playwright-core（Apache-2.0）と WebKit（約 320MB）。リポジトリの依存には入れず、`mkdir /tmp/pw-bench && cd /tmp/pw-bench && bun add playwright-core && bunx playwright-core install webkit` で入れ、`NODE_PATH=/tmp/pw-bench/node_modules` で渡す。WebKit は `~/Library/Caches/ms-playwright/webkit-<版>` に入る。
+- 2026-11-22 に数字が出なかった原因: #131 で `?mock` とモック（`scripts/mock-ccn-crowd.ts`）を消したので、旧 script の手順では町が出なかった。この script は、PROD で開いたときの `/api/sessions`（ccn の口の形）を同じポートで返すように変えた。
+- 窓の大きさは `VW` と `VH`（既定 1440×900）、ならしは `WARM` 秒、計測は `WIN` 秒で変える。結果は `OUT`（既定 `/tmp/ct-bench-crowd-webkit.jsonl`）に足す。
