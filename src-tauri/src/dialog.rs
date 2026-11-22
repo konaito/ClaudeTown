@@ -106,8 +106,11 @@ pub fn parse(screen: &str) -> Option<Dialog> {
                 if let Some((_, r)) = row_of(l) {
                     rows.push(r);
                 } else if rows.is_empty() {
-                    if !l.trim().is_empty() {
-                        question.push_str(l.trim());
+                    // 質問の文は、各行の頭に引用の罫線「│ 」が付いて出ることがある（v2.1.330、2026-11-22）。行頭の1つだけ外す
+                    let t = l.trim();
+                    let t = t.strip_prefix('│').map(str::trim_start).unwrap_or(t);
+                    if !t.is_empty() {
+                        question.push_str(t);
                         question.push(' ');
                     }
                 } else {
@@ -689,6 +692,47 @@ mod tests {
     // 計画の確認は、PTY（vt100）で解いた実物の画面。空行がある
     const PLAN: &str = "⏺ Updated plan\n  ⎿  /plan to preview\n\n────────────────────────────────────────\n Ready to code?\n\n Here is Claude's plan:\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n Create hello.txt in /private/tmp/fc-ask-probe containing \"hi\".\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n\n────────────────────────────────────────\n Claude has written up a plan and is ready to execute. Would you like to proceed?\n\n ❯ 1. Yes, and use auto mode\n   2. Yes, manually approve edits\n   3. Tell Claude what to change\n      shift+tab to approve with this feedback\n\n ctrl+g to edit in Vim · ~/.claude/plans/plan-create-a-file-binary-pascal.md";
     const IDLE: &str = "⏺ 色は Blue でした。\n範囲はどこまでにする？\n1. 質問だけ\n2. 全部\n────────────────────────────────────────\n❯ \n────────────────────────────────────────\n  ⏸ manual mode on · ? for shortcuts";
+
+    // 2026-11-22 に v2.1.330 の claude を tmux（100x50）で動かして撮った実物の画面。質問の各行の頭に「│ 」が付く（fix-storage-gui の承認で、チャット欄が「質問の中身が読めない」と出た）
+    const QUOTE_Q1: &str = include_str!("dialog_fixtures/ask_quote_q1.txt");
+    const QUOTE_Q2: &str = include_str!("dialog_fixtures/ask_quote_q2.txt");
+    const QUOTE_REVIEW: &str = include_str!("dialog_fixtures/ask_quote_review.txt");
+    // 本物の hook（perm/<id>.json）の items の input
+    fn quote_hook() -> Vec<HookItem> {
+        let input = json!({"questions": [
+            {"question": "Fix Storage GUI（今 /Applications にある v0.2.0、Developer ID 署名済み）を消して入れ直す。入れ直すのはどれ？", "header": "入れる版", "multiSelect": false,
+             "options": [{"label": "Release の v0.2.0", "description": "GitHub Releases の最新 dmg（~/Downloads に同じ dmg もある）。今入っているのと同じ版"}, {"label": "今のブランチをビルド", "description": "feat/login-redesign（ログイン画面作り直し）を手元で universal ビルドして入れる。ad-hoc 署名・未公証になる"}]},
+            {"question": "アプリのデータも消す？（Application Support・Caches・WebKit の io.github.konaito.fixstoragegui / fix-storage-gui と、keyring に入れている鍵やログイン情報）", "header": "データ", "multiSelect": false,
+             "options": [{"label": "全部消す（初回起動状態）", "description": "x"}, {"label": "アプリ本体だけ", "description": "x"}, {"label": "キーチェーン以外を消す", "description": "x"}]}
+        ]});
+        vec![HookItem { tool_name: "AskUserQuestion".into(), tool_input: input, agent_id: None, at: 1 }]
+    }
+
+    #[test]
+    fn quoted_long_questions_match_hook() {
+        let hook = quote_hook();
+        let qs = questions_of(&hook[0].tool_input);
+        for (screen, want) in [(QUOTE_Q1, 0usize), (QUOTE_Q2, 1)] {
+            let d = parse(screen).expect("質問の画面");
+            let Dialog::Ask { question, .. } = &d else { panic!("Ask ではない: {d:?}") };
+            assert!(!question.contains('│'), "質問の文に罫線が混ざった: {question}");
+            let (t, kind) = match_tool(&d, &hook, &[]).expect("hook の質問と合う");
+            assert_eq!((kind, t.1.as_str()), ("ask", "AskUserQuestion"));
+            let act = Act::Ask { picks: vec![pk(&[0], ""), pk(&[2], "")] };
+            assert_eq!(next_step(Some(&d), &act, &qs), Step::Key(digit(if want == 0 { 1 } else { 3 })));
+        }
+        // 別の質問には合わない
+        let other = vec![HookItem { tool_input: json!({"questions": [{"question": "全然違う質問？", "options": []}]}), ..hook[0].clone() }];
+        assert!(match_tool(&parse(QUOTE_Q1).unwrap(), &other, &[]).is_err());
+    }
+
+    #[test]
+    fn quoted_review_matches_two_questions() {
+        let d = parse(QUOTE_REVIEW).expect("確かめの画面");
+        let Dialog::Review { answers, .. } = &d else { panic!("Review ではない: {d:?}") };
+        assert_eq!(answers, &vec!["Release の v0.2.0".to_string(), "キーチェーン以外を消す".to_string()]);
+        assert!(match_tool(&d, &quote_hook(), &[]).is_ok());
+    }
 
     fn qs2() -> Vec<Q> {
         vec![

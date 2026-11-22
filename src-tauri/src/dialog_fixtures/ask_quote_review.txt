@@ -1,0 +1,29 @@
+────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ 入れる版  ☒ データ  ✔ Submit  →
+
+Review your answers
+
+ │ ● Fix Storage GUI（今 /Applications にある v0.2.0、Developer ID
+ │   署名済み）を消して入れ直す。入れ直すのはどれ？
+   → Release の v0.2.0
+ │ ● アプリのデータも消す？（Application Support・Caches・WebKit の io.github.konaito.fixstoragegui
+ │   / fix-storage-gui と、keyring に入れている鍵やログイン情報）
+   → キーチェーン以外を消す
+
+❯ 1. Submit answers
+  2. Cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
