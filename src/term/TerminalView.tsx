@@ -53,7 +53,7 @@ function sharedTerm(): Shared {
     scrollback: 1000, allowProposedApi: false,
     // OSC 8 のリンク（claude が出す）を押したとき。既定は window.open なので、既定のブラウザで開く。http と https 以外は openExternal が開かない
     linkHandler: { activate: (_e, uri) => { openExternal(uri); }, allowNonHttpProtocols: false },
-    theme: { background: "#ffffff", foreground: "#2f2d36", cursor: "#2f2d36", selectionBackground: "#cfe0ff", black: "#2f2d36", brightBlack: "#8a8794" },
+    theme: { background: "#ffffff", foreground: "#2f2d36", cursor: "#2f2d36", selectionBackground: "#cfe0ff", black: "#2f2d36", brightBlack: "#6c6a75" },
   });
   const fit = new FitAddon();
   term.loadAddon(fit);

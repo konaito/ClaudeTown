@@ -129,6 +129,8 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   // 見た目の確認用: public/dev-house-places.json（Rust の house_places の出力）。無ければ空の一覧
   if (cmd === "house_places") return devJson<T>("dev-house-places.json", { roots: [], lobby: null, sessions: [], places: null } as T);
   if (cmd === "place_repos") return devJson<T>("dev-place-repos.json", {} as T);
+  // 見た目の確認用: public/dev-session-detail.json（承認待ちの中身。どのセッションにも同じものを返す）。無ければ承認待ちなし
+  if (cmd === "session_detail") return devJson<T>("dev-session-detail.json", null as T);
   // ブラウザ表示では本物の会話を読めない。別のセッションの会話を見せて取り違えに見えないよう、仮の1件だけ返す
   // 見た目の確認用: ?longconv を付けると、スクロールが要る長さの仮の会話を返す
   // 見た目の確認用: ?conv を付けると public/dev-conversation.json（`--conversation <id>` の出力の Ok）を返す
