@@ -19,6 +19,8 @@ const TTL: Duration = Duration::from_secs(30);
 pub enum Choice {
     /// このプロファイルで起動する。dir は claude に渡す CLAUDE_CONFIG_DIR
     Profile { name: String, dir: PathBuf },
+    /// best が --default のコマンド（プロファイルのディレクトリが無い）。~/.claude のログインで起動する（#251）
+    Default { name: String },
     /// 枠の残るコマンドが無い（choice: none）。いちばん早く戻るコマンドと時刻（epoch 秒）
     None { next: Option<(String, i64)> },
     /// 選ばない。env を触らずに起動する（理由はログに出す）
@@ -54,8 +56,20 @@ pub fn choose(stdout: &str, profiles: &Path, is_dir: impl Fn(&Path) -> bool) -> 
     if is_dir(&dir) {
         Choice::Profile { name: best.to_string(), dir }
     } else {
-        Choice::Keep(format!("cam の best（{best}）は --default のコマンド"))
+        // cam add の決まり（プロファイルのディレクトリが無いコマンドは ~/.claude のログインを使う）と同じ判定
+        Choice::Default { name: best.to_string() }
     }
+}
+
+/// claude の CLAUDE_CONFIG_DIR をどうするか
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConfigDir {
+    /// この値にする。アプリの環境に別の値があっても上書きする
+    Set(PathBuf),
+    /// 外す（~/.claude で起動する）。cam が --default のコマンドを選んだとき。アプリの環境にプロファイルの値があっても使わない（#251）
+    Unset,
+    /// 触らない。アプリの環境の値のまま起動する（cam を使わない、使えないとき）
+    Keep,
 }
 
 /// choice: none のとき起動をやめるか。戻る時刻が分かっていて、まだ先のときだけやめる。
@@ -156,11 +170,11 @@ pub fn pick(path: Option<&str>) -> Choice {
     choice
 }
 
-/// 起動の直前の用意。返すのは claude に渡す CLAUDE_CONFIG_DIR（None なら env を触らない）。起動をやめるときは Err（refuse が true のときだけ。新しく立てるとき）。
+/// 起動の直前の用意。返すのは claude の CLAUDE_CONFIG_DIR の扱い（ConfigDir）。起動をやめるときは Err（refuse が true のときだけ。新しく立てるとき）。
 /// プロファイルを選んだら launcher と同じく `cam sync <名前>` を掛ける（共有のリンク、MCP、信頼済みフォルダの同期。失敗しても起動は続ける）。
 /// 信頼済みフォルダは cam sync が ~/.claude.json と全プロファイルの和をプロファイルに写すので、ccn のように cwd を書き足すことはしない
 /// （launcher も書かない。Claude Town は信頼の画面を端末で出す）
-pub fn prepare(path: Option<&str>, refuse: bool) -> Result<Option<PathBuf>, String> {
+pub fn prepare(path: Option<&str>, refuse: bool) -> Result<ConfigDir, String> {
     let choice = pick(path);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     if let Some(why) = refuse_reason(&choice, now).filter(|_| refuse) {
@@ -176,15 +190,20 @@ pub fn prepare(path: Option<&str>, refuse: bool) -> Result<Option<PathBuf>, Stri
                 }
             }
             eprintln!("[account] {name} で起動する（{}）", dir.display());
-            Ok(Some(dir))
+            Ok(ConfigDir::Set(dir))
+        }
+        // launcher（~/.cam/bin/<名前>）と同じく cam sync は掛けない
+        Choice::Default { name } => {
+            eprintln!("[account] {name}（--default のコマンド）で起動する。CLAUDE_CONFIG_DIR を外す");
+            Ok(ConfigDir::Unset)
         }
         Choice::None { next } => {
             eprintln!("[account] cam に使えるコマンドが無いが、resume か、戻る時刻が過ぎているか分からないので今まで通り起動する: {next:?}");
-            Ok(None)
+            Ok(ConfigDir::Keep)
         }
         Choice::Keep(why) => {
             eprintln!("[account] 今まで通り起動する: {why}");
-            Ok(None)
+            Ok(ConfigDir::Keep)
         }
     }
 }
@@ -208,8 +227,9 @@ mod tests {
     }
 
     #[test]
-    fn a_default_command_keeps_the_env() {
-        assert!(matches!(pick_of(r#"{"best":"main","choice":"normal"}"#, &[]), Choice::Keep(_)));
+    fn a_default_command_is_the_default_login() {
+        assert_eq!(pick_of(r#"{"best":"main","choice":"normal"}"#, &[]), Choice::Default { name: "main".into() });
+        assert_eq!(refuse_reason(&Choice::Default { name: "main".into() }, 1000), None);
     }
 
     #[test]

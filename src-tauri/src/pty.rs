@@ -355,9 +355,12 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
     if let Some(p) = &path {
         cmd.env("PATH", p);
     }
-    // 選べたときだけ差し替える。アプリの環境に別の値があっても（cam の launcher から開いた開発版）、選んだプロファイルにする
-    if let Some(d) = &config_dir {
-        cmd.env("CLAUDE_CONFIG_DIR", d);
+    // 選べたときだけ差し替える。アプリの環境に別の値があっても（cam の launcher から開いた開発版）、選んだプロファイルにする。
+    // cam が --default のコマンドを選んだら外して ~/.claude で起動する（#251）。選べないときは触らない
+    match &config_dir {
+        crate::account::ConfigDir::Set(d) => { cmd.env("CLAUDE_CONFIG_DIR", d); }
+        crate::account::ConfigDir::Unset => { cmd.env_remove("CLAUDE_CONFIG_DIR"); }
+        crate::account::ConfigDir::Keep => {}
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -720,6 +723,15 @@ mod tests {
         let dir = fake_cam_dir("unknown", r#"{"best":null,"choice":"unknown","next_available":null,"accounts":[]}"#);
         assert_eq!(launched_config_dir(&dir).unwrap().as_deref(), Some("/nowhere/inherited"));
         assert!(!dir.join("sync.log").exists());
+    }
+
+    /// cam の best が --default のコマンド（プロファイルのディレクトリが無い）なら、~/.claude で起動する。
+    /// アプリの環境の CLAUDE_CONFIG_DIR（cam のプロファイルで動く子が開いた開発版）を外す（#251）。直す前は親の値のまま起動していた
+    #[test]
+    fn launch_drops_the_inherited_config_dir_for_a_default_command() {
+        let dir = fake_cam_dir("default", r#"{"best":"main","choice":"normal","next_available":null,"accounts":[]}"#);
+        assert_eq!(launched_config_dir(&dir).unwrap(), None);
+        assert!(!dir.join("sync.log").exists(), "--default のコマンドに cam sync は掛けない（launcher も掛けない）");
     }
 
     /// 全部のアカウントが上限で、戻る時刻が先にあるときは起動しない。理由に戻るアカウントを書く
