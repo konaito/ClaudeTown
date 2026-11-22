@@ -11,9 +11,16 @@
 
 cam の各プロファイルの settings.json は ~/.claude/settings.json へのリンクなので、ここだけ書けば全部に効く。
 書く前に settings.json.bak-fc-<時刻> を残す。読み出しが空や壊れていたら何も書かずに止まる。
+
+登録するコマンドは、登録先のファイルが無ければ何もせず 0 で終わる（#171）。
+python3 は開けないファイルを渡されると 2 で終わり、Claude Code は PreToolUse と UserPromptSubmit の 2 を「止める」として扱う。
+登録したまま worktree や安定版の写しを消すと、この機械の全セッションの道具と入力が止まっていた。
+#171 より前の形（/usr/bin/python3 <path> # family-computing）は status、install、uninstall が MARK で見つけて扱う。
+install し直すと新しい形に替わる。
 """
 import json
 import os
+import shlex
 import shutil
 import sys
 import time
@@ -28,7 +35,13 @@ EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest",
 
 
 def command(script):
-    return f"/usr/bin/python3 {script} {MARK}"
+    # MARK は末尾のシェルのコメントとして残す。古い hook.py（安定版に写した分を含む）も MARK で新しい形を見つけて外せる
+    f = shlex.quote(str(script))
+    return f'f={f}; [ -f "$f" ] || exit 0; /usr/bin/python3 "$f" {MARK}'
+
+
+def guarded(cmd):
+    return '[ -f "$f" ] || exit 0' in cmd
 
 
 def load():
@@ -77,9 +90,11 @@ def main():
         print("登録済み: " + ", ".join(evs) if evs else "未登録")
         for c in cmds:
             print("  " + c)
+        if any(not guarded(c) for c in cmds):
+            print("古い形の登録がある。登録先のファイルが無いと全セッションの道具が止まるので、install し直す（#171）")
     elif cmd == "install":
         script = WORKTREE_SCRIPT if "--worktree" in sys.argv[2:] else SCRIPT
-        # 無いファイルを登録すると python3 が 2 で終わり、PreToolUse では全セッションの道具が止まる
+        # 登録するコマンドはファイルが無くても 0 で終わるが、無いファイルを登録しても状態は出ないので止める
         if not script.exists():
             sys.exit(f"{script} が無い（安定版の写しは scripts/install-stable-hooks.sh で作る）")
         strip(data)
