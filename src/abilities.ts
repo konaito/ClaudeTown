@@ -13,7 +13,7 @@ export const canStop = (a: HasCaps): boolean => a?.capabilities?.stop === true;
 /** 作業中のターンを割り込んで止められるか */
 export const canInterrupt = (a: HasCaps): boolean => a?.capabilities?.interrupt === true;
 
-/** 承認の欄から答えられるか。ブラウザ版の ccn の行だけ。アプリが立てたセッションは端末の承認の画面で答える */
+/** 承認の欄から答えられるか。アプリが立てたセッション（端末の承認の画面にキーを書く、dialog.rs）と、ブラウザ版の ccn の行 */
 export const canAnswerPermission = (a: HasCaps): boolean => a?.capabilities?.permissions === true;
 
 /** 端末（ターミナルのタブ）を持つか */

@@ -136,6 +136,10 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   // 見た目の確認用: public/dev-house-places.json（Rust の house_places の出力）。無ければ空の一覧
   if (cmd === "house_places") return devJson<T>("dev-house-places.json", { roots: [], lobby: null, sessions: [], places: null } as T);
   if (cmd === "place_repos") return devJson<T>("dev-place-repos.json", {} as T);
+  // 見た目の確認用: ?approval=<名前> を付けると、承認の欄の中身に public/dev-approval-<名前>.json（Rust の session_detail の出力の形）を返す
+  if (cmd === "session_detail" && location.search.includes("approval=")) {
+    return devJson<T>(`dev-approval-${new URLSearchParams(location.search).get("approval")}.json`, { pending: [] } as T);
+  }
   // 見た目の確認用: public/dev-session-detail.json（承認待ちの中身。どのセッションにも同じものを返す）。無ければ承認待ちなし
   if (cmd === "session_detail") return devJson<T>("dev-session-detail.json", null as T);
   // 見た目の確認用: ?boot を付けると、起動を待って1件預かっている様子を返す（信頼の確認の画面を疑う長さ）

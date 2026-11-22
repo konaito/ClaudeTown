@@ -33,3 +33,4 @@ public/dev-letters.json
 public/dev-house-places.json
 public/dev-place-repos.json
 public/dev-session-detail.json
+public/dev-approval-*.json

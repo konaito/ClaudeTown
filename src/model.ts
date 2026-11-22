@@ -213,16 +213,35 @@ export function cardNames(ws: Who[]): Map<string, string> {
   );
 }
 
-/** 返事の最後の段落が問いで、その中に短い選択肢の行があれば取り出す（ボタンにする） */
+/**
+ * 返事の最後の問いに付いた選択肢の行を取り出す（ボタンにする）。選択肢は、問いの行のすぐ後ろ（無ければすぐ前）に続く箇条書き。
+ * - と * は後ろに空白があるときだけ箇条書きとみる（「**太字**」の行を箇条書きにしない、2026-11-22）
+ * 長すぎる行が混じったら、黙って落とさずに何も出さない（落とすと残りだけの違う選択肢になる、2026-11-22）
+ */
 export function choicesOf(text: string): string[] {
-  const paras = text.trim().split(/\n\s*\n/);
-  const tail = paras.slice(-2).join("\n");
-  if (!/[?？]/.test(tail)) return [];
-  const opts: string[] = [];
-  for (const line of tail.split("\n")) {
-    const m = line.match(/^\s*(?:[-*・]|\d+[.)．]|[A-DＡ-Ｄ][:：.)])\s*(.+?)\s*$/);
-    if (m && m[1].length <= 40) opts.push(m[1].replace(/\*\*/g, ""));
-  }
+  const lines = text.trim().split("\n").slice(-40);
+  const item = (line: string): string | null => {
+    const m = line.match(/^\s*(?:[-*]\s+|・\s*|\d+[.)．]\s*|[A-DＡ-Ｄ][:：.)]\s*)(.+?)\s*$/);
+    return m ? m[1].replace(/\*\*/g, "").trim() : null;
+  };
+  let q = -1;
+  lines.forEach((l, i) => { if (/[?？]/.test(l) && item(l) === null) q = i; });
+  if (q < 0) return [];
+  // 問いの後ろの段落か前の段落。間の空行は1つまで
+  const block = (from: number, step: 1 | -1): string[] => {
+    const out: string[] = [];
+    let i = from;
+    if (lines[i] !== undefined && !lines[i].trim()) i += step;
+    for (; i >= 0 && i < lines.length; i += step) {
+      const it = item(lines[i]);
+      if (it === null) break;
+      out.push(it);
+    }
+    return step === 1 ? out : out.reverse();
+  };
+  const after = block(q + 1, 1);
+  const opts = after.length ? after : block(q - 1, -1);
+  if (opts.some((o) => !o || o.length > 200)) return [];
   return opts.length >= 2 && opts.length <= 5 ? opts : [];
 }
 
