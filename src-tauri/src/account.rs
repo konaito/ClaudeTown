@@ -237,9 +237,9 @@ pub fn prepare(path: Option<&str>, refuse: bool) -> Result<Prepared, String> {
     }
 }
 
-/// 上限で止めたときに画面に出す一言
+/// 上限で止めたときに画面に出す一言。結果は TTL（30秒）使い回すので、すぐに立て直すと同じく既定のアカウントで立つ
 fn fallback_text(why: &str) -> String {
-    format!("アカウントを選べず、既定のアカウントで起動した（{why}）。上限に達したアカウントなら、送る前に立て直す")
+    format!("アカウントを選べず、既定のアカウントで起動した（{why}）。上限に達したアカウントなら、送る前に30秒ほど置いてから立て直す")
 }
 
 #[cfg(test)]
