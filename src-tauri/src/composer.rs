@@ -1113,7 +1113,8 @@ while True:
         until(3, "入力欄への Enter", || s.events().contains("enter:input:hello") || s.events().contains("enter:picker"));
         let ev = s.events();
         assert!(!ev.contains("paste:picker") && !ev.contains("enter:picker"), "ピッカーに文か Enter が届いた: {ev:?}");
-        assert!(ev.contains("enter:input:hello"), "{ev:?}");
+        // 送った文は、ピッカーが閉じた後に入力欄へ届く
+        assert_eq!(ev, "paste:input:/model\nenter:input:/model\npaste:input:hello\nenter:input:hello\n");
         assert!(r.is_ok(), "{r:?}");
         assert!(m.is_err(), "代役のピッカーに Opus の行は無い: {m:?}");
     }

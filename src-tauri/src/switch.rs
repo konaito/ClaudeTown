@@ -268,6 +268,8 @@ fn set_model_locked(id: &str, model: &str) -> Result<(), String> {
     }
     if cur.as_deref() != Some(name) {
         super::pty::write(id, "\x1b")?;
+        // 閉じたのを見てから錠を放す。見ずに戻ると、待っていた送信が閉じかけのピッカーを読んで断る
+        wait_screen(id, 1.5, |s| !s.contains(PICKER)).ok_or("ピッカーに Esc を送ったが、閉じなかった。ターミナルで様子を見る")?;
         return Err(format!("/model のピッカーに {name} の行が見つからなかったので、閉じた"));
     }
     super::pty::write(id, "s")?;
