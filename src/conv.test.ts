@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, settlePending, answerPending, withNotes, type Live, type PendingItem } from "./conv";
+import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, settlePending, answerPending, withNotes, withQueued, type Live, type PendingItem } from "./conv";
 import type { ConvItem } from "./model";
 
 const item = (n: number): ConvItem => ({ role: "assistant", text: `t${n}`, n });
@@ -158,5 +158,21 @@ describe("withNotes（#97）", () => {
   test("印が無ければ同じ配列を返す", () => {
     const xs = [it(1)];
     expect(withNotes(xs, [])).toBe(xs);
+  });
+});
+
+describe("withQueued（順番待ち）", () => {
+  const q: ConvItem[] = [{ role: "user", text: "一回オンにしたけど、開き直す？", at: "2026-11-22T11:49:56.503Z" }, { role: "user", text: "こんにちは", from: "from local via konaito-pro", at: "t2" }];
+  const sent: PendingItem = { role: "user", text: "こんにちは", pending: true, at: "t1", after: 3 };
+  const other: PendingItem = { role: "user", text: "別の文", pending: true, at: "t1", after: 3 };
+  test("作業中は待ちの文を印付きで出し、このアプリから送った同じ文の仮の項目は待ちに置き換える", () => {
+    const r = withQueued([sent, other], q, true);
+    expect(r.queued.map((x) => [x.text, x.queued, x.pending])).toEqual([["一回オンにしたけど、開き直す？", true, true], ["こんにちは", true, true]]);
+    expect(r.waiting).toEqual([other]);
+  });
+  test("止まっているとき、待ちが無いときは何も足さず、仮の項目もそのまま", () => {
+    const w = [sent];
+    expect(withQueued(w, q, false)).toEqual({ waiting: w, queued: [] });
+    expect(withQueued(w, undefined, true).waiting).toBe(w);
   });
 });

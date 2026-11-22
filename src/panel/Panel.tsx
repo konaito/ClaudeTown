@@ -10,7 +10,7 @@ import { openPlan } from "../approval/answers";
 import { Avatar, roleOf } from "../kid/Avatar";
 import { type Agent, MOOD_LABEL, accountText, choicesOf, moodOf, targetLabel, taskOf } from "../model";
 import { linkify } from "../Markdown";
-import { withNotes, type PendingItem } from "../conv";
+import { withNotes, withQueued, type PendingItem } from "../conv";
 import { Bubble, collapseTools, withResults } from "../chat/Bubble";
 import { LiveLine } from "../chat/LiveLine";
 import { TownCtx } from "../contexts";
@@ -89,11 +89,14 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
 
   // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
   // -p の子は返事が出ると、送った文の仮の印が外れる（#55、answerPending）。外れた分は after の位置に置く（withNotes）
+  // 作業中に打たれた文（順番待ち）は、送った文の後ろ、今の動きの行の前に出す。CLI の端末と同じ並び
+  const running = !!agent && (moodOf(agent) === "working" || moodOf(agent) === "approval");
+  const liveQueued = live?.queued;
   const shown = useMemo(() => {
-    const waiting = pending.filter((x) => x.pending);
-    const placed = pending.length === waiting.length ? notes : [...notes, ...pending.filter((x) => !x.pending)].sort((a, b) => a.after - b.after);
-    return collapseTools(withResults(withNotes([...items, ...waiting], placed)));
-  }, [items, pending, notes]);
+    const { waiting, queued } = withQueued(pending.filter((x) => x.pending), liveQueued, running);
+    const placed = pending.every((x) => x.pending) ? notes : [...notes, ...pending.filter((x) => !x.pending)].sort((a, b) => a.after - b.after);
+    return [...collapseTools(withResults(withNotes([...items, ...waiting], placed))), ...queued];
+  }, [items, pending, notes, liveQueued, running]);
   // 読めなかった印が出ているか。出ている間は中身の上に余白を足す（下の has-note）
   const hasNote = shown.length > 0 && !!convErr;
   // 会話の最後のまだ答えていない計画（ExitPlanMode の本文）。承認の hook の入力が空のとき、承認の欄に出す（#83）

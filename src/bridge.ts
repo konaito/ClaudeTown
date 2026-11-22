@@ -132,8 +132,11 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   // ブラウザ表示では本物の会話を読めない。別のセッションの会話を見せて取り違えに見えないよう、仮の1件だけ返す
   // 見た目の確認用: ?longconv を付けると、スクロールが要る長さの仮の会話を返す
   // 見た目の確認用: ?conv を付けると public/dev-conversation.json（`--conversation <id>` の出力の Ok）を返す
+  // 中身が { items, live } のときは live（今の動きと順番待ち）も返す
   if (cmd === "conversation" && location.search.includes("conv") && !location.search.includes("longconv")) {
-    return deltaOf(await devJson("dev-conversation.json", []), args?.since as number | null) as T;
+    const j = await devJson<ConvItem[] | { items: ConvItem[]; live?: unknown }>("dev-conversation.json", []);
+    if (Array.isArray(j)) return deltaOf(j, args?.since as number | null) as T;
+    return { ...deltaOf(j.items, args?.since as number | null), live: j.live ?? null } as T;
   }
   if (cmd === "conversation" && location.search.includes("longconv")) return deltaOf(fakeConv(), args?.since as number | null) as T;
   if (cmd === "conversation") return deltaOf([{ role: "assistant", text: `（ブラウザ表示の仮の会話）${String(args?.sessionId ?? "").slice(0, 8)} の会話は、アプリの中で Claude Code の記録から読む。` }], args?.since as number | null) as T;
