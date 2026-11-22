@@ -72,7 +72,9 @@ pub fn owns(id: &str) -> bool {
     with(|m| pid_of(m, id).is_some())
 }
 
-/// 一覧で見えた行（id と pid）を台帳に足す。/clear などで id が変わっても、同じ pid なら同じ端末として扱う
+/// 一覧で見えた行（id と pid）を台帳に足す。/clear などで id が変わっても、同じ pid なら同じ端末として扱う。
+/// 端末が前に名乗った id が別の pid の行として見えたら（よその端末で `claude --resume <前の id>`、#174）、その端末の ids から外す。
+/// 今の id（cur）は外さない。起動の直後や、claude を子として立てる launcher では、一覧の pid が台帳の pid と合わないことがあるため
 pub fn note_ids(rows: &[(String, u32)]) {
     let changed = with(|m| {
         let mut changed = false;
@@ -84,6 +86,14 @@ pub fn note_ids(rows: &[(String, u32)]) {
                 if p.cur != *id {
                     p.cur = id.clone();
                     changed = true;
+                }
+            }
+        }
+        // cur を全部の行で決めてから外す（同じ回の一覧で /clear の後の id がまだ後ろにあっても、前の id を外せるように）
+        for (id, pid) in rows {
+            for p in m.values_mut() {
+                if p.pid != *pid && p.cur != *id && p.ids.len() > 1 {
+                    p.ids.retain(|x| x != id);
                 }
             }
         }
@@ -873,6 +883,50 @@ mod tests {
         SHUTTING.store(false, Ordering::SeqCst);
         *LEDGER.lock().unwrap_or_else(|e| e.into_inner()) = None;
         unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+    }
+
+    /// /clear で X から Y になった端末の X が、別の pid の行として見えたら（よその端末で `claude --resume X`）、X はもうこの端末ではない（#174）。
+    /// 今の id のまま別の pid に見えたときは外さない（起動の直後や、claude を子として立てる launcher で pid が合わないときに、自分の端末を手放さない）
+    #[test]
+    fn an_old_id_seen_on_another_pid_leaves_the_terminal() {
+        use std::os::unix::fs::PermissionsExt;
+        // 町の一覧を数える試験（lib.rs）に、この端末が混ざらないようにする
+        let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fc-pty-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        std::fs::write(&bin, "#!/bin/sh\nexec cat\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
+        let x = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {}).unwrap()["id"].as_str().unwrap().to_string();
+        let z = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {}).unwrap()["id"].as_str().unwrap().to_string();
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+        let px = pid_of_id(&x).unwrap();
+        let pz = pid_of_id(&z).unwrap();
+        // 台帳に無い pid（この試験のプロセス）を、よその端末の pid にする
+        let other = std::process::id();
+        let y = format!("cleared-{x}");
+
+        note_ids(&[(y.clone(), px)]);
+        assert_eq!(pid_of_id(&x), Some(px), "/clear の前の id でも同じ端末");
+        note_ids(&[(x.clone(), other), (y.clone(), px)]);
+        assert_eq!(pid_of_id(&x), None, "よその端末で resume した前の id を、まだこのアプリの端末として扱っている");
+        assert_eq!(pid_of_id(&y), Some(px), "今の id はこの端末のまま");
+        assert_eq!(ids_of(&y), vec![y.clone()]);
+
+        // 今の id が別の pid に見えても外さない
+        note_ids(&[(z.clone(), other)]);
+        assert_eq!(pid_of_id(&z), Some(pz));
+
+        for id in [&y, &z] {
+            kill(id).unwrap();
+        }
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(5) && (owns(&y) || owns(&z)) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!owns(&y) && !owns(&z));
     }
 
     /// 本物の PTY で、cat を起動して書き、読み、止める（claude の代わり）
