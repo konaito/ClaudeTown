@@ -34,7 +34,7 @@ pub struct Row {
 pub enum Dialog {
     /// 質問の1問。submit は複数選択の「Submit」の行があるときに Some（中身はカーソルがそこにあるか）
     Ask { question: String, rows: Vec<Row>, submit: Option<bool> },
-    /// 全部の質問に答えた後の確かめ。answers は「→ 」の後ろ
+    /// 全部の質問に答えた後の確かめ。answers は「→ 」の後ろと、折り返した続きの行をつないだもの
     Review { answers: Vec<String>, rows: Vec<Row> },
     /// 道具の承認と計画の確認。prompt は番号の行のすぐ上の行、body はその上の区切り線から prompt の前まで
     Choice { prompt: String, body: String, rows: Vec<Row> },
@@ -904,7 +904,9 @@ mod tests {
         let Dialog::Review { answers, .. } = &d else { panic!("Review ではない: {d:?}") };
         assert_eq!(answers.len(), 2, "{answers:?}");
         assert_eq!(next_step(Some(&d), &act, &qs), Step::Final("1".into()));
-        // 続きの行まで比べるので、続きだけが違う答えは送らない
+        // 続きの行まで比べるので、1行目が同じで続きだけが違う答えは送らない
+        let tail = Act::Ask { picks: vec![pk(&[], &memo.replace("しておく", "さない")), pk(&[0, 1, 2, 3], "")] };
+        assert!(matches!(next_step(Some(&d), &tail, &qs), Step::Fail(_)));
         let other = Act::Ask { picks: vec![pk(&[], memo), pk(&[0, 1, 2], "")] };
         assert!(matches!(next_step(Some(&d), &other, &qs), Step::Fail(_)));
         // 質問の文の続き（引用の罫線「│」付き）は答えに混ぜない
@@ -920,16 +922,21 @@ mod tests {
         checked: Vec<Vec<bool>>,
         /// 1..=n+1 は番号の行、n+2 は Submit
         cur: usize,
+        /// 確かめの画面で送った
+        sent: bool,
     }
 
     impl MultiSim {
         fn new(qs: Vec<Q>) -> Self {
             let checked = qs.iter().map(|q| vec![false; q.labels.len() + 1]).collect();
-            MultiSim { qs, at: 0, checked, cur: 1 }
+            MultiSim { qs, at: 0, checked, cur: 1, sent: false }
         }
         fn screen(&self) -> String {
             let tabs = format!("←  {}  ✔ Submit  →", (0..self.qs.len()).map(|i| format!("{} Q{i}", if i < self.at { '☒' } else { '☐' })).collect::<Vec<_>>().join("  "));
             let c = |on: bool| if on { "❯ " } else { "  " };
+            if self.sent {
+                return String::new();
+            }
             if self.at == self.qs.len() {
                 let mut s = format!("{tabs}\n\nReview your answers\n\n");
                 for (i, q) in self.qs.iter().enumerate() {
@@ -949,6 +956,11 @@ mod tests {
             s
         }
         fn key(&mut self, k: &str) {
+            if self.at == self.qs.len() {
+                assert_eq!(k, "1", "確かめの画面で Submit answers 以外を押した");
+                self.sent = true;
+                return;
+            }
             let n = self.qs[self.at].labels.len();
             match k {
                 "\x1b[B" => self.cur = (self.cur + 1).min(n + 2),
@@ -986,6 +998,9 @@ mod tests {
             }
         };
         assert_eq!((fin.as_str(), tries), ("1", 41));
+        // 送ると承認の画面が閉じる
+        sim.key(&fin);
+        assert_eq!(next_step(parse(&sim.screen()).as_ref(), &act, &qs), Step::Done);
         // 質問の無い承認（道具の承認、計画の確認）は今までと同じ上限
         assert_eq!(key_limit(&[]), 40);
     }
