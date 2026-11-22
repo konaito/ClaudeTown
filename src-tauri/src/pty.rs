@@ -648,7 +648,7 @@ mod tests {
         let owned = owns(&id);
         let listed = !list().is_empty();
         let took = t0.elapsed();
-        // 確かめる前に止める（落ちても代役を残さない）。止めると書き込みも戻る
+        // 確かめる前に止める（落ちても代役を残さない）
         kill(&id).unwrap();
         let t1 = Instant::now();
         while t1.elapsed() < Duration::from_secs(5) && owns(&id) {
