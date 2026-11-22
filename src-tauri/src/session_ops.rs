@@ -61,6 +61,9 @@ pub(crate) fn plan_for(root: &std::path::Path, id: &str, cwd: &str) -> Plan {
     }
 }
 
+/// 起動のときの立て直しで、前のアプリの claude が終わるのを待つ上限
+const RESTORE_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// 起動したときに、前回開いていて終わっていなかった端末を立て直す。台帳は terminals.json（アプリの置き場所）。
 /// 結果は1件ずつ stderr と restore.log に書く。立てられなかった（起動の失敗）ものは台帳に残し、次の起動でもう一度試す
 pub(crate) fn restore_terminals() {
@@ -69,6 +72,12 @@ pub(crate) fn restore_terminals() {
     let root = native::claude_home();
     let mut log = vec![format!("{} 台帳 {} の {} 件", now_ms(), path.display(), prev.len())];
     for e in prev {
+        // 前のアプリの claude がまだ終わりきっていなければ、消えるまで待つ（上限 RESTORE_WAIT）。待っても生きていれば、よそで動いているとして外す
+        if native::sessions::live_pid_of(&root, &e.id).is_some() && pty::pid_of_id(&e.id).is_none() {
+            let t0 = std::time::Instant::now();
+            let gone = native::sessions::wait_gone(&root, &e.id, RESTORE_WAIT);
+            log.push(format!("wait {} {:.1}s → {}", e.id, t0.elapsed().as_secs_f32(), if gone { "消えた" } else { "まだ生きている" }));
+        }
         let line = match plan_for(&root, &e.id, &e.cwd) {
             Plan::Skip(why) => {
                 pty::settle(&e.id);
@@ -167,6 +176,29 @@ mod tests {
         assert_eq!(plan_for(&root, with_log, "/no/such/place"), Plan::Skip("場所が無いか、ディレクトリではない"));
         let jsonl = native::sessions::find_jsonl(&root, with_log).unwrap();
         assert_eq!(native::sessions::resume_cwd(&jsonl).as_deref(), Some(cwd.as_str()));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 前のアプリの claude が終わりかけている間は待ってから判定する（#152）。終わったら立て直し、上限まで生きていれば外す
+    #[test]
+    fn restore_waits_for_the_old_claude_to_end() {
+        use std::time::{Duration, Instant};
+        let root = std::env::temp_dir().join(format!("fc-restore-wait-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        let id = "44444444-4444-4444-8444-444444444444";
+        // 1秒で終わるプロセスが id を名乗る
+        let mut child = std::process::Command::new("sleep").arg("1").spawn().unwrap();
+        let pid = child.id();
+        fs::write(root.join(format!("sessions/{pid}.json")), format!("{{\"pid\":{pid},\"sessionId\":\"{id}\",\"cwd\":\"/x\"}}")).unwrap();
+        let reaper = std::thread::spawn(move || { let _ = child.wait(); });
+        assert!(native::sessions::live_pid_of(&root, id).is_some());
+        // 上限が短ければ、まだ生きている
+        assert!(!native::sessions::wait_gone(&root, id, Duration::from_millis(100)));
+        let t0 = Instant::now();
+        assert!(native::sessions::wait_gone(&root, id, Duration::from_secs(5)));
+        assert!(t0.elapsed() < Duration::from_secs(3));
+        reaper.join().unwrap();
         let _ = fs::remove_dir_all(&root);
     }
 }

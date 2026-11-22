@@ -197,6 +197,22 @@ pub fn live_pid_of(root: &Path, id: &str) -> Option<u32> {
     })
 }
 
+/// id を名乗るプロセスが消えるのを、limit まで待つ。消えた（もともと無い）なら true。
+/// アプリを入れ替えた直後は、前のアプリの claude が SIGHUP を受けてから終わるまでに1秒ほどかかる（2026-11-22 の実測で 1.27 秒）。
+/// その間に立て直しを判定すると「よそで動いている」と見て外してしまうので、起動のときの立て直しはここで待ってから判定する
+pub fn wait_gone(root: &Path, id: &str, limit: std::time::Duration) -> bool {
+    let t0 = std::time::Instant::now();
+    loop {
+        if live_pid_of(root, id).is_none() {
+            return true;
+        }
+        if t0.elapsed() >= limit {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 /// resume するときの cwd。jsonl の行の cwd のうち、projects/ の下のディレクトリ名（project_dir_name）が jsonl の置き場所と合うもの。
 /// claude は cwd から projects/ の下を引いて jsonl を探すので、合わない cwd では resume できない。途中で cd したセッションは最初の行の cwd が合う
 pub fn resume_cwd(jsonl: &Path) -> Option<String> {
