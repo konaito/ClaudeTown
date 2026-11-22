@@ -7,6 +7,7 @@ import { KillCtx, LetterCtx } from "../contexts";
 import { LETTER_IMG } from "../useLetterMarks";
 import { CardActions } from "../card/CardActions";
 import { Since } from "../Since";
+import { watchOffscreen } from "../offscreen";
 
 /** グループ（根のセッション1つとその子孫）ごとの淡い色。名前から決まる */
 const GROUP_TINTS = ["#f3f7ff", "#fff6ec", "#f1faf3", "#f8f3ff", "#fff2f5", "#eff9f9", "#fbf8ec"];
@@ -108,7 +109,7 @@ export const FamilyCanvas = memo(function FamilyCanvas({ all, result, selected, 
         if (!a) return null;
         const delay = kill.dying.get(n.id);
         return (
-          <div key={n.id} className={`fnode ${selected === n.id ? "open" : ""} ${delay !== undefined ? "dying" : ""} ${n.depth >= 2 ? "is-mini" : ""}`}
+          <div key={n.id} ref={watchOffscreen} className={`fnode ${selected === n.id ? "open" : ""} ${delay !== undefined ? "dying" : ""} ${n.depth >= 2 ? "is-mini" : ""}`}
             style={{ left: n.x - n.w / 2 + ox, top: n.y - n.h / 2 + oy, width: n.w, height: n.h, transition: `left ${LAYOUT.moveMs}ms ease, top ${LAYOUT.moveMs}ms ease`, ["--kd" as string]: `${delay ?? 0}ms` }}>
             {/* 右下のボタンはカード（札）の縁を基準に置くので、カードと同じ大きさの包みに入れる（カードは overflow: hidden） */}
             <div className={`fnode-body ${n.depth >= 2 ? "k-mini" : "k-card"}`} data-aid={n.id}
