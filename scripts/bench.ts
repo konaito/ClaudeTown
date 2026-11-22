@@ -16,7 +16,7 @@
 //
 // 1回の測り方
 //   1. ~/.local/bin/ct-lock の列に並んでロックを取る（来た順。上限3時間）。1回ごとに取って放し、次の回はまた列の後ろに並ぶ
-//   2. 合成の ~/.claude（FC_CLAUDE_HOME）と、~/.family-computing の代わり（FC_SHARED_HOME）、アプリの分（FC_APP_HOME）を一時の場所にして
+//   2. 合成の ~/.claude（FC_CLAUDE_HOME）、hook が書くものの置き場所（FC_STATE_DIR、FC_LETTERS、FC_PERM_DIR）、アプリの分（FC_APP_HOME）を一時の場所にして
 //      開発版（bun tauri dev）を起動する。HOME は分けない（README の「子が開発版で確かめるとき」）。お手紙の記録（letters.jsonl）は決まった大きさで仕込む
 //   3. 画面が場面を用意して ready を書いたら、settle 秒待ってから secs 秒のあいだの CPU 時間の差を ps で測る
 //   4. 見えているはずの場面で窓が描かれていなかった回（fps が 20 未満、visibilityState が hidden）と、
@@ -197,7 +197,9 @@ function benchEnv(p: ReturnType<typeof prepare>, extra: Record<string, string>) 
   const env: Record<string, string | undefined> = {
     ...process.env,
     PATH: `${os.homedir()}/.cargo/bin:${process.env.PATH}`,
-    FC_CLAUDE_HOME: p.claudeHome, FC_SHARED_HOME: p.shared, FC_APP_HOME: p.appHome,
+    // hook と同じ変数で、state/、letters.jsonl、perm/ を一時の場所に向ける（本物の ~/.family-computing を読まない）
+    FC_CLAUDE_HOME: p.claudeHome, FC_APP_HOME: p.appHome,
+    FC_STATE_DIR: path.join(p.shared, "state"), FC_LETTERS: path.join(p.shared, "letters.jsonl"), FC_PERM_DIR: path.join(p.shared, "perm"),
     // 立て直しをしない（台帳も書かない）。cam を呼ばない（本物の利用枠を見に行かない。account.rs は選べないとき今まで通りに起動する）
     FC_NO_RESTORE: "1", FC_CAM_BIN: "/usr/bin/false",
     FC_CLAUDE_BIN: p.standIn, FC_FLOOD_HZ: String(p.flood || 100), FC_BENCH_FLOOD_PARENT: p.town.roots[0], FC_BENCH_FLOOD_CWD: FLOOD_CWD,

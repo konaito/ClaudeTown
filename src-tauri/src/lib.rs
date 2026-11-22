@@ -67,18 +67,37 @@ enum Scope {
 }
 
 /// ~/.family-computing の下のファイルの置き場所を決める。Rust で置き場所を組み立てるのはここだけにする。
-/// FC_SHARED_HOME は ~/.family-computing そのものを差し替える（軽さの計測 scripts/bench.ts が、本物の letters.jsonl と state/ を読まないために使う、#187）
+/// hook（hooks/fc-report.py）と同じ FC_STATE_DIR、FC_LETTERS、FC_PERM_DIR で、hook が書くものの置き場所を差し替えられる
+/// （軽さの計測 scripts/bench.ts が、本物の state/ と letters.jsonl を読まないために使う、#187）
 fn fc_path(scope: Scope, name: &str) -> PathBuf {
     let env = |k: &str| std::env::var(k).ok().filter(|s| !s.is_empty());
-    place(&home(), env("FC_SHARED_HOME"), APP_ID.get().map(String::as_str), env("FC_APP_HOME"), scope, name)
+    let hook = HookDirs { state: env("FC_STATE_DIR"), letters: env("FC_LETTERS"), perm: env("FC_PERM_DIR") };
+    place(&home(), &hook, APP_ID.get().map(String::as_str), env("FC_APP_HOME"), scope, name)
+}
+
+/// hook と同じ差し替えの変数の値。state と perm はディレクトリ、letters はファイル（hooks/fc-report.py の STATE_DIR、PERM_DIR、LETTERS と同じ意味）
+#[derive(Default)]
+struct HookDirs {
+    state: Option<String>,
+    letters: Option<String>,
+    perm: Option<String>,
 }
 
 /// fc_path の中身（試験のために環境から切り離してある）。
 /// App は、FC_APP_HOME があればそこ、identifier が安定版の値か分からないときは ~/.family-computing、それ以外（開発版）は ~/.family-computing/dev。
 /// 分からないときに安定版と同じ場所へ落とすのは、逆にすると安定版が割り当てと世帯の名前を見失うため。
-/// shared_home（FC_SHARED_HOME）があれば、~/.family-computing の代わりにそこを使う
-fn place(home: &std::path::Path, shared_home: Option<String>, app_id: Option<&str>, app_home: Option<String>, scope: Scope, name: &str) -> PathBuf {
-    let shared = shared_home.map(PathBuf::from).unwrap_or_else(|| home.join(".family-computing"));
+/// Shared の state/、letters.jsonl、perm/ は、hook の差し替えの変数があればそちらにする。send-disabled は差し替えない
+fn place(home: &std::path::Path, hook: &HookDirs, app_id: Option<&str>, app_home: Option<String>, scope: Scope, name: &str) -> PathBuf {
+    let shared = home.join(".family-computing");
+    if scope == Scope::Shared {
+        let under = |dir: &Option<String>, sub: &str| dir.as_ref().and_then(|d| (name == sub).then(|| PathBuf::from(d)).or_else(|| name.strip_prefix(&format!("{sub}/")).map(|r| PathBuf::from(d).join(r))));
+        if let Some(p) = under(&hook.state, "state").or_else(|| under(&hook.perm, "perm")) {
+            return p;
+        }
+        if let (Some(f), "letters.jsonl") = (&hook.letters, name) {
+            return PathBuf::from(f);
+        }
+    }
     let dir = match scope {
         Scope::Shared => shared,
         Scope::App => match (app_home, app_id) {
@@ -391,6 +410,9 @@ fn print_paths() {
     println!("{}", serde_json::to_string_pretty(&json!({
         "identifier": APP_ID.get(),
         "shared": fc_path(Scope::Shared, ""),
+        "state": fc_path(Scope::Shared, "state"),
+        "letters": fc_path(Scope::Shared, "letters.jsonl"),
+        "perm": fc_path(Scope::Shared, "perm"),
         "app": fc_path(Scope::App, ""),
         "avatars": avatars_path(),
         "avatarsRecent": avatars::recent_path(&avatars_path()),
@@ -665,7 +687,8 @@ mod tests {
     #[test]
     fn dev_keeps_app_files_apart_from_stable() {
         let h = std::path::Path::new("/h");
-        let p = |id: Option<&str>, over: Option<&str>, scope, name| place(h, None, id, over.map(String::from), scope, name);
+        let none = HookDirs::default();
+        let p = |id: Option<&str>, over: Option<&str>, scope, name| place(h, &none, id, over.map(String::from), scope, name);
         // 安定版と、identifier が分からないときは、今までの場所
         assert_eq!(p(Some(STABLE_ID), None, Scope::App, "avatars.json"), PathBuf::from("/h/.family-computing/avatars.json"));
         assert_eq!(p(None, None, Scope::App, "houses.json"), PathBuf::from("/h/.family-computing/houses.json"));
@@ -680,12 +703,18 @@ mod tests {
         // FC_APP_HOME はアプリの分だけを差し替える
         assert_eq!(p(Some(STABLE_ID), Some("/t"), Scope::App, "avatars.json"), PathBuf::from("/t/avatars.json"));
         assert_eq!(p(dev, Some("/t"), Scope::Shared, "letters.jsonl"), PathBuf::from("/h/.family-computing/letters.jsonl"));
-        // FC_SHARED_HOME は ~/.family-computing そのものを差し替える（#187）。FC_APP_HOME が無い開発版のアプリの分は、その下の dev/
-        let s = |id: Option<&str>, over: Option<&str>, scope, name| place(h, Some("/s".into()), id, over.map(String::from), scope, name);
-        assert_eq!(s(dev, None, Scope::Shared, "letters.jsonl"), PathBuf::from("/s/letters.jsonl"));
-        assert_eq!(s(dev, None, Scope::Shared, "state/x.json"), PathBuf::from("/s/state/x.json"));
-        assert_eq!(s(dev, None, Scope::App, "avatars.json"), PathBuf::from("/s/dev/avatars.json"));
-        assert_eq!(s(dev, Some("/t"), Scope::App, "terminals.json"), PathBuf::from("/t/terminals.json"));
+        // FC_STATE_DIR、FC_LETTERS、FC_PERM_DIR は hook と同じ意味で、hook が書くものだけを差し替える（#187）。
+        // 非常停止とアプリの分は動かない
+        let hook = HookDirs { state: Some("/st".into()), letters: Some("/l/letters-x.jsonl".into()), perm: Some("/pm".into()) };
+        let s = |id: Option<&str>, over: Option<&str>, scope, name| place(h, &hook, id, over.map(String::from), scope, name);
+        assert_eq!(s(dev, None, Scope::Shared, "state/x.json"), PathBuf::from("/st/x.json"));
+        assert_eq!(s(dev, None, Scope::Shared, "letters.jsonl"), PathBuf::from("/l/letters-x.jsonl"));
+        assert_eq!(s(dev, None, Scope::Shared, "perm"), PathBuf::from("/pm"));
+        assert_eq!(s(dev, None, Scope::Shared, "perm/a.json"), PathBuf::from("/pm/a.json"));
+        assert_eq!(s(dev, None, Scope::Shared, "send-disabled"), PathBuf::from("/h/.family-computing/send-disabled"));
+        assert_eq!(s(dev, None, Scope::Shared, "statefile"), PathBuf::from("/h/.family-computing/statefile"));
+        assert_eq!(s(dev, None, Scope::App, "avatars.json"), PathBuf::from("/h/.family-computing/dev/avatars.json"));
+        assert_eq!(s(Some(STABLE_ID), None, Scope::App, "state/x.json"), PathBuf::from("/h/.family-computing/state/x.json"));
     }
 
     #[test]

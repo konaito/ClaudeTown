@@ -9,7 +9,7 @@
 HOME は分けない（README の「子が開発版で確かめるとき」）。開発版が読む先と書く先は、次の環境変数で1回ごとの一時の場所に向ける。本物の `~/.claude` と `~/.family-computing/` は、読まず、書かない。
 
 - `FC_CLAUDE_HOME`: 合成の `~/.claude`。
-- `FC_SHARED_HOME`: `~/.family-computing` の代わり。お手紙の記録（letters.jsonl）と hook の状態（state/）をここから読む。#187 で Rust に足した。
+- `FC_STATE_DIR`、`FC_LETTERS`、`FC_PERM_DIR`: hook の状態（state/）、お手紙の記録（letters.jsonl）、承認の input（perm/）の置き場所。hook（`hooks/fc-report.py`）と同じ名前と意味で、#187 で Rust も読むようにした。非常停止（send-disabled）は差し替えない。
 - `FC_APP_HOME`: アプリが書くファイル（キャラの割り当てなど）。
 - `FC_NO_RESTORE=1` と `FC_CAM_BIN=/usr/bin/false`: 端末の立て直しをせず、cam を呼ばない。
 - `FC_CLAUDE_BIN`: ターミナルの出力の場面で、claude の代わりに `scripts/bench-flood-claude.ts` を起動する。
