@@ -155,7 +155,7 @@ hook の本体は `hooks/fc-report.py` に置く。2026-11-12 に本人に確か
 
 hook は本物の `claude -p` で試し、頼まれたこと、道具、最後の報告、次の一手が状態ファイルに入ることを確かめた。
 
-in-process のチームメイトと sub-agent の hook は、リードの session_id に `agent_id` が付いて届く。hook はこれをリードの状態ファイルにもお手紙にも書かない。例外は承認で、チームメイトの承認の画面はリードの端末に出るので、リードの承認の並びに足し、終われば外す（2026-11-21 に Claude Code 2.1.330 で確かめた）。チームメイトの様子は、hook ではなく `native/subagents.rs` が meta.json と jsonl から作る。tmux のチームメイトは自分の session_id で届くので、ふつうのセッションと同じに書く。
+in-process のチームメイトと sub-agent の hook は、リードの session_id に `agent_id` が付いて届く。hook はこれをリードの状態ファイルには書かない。例外は承認で、チームメイトの承認の画面はリードの端末に出るので、リードの承認の並びに足し、終われば外す（2026-11-21 に Claude Code 2.1.330 で確かめた）。送ったお手紙は、from を町のチームメイトの行の id（`sub-<agent_id>@<session_id の先頭8字>`）にして書く（#271）。チームメイトの文（`<teammate-message>`）を受けたときは UserPromptSubmit が出ないので、受けた記録は作らない（2026-11-23 に Claude Code 2.1.330 の in-process と tmux で確かめた）。チームメイトの様子は、hook ではなく `native/subagents.rs` が meta.json と jsonl から作る。tmux のチームメイトは自分の session_id で届くので、ふつうのセッションと同じに書く。
 
 ## 決まったこと
 
