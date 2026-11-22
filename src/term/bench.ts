@@ -15,7 +15,8 @@
 //   ?answer=1 なら、10秒たっても預かったままのとき、信頼の確認の画面に Yes（↓と Enter）を答える。cwd が一時の場所（/var/folders）のときだけ答える
 // - scene: 軽さの計測（#2）。場面（scene=idle|hidden|minimized|terminal|talk|town）を用意して ready を書き、
 //   wait（ms）たったら post を書く。CPU とメモリは外から ps で測る。測っている間は、ここでは何も回さない。
-//   外から回していた scripts/bench.ts はモックの ccn で町を作っていたので、ccn を外したときに消した（作り直すまで、この場面は手で使う）
+//   外から回すのは scripts/bench.ts（合成の ~/.claude で町を作る、#187）。terminal は ?sid= が無ければ ?cwd= に新しい世帯を立て
+//   （FC_CLAUDE_BIN の代役が決まった出力を流す）、そのターミナルを開く
 // 結果は perf.ts が1回ごとに perf_log に書く。作るセッションには name に bench-ct-term を付ける。
 // 引数は URL（?bench=…）か、環境変数 VITE_FC_BENCH（"bench=scene&scene=idle" の形）で渡す。
 // 環境変数なら devUrl を変えずに済むので、場面ごとに Rust を組み直さない（devUrl は Rust に埋め込まれる）
@@ -74,9 +75,19 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       const onVis = () => { vis.push({ at: Date.now(), state: document.visibilityState }); log({ visChange: document.visibilityState, at: Date.now() }); };
       document.addEventListener("visibilitychange", onVis);
       if (scene === "terminal") {
-        // 開いたときの計測（perf.ts の open の流れ）が終わるまで待つ。終わるまでは perf_ping を20ms ごとに回している
-        const opened = perfNext();
-        h().focusId(sid);
+        let id = sid;
+        if (!id) {
+          const cwd = params.get("cwd");
+          if (!cwd) throw new Error("terminal の場面には ?sid= か ?cwd= が要る");
+          const r = await call<{ id: string }>("create_session", { cwd, name: benchName(), cols: 120, rows: 40 });
+          mine.push(r.id);
+          id = r.id;
+        }
+        // 開いたときの計測（perf.ts の open の流れ）が終わるまで待つ。終わるまでは perf_ping を20ms ごとに回している。
+        // 作った直後は一覧に載っておらず focusId が何もしないので、開く流れが始まるまで繰り返す
+        let got = false;
+        const opened = perfNext().then(() => { got = true; });
+        for (let k = 0; k < 40 && !got && !perfWaitingPrompt(id); k++) { h().focusId(id); await sleep(250); }
         await Promise.race([opened, sleep(25000)]);
       } else if (scene === "talk") {
         h().select(sid);
