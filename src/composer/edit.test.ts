@@ -18,6 +18,22 @@ describe("readline のキー", () => {
     expect(killToStart(at("abc\ndef", 6))).toEqual({ from: 4, to: 6, insert: "", killed: "de" });
     expect(killToStart(at("abc\ndef", 4))).toEqual({ from: 3, to: 4, insert: "", killed: "\n" });
   });
+  test("文が改行で始まり、カーソルが先頭にあるときは次の行に効かない（#215）", () => {
+    const t = "\nabc";
+    expect(toLineStart(at(t, 0))).toBe(0);
+    expect(killToStart(at(t, 0))).toBeNull();
+    expect(toLineEnd(at(t, 0))).toBe(0);
+    expect(killToEnd(at(t, 0))).toEqual({ from: 0, to: 1, insert: "", killed: "\n" });
+    expect(killWordBack(at(t, 0))).toBeNull();
+    // 2行目の頭では、これまでどおり前の改行を消す
+    expect(toLineStart(at(t, 1))).toBe(1);
+    expect(killToStart(at(t, 1))).toEqual({ from: 0, to: 1, insert: "", killed: "\n" });
+    // 空の文と、改行で始まらない文の先頭
+    expect(toLineStart(at("", 0))).toBe(0);
+    expect(killToStart(at("", 0))).toBeNull();
+    expect(toLineStart(at("abc", 0))).toBe(0);
+    expect(killToStart(at("abc", 0))).toBeNull();
+  });
   test("Ctrl+W は空白まで消す。パスは1回で消える", () => {
     expect(killWordBack(at("open src/utils/foo.ts"))?.killed).toBe("src/utils/foo.ts");
     expect(killWordBack(at("a --flag=value  "))?.killed).toBe("--flag=value  ");
