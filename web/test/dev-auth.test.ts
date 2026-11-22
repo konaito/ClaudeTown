@@ -61,7 +61,7 @@ describe('vite.config.ts: DEV_NO_AUTH=1 のときは loopback だけで受ける
     process.env.DEV_NO_AUTH = '1';
     await expect(resolve({ server: { host: true } })).rejects.toThrow(/DEV_NO_AUTH/);
     await expect(resolve({ server: { host: '0.0.0.0' } })).rejects.toThrow(/DEV_NO_AUTH/);
-    await expect(resolve({ server: { host: '192.168.128.191' } })).rejects.toThrow(/DEV_NO_AUTH/);
+    await expect(resolve({ server: { host: '192.168.1.50' } })).rejects.toThrow(/DEV_NO_AUTH/);
   });
 
   test('DEV_NO_AUTH が無ければ今までどおり全部のインターフェースで受ける', async () => {

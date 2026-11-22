@@ -1,7 +1,7 @@
 // 手元の開発サーバーで Access の確認を飛ばす（DEV_NO_AUTH=1）ときに、開発サーバーを loopback だけで受けさせる（#244）。
 // Worker から見える Host と CF-Connecting-IP では、LAN の別の機械からの要求を見分けられない。
-// Host は要求の側が好きに付けられる。CF-Connecting-IP は vite のプロセスから miniflare に渡すので、どの機械からでも 127.0.0.1 になり、
-// 要求に付いていればそのまま残る。そこで、要求を受ける口そのものを loopback に絞る。
+// Host は要求の側が好きに付けられる。CF-Connecting-IP は vite のプロセスから miniflare に渡すので、LAN から来ても 127.0.0.1 になり、
+// 要求に付いていればその値が残る（どちらも 2026-11-23 に実測）。そこで、要求を受ける口そのものを loopback に絞る。
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseEnv } from 'node:util';
