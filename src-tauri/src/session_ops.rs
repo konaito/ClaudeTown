@@ -88,7 +88,9 @@ pub(crate) fn restore_terminals() {
             Plan::Resume => match pty::resume(&e.id, &e.cwd, e.name.as_deref(), e.cols, e.rows, town_kick) {
                 Ok(r) => {
                     pty::settle(&e.id);
-                    format!("resume {} {} → pid {}", e.id, e.cwd, r["pid"])
+                    // ログインシェルの PATH を取れずに立てたら、そう書く（#175。画面には出していない）
+                    let fallback = if r["pathFallback"] == true { "（ログインシェルの PATH を取れず、アプリの PATH で起動）" } else { "" };
+                    format!("resume {} {} → pid {}{fallback}", e.id, e.cwd, r["pid"])
                 }
                 Err(err) => format!("fail {} {} → {err}（台帳に残す）", e.id, e.cwd),
             },

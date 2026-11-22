@@ -19,7 +19,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// replay のために持つ出力の末尾の長さ
@@ -131,38 +131,103 @@ pub fn new_uuid() -> String {
 // ---------- claude の場所と環境 ----------
 
 /// ログインシェルの PATH。Finder から開いたアプリの PATH は /usr/bin:/bin:/usr/sbin:/sbin だけで、claude（~/.local/bin）も、
-/// claude が呼ぶ git や bun も見つからない。ターミナルで開いたときと同じ PATH を、ログインシェルに1回だけ聞いて覚える。
-/// 対話の設定（.zshrc）で PATH を足す人が多いので -i も付ける。出力の前後に設定が何か書いても拾えるよう、印で挟む
+/// claude が呼ぶ git や bun も見つからない。ターミナルで開いたときと同じ PATH をログインシェルに聞き、取れた値だけを覚える（#175）。
+/// 取れなかったときは None で、claude はアプリの PATH で動く。次に端末を立てるときにもう一度聞く
 fn login_path() -> Option<String> {
-    static P: OnceLock<Option<String>> = OnceLock::new();
-    P.get_or_init(|| {
-        let shell = std::env::var("SHELL").ok().filter(|s| s.starts_with('/')).unwrap_or_else(|| "/bin/zsh".into());
-        let mut child = std::process::Command::new(&shell)
-            .args(["-l", "-i", "-c", "printf '\\n__FC_PATH__%s__FC_PATH__\\n' \"$PATH\""])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()?;
-        let t0 = Instant::now();
+    static LOGIN: LoginPath = LoginPath::new();
+    let shell = std::env::var("SHELL").ok().filter(|s| s.starts_with('/')).unwrap_or_else(|| "/bin/zsh".into());
+    LOGIN.get(&shell, LOGIN_WAIT, LOGIN_LIMIT)
+}
+
+/// 端末を立てる側が、ログインシェルの返事を待つ上限。過ぎたらアプリの PATH で立てる
+const LOGIN_WAIT: Duration = Duration::from_secs(5);
+/// ログインシェルを待つ上限。LOGIN_WAIT を過ぎても裏で待ち続け、返ってきたら覚える（.zshrc が重い Mac でも、後の端末は正しい PATH になる）。
+/// これを過ぎたら固まったとみて止め、次に端末を立てるときに聞き直す
+const LOGIN_LIMIT: Duration = Duration::from_secs(30);
+
+/// ログインシェルの PATH を聞く窓口。取れた値だけを覚え、失敗は覚えない。
+/// 聞いている間はシェルを2つ起こさない。聞き始めから wait を過ぎた後に来た呼び出しは、待たずに None を返す
+/// （起動のときの立て直しは端末を1つずつ立てるので、1つごとに wait を待つと、N 個で N 倍遅くなる）
+struct LoginPath {
+    st: Mutex<Ask>,
+    cv: std::sync::Condvar,
+}
+
+enum Ask {
+    Idle,
+    Asking(Instant),
+    Got(String),
+}
+
+impl LoginPath {
+    const fn new() -> Self {
+        LoginPath { st: Mutex::new(Ask::Idle), cv: std::sync::Condvar::new() }
+    }
+
+    fn get(&'static self, shell: &str, wait: Duration, limit: Duration) -> Option<String> {
+        let mut g = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        if let Ask::Idle = *g {
+            *g = Ask::Asking(Instant::now());
+            let shell = shell.to_string();
+            std::thread::spawn(move || {
+                let r = ask_login_path(&shell, limit);
+                let mut g = self.st.lock().unwrap_or_else(|e| e.into_inner());
+                *g = match r {
+                    Some(p) => Ask::Got(p),
+                    None => Ask::Idle,
+                };
+                self.cv.notify_all();
+            });
+        }
         loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if t0.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(20)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    eprintln!("[pty] ログインシェルが5秒で PATH を返さなかった");
-                    return None;
+            match &*g {
+                Ask::Got(p) => return Some(p.clone()),
+                // この呼び出しの間に聞いたのが失敗に終わった。聞き直すのは次の呼び出し
+                Ask::Idle => return None,
+                Ask::Asking(t0) => {
+                    let left = (*t0 + wait).saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return None;
+                    }
+                    g = self.cv.wait_timeout(g, left).unwrap_or_else(|e| e.into_inner()).0;
                 }
             }
         }
-        let mut s = String::new();
-        child.stdout.take()?.read_to_string(&mut s).ok()?;
-        let p = s.split("__FC_PATH__").nth(1)?.to_string();
-        (!p.is_empty()).then_some(p)
-    })
-    .clone()
+    }
+}
+
+/// ログインシェルに PATH を1回聞く。対話の設定（.zshrc）で PATH を足す人が多いので -i も付ける。
+/// 出力の前後に設定が何か書いても拾えるよう、印で挟む。limit を過ぎたらシェルを止めて None
+fn ask_login_path(shell: &str, limit: Duration) -> Option<String> {
+    let mut child = std::process::Command::new(shell)
+        .args(["-l", "-i", "-c", "printf '\\n__FC_PATH__%s__FC_PATH__\\n' \"$PATH\""])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .inspect_err(|e| eprintln!("[pty] ログインシェル {shell} を起動できなかった: {e}"))
+        .ok()?;
+    let t0 = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if t0.elapsed() < limit => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("[pty] ログインシェルが{}秒で PATH を返さなかった。次に端末を立てるときに聞き直す", limit.as_secs());
+                return None;
+            }
+        }
+    }
+    let mut s = String::new();
+    child.stdout.take()?.read_to_string(&mut s).ok()?;
+    let p = s.split("__FC_PATH__").nth(1)?.to_string();
+    if p.is_empty() {
+        eprintln!("[pty] ログインシェルの出力に PATH が無かった。次に端末を立てるときに聞き直す");
+        return None;
+    }
+    Some(p)
 }
 
 /// claude の実行ファイル。FC_CLAUDE_BIN があればそれ（試験用）、無ければログインシェルの PATH、~/.local/bin の順に探す
@@ -392,7 +457,8 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
         persist();
         notice();
     });
-    Ok(json!({ "id": id, "pid": pid, "cwd": cwd }))
+    // pathFallback は、ログインシェルの PATH を取れず、アプリの PATH で立てた印。画面がトーストで知らせる（#175）
+    Ok(json!({ "id": id, "pid": pid, "cwd": cwd, "pathFallback": path.is_none() }))
 }
 
 fn read_loop(pid: u32, mut reader: Box<dyn Read + Send>) {
@@ -602,6 +668,85 @@ mod tests {
         let s = "あい".as_bytes();
         assert_eq!(replay_text(&s[1..]), "い");
         assert_eq!(replay_text(b""), "");
+    }
+
+    /// 1回目だけ first_sleep 秒黙ってから、PATH を返すシェルの台本。何回起こされたかを count に書く。
+    /// 試験ごとに別の窓口（LoginPath）と台本を使い、SHELL の環境変数は変えない（ほかの試験の spawn が本物のシェルに聞くのと競合しない）
+    fn slow_then_fast_shell(tag: &str, first_sleep: &str) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("fc-pty-shell-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sh = dir.join("sh");
+        let body = format!(
+            "#!/bin/sh\nn=$(cat '{d}/count' 2>/dev/null || echo 0)\necho $((n+1)) > '{d}/count'\nif [ \"$n\" = 0 ]; then sleep {first_sleep}; fi\nprintf '\\n__FC_PATH__/fake/bin:/usr/bin__FC_PATH__\\n'\n",
+            d = dir.display()
+        );
+        std::fs::write(&sh, body).unwrap();
+        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (sh, dir.join("count"))
+    }
+
+    fn asked(count: &std::path::Path) -> u32 {
+        std::fs::read_to_string(count).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+    }
+
+    fn fresh_login() -> &'static LoginPath {
+        Box::leak(Box::new(LoginPath::new()))
+    }
+
+    /// #175 の再現。ログインシェルが1回目に5秒（LOGIN_WAIT）を超えても、後の呼び出しでは PATH を取れる（失敗を覚え続けない）
+    #[test]
+    fn login_path_recovers_after_a_slow_shell() {
+        let (sh, count) = slow_then_fast_shell("repro", "6");
+        let login = fresh_login();
+        let t0 = Instant::now();
+        let mut got = None;
+        while t0.elapsed() < Duration::from_secs(12) && got.is_none() {
+            got = login.get(sh.to_str().unwrap(), LOGIN_WAIT, LOGIN_LIMIT);
+            if got.is_none() { std::thread::sleep(Duration::from_millis(500)); }
+        }
+        assert_eq!(got.as_deref(), Some("/fake/bin:/usr/bin"));
+        // 取れた値は覚え、もう聞かない
+        let n = asked(&count);
+        assert_eq!(login.get(sh.to_str().unwrap(), LOGIN_WAIT, LOGIN_LIMIT).as_deref(), Some("/fake/bin:/usr/bin"));
+        assert_eq!(asked(&count), n);
+    }
+
+    /// 1回目が上限（limit）を超えて止められたら、次の呼び出しでもう一度聞き、2回目の速い返事を覚える
+    #[test]
+    fn login_path_asks_again_after_a_failure() {
+        let (sh, count) = slow_then_fast_shell("retry", "5");
+        let sh = sh.to_str().unwrap();
+        let login = fresh_login();
+        let (wait, limit) = (Duration::from_millis(200), Duration::from_millis(600));
+        let t0 = Instant::now();
+        assert_eq!(login.get(sh, wait, limit), None);
+        assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+        // 聞いている最中で、聞き始めから wait を過ぎている。待たずに None を返し、2つ目のシェルを起こさない
+        let t1 = Instant::now();
+        assert_eq!(login.get(sh, wait, limit), None);
+        assert!(t1.elapsed() < Duration::from_millis(100), "{:?}", t1.elapsed());
+        // 1回目が limit で止められるのを待つ。ここまでに起こしたシェルは1つだけ
+        std::thread::sleep(Duration::from_millis(800));
+        assert_eq!(asked(&count), 1);
+        assert_eq!(login.get(sh, wait, limit).as_deref(), Some("/fake/bin:/usr/bin"));
+        assert_eq!(asked(&count), 2);
+        assert_eq!(login.get(sh, wait, limit).as_deref(), Some("/fake/bin:/usr/bin"));
+        assert_eq!(asked(&count), 2);
+    }
+
+    /// wait を過ぎても limit の内に返ってきた PATH は、聞き直さずに覚える（.zshrc が重い Mac）
+    #[test]
+    fn login_path_keeps_a_late_answer() {
+        let (sh, count) = slow_then_fast_shell("late", "0.6");
+        let sh = sh.to_str().unwrap();
+        let login = fresh_login();
+        let (wait, limit) = (Duration::from_millis(100), Duration::from_secs(5));
+        assert_eq!(login.get(sh, wait, limit), None);
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(login.get(sh, wait, limit).as_deref(), Some("/fake/bin:/usr/bin"));
+        assert_eq!(asked(&count), 1);
     }
 
     #[test]
