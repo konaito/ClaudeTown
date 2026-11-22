@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { simplify, toolLine, unwrapPasted, splitImageMarks, readConversation, newConvState, clip, resultText, type MessagesPage } from "./webConv";
 import { KEEP_CONV } from "./conv";
+import convCases from "./conv-cases.json";
 
 // pty は { at, type, data: { type, message } }、node はトランスクリプトの行そのまま
 const ptyUser = (content: unknown, at = 1000) => ({ at, type: "user", data: { type: "user", message: { role: "user", content } } });
@@ -27,6 +28,11 @@ describe("simplify", () => {
     expect(simplify(ptyUser([{ type: "tool_result", content: "ok" }]))).toEqual([]);
     expect(simplify(ptyUser("<system-reminder>x</system-reminder>"))).toEqual([]);
     expect(simplify(ptyUser("Caveat: x"))).toEqual([]);
+  });
+  test("スラッシュコマンドの入力は「/名前 引数」の吹き出しにする（#157）", () => {
+    expect(simplify(ptyUser("<command-message>merge</command-message>\n<command-name>/merge</command-name>"))).toEqual([{ role: "user", text: "/merge", from: null, at: 1000, letter: null }]);
+    expect(simplify(ptyUser("<command-name>/login</command-name>\n            <command-message>login</command-message>\n            <command-args></command-args>"))[0].text).toBe("/login");
+    expect(simplify(ptyUser("<command-message>surf</command-message>\n<command-name>/surf</command-name>\n<command-args>https://a.example/x <b>強</b></command-args>"))[0].text).toBe("/surf https://a.example/x <b>強</b>");
   });
   test("from 行は from に分け、agent: なら letter にする", () => {
     const out = simplify(ptyUser("from agent:n1/abcd1234/child via n1\n\n本文"));
@@ -153,4 +159,26 @@ describe("-p の子を止めたとき（#83）", () => {
     const d = await readConversation(s, async () => ({ messages: msgs, next: 2, epoch: "e" }), null);
     expect(d.items.map((x) => [x.role, x.kind])).toEqual([["event", "interrupted"]]);
   });
+});
+
+// src-tauri/src/conversation.rs の shared_cases と同じ事例。TS 側の出力は JSON を通して、undefined の項目を落としてから比べる
+describe("会話の整形（src/conv-cases.json）", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const run = (fn: string, a: any[]): unknown => {
+    switch (fn) {
+      case "clip": return clip(a[0], a[1]);
+      case "tool_line": return toolLine(a[0], a[1]);
+      case "result_text": return resultText(a[0]);
+      case "unwrap_pasted": return unwrapPasted(a[0]);
+      case "split_image_marks": return splitImageMarks(a[0]);
+      case "simplify": return simplify(a[0]);
+    }
+    throw new Error(`知らない関数: ${fn}`);
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  for (const c of convCases as { name: string; fn: string; args: any[]; expect: unknown }[]) {
+    test(c.name, () => {
+      expect(JSON.parse(JSON.stringify(run(c.fn, c.args)))).toEqual(c.expect);
+    });
+  }
 });

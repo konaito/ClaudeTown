@@ -31,6 +31,9 @@ const TAIL_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone)]
 struct Sub {
+    /// チームに今も入っているチームメイト（畳まない）
+    member: bool,
+    teammate: bool,
     stem: String,
     jsonl: PathBuf,
     meta: Value,
@@ -45,8 +48,10 @@ struct Tail {
     said: Option<String>,
     doing: Option<String>,
 }
-static TAILS: Mutex<Option<HashMap<PathBuf, ((u64, u64), Tail)>>> = Mutex::new(None);
-static METAS: Mutex<Option<HashMap<PathBuf, ((u64, u64), Value)>>> = Mutex::new(None);
+/// ファイルの (更新時刻, 大きさ)
+type Stamp = (u64, u64);
+static TAILS: Mutex<Option<HashMap<PathBuf, (Stamp, Tail)>>> = Mutex::new(None);
+static METAS: Mutex<Option<HashMap<PathBuf, (Stamp, Value)>>> = Mutex::new(None);
 
 fn stamp(m: &fs::Metadata) -> (u64, u64) {
     (m.len(), mtime_ms(m))
@@ -57,11 +62,10 @@ fn read_meta(p: &Path) -> Option<Value> {
     let st = stamp(&m);
     let mut g = METAS.lock().unwrap_or_else(|e| e.into_inner());
     let map = g.get_or_insert_with(HashMap::new);
-    if let Some((s, v)) = map.get(p) {
-        if *s == st {
+    if let Some((s, v)) = map.get(p)
+        && *s == st {
             return Some(v.clone());
         }
-    }
     let v: Value = serde_json::from_str(&fs::read_to_string(p).ok()?).ok()?;
     map.insert(p.to_path_buf(), (st, v.clone()));
     Some(v)
@@ -70,11 +74,10 @@ fn read_meta(p: &Path) -> Option<Value> {
 fn tail_of(p: &Path, st: (u64, u64)) -> Tail {
     let mut g = TAILS.lock().unwrap_or_else(|e| e.into_inner());
     let map = g.get_or_insert_with(HashMap::new);
-    if let Some((s, t)) = map.get(p) {
-        if *s == st {
+    if let Some((s, t)) = map.get(p)
+        && *s == st {
             return t.clone();
         }
-    }
     let t = read_tail(p, st.0);
     map.insert(p.to_path_buf(), (st, t.clone()));
     t
@@ -120,6 +123,15 @@ fn read_tail(p: &Path, len: u64) -> Tail {
         }
     }
     t
+}
+
+/// in-process のチームメイトが、今もチームの config.json（~/.claude/teams/<チーム名>/config.json）の members にいるか。
+/// 置き場所は、リードの jsonl（<root>/projects/<dir>/<sid>.jsonl）から3つ上がった root の下
+fn in_team(lead_jsonl: &Path, team: Option<&str>, name: Option<&str>) -> bool {
+    let (Some(team), Some(name)) = (team, name) else { return false };
+    let Some(root) = lead_jsonl.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) else { return false };
+    let Some(v) = read_meta(&root.join("teams").join(team).join("config.json")) else { return false };
+    v["members"].as_array().into_iter().flatten().any(|m| m["name"].as_str() == Some(name))
 }
 
 /// subagents/ と subagents/workflows/*/ の agent-*.jsonl
@@ -179,14 +191,15 @@ pub fn of_session(s: &Session, now: u64, stats: &mut Stats) -> Vec<Value> {
         }
         let finished = meta["finished"].as_bool() == Some(true);
         let running = age < ACTIVE_MS || (!teammate && !finished && age < STALE_MS);
-        subs.push(Sub { stem, jsonl, meta, mtime, created, running });
+        let member = teammate && in_team(&s.jsonl, meta["teamName"].as_str(), meta["name"].as_str());
+        subs.push(Sub { member, teammate, stem, jsonl, meta, mtime, created, running });
     }
-    // 畳む: 終わってから FOLD_MS を過ぎたもの
+    // 畳む: 終わってから FOLD_MS を過ぎたもの。チームに今も入っているチームメイトは、待っている間も畳まない
     let before = subs.len();
-    subs.retain(|x| x.running || now.saturating_sub(x.mtime) < FOLD_MS);
+    subs.retain(|x| x.member || x.running || now.saturating_sub(x.mtime) < FOLD_MS);
     stats.sub_folded += before - subs.len();
-    // 上限: 実行中を先に、新しい順
-    subs.sort_by(|a, b| b.running.cmp(&a.running).then(b.mtime.cmp(&a.mtime)));
+    // 上限: チームのチームメイトを先に、次に実行中を、新しい順
+    subs.sort_by(|a, b| b.member.cmp(&a.member).then(b.running.cmp(&a.running)).then(b.mtime.cmp(&a.mtime)));
     if subs.len() > MAX_SHOWN {
         stats.sub_capped += subs.len() - MAX_SHOWN;
         subs.truncate(MAX_SHOWN);
@@ -216,7 +229,7 @@ pub fn of_session(s: &Session, now: u64, stats: &mut Stats) -> Vec<Value> {
         let cwd = meta["worktreePath"].as_str().or(meta["cwd"].as_str()).unwrap_or(&s.cwd).to_string();
         out.push(json!({
             "id": sub_id(&x.stem, &s.id),
-            "kind": "subagent",
+            "kind": if x.teammate { "teammate" } else { "subagent" },
             "state": if x.running { "running" } else { "idle" },
             "cwd": cwd,
             "pid": null,
@@ -297,6 +310,24 @@ mod tests {
         let v = of_session(&s, now + 15 * 60_000, &mut st);
         assert_eq!(v.len(), 0);
         assert_eq!(st.sub_folded, 4);
+    }
+
+    #[test]
+    fn teammates_in_a_live_team_are_not_folded() {
+        let root = tmp("subs-team");
+        let sid = "77777777-aaaa-bbbb-cccc-000000000007";
+        let s = sess(&root, sid);
+        let meta = |name: &str| json!({"agentType":name,"name":name,"taskKind":"in_process_teammate","teamName":"session-77777777"});
+        agent(&root, sid, "aalpha-1", Some(meta("alpha")), &[A1]);
+        agent(&root, sid, "abeta-2", Some(meta("beta")), &[A1]);
+        write(&root.join("teams/session-77777777/config.json"), &json!({"members":[{"name":"team-lead"},{"name":"alpha"}]}).to_string());
+        let mut st = Stats::default();
+        let v = of_session(&s, super::super::now_ms() + 15 * 60_000, &mut st);
+        assert_eq!(v.len(), 1, "チームにいる alpha だけ残る");
+        assert_eq!(v[0]["kind"], "teammate");
+        assert_eq!(v[0]["title"], "alpha");
+        assert_eq!(v[0]["state"], "idle");
+        assert!(st.unexpected.is_empty(), "{:?}", st.unexpected);
     }
 
     #[test]

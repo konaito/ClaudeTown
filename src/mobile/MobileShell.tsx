@@ -3,27 +3,20 @@
 import { useEffect, type ReactNode } from "react";
 import { Avatar, roleOf } from "../kid/Avatar";
 import type { Mail } from "../mail";
-import { MOOD_LABEL, houseNameOf, moodOf, nowOf, taskOf, type Agent, type Mood, type Peer, type Snapshot } from "../model";
+import { MOOD_LABEL, statusClass, statusLabel, houseNameOf, moodOf, nowOf, taskOf, type Agent, type Mood, type Snapshot } from "../model";
 
 type Tree = { byId: Map<string, Agent>; childrenOf: Map<string, Agent[]>; families: { root: Agent; all: Agent[] }[] };
 
 type Props = {
   tree: Tree;
-  peers: Peer[];
-  peer: string;
-  selfName: string;
   snap: Snapshot | null;
+  /** 一覧を読めなかった理由（ブラウザ版で ccn に届かないときなど） */
   err: string | null;
-  conn: { cls: "ok" | "slow" | "bad"; label: string; msg: string };
   counts: Record<Mood, number>;
   total: number;
   /** いま開いているチャット。無ければ一覧を出す */
   open: Agent | null;
   mails: Mail[];
-  curTown: string;
-  /** 取れなかった別の町 */
-  unreachable: string[];
-  onTown: (v: string) => void;
   onPick: (a: Agent) => void;
   onMail: (m: Mail) => void;
   onBack: () => void;
@@ -39,17 +32,17 @@ function flatten(root: Agent, kids: Map<string, Agent[]>): { a: Agent; depth: nu
   return out;
 }
 
-function Row({ a, depth, onPick, town, mood }: { a: Agent; depth: number; onPick: (a: Agent) => void; town?: string; mood?: Mood }) {
+function Row({ a, depth, onPick, mood }: { a: Agent; depth: number; onPick: (a: Agent) => void; mood?: Mood }) {
   const m = mood ?? moodOf(a);
   const line = m === "working" ? nowOf(a, m) ?? taskOf(a, m) : taskOf(a, m);
   return (
-    <button className={`mr m-${m}${a.ghost ? " ghost" : ""}`} style={{ paddingLeft: 16 + Math.min(depth, 3) * 20 }} onClick={() => onPick(a)}>
+    <button className={`mr m-${m}`} style={{ paddingLeft: 16 + Math.min(depth, 3) * 20 }} onClick={() => onPick(a)}>
       <span className="mr-av"><Avatar pick={a.avatar} seed={a.id} mood={m} role={roleOf(depth)} size={40} /></span>
       <span className="mr-body">
-        <span className="mr-name">{a.name}{town && <em>{town}</em>}</span>
-        <span className="mr-line">{a.ghost ? `${a.ghost.town} の町にいます` : line}</span>
+        <span className="mr-name">{a.name}</span>
+        <span className="mr-line">{line}</span>
       </span>
-      <span className={`mr-st st st-${m}`}><i />{MOOD_LABEL[m]}</span>
+      <span className={`mr-st ${statusClass(a, m)}`}><i />{statusLabel(a, m)}</span>
     </button>
   );
 }
@@ -68,34 +61,21 @@ export function MobileShell(p: Props) {
   const back = () => { if (history.state?.mChat) history.back(); else p.onBack(); };
 
   const needs = p.mails.filter((m) => m.kind !== "done");
-  const home = p.peers.find((x) => x.self);
 
   return (
     <>
       <div className={`m-screen m-list${isOpen ? " away" : ""}`} aria-hidden={isOpen}>
         <header className="m-top">
           <h1>Claude Town</h1>
-          <label className="m-town">
-            <span className="sr">町を選ぶ</span>
-            <select value={p.peer} onChange={(e) => p.onTown(e.target.value)}>
-              <option value="">{home ? home.name : "この町"}</option>
-              {p.peers.filter((x) => !x.self).map((x) => (
-                <option key={x.name} value={x.name} disabled={x.status !== "healthy"}>{x.name}{x.status !== "healthy" ? "（つながらない）" : ""}</option>
-              ))}
-            </select>
-          </label>
-          <span className={`m-conn ${p.conn.cls}`} title={p.conn.msg}><i />{p.conn.label}</span>
         </header>
         <div className="m-scroll">
-          {p.snap && !p.snap.ccn_ok && <p className="m-note bad">{p.err ?? p.snap.ccn_error ?? "ccn につながりません。"}</p>}
-
-          {p.unreachable.length > 0 && <p className="m-note">{p.unreachable.join("、")}の町には、いま届きません。その町のお便りは出ていません。</p>}
+          {p.err && <p className="m-note bad">{p.err}</p>}
 
           {needs.length > 0 && (
             <section>
               <h2 className="m-h need">あなたの番<b>{needs.length}</b></h2>
               {needs.map((m) => (
-                <Row key={`${m.town}/${m.agent.id}`} a={m.agent} depth={m.root ? 0 : 1} mood={m.kind as Mood} town={m.town !== p.curTown ? m.town : undefined} onPick={() => p.onMail(m)} />
+                <Row key={m.agent.id} a={m.agent} depth={m.root ? 0 : 1} mood={m.kind as Mood} onPick={() => p.onMail(m)} />
               ))}
             </section>
           )}
@@ -107,7 +87,7 @@ export function MobileShell(p: Props) {
             ))}
           </p>
 
-          {p.snap?.ccn_ok && p.total === 0 && <p className="m-note">この町にはまだ誰もいません。</p>}
+          {p.snap && p.total === 0 && <p className="m-note">この町にはまだ誰もいません。</p>}
           {p.tree.families.map((f) => (
             <section key={f.root.id}>
               <h2 className="m-h">{houseNameOf(f.root)}<b>{f.all.length}人</b></h2>

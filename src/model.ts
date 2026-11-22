@@ -20,34 +20,30 @@ export type Report = {
 export type Agent = {
   id: string;
   name: string;
-  /** ccn の種類。pty はノードが端末（PTY）で動かす対話の claude、node は -p の子、terminal は人が端末で起動したもの。
-   *  subagent は Claude Code の記録から読んだ sub-agent と teammate（#96）。親のセッションの子として出す */
-  kind: "terminal" | "node" | "pty" | "subagent";
-  /** 一覧の出どころ（#96）。native は Claude Code の記録（~/.claude）から読んでいるだけで、capabilities が全部 false。古い一覧には無い */
-  source?: "ccn" | "native";
+  /** terminal は対話の claude（このアプリが立てたものと、端末で起動したもの）。subagent は sub-agent、teammate は agent team のチームメイト。
+   *  どちらも Claude Code の記録から読み、親のセッションの子として出す。pty と node はブラウザ版（PWA）が ccn から読むセッションの種類 */
+  kind: "terminal" | "node" | "pty" | "subagent" | "teammate";
+  /** 一覧の出どころ。app はこのアプリが立てた端末で、送信、停止、端末ができる。native は Claude Code の記録（~/.claude）から読んでいるだけで、
+   *  capabilities が全部 false。ccn はブラウザ版（PWA）だけが持つ、ccn の一覧の行 */
+  source?: "app" | "native" | "ccn";
+  /** アプリが立てた端末で、claude がまだ入力を受け付けるところまで起動していない（信頼の確認の画面を含む）。Rust の town_rows が付ける */
+  booting?: boolean;
   state: "running" | "waiting_permission" | "idle";
   cwd: string;
   /** cwd のプロジェクトの名前（worktree なら本体の名前。Rust が .git を読んで出す）。モックと古い一覧には無い */
   project?: string | null;
   pid?: number;
   startedAt?: number;
-  /** ccn が最後に動きを見た時刻（ms） */
+  /** 最後に動きを見た時刻（ms） */
   lastActivityAt?: number;
   canSend: boolean;
   parent: string | null;
-  /** ccn の parent の生の値（agent:<ノード>/<親の sid8>/<役割> か local） */
-  parentRaw?: string | null;
-  /** 転出のゴースト（src/ghost.ts）。相手の町にいる本物の ID と、親か子か */
-  ghost?: { town: string; realId: string; role: "parent" | "child" } | null;
   capabilities?: { send?: boolean; permissions?: boolean; interrupt?: boolean; stop?: boolean; terminal?: boolean } | null;
   report?: Report | null;
   closeCheck?: { status: "working" | "checking" | "ok" | "ng" | "error"; short?: string | null } | null;
   /** キャラの絵（Rust が町の中で被らないように割り当てる）。hue は色相のずらし（度） */
   avatar?: { char: string; hue: number } | null;
-  /**
-   * このセッションの claude が動いているアカウント。cam のコマンド名と、その email（ccn の PR #56 から一覧に載る）。
-   * 古い ccn、cam で選べずノードの設定で起動したセッション、アカウントを読めなかった端末のセッションには無い
-   */
+  /** このセッションの claude が動いているアカウント（cam のコマンド名と email）。ブラウザ版（PWA）が ccn から読む行にだけある */
   account?: string | null;
   accountEmail?: string | null;
 };
@@ -59,25 +55,19 @@ export function accountText(a: Agent): string | null {
 }
 
 export type Snapshot = {
-  ccn: string;
-  peer: string | null;
-  ccn_ok: boolean;
-  ccn_error: string | null;
   agents: Agent[];
-  /** お手紙の最近の記録（この機械の町だけ。src/letters.ts） */
+  /** お手紙の最近の記録（src/letters.ts） */
   letters?: import("./letters").LetterRec[];
   fetched_at: number;
-  /** 一覧を読めず、保存してあった一覧を agents に入れたときの、保存した時刻（ms）。src-tauri/src/offline.rs */
-  cached_at?: number | null;
-  /** 一覧の出どころ（#96）。ccn は "on"、"off"（設定で切った）、つながらなかった理由。native は件数（src-tauri/src/native/mod.rs の Stats） */
-  sources?: { ccn: string; native: Record<string, unknown> } | null;
+  /** 一覧の出どころの件数。native は src-tauri/src/native/mod.rs の Stats、app はこのアプリが立てた端末の数 */
+  sources?: { native: Record<string, unknown>; app: number } | null;
 };
-
-export type Peer = { name: string; url: string; status: string; self: boolean };
 
 export type ConvItem = {
   /** result は道具の結果（画面は道具の行に付け直し、吹き出しにしない）。event は止めた・失敗したターンの印（#83） */
   role: "user" | "assistant" | "tool" | "result" | "event"; text: string; from?: string | null; at?: string | number | null; pending?: boolean;
+  /** claude の起動を待って、まだ送っていない文（Rust の composer.rs が預かっている）。起動したら送る */
+  waitBoot?: boolean;
   /** 通し番号（このセッションで何件目か。Rust の conversation が付ける）。吹き出しの key に使う。送ったばかりの仮の項目には無い */
   n?: number;
   /** 別のセッションからのお手紙なら、送り手（from-name と、uds のソケットか agent:<ノード>/<sid8>/<役割>） */
@@ -118,6 +108,16 @@ export const MOOD_LABEL: Record<Mood, string> = {
   idle: "待機",
 };
 
+/** 様子の札の文。起動中は様子に関係なく「起動中」と出す（起動の前は sessions/<pid>.json が無く、様子は待機になる） */
+export function statusLabel(a: Pick<Agent, "booting">, mood: Mood): string {
+  return a.booting ? "起動中" : MOOD_LABEL[mood];
+}
+
+/** 様子の札の class。起動中は点を回る輪にする（App.css の .st-boot） */
+export function statusClass(a: Pick<Agent, "booting">, mood: Mood): string {
+  return `st st-${mood}${a.booting ? " st-boot" : ""}`;
+}
+
 export const NEEDS_YOU: Mood[] = ["approval", "reply"];
 
 /** カードの1行ラベル。その子がいま何の係かを短く */
@@ -148,12 +148,6 @@ export function sinceText(ms?: number | null): string {
   if (s < 3600) return `${Math.round(s / 60)}分`;
   return `${(s / 3600).toFixed(1)}時間`;
 }
-
-export function clip(s: string, n: number): string {
-  return s.length <= n ? s : s.slice(0, n - 1) + "…";
-}
-
-export type Family = { root: Agent; all: Agent[] };
 
 export function buildTree(agents: Agent[]) {
   const byId = new Map(agents.map((a) => [a.id, a]));
@@ -207,7 +201,7 @@ export type Who = {
 
 /**
  * カードの名前を全員分決める。世帯の名前は根のカードの名前なので、親のプロジェクトの名前になる。
- * 1. cwd が無ければ ccn の題名、それも無ければ ID の先頭8字
+ * 1. cwd が無ければセッションの題名、それも無ければ ID の先頭8字
  * 2. cwd があれば、cwd のプロジェクトの名前（worktree は本体の名前。~/Documents 直下、ホーム、/tmp なども cwd の最後の名前）。
  *    子孫の cwd や、エージェントが付けた名前（houses.json）は見ない
  */
@@ -215,11 +209,6 @@ export function cardNames(ws: Who[]): Map<string, string> {
   return new Map(
     ws.map((w) => [w.id, !w.cwd ? w.title || w.id.slice(0, 8) : w.project || projectFromPath(w.cwd) || "/"] as [string, string]),
   );
-}
-
-/** cwd のプロジェクトの名前（worktree なら本体の名前）。Rust が出した分が無ければパスの形で出す */
-export function projectOf(a: Agent): string {
-  return a.project || projectFromPath(a.cwd) || a.cwd;
 }
 
 /** 返事の最後の段落が問いで、その中に短い選択肢の行があれば取り出す（ボタンにする） */

@@ -1,13 +1,21 @@
 // チャット欄からモデルと権限モードを替えるときの決まり（#97）。画面は SessionControls.tsx。
 // ccn の口の仕様は claude-code-nodes の docs/superpowers/specs/2026-11-21-session-control-for-town.md にある。
-// - node（-p の子）は SDK で替えるので、いつでも受ける。ターンの途中で替えたときの効き方は ccn でも未確認
-// - pty（ノードが端末で動かす対話の claude）は、待機中だけ受ける。同じ id で起動し直すので約3秒かかる（実測 2.9 秒）
-// - terminal（人が端末で起動したセッション）は替えられない（ccn が 409 で断る）
+// 選択はいつでも押せる。今は替えられなければ予約し、替えられるようになったら替える（always-switch）。
+// - app（このアプリが PTY で立てた claude）: 端末に /model と Shift+Tab を書く（src-tauri/src/switch.rs）。予約も Rust が持つ。
+//   モデルは作業中でもすぐ効く。承認待ちだけ待つ。モードは待機中に替える（作業中と承認待ちは予約）
+// - ccn（ブラウザ版の ccn の行）: node（-p の子）は SDK で替えるので、承認待ちのほかはいつでも受ける。
+//   pty（ノードが端末で動かす対話の claude）は、待機中だけ受ける。同じ id で起動し直すので約3秒かかる（実測 2.9 秒）。予約は画面が持つ（src/webReserve.ts）
+// - none（端末で起動したセッション、記録から読むだけのセッション、チームメイト、sub-agent）: 外から届ける口が無い。代わりの手を出す
 
 import type { Agent } from "../model";
 
 /** Rust の session_controls と configure_session が返す形。HTTP の応答をそのまま渡す */
-export type Http = { status: number; body: any };
+export type Http = { status: number; body: unknown };
+
+/** 応答の本文がオブジェクトならそれ、でなければ空のオブジェクト。フィールドは unknown のまま、読む側が型を確かめる */
+export function bodyObj(body: unknown): Record<string, unknown> {
+  return typeof body === "object" && body ? (body as Record<string, unknown>) : {};
+}
 
 /** 候補は仕様書にある別名だけにする。今の値が別名でなければ（node は claude-sonnet-5-5 のような id で返る）、その値も選択肢に出す */
 export const MODELS: { value: string; label: string }[] = [
@@ -37,7 +45,7 @@ export type Support = "unknown" | "yes" | "no";
  */
 export function supportOf(r: unknown): Support {
   if (!isHttp(r)) return "unknown";
-  if (r.status === 400 && r.body?.code === "not_command") return "yes";
+  if (r.status === 400 && bodyObj(r.body).code === "not_command") return "yes";
   if (r.status === 409) return "yes";
   if (noRoute(r)) return "no";
   return "unknown";
@@ -45,7 +53,7 @@ export function supportOf(r: unknown): Support {
 
 /** 口そのものが無い（古いノード）。セッションが無い 404 とは本文で見分ける */
 export function noRoute(r: Http): boolean {
-  return r.status === 405 || (r.status === 404 && r.body?.error === "not found");
+  return r.status === 405 || (r.status === 404 && bodyObj(r.body).error === "not found");
 }
 
 export function isHttp(r: unknown): r is Http {
@@ -55,36 +63,75 @@ export function isHttp(r: unknown): r is Http {
 /** 口が無いノードの文言。仕様で決めた言い方に合わせる */
 export const NO_SUPPORT = "このノードでは使えません（ccn が古く、切り替えの口が無い）";
 
+/** どの口で替えるか。app はこのアプリが PTY で立てた claude（端末に /model と Shift+Tab を書く、src-tauri/src/switch.rs）。
+ *  ccn はブラウザ版（PWA）の ccn の行（ccn の PATCH）。none は外から届ける口が無いセッション */
+export type Route = "app" | "ccn" | "none";
+
+export function routeOf(a: Pick<Agent, "kind" | "source" | "capabilities">): Route {
+  if (a.source === "app" && a.capabilities?.terminal) return "app";
+  if (viaCcn(a) && a.kind !== "terminal") return "ccn";
+  return "none";
+}
+
+export type What = "model" | "mode";
+
 /**
- * 今は替えられない理由。替えられるなら null。
- * switching は、こちらが替えている最中（pty は起動し直しを待っている）
+ * 選んだ値をいつ当てるか。now はすぐ、wait は予約して when の時点で当てる、none は当てる口が無い（why に代わりの手を書く）。
+ * 選択はどの場合も押せる。none のときは、選んだら why を出す
  */
-export function lockReason(a: Pick<Agent, "kind" | "state" | "source">, support: Support, switching: boolean): string | null {
-  if (!viaCcn(a)) return "Claude Code の記録から読んでいるだけのセッションなので、ここからは替えられない";
-  if (a.kind === "terminal") return "端末で起動したセッションなので、ここからは替えられない";
-  if (support === "no") return NO_SUPPORT;
-  if (support === "unknown") return "このノードで使えるかを確かめている";
-  if (switching) return a.kind === "pty" ? "起動し直している（約3秒）" : "替えている";
-  // 承認の欄（ExitPlanMode の計画の確認を含む）に答える前にモードを替えると、承認で決まるモードと食い違う。node も含めて止める
-  if (a.state === "waiting_permission") return "承認待ちの間は替えられない。先に承認の欄で答える";
-  if (a.kind === "pty" && a.state !== "idle") return "作業中は替えられない。端末のセッションは待機中だけ替えられる（止めてから替える）";
-  return null;
+export type Plan = { kind: "now" } | { kind: "wait"; when: string } | { kind: "none"; why: string };
+
+/** Shift+Tab の順に出ないので、端末に書いても届かないモード（2026-11-21、v2.1.330 で確かめた） */
+export const UNREACHABLE_MODES = ["dontAsk"];
+
+/**
+ * switching は、こちらが替えている最中（ccn の pty は起動し直しを待っている）。
+ * 承認の欄（ExitPlanMode の計画の確認を含む）が出ている間は、どの口も待つ。
+ * app は端末に書くので、承認の画面に入力が入る（Enter は許可になる）。ccn は承認で決まるモードと食い違う
+ */
+export function planOf(a: Pick<Agent, "kind" | "state" | "source" | "capabilities" | "name">, what: What, value: string | null, support: Support, switching: boolean): Plan {
+  const route = routeOf(a);
+  if (route === "none") return { kind: "none", why: noRouteWhy(a, what, value) };
+  if (route === "app") {
+    if (what === "mode" && value && UNREACHABLE_MODES.includes(value)) {
+      return { kind: "none", why: `${value} は Shift+Tab の順に出ないので、端末からは替えられない。claude を --permission-mode ${value} で起動し直す` };
+    }
+    if (a.state === "waiting_permission") return { kind: "wait", when: "承認に答えたら替える" };
+    // モードは Shift+Tab で順に回すので、途中のモード（bypassPermissions など）を通る。道具が走っている間には回さない
+    if (what === "mode" && a.state !== "idle") return { kind: "wait", when: "このターンが終わったら替える" };
+    return { kind: "now" };
+  }
+  if (support === "no") return { kind: "none", why: NO_SUPPORT };
+  if (support === "unknown") return { kind: "wait", when: "このノードで使えるかを確かめてから替える" };
+  if (switching) return { kind: "wait", when: "いまの切り替えが終わったら替える" };
+  if (a.state === "waiting_permission") return { kind: "wait", when: "承認に答えたら替える" };
+  if (a.kind === "pty" && a.state !== "idle") return { kind: "wait", when: "このターンが終わったら替える（端末のセッションは claude を起動し直す）" };
+  return { kind: "now" };
 }
 
-/** ccn が動かしているセッションか。ネイティブの記録だけから読んだもの（#96）と sub-agent は ccn の口が使えない */
+/** 外から届ける口が無いセッションで、代わりにできること。Claude Code に外から入力やモデルを渡す口は無い（README の「モデルと権限モード」） */
+export function noRouteWhy(a: Pick<Agent, "kind" | "source">, what: What, value: string | null): string {
+  const v = value ?? (what === "model" ? "<モデル>" : "<モード>");
+  const inTerm = what === "model" ? `/model ${v} を打つ` : v === "plan" ? "/plan を打つか、Shift+Tab で plan にする" : `Shift+Tab で ${v} にする`;
+  if (a.kind === "subagent") return "sub-agent は親のセッションの中で動くので、ここからは替えられない";
+  if (a.kind === "teammate") {
+    return what === "model"
+      ? "チームメイトのモデルは起動のときに決まり、後から替えられない（Claude Code の仕様）"
+      : `チームメイトの権限モードは、リードの端末でそのチームメイトを開き、Shift+Tab で ${v} にする（次のターンから効く）`;
+  }
+  if (viaCcn(a)) return `端末で起動したセッションには、ccn から替える口が無い。そのターミナルで ${inTerm}`;
+  return `Claude Town の外で起動したセッションには、外から入力を届ける口が無い。起動したターミナルで ${inTerm}`;
+}
+
+/** ccn が動かしているセッションか。ブラウザ版（PWA）が ccn から読む行だけで、アプリ（Tauri）の行はどれも当たらない */
 export function viaCcn(a: Pick<Agent, "kind" | "source">): boolean {
-  return a.source !== "native" && a.kind !== "subagent";
-}
-
-/** 理由のうち、画面にいつも出しておくもの（確かめている最中は出さない） */
-export function showReason(reason: string | null, support: Support): boolean {
-  return !!reason && support !== "unknown";
+  return a.source === "ccn";
 }
 
 /** configure_session が断られたときの文言。成功（2xx）なら null */
 export function configureError(r: Http): string | null {
   if (r.status >= 200 && r.status < 300) return null;
-  const b = typeof r.body === "object" && r.body ? r.body : {};
+  const b = bodyObj(r.body);
   const msg = typeof b.error === "string" ? b.error : typeof r.body === "string" ? r.body : JSON.stringify(r.body);
   if (noRoute(r)) return NO_SUPPORT;
   if (r.status === 404) return "セッションが見つからなかった（終わったか、別のノードに移った）";

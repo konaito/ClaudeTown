@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { call as invoke, HAS_CCN_SETTING } from "../bridge";
+import { call as invoke } from "../bridge";
 import { checkPlace, DEFAULT_PLACE_LABEL } from "../newHouse/placeSetting";
 import { placeLabel, recentPlaces, type PlacesInput, type RecentPlace } from "../newHouse/places";
 import { MODELS, MODES } from "../session/control";
@@ -19,13 +19,6 @@ export function SettingsDialog({ place, defaults, onSave, onClose }: {
   const [model, setModel] = useState(defaults.model ?? "");
   const [mode, setMode] = useState(defaults.permissionMode ?? "");
   const [src, setSrc] = useState<{ roots: string[]; lobby: string | null; recent: RecentPlace[] } | "error" | null>(null);
-  // ccn を使うか（#96）。アプリの中だけの設定で、Rust のファイルに置く（読むのは一覧の見張りのスレッド）。null は読み込み中
-  const [ccn, setCcn] = useState<boolean | null>(null);
-  const [ccnSaved, setCcnSaved] = useState<boolean | null>(null);
-  useEffect(() => {
-    if (!HAS_CCN_SETTING) return;
-    invoke<{ ccn: boolean }>("town_settings").then((v) => { setCcn(v.ccn); setCcnSaved(v.ccn); }).catch(() => {});
-  }, []);
   useEffect(() => {
     let live = true;
     invoke<PlacesInput>("house_places")
@@ -39,7 +32,7 @@ export function SettingsDialog({ place, defaults, onSave, onClose }: {
     return () => window.removeEventListener("keydown", k);
   }, [onClose]);
 
-  // 範囲の確認は一覧を読めてから。読めなかったときは範囲を確かめず、立てたときの ccn の応答で伝える
+  // 範囲の確認（ブラウザ版の ccn の roots）は一覧を読めてから。読めなかったときは範囲を確かめず、立てたときの失敗で伝える
   const roots = typeof src === "object" && src ? src.roots : [];
   const lobby = typeof src === "object" && src ? src.lobby : null;
   const check = text.trim() ? checkPlace(text, roots, lobby) : null;
@@ -47,7 +40,6 @@ export function SettingsDialog({ place, defaults, onSave, onClose }: {
   const save = () => {
     if (bad) return;
     onSave(check && check.ok ? check.path : null, { model: model || null, permissionMode: mode || null });
-    if (ccn !== null && ccn !== ccnSaved) invoke("set_town_settings", { ccn }).catch(() => {});
     onClose();
   };
 
@@ -57,7 +49,7 @@ export function SettingsDialog({ place, defaults, onSave, onClose }: {
         <div className="modal-title">設定</div>
         <section className="set-sec">
           <label className="set-label" htmlFor="set-place">新しい世帯の場所</label>
-          <p className="hint">「＋ 新しい世帯」を押したときに、親を立てる場所。空にすると {DEFAULT_PLACE_LABEL} で立てる。</p>
+          <p className="hint">左のペインの「新しい世帯」を押したときに、親を立てる場所。空にすると {DEFAULT_PLACE_LABEL} で立てる。</p>
           <input id="set-place" className="set-input" value={text} spellCheck={false} placeholder={`${DEFAULT_PLACE_LABEL}（既定）`} autoFocus
             onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") save(); }} aria-invalid={!!bad} />
           {bad && <p className="set-bad">{bad}</p>}
@@ -67,7 +59,7 @@ export function SettingsDialog({ place, defaults, onSave, onClose }: {
               <span className="nh-time">既定</span><span className="nh-path">{DEFAULT_PLACE_LABEL}</span>
             </button>
             {src === null && <p className="nh-note">読み込み中…</p>}
-            {src === "error" && <p className="nh-note bad">一覧を読めなかった。場所は直接入力できる（範囲は立てるときに ccn が確かめる）</p>}
+            {src === "error" && <p className="nh-note bad">一覧を読めなかった。場所は直接入力できる（無い場所なら、立てるときに知らせる）</p>}
             {typeof src === "object" && src && src.recent.map((p) => (
               <button key={p.path} className={`nh-row${text.trim() === p.path ? " on" : ""}`} onClick={() => setText(p.path)} title={p.path}>
                 <span className="nh-path">{placeLabel(p.path)}</span>
@@ -95,18 +87,6 @@ export function SettingsDialog({ place, defaults, onSave, onClose }: {
             </label>
           </div>
         </section>
-        {HAS_CCN_SETTING && (
-          <section className="set-sec">
-            <label className="set-label set-check">
-              <input type="checkbox" checked={ccn ?? true} disabled={ccn === null} onChange={(e) => setCcn(e.target.checked)} />
-              ccn を使う
-            </label>
-            <p className="hint">
-              町の一覧と会話は、この Mac の Claude Code の記録から読む。ccn を使うと、ccn につながるときだけ ccn の一覧を重ね、送信、承認、停止、ターミナル、別の機械の町を使える。
-              切ると ccn に取りに行かず、どのセッションも読むだけになる（新しい世帯も作れない）。
-            </p>
-          </section>
-        )}
         <div className="modal-btns">
           <button className="pane-btn" onClick={onClose}>やめる（Esc）</button>
           <button className="primary" disabled={!!bad} onClick={save}>保存</button>

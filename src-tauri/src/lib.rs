@@ -1,33 +1,40 @@
 // family-computing の裏側。画面から呼ばれる命令:
-// - snapshot(peer): ccn の一覧（状態、送信先、親子）、hook の報告、close-check の判定を1つにまとめる
-// - peers: ccn につながっている機械の一覧
-// - conversation(session_id, peer, since): ccn の messages を差分で読み、画面に出す形（発言と道具の1行）に縮め、画面がまだ持っていない分だけ返す
-// - send_message(session_id, text, peer): ccn の POST /api/sessions/<id>/messages で文を届ける
-// - create_session / stop_session / teleport / teleport_info / session_detail: ccn の口をそのまま呼ぶ
-// - term_open / term_close / term_input / term_resize: ccn の端末（PTY）の口を読み書きし、開いた画面の Channel へ流す
+// - snapshot: この機械の Claude Code の記録（native/）、このアプリが立てた端末（pty.rs）、hook の報告、close-check の判定を1つにまとめる
+// - conversation(session_id, since): セッションの jsonl を差分で読み、画面に出す形（発言と道具の1行）に縮め、画面がまだ持っていない分だけ返す
+// - create_session / stop_session: 新しい世帯の claude をこのアプリの中の端末で起動する、止める（pty.rs）
+// - term_open / term_close / term_input / term_resize: このアプリが立てた端末を読み書きし、開いた画面の Channel へ流す
+// - house_places: 新しい世帯のペインの「最近の場所」の材料（places.rs）
 // - prompt_history / slash_commands / file_suggestions / send_direct / interrupt_session: チャットの入力欄を CLI と同じ動きにする（composer.rs）
-// - session_controls / configure_session / run_command: チャット欄からモデルと権限モードを替え、組み込みコマンドを送る（composer.rs、#97）
-// HTTP を待つ命令は spawn_blocking で動かし、メインスレッドを止めない（下の「画面から呼ぶ命令」）
-//
-// ccn は Origin 付きの要求を CSRF として断るので、HTTP は必ずこちら（webview ではなく Rust）から出す。
-// 別の機械（peer）は手元のノードの中継 /n/<peer>/api/... を通す。
+// - session_settings / switch_session / cancel_switch: モデルと権限モードを読む、替える、予約を取り消す（switch.rs）
+// ファイルを読む命令は spawn_blocking で動かし、メインスレッドを止めない（下の「画面から呼ぶ命令」）。
+// 操作（送信、停止、端末）は、このアプリが立てたセッションにだけできる。ほかのセッションは記録から読むだけ。
 
 mod attach;
 mod avatars;
 mod composer;
 mod naming;
+mod places;
+mod pty;
 mod repo;
+mod switch;
 mod native;
-mod offline;
+mod perf;
+use perf::*;
+mod conversation;
+use conversation::*;
+mod session_ops;
+mod terminal;
+use terminal::*;
+mod watch;
+use watch::*;
 
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::io::{BufRead, BufReader};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// 非常停止。~/.family-computing/send-disabled があると、アプリからの送信（注文と承認のキー）を全部断る。
@@ -78,21 +85,6 @@ fn place(home: &std::path::Path, app_id: Option<&str>, app_home: Option<String>,
     dir.join(name)
 }
 
-/// オフラインのキャッシュの置き場所（src-tauri/src/offline.rs）。開発版と安定版で分かれる
-fn cache_dir() -> PathBuf {
-    #[cfg(test)]
-    if let Some(p) = TEST_CACHE.with(|c| c.borrow().clone()) {
-        return p;
-    }
-    fc_path(Scope::App, "cache")
-}
-
-#[cfg(test)]
-thread_local! {
-    /// 試験のスレッドごとの会話の保存先（本物の ~/.family-computing に書かない）
-    static TEST_CACHE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
-}
-
 fn read_json(p: &PathBuf) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(p).ok()?).ok()
 }
@@ -106,68 +98,24 @@ fn stamp_of(meta: &fs::Metadata) -> FileStamp {
 }
 
 /// read_json と同じ中身を返す。前に読んだときから更新時刻、大きさ、inode のどれも変わっていなければ、読まずに覚えた中身を返す（#11）。
-/// snapshot は一覧を取るたびに、セッションごとの state/{id}.json と close-check/{id}.json、houses.json、ccn.json を読んでいた。
+/// snapshot は一覧を取るたびに、セッションごとの state/{id}.json と close-check/{id}.jsonを読む。
 /// 無いファイルは覚えない（できたら次の回に読む）
 fn read_json_cached(p: &std::path::Path) -> Option<Value> {
-    static CACHE: std::sync::OnceLock<Mutex<HashMap<PathBuf, (FileStamp, Option<Value>)>>> = std::sync::OnceLock::new();
+    type Entry = (FileStamp, Option<Value>);
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<PathBuf, Entry>>> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let Ok(meta) = fs::metadata(p) else {
         cache.lock().unwrap_or_else(|e| e.into_inner()).remove(p);
         return None;
     };
     let st = stamp_of(&meta);
-    if let Some((s, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(p) {
-        if *s == st && st.modified.is_some() {
+    if let Some((s, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(p)
+        && *s == st && st.modified.is_some() {
             return v.clone();
         }
-    }
     let v = read_json(&p.to_path_buf());
     cache.lock().unwrap_or_else(|e| e.into_inner()).insert(p.to_path_buf(), (st, v.clone()));
     v
-}
-
-/// 手元の ccn ノードの入口。ccn.json の port を読む（README は 4322、実機は 4323 なので固定しない）。
-fn ccn_base() -> String {
-    if let Ok(u) = std::env::var("FC_CCN_URL") {
-        return u.trim_end_matches('/').to_string();
-    }
-    for rel in [".config/ccn/ccn.json", ".config/cc/cc.json"] {
-        if let Some(port) = read_json_cached(&home().join(rel)).and_then(|v| v.get("port").and_then(|p| p.as_u64())) {
-            return format!("http://127.0.0.1:{port}");
-        }
-    }
-    "http://127.0.0.1:4322".into()
-}
-
-fn api(peer: &Option<String>) -> String {
-    let base = ccn_base();
-    match peer.as_deref().filter(|p| !p.is_empty()) {
-        Some(p) => format!("{base}/n/{p}/api"),
-        None => format!("{base}/api"),
-    }
-}
-
-/// ccn への HTTP。接続を使い回すため、1つの Agent を全部の命令で共有する（呼ぶたびに作ると、毎回つなぎ直す）
-fn agent() -> &'static ureq::Agent {
-    static A: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
-    A.get_or_init(|| ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(3)).timeout(Duration::from_secs(8)).build())
-}
-
-/// 一覧（snapshot、peers）の時間切れ。別の機械への中継は実測 0.42〜0.46 秒（2026-11-12）。
-/// 3秒にしたら、ノードが一瞬詰まった回（/api/sessions が最大 1.4 秒、2026-11-12 の meta-9d の実測）で取りこぼし、町が空になった。
-/// 命令は非同期で画面を止めず、画面は前の回が終わるまで次を始めないので、長めの5秒にする
-const LIST_TIMEOUT: Duration = Duration::from_secs(5);
-
-fn get_json(url: &str) -> Result<Value, String> {
-    get_json_t(url, Duration::from_secs(8))
-}
-
-fn get_json_t(url: &str, timeout: Duration) -> Result<Value, String> {
-    match agent().get(url).timeout(timeout).call() {
-        Ok(r) => r.into_json::<Value>().map_err(|e| format!("応答を読めなかった: {e}")),
-        Err(ureq::Error::Status(code, r)) => Err(format!("ccn が {code} を返した: {}", r.into_string().unwrap_or_default())),
-        Err(e) => Err(format!("ccn につながらない（{url}）: {e}")),
-    }
 }
 
 fn now_ms() -> u128 {
@@ -176,63 +124,21 @@ fn now_ms() -> u128 {
 
 #[derive(Serialize)]
 struct Snapshot {
-    ccn: String,
-    peer: Option<String>,
-    ccn_ok: bool,
-    ccn_error: Option<String>,
     agents: Vec<Value>,
-    /// お手紙（セッションどうしのやり取り）の最近の記録。hook が ~/.family-computing/letters.jsonl に書く。この機械の町だけ
+    /// お手紙（セッションどうしのやり取り）の最近の記録。hook が ~/.family-computing/letters.jsonl に書く
     letters: Vec<Value>,
     fetched_at: u128,
-    /// 一覧を読めず、保存してあった一覧（offline.rs）を agents に入れたときの、保存した時刻（ms）
-    cached_at: Option<u64>,
-    /// 一覧の出どころ（#96）。この機械の町だけ。ccn は on、off（設定で切った）、つながらなかった理由。native は件数
+    /// 一覧の出どころの件数（#96）。native は Claude Code の記録から読んだ件数、app はこのアプリが立てた端末の数
     sources: Option<Value>,
 }
 
-// ---------- ccn を使うかの設定（#96） ----------
-// 既定は使う（ネイティブの一覧に、ccn に接続できるときだけ ccn の一覧を重ねる）。切ると ccn の一覧を読まない。
-// 読むのは Rust の見張りのスレッドなので、アプリ側の置き場所（開発版は dev/ の下）のファイルに置く。形は {"ccn": true|false}
-
-const SETTINGS_FILE: &str = "town-settings.json";
-/// 0 はまだ読んでいない、1 は使う、2 は使わない
-static CCN_USE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-fn ccn_use() -> bool {
-    match CCN_USE.load(Ordering::SeqCst) {
-        1 => true,
-        2 => false,
-        _ => {
-            let on = read_json(&fc_path(Scope::App, SETTINGS_FILE)).and_then(|v| v["ccn"].as_bool()).unwrap_or(true);
-            CCN_USE.store(if on { 1 } else { 2 }, Ordering::SeqCst);
-            on
-        }
-    }
+/// このアプリが立てていないセッションへの操作を断る
+fn app_guard(session_id: &str) -> Result<(), String> {
+    if pty::owns(session_id) { Ok(()) } else { Err(native::READ_ONLY.into()) }
 }
 
-#[tauri::command]
-fn town_settings() -> Value {
-    json!({ "ccn": ccn_use() })
-}
-
-#[tauri::command]
-fn set_town_settings(ccn: bool) -> Result<Value, String> {
-    let p = fc_path(Scope::App, SETTINGS_FILE);
-    if let Some(d) = p.parent() {
-        fs::create_dir_all(d).map_err(|e| e.to_string())?;
-    }
-    fs::write(&p, json!({ "ccn": ccn }).to_string()).map_err(|e| format!("設定を保存できなかった: {e}"))?;
-    CCN_USE.store(if ccn { 1 } else { 2 }, Ordering::SeqCst);
-    town_kick();
-    Ok(town_settings())
-}
-
-/// 設定で ccn を切ったときの、ccn の一覧の代わりの理由
-const CCN_OFF: &str = "ccn を使わない設定";
-
-/// ネイティブの記録から読んでいるだけのセッションへの操作を断る（この機械の町だけ）
-fn native_guard(session_id: &str, peer: &Option<String>) -> Result<(), String> {
-    if peer.as_deref().unwrap_or("").is_empty() { native::refuse_if_native(session_id) } else { Ok(()) }
+fn refuse_if_disabled() -> Result<(), String> {
+    if send_disabled() { Err("送信を止めている（~/.family-computing/send-disabled がある）".into()) } else { Ok(()) }
 }
 
 /// お手紙の記録のうち、直近 LETTERS_WINDOW_MS のものを古い順に返す（多くても LETTERS_MAX 件）
@@ -286,188 +192,104 @@ fn letters_from(path: &std::path::Path, now: u128, tail: &mut Option<LetterTail>
     t.recs[n.saturating_sub(LETTERS_MAX)..].to_vec()
 }
 
-/// ccn の peers。手元のノードは peers を Cloudflare の API から引くので、ネットが切れると失敗する。
-/// 読めたら保存し、読めなければ保存した一覧を返す（別の機械の status は "cached" にして、裏で取りに行かせない）
-fn peers() -> Result<Value, String> {
-    let file = offline::peers_file(&cache_dir());
-    match get_json_t(&format!("{}/api/peers", ccn_base()), LIST_TIMEOUT) {
-        Ok(v) => {
-            if v.as_array().is_some_and(|a| !a.is_empty()) && offline::read(&file).map(|c| c["peers"] != v).unwrap_or(true) {
-                let _ = offline::write(&file, json!({ "peers": v }));
-            }
-            Ok(v)
+/// 町の一覧の行。Claude Code の記録から読んだセッション、sub-agent、チームメイトに、このアプリが立てた端末を重ねる。
+/// このアプリが立てたもので、まだ sessions/<pid>.json が無い（起動したばかり）ものは、台帳から仮の行を作る
+fn town_rows() -> Vec<Value> {
+    let n = native::list(&native::claude_home(), native::now_ms());
+    let mut rows: Vec<Value> = n.sessions.into_iter().chain(n.subagents).collect();
+    // /clear で id が変わっても同じ pid なら同じ端末。一覧で見えた id を台帳に足してから、どれがこのアプリのものかを決める
+    pty::note_ids(&rows.iter().filter(|r| r["kind"] == "terminal").filter_map(|r| Some((r["id"].as_str()?.to_string(), r["pid"].as_u64()? as u32))).collect::<Vec<_>>());
+    let seen: HashSet<String> = rows.iter().filter_map(|r| r["id"].as_str().map(String::from)).collect();
+    let mut app = 0;
+    for p in pty::list() {
+        app += 1;
+        if p.ids.iter().any(|i| seen.contains(i)) {
+            continue;
         }
-        Err(e) => match offline::read(&file).and_then(|c| c["peers"].as_array().cloned()) {
-            Some(list) => Ok(Value::Array(list.into_iter().map(|mut p| {
-                if p["self"] != json!(true) {
-                    p["status"] = json!("cached");
-                }
-                p
-            }).collect())),
-            None => Err(e),
-        },
-    }
-}
-
-/// 顔ぶれが同じまま中身だけ変わったときに、前の書き込みから空ける時間。
-/// 動いているセッションがあると report の doing などが取るたびに変わるので、毎回は書かない
-const TOWN_SAVE_GAP_MS: u128 = 30_000;
-
-/// 町ごとの、前回保存した一覧の鍵と顔ぶれと時刻
-struct TownSaved {
-    key: u64,
-    ids: Vec<String>,
-    at: u128,
-}
-static TOWN_SAVED: Mutex<Option<HashMap<String, Option<TownSaved>>>> = Mutex::new(None);
-
-/// 保存した一覧と同じかを比べる鍵。agents を JSON にしたもののハッシュ（保存した時刻の savedAt は agents の外にあるので入らない）
-fn town_key(agents: &[Value]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_string(agents).unwrap_or_default().hash(&mut h);
-    h.finish()
-}
-
-fn town_ids(agents: &[Value]) -> Vec<String> {
-    agents.iter().filter_map(|a| a["id"].as_str().map(String::from)).collect()
-}
-
-fn save_town(peer: &Option<String>, agents: &[Value]) {
-    let mut g = TOWN_SAVED.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = g.get_or_insert_with(HashMap::new).entry(offline::town(peer)).or_insert(None);
-    save_town_to(&offline::town_file(&cache_dir(), peer), agents, now_ms(), prev);
-}
-
-/// save_town の中身（試験のために置き場所、時刻、前回の記録を受け取る）。書いたら true。
-/// 中身が前回保存と同じなら書かない。顔ぶれが同じで中身だけ変わったときは、前の書き込みから TOWN_SAVE_GAP_MS 空ける
-/// （空けている間に変わった分は、間隔が過ぎた後の回で書く）。前回の記録が無い（起動直後）ときは、保存してあるファイルと比べる
-fn save_town_to(file: &std::path::Path, agents: &[Value], now: u128, prev: &mut Option<TownSaved>) -> bool {
-    if prev.is_none() {
-        *prev = offline::read(file).map(|c| {
-            let saved = c["agents"].as_array().cloned().unwrap_or_default();
-            TownSaved { key: town_key(&saved), ids: town_ids(&saved), at: c["savedAt"].as_u64().unwrap_or(0) as u128 }
-        });
-    }
-    let key = town_key(agents);
-    let ids = town_ids(agents);
-    if let Some(p) = prev.as_ref() {
-        if p.key == key || (p.ids == ids && now.saturating_sub(p.at) < TOWN_SAVE_GAP_MS) {
-            return false;
-        }
-    }
-    // 書けたときだけ覚える（書けなかったら、次の回にまた書く）
-    if offline::write(file, json!({ "agents": agents })).is_err() {
-        return false;
-    }
-    *prev = Some(TownSaved { key, ids, at: now });
-    true
-}
-
-/// ccn の一覧を、画面に渡すセッションの形に直す。読めなければ（空の一覧, 理由）。
-/// この機械の町（peer が None）だけ、hook の報告と close-check の判定を足す。キャラの割り当ては足さない
-fn fetch_agents(peer: &Option<String>) -> (Vec<Value>, Option<String>) {
-    agents_from(peer, list_sessions(peer))
-}
-
-/// ccn の一覧（GET /sessions）。読めなければ理由
-fn list_sessions(peer: &Option<String>) -> Result<Vec<Value>, String> {
-    match get_json_t(&format!("{}/sessions", api(peer)), LIST_TIMEOUT) {
-        Ok(Value::Array(v)) => Ok(v),
-        Ok(_) => Err("一覧の形が想定と違う".into()),
-        Err(e) => Err(e),
-    }
-}
-
-/// ccn の一覧を、画面に渡すセッションの形に直す（fetch_agents の中身）。一覧は GET /sessions でも、一覧の SSE（#5）でもよい
-fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<Value>, Option<String>) {
-    let local = peer.is_none();
-    let (sessions, mut ccn_error) = match got {
-        // 設定で ccn を切ったら、SSE で受けた一覧が残っていても使わない
-        Ok(_) if local && !ccn_use() => (vec![], Some(CCN_OFF.to_string())),
-        Ok(v) => (v, None),
-        Err(e) => (vec![], Some(e)),
-    };
-    let mut live: Vec<&Value> = sessions
-        .iter()
-        .filter(|s| s.get("state").and_then(|x| x.as_str()) != Some("exited"))
-        .collect();
-    // この機械の町は、ネイティブの記録（~/.claude）の一覧を重ねる（#96）。同じ sessionId が ccn にもあれば ccn の行を使う。
-    // ccn の行は、送信や承認の口（capabilities）、from 行の親、アカウントを持つ。ネイティブからは、ccn に無いセッションと sub-agent を足す
-    let native_rows: Vec<Value> = if local {
-        let n = native::list(&native::claude_home(), native::now_ms());
-        let ccn_ids: HashSet<&str> = live.iter().filter_map(|s| s["id"].as_str()).collect();
-        let rows: Vec<Value> = n.sessions.into_iter().filter(|r| !r["id"].as_str().is_some_and(|id| ccn_ids.contains(id))).chain(n.subagents).collect();
-        native::register(native::paths_of(&rows.iter().collect::<Vec<_>>()));
-        let mut odd = n.stats.unexpected.clone();
-        for (k, v) in native::conv::odd_counts() {
-            *odd.entry(k).or_default() += v;
-        }
-        let mut st = serde_json::to_value(&n.stats).unwrap_or(Value::Null);
-        st["unexpected"] = json!(odd);
-        // 時間は毎回変わるので、一覧が変わったかの比べ（snapshot_key）に入れない
-        if let Some(o) = st.as_object_mut() {
-            o.remove("ms");
-        }
-        *LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!({
-            "ccn": match &ccn_error { None => "on".to_string(), Some(e) if e == CCN_OFF => "off".to_string(), Some(e) => e.clone() },
-            "native": st,
+        rows.push(json!({
+            "id": p.id, "kind": "terminal", "state": "idle", "cwd": p.cwd, "pid": p.pid, "startedAt": p.started_at,
+            "lastActivityAt": p.started_at, "parent": null, "title": null,
         }));
-        // ccn につながらなくても、ネイティブの一覧は読めているので、町は読めたものとして扱う（保存した一覧に差し替えない）
-        ccn_error = None;
-        rows
-    } else {
-        vec![]
-    };
-    live.extend(native_rows.iter());
-    let live_ids: HashSet<String> = live.iter().filter_map(|s| s["id"].as_str().map(String::from)).collect();
+    }
+    for r in rows.iter_mut() {
+        let mine = r["id"].as_str().is_some_and(pty::owns);
+        r["capabilities"] = if mine { app_caps() } else { native::read_only_caps() };
+        if mine {
+            r["source"] = json!("app");
+            // claude が入力を受け付けるところまで起動していない（信頼の確認の画面を含む）。画面は「起動中」と出す
+            if r["id"].as_str().and_then(composer::booted) == Some(false) {
+                r["booting"] = json!(true);
+            }
+        }
+    }
+    native::register(native::paths_of(&rows.iter().collect::<Vec<_>>()));
+    let mut odd = n.stats.unexpected.clone();
+    for (k, v) in native::conv::odd_counts() {
+        *odd.entry(k).or_default() += v;
+    }
+    let mut st = serde_json::to_value(&n.stats).unwrap_or(Value::Null);
+    st["unexpected"] = json!(odd);
+    // 時間は毎回変わるので、一覧が変わったかの比べ（snapshot_key）に入れない
+    if let Some(o) = st.as_object_mut() {
+        o.remove("ms");
+    }
+    *LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!({ "native": st, "app": app }));
+    rows
+}
 
-    // ccn の parent は from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）
-    let parent_from_ccn = |s: &Value| -> Option<String> {
+/// このアプリが立てたセッションでできること。承認は端末で答える（構造化した承認の口は無い）
+fn app_caps() -> Value {
+    json!({ "send": true, "permissions": false, "interrupt": true, "stop": true, "terminal": true, "events": false })
+}
+
+/// 一覧の行を、画面に渡すセッションの形に直す。hook の報告と close-check の判定を足す。キャラの割り当ては足さない
+fn agents_from(rows: Vec<Value>) -> Vec<Value> {
+    let live_ids: HashSet<String> = rows.iter().filter_map(|s| s["id"].as_str().map(String::from)).collect();
+    // 別のプロダクト（ccn など）が子に付ける from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）から親を引く。Claude Code の記録の1行目にある
+    let parent_from_line = |s: &Value| -> Option<String> {
         let p = s["parent"].as_str()?;
         let sid8 = p.strip_prefix("agent:")?.split('/').nth(1)?;
         live_ids.iter().find(|id| id.starts_with(sid8)).cloned()
     };
 
-    // 名前は、そのセッションが作業しているプロジェクトの名前（src-tauri/src/naming.rs）。
-    // .git を読むのはこの機械の町だけ。別の機械の cwd はパスの形だけで決める
-    let whos: Vec<naming::Who> = live.iter().map(|s| {
+    // 名前は、そのセッションが作業しているプロジェクトの名前（src-tauri/src/naming.rs）
+    let whos: Vec<naming::Who> = rows.iter().map(|s| {
         let id = s["id"].as_str().unwrap_or_default().to_string();
         let cwd = s["cwd"].as_str().filter(|c| !c.is_empty());
         naming::Who {
             cwd: cwd.map(String::from),
             title: s["title"].as_str().map(String::from),
-            project: cwd.and_then(|c| naming::project_of(c, local)),
+            project: cwd.and_then(|c| naming::project_of(c, true)),
             id,
         }
     }).collect();
     let name_of = naming::card_names(&whos);
     let project_of: HashMap<&str, Option<&String>> = whos.iter().map(|w| (w.id.as_str(), w.project.as_ref())).collect();
     let mut agents = vec![];
-    for s in &live {
+    for s in &rows {
         let id = s["id"].as_str().unwrap_or_default().to_string();
-        // 親は ccn の parent（from 行の呼び手）から引く。sub-agent は置き場所で決めた親（#96）。親が生きていなければ根として扱う
+        // sub-agent とチームメイトは置き場所で決めた親（#96）。ほかは from 行の呼び手。親が生きていなければ根として扱う
         let native_parent = s["native"]["parentId"].as_str().filter(|p| live_ids.contains(*p)).map(String::from);
-        let parent = native_parent.or_else(|| parent_from_ccn(s)).filter(|p| *p != id);
-        let sub = s["kind"] == "subagent";
-        let (report, close_check) = if sub {
-            // sub-agent の様子は hook の報告ではなく、meta.json の説明と jsonl の末尾から作る（hook の報告は親のセッションの分しか無い）
+        let parent = native_parent.or_else(|| parent_from_line(s)).filter(|p| *p != id);
+        // sub-agent と in-process のチームメイトは、リードと同じ session id で hook が届くので、hook の報告を使わない。
+        // 様子は meta.json の説明と jsonl の末尾から作る。tmux のチームメイトは自分の session id を持つので hook の報告を読む
+        let from_meta = s["native"]["report"].is_object();
+        let (report, close_check) = if from_meta {
             (Some(s["native"]["report"].clone()), None)
-        } else if peer.is_none() {
+        } else {
             (
                 read_json_cached(&fc_path(Scope::Shared, &format!("state/{id}.json"))),
                 read_json_cached(&home().join(format!(".claude/close-check/{id}.json"))),
             )
-        } else {
-            (None, None)
         };
+        let named = matches!(s["kind"].as_str(), Some("subagent") | Some("teammate"));
         agents.push(json!({
             "id": id,
-            // sub-agent は、親と同じプロジェクトの名前になって見分けられないので、teammate の名前か種類（Explore など）にする
-            "name": if sub { s["title"].clone() } else { json!(name_of.get(&id)) },
-            // 一覧の出どころ（#96）。native は Claude Code の記録から読んでいるだけで、操作はできない
-            "source": if s.get("native").is_some() { "native" } else { "ccn" },
-            // cwd のプロジェクトの名前（worktree なら本体の名前）。振り分けの場所でも cwd の分を入れる
+            // sub-agent とチームメイトは、親と同じプロジェクトの名前になって見分けられないので、チームメイトの名前か種類（Explore など）にする
+            "name": if named { s["title"].clone() } else { json!(name_of.get(&id)) },
+            // 一覧の出どころ。app はこのアプリが立てた端末、native は Claude Code の記録から読んでいるだけで、操作はできない
+            "source": s.get("source").cloned().unwrap_or(json!("native")),
+            // cwd のプロジェクトの名前（worktree なら本体の名前）
             "project": project_of.get(id.as_str()).copied().flatten(),
             "kind": s["kind"],
             "state": s["state"],
@@ -475,14 +297,11 @@ fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<V
             "pid": s["pid"],
             "startedAt": s["startedAt"],
             "lastActivityAt": s["lastActivityAt"],
+            // claude が入力を受け付けるところまで起動していない（town_rows が付ける）。起動していれば null
+            "booting": s["booting"].as_bool().filter(|b| *b),
             "canSend": s["capabilities"]["send"],
             "parent": parent,
-            // ccn の parent の生の値。別の町にいる親を引くのに使う（src/ghost.ts）
-            "parentRaw": s["parent"],
             "capabilities": s["capabilities"],
-            // どのアカウントで動いているか（cam のコマンド名と email）。ccn の PR #56 から載る。古い ccn と、選べなかったセッションでは null
-            "account": s["account"],
-            "accountEmail": s["accountEmail"],
             "report": report,
             // status が ok/ng なら short は直下、working/checking なら前回の判定が last に入っている
             "closeCheck": close_check.map(|c| json!({
@@ -491,24 +310,16 @@ fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<V
             })),
         }));
     }
-    (agents, ccn_error)
+    agents
 }
 
-/// 最後に作ったこの機械の町の一覧の出どころ（Snapshot の sources）
+/// 最後に作った町の一覧の出どころ（Snapshot の sources）
 static LAST_SOURCES: Mutex<Option<Value>> = Mutex::new(None);
 
-fn snapshot(peer: Option<String>) -> Snapshot {
-    let peer = peer.filter(|p| !p.is_empty());
-    // 設定で ccn を切ったら、ccn に一覧を取りに行かない
-    let got = if peer.is_none() && !ccn_use() { Err(CCN_OFF.to_string()) } else { list_sessions(&peer) };
-    snapshot_from(peer, got)
-}
-
-/// 受け取った一覧から、画面に渡す町の形を作る。キャラの割り当て、状態ファイル、お手紙はここで足す
-fn snapshot_from(peer: Option<String>, got: Result<Vec<Value>, String>) -> Snapshot {
-    let (mut agents, ccn_error) = agents_from(&peer, got);
-    // キャラの絵の割り当て。世代（親をたどった深さ）に合う見た目を重み付きの乱数で選び、保存して以後変えない。
-    // 別の機械の町も、機械ごとのファイルに保存する（乱数なので、保存しないと読むたびに顔が変わる）
+/// 画面に渡す町を作る。キャラの割り当て、状態ファイル、お手紙はここで足す
+fn snapshot() -> Snapshot {
+    let mut agents = agents_from(town_rows());
+    // キャラの絵の割り当て。世代（親をたどった深さ）に合う見た目を重み付きの乱数で選び、保存して以後変えない
     let mut order: Vec<&Value> = agents.iter().collect();
     order.sort_by(|a, b| a["startedAt"].as_u64().unwrap_or(0).cmp(&b["startedAt"].as_u64().unwrap_or(0)).then(a["id"].as_str().cmp(&b["id"].as_str())));
     let parent_of: HashMap<String, Option<String>> = agents.iter()
@@ -520,15 +331,14 @@ fn snapshot_from(peer: Option<String>, got: Result<Vec<Value>, String>) -> Snaps
         let d = depth.get(&id).copied().unwrap_or(0);
         (id, d)
     }).collect();
-    let path = avatars_path(&peer);
+    let path = avatars_path();
     let next = {
         // 読む、決める、書くの間に、同じアプリの別の snapshot が割り込まないようにする
         let _guard = AVATARS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (prev, mut recent) = avatars::load(&path);
         let before = recent.clone();
         let next = avatars::assign(&prev, &mut recent, &live, &mut fastrand::Rng::new());
-        // 一覧を読めなかったときは、全員がいなくなったように見えるので書かない
-        if ccn_error.is_none() && (next != prev || recent != before) {
+        if next != prev || recent != before {
             avatars::save(&path, &next, &recent);
         }
         next
@@ -538,1219 +348,25 @@ fn snapshot_from(peer: Option<String>, got: Result<Vec<Value>, String>) -> Snaps
             a["avatar"] = json!({ "char": v.char, "hue": v.hue });
         }
     }
-    let letters = if peer.is_none() { recent_letters() } else { vec![] };
-    // 読めたら町の一覧を保存する。読めなければ保存した一覧を出す（ネットが切れて起動しても、世帯を選んで会話の保存を見られる）
-    let mut cached_at = None;
-    if ccn_error.is_none() {
-        save_town(&peer, &agents);
-    } else if let Some(c) = offline::read(&offline::town_file(&cache_dir(), &peer)) {
-        agents = c["agents"].as_array().cloned().unwrap_or_default();
-        cached_at = c["savedAt"].as_u64();
-    }
-    let sources = if peer.is_none() { LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner()).clone() } else { None };
-    Snapshot { ccn: ccn_base(), peer, ccn_ok: ccn_error.is_none(), ccn_error, agents, letters, fetched_at: now_ms(), cached_at, sources }
+    let sources = LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    Snapshot { agents, letters: recent_letters(), fetched_at: now_ms(), sources }
 }
 
 static AVATARS_LOCK: Mutex<()> = Mutex::new(());
 
-/// 別の町（いま見ていない町）のセッションの一覧（#14）。お便りと転出のゴーストにだけ使う。
-/// snapshot と違い、キャラを割り当てず保存もしない（前に割り当てた分を読むだけ）。お手紙の記録も読まない。
-/// まだ割り当てていないセッションは avatar が無く、画面は ID から決まる仮の顔を出す。その町を開いたときに snapshot が割り当てる
-fn town_agents(peer: Option<String>) -> Result<Vec<Value>, String> {
-    let peer = peer.filter(|p| !p.is_empty());
-    let (mut agents, err) = fetch_agents(&peer);
-    if let Some(e) = err {
-        return Err(e);
-    }
-    let (assigned, _) = avatars::load(&avatars_path(&peer));
-    for a in agents.iter_mut() {
-        if let Some(v) = a["id"].as_str().and_then(|id| assigned.get(id)) {
-            a["avatar"] = json!({ "char": v.char, "hue": v.hue });
-        }
-    }
-    Ok(agents)
-}
-
-/// キャラの割り当ての保存先。FC_AVATARS で差し替えられる（モックの ccn で試すとき、本物の割り当てを消さないため）。
-/// 別の機械の町は、同じ場所の avatars-peer-<機械>.json に分けて置く
-/// FC_CCN_URL で別のノード（モックなど）に向けたのに FC_AVATARS が無いときは、avatars-custom-ccn.json に分ける。
-/// 本物の avatars.json を使うと、モックにいない本物のセッションの割り当てが全部消える（乱数なので元に戻らない）。
+/// キャラの割り当ての保存先。FC_AVATARS で差し替えられる（試すときに本物の割り当てを消さないため）。
 /// 直近の記録（avatars-recent.json）は、同じ場所に avatars::recent_path が組み立てる。開発版はどれも dev/ の下になる
-fn avatars_path(peer: &Option<String>) -> PathBuf {
-    let default = if std::env::var("FC_CCN_URL").is_ok() { "avatars-custom-ccn.json" } else { "avatars.json" };
-    let base = std::env::var("FC_AVATARS").map(PathBuf::from).unwrap_or_else(|_| fc_path(Scope::App, default));
-    match peer {
-        None => base,
-        Some(p) => {
-            let safe: String = p.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
-            base.with_file_name(format!("avatars-peer-{safe}.json"))
-        }
-    }
-}
-
-// ---------- 家の名前 ----------
-
-/// 世帯の名前の置き場所。（共有の分, アプリが書く分）を返す。
-/// 旧版が書いた houses.json の置き場所。今は名前に使わない（--paths の表示だけに残してある）。
-/// 安定版では2つは同じファイル。FC_HOUSES があれば、両方ともそのファイルにする
-fn houses_paths() -> (PathBuf, PathBuf) {
-    match std::env::var("FC_HOUSES") {
-        Ok(p) if !p.is_empty() => (PathBuf::from(&p), PathBuf::from(p)),
-        _ => (fc_path(Scope::Shared, "houses.json"), fc_path(Scope::App, "houses.json")),
-    }
-}
-
-// ---------- 会話 ----------
-
-#[derive(Default)]
-struct Conv {
-    /// ccn の messages の次の読み出し位置（after=）
-    next: u64,
-    /// next の数え方の印（ccn の messages の epoch）。印を返さない古い ccn では None のまま
-    epoch: Option<String>,
-    /// これまでに縮めた項目の数。項目の通し番号 n は 0 から数える
-    total: u64,
-    /// 最後の KEEP_MESSAGES 件
-    items: Vec<Value>,
-    /// 最後に読まれた時刻（ms）
-    used: u128,
-    /// 今の動き（#59）
-    live: Live,
-    /// ネイティブの jsonl から読んだか（#96）。同じ id が ccn とネイティブの間で入れ替わったら、読み位置の数え方が違うので頭から読み直す
-    native: bool,
-}
-
-/// 今の動き（#59）。会話を頭から読みながら、結果がまだ無い道具、最後の出来事、ターンの始まりを持つ。
-/// 時刻は node なら ISO の文字列、pty なら jsonl の timestamp（無ければ ccn の at の ms）のまま渡し、画面が Date で読む
-#[derive(Default, Clone, Serialize, Debug, PartialEq)]
-struct Live {
-    /// 結果がまだ無い道具（古い順）
-    tools: Vec<LiveTool>,
-    /// 最後の出来事の種類（user、thinking、text、tool、result）と時刻
-    last: Option<&'static str>,
-    last_at: Value,
-    /// 最後に人（かほかのセッション）から文が届いた時刻
-    turn_at: Value,
-}
-
-#[derive(Clone, Serialize, Debug, PartialEq)]
-struct LiveTool {
-    id: String,
-    /// まとめるときの種類（シェル、ccn など）
-    kind: String,
-    /// 1行の中身（Bash ならコマンドの頭）
-    text: String,
-    at: Value,
-}
-
-#[derive(Debug, Clone)]
-enum LiveEv {
-    User(Value),
-    Thinking(Value),
-    Text(Value),
-    Tool(LiveTool),
-    Result(Vec<String>, Value),
-}
-
-impl Live {
-    fn apply(&mut self, ev: LiveEv) {
-        let (kind, at) = match ev {
-            // 新しい文が来たら、前のターンで結果が来なかった道具（中断など）は捨てる
-            LiveEv::User(at) => { self.tools.clear(); self.turn_at = at.clone(); ("user", at) }
-            LiveEv::Thinking(at) => ("thinking", at),
-            LiveEv::Text(at) => ("text", at),
-            LiveEv::Tool(t) => { let at = t.at.clone(); self.tools.retain(|x| x.id != t.id); self.tools.push(t); ("tool", at) }
-            LiveEv::Result(ids, at) => { self.tools.retain(|x| !ids.contains(&x.id)); ("result", at) }
-        };
-        self.last = Some(kind);
-        self.last_at = at;
-    }
-}
-
-/// 道具をまとめるときの種類
-fn tool_kind(name: &str) -> String {
-    match name {
-        "Bash" | "BashOutput" | "KillShell" => "シェル".into(),
-        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => "書く".into(),
-        "Read" => "読む".into(),
-        "Grep" | "Glob" => "探す".into(),
-        "WebSearch" | "WebFetch" => "調べる".into(),
-        "Agent" | "Task" => "手伝い".into(),
-        n if n.starts_with("mcp__") => n.split("__").nth(1).unwrap_or(n).into(),
-        n => n.into(),
-    }
-}
-
-/// CLI が貼り付けた文に付ける包み（`<pasted_content id="…">` と `</pasted_content id="…">`）を外す。
-/// ccn は文を端末に貼るので、送った文が包まれて届くことがある（2026-11-14 の meta、8074d764 の jsonl）。
-/// 包みのまま `<` で始まると、hook の差し込みと見分けられず会話から落ちていた（#69）。外した後の前後の空白は落とす
-fn unwrap_pasted(text: &str) -> String {
-    const TAGS: [&str; 2] = ["<pasted_content", "</pasted_content"];
-    if !text.contains("pasted_content") {
-        return text.trim().to_string();
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some((i, tag)) = TAGS.iter().filter_map(|t| rest.find(t).map(|i| (i, *t))).min_by_key(|(i, _)| *i) {
-        let tail = &rest[i..];
-        // 包みの印は、名前の直後が空白か > で、1行に収まり > で閉じるもの
-        let end = tail.find('>').filter(|&j| !tail[..j].contains('\n'));
-        let named = matches!(tail[tag.len()..].chars().next(), Some(' ') | Some('>'));
-        match end {
-            Some(j) if named => {
-                out.push_str(&rest[..i]);
-                rest = &tail[j + 1..];
-            }
-            _ => {
-                out.push_str(&rest[..i + 1]);
-                rest = &rest[i + 1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out.trim().to_string()
-}
-
-/// 先頭に並んだ画像の印（[Image #3]）と、その後ろの文に分ける。印が無ければ ("", text)
-fn split_image_marks(text: &str) -> (&str, &str) {
-    let mut i = 0;
-    while let Some(r) = text[i..].strip_prefix("[Image #") {
-        let digits = r.chars().take_while(|c| c.is_ascii_digit()).count();
-        if digits == 0 || !r[digits..].starts_with(']') {
-            break;
-        }
-        i += "[Image #".len() + digits + 1;
-        i += text[i..].len() - text[i..].trim_start_matches([' ', '\t']).len();
-    }
-    (text[..i].trim_end(), &text[i..])
-}
-
-/// user の行の文。文の部分をつなぎ、貼り付けの包みを外す
-fn user_text(content: &Value) -> String {
-    match content {
-        Value::String(s) => unwrap_pasted(s),
-        Value::Array(a) => unwrap_pasted(&a.iter().filter(|c| c["type"] == "text").filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n")),
-        _ => String::new(),
-    }
-}
-
-/// ccn の1件から、今の動きに効く出来事を取り出す。simplify と同じく node と pty の両方の形を読む
-fn live_events(m: &Value) -> Vec<LiveEv> {
-    let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
-        Some(d) => (d, if d["timestamp"].is_string() { d["timestamp"].clone() } else { m["at"].clone() }),
-        None => (m, m["timestamp"].clone()),
-    };
-    let content = &m["message"]["content"];
-    let mut out = vec![];
-    match m["type"].as_str().unwrap_or("") {
-        "user" => {
-            let ids: Vec<String> = content.as_array().map(|a| a.iter()
-                .filter(|c| c["type"] == "tool_result")
-                .filter_map(|c| c["tool_use_id"].as_str().map(String::from))
-                .collect()).unwrap_or_default();
-            if !ids.is_empty() {
-                out.push(LiveEv::Result(ids, at));
-            } else {
-                let text = user_text(content);
-                // hook やシステムの差し込み（<...>、Caveat:）はターンの始まりにしない。お手紙（<cross-session-message>）は始まりにする
-                let letter = text.contains("<cross-session-message");
-                if !text.is_empty() && !m["isMeta"].as_bool().unwrap_or(false) && (letter || !(text.starts_with('<') || text.starts_with("Caveat:"))) {
-                    out.push(LiveEv::User(at));
-                }
-            }
-        }
-        "assistant" => {
-            for c in content.as_array().into_iter().flatten() {
-                match c["type"].as_str() {
-                    Some("thinking") | Some("redacted_thinking") => out.push(LiveEv::Thinking(at.clone())),
-                    Some("text") => out.push(LiveEv::Text(at.clone())),
-                    Some("tool_use") => {
-                        let name = c["name"].as_str().unwrap_or("");
-                        let inp = &c["input"];
-                        // Bash はコマンドそのもの、ccn などは宛先（session、name）を頭に出す。終わった道具の行（tool_line）は変えない
-                        let text = match (name, inp["command"].as_str()) {
-                            ("Bash", Some(cmd)) => format!("コマンド: {}", clip(cmd, 70)),
-                            _ => {
-                                let line = tool_line(name, inp);
-                                match ["session", "name"].iter().find_map(|k| inp[*k].as_str()).filter(|_| !line.contains(": ")) {
-                                    Some(to) => format!("{line}: {}", clip(to, 70)),
-                                    None => line,
-                                }
-                            }
-                        };
-                        out.push(LiveEv::Tool(LiveTool { id: c["id"].as_str().unwrap_or("").into(), kind: tool_kind(name), text, at: at.clone() }));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        _ => {}
-    }
-    out
-}
-
-/// 会話のキャッシュを残す時間（#15）。画面は開いている会話だけを 2.5 秒ごとに読むので、
-/// これより長く読まれていない会話（閉じたセッション、ほかのセッションに切り替えた後）は捨てる。
-/// 捨てた後に開き直したら、ccn の after=0 から読み直し、画面は reset で受け取る
-const CONV_IDLE_MS: u128 = 10 * 60 * 1000;
-
-fn forget_idle_convs(map: &mut HashMap<String, Conv>, keep: &str, now: u128) {
-    map.retain(|k, c| k == keep || now.saturating_sub(c.used) < CONV_IDLE_MS);
-}
-
-/// 画面へ渡す差分（#10）。items の各項目には通し番号 n を付ける。
-/// reset=true のとき、画面は持っている分を捨てて items に置き換える。total は次の呼び出しの since に渡す
-#[derive(Serialize, Debug, PartialEq)]
-struct ConvDelta {
-    items: Vec<Value>,
-    total: u64,
-    reset: bool,
-    /// 今の動き（#59）。毎回、全部を返す
-    live: Live,
-}
-
-impl Conv {
-    /// ccn の after=from から next まで読んだ分を足す。同じセッションの取得が重なり、
-    /// ほかの呼び出しが先に同じ範囲を足していたら（c.next が読み始めと違う）、足さない
-    /// 項目が増えたら true
-    fn absorb(&mut self, from: u64, next: u64, fresh: Vec<Value>, evs: Vec<LiveEv>, epoch: Option<String>) -> bool {
-        if self.next != from {
-            return false;
-        }
-        self.next = next;
-        if epoch.is_some() {
-            self.epoch = epoch;
-        }
-        let grew = !fresh.is_empty();
-        for e in evs {
-            self.live.apply(e);
-        }
-        self.push(fresh);
-        grew
-    }
-
-    /// after=0 から読み直した中身で置き換える。読み始めたとき（from、seen）から誰も進めていなければ置き換えて true。
-    /// 通し番号 n は前の続きから1つ空けて振る。画面が持っている数（since）は必ず新しい範囲の手前に落ちるので、
-    /// since() が reset を返し、画面は持っている分を捨てて置き換える（App.tsx と conv.ts は変えない）。
-    /// n は減らないので、送ったばかりの仮の項目（pending の after）とも比べられる
-    /// 今の動き（#59）も、頭から読んだ出来事（evs）で作り直す
-    fn replace(&mut self, from: u64, seen: &Option<String>, next: u64, fresh: Vec<Value>, evs: Vec<LiveEv>, epoch: Option<String>) -> bool {
-        if self.next != from || &self.epoch != seen {
-            return false;
-        }
-        self.total += 1;
-        self.items.clear();
-        self.next = next;
-        self.epoch = epoch;
-        self.live = Live::default();
-        for e in evs {
-            self.live.apply(e);
-        }
-        self.push(fresh);
-        true
-    }
-
-    fn push(&mut self, fresh: Vec<Value>) {
-        let start = self.total;
-        for mut v in fresh {
-            // 止めた印の直後の印は重ねない。-p の子は、止めると止めた印の文に続いて error_during_execution の result を書く（#83）
-            if v["role"] == "event" && self.items.last().map(|l| l["role"] == "event" && l["kind"] == "interrupted").unwrap_or(false) {
-                continue;
-            }
-            // 道具の結果は、持っている道具の行に付ける。道具の行が今回の分にあれば、それで画面に届くので項目にしない。
-            // 前に渡した道具の行の結果だけ、小さい result の項目で送り、画面が道具の行に付け直す。道具の行が無ければ捨てる（#83）
-            if v["role"] == "result" {
-                let id = v["id"].clone();
-                let hit = self.items.iter_mut().rev().find(|t| t["role"] == "tool" && t["id"] == id && t.get("result").is_none());
-                let Some(t) = hit else { continue };
-                t["result"] = json!({ "text": v["text"], "error": v["error"] });
-                if t["n"].as_u64().map(|n| n >= start).unwrap_or(false) {
-                    continue;
-                }
-            }
-            if let Value::Object(o) = &mut v {
-                o.insert("n".into(), json!(self.total));
-            }
-            self.total += 1;
-            self.items.push(v);
-        }
-        if self.items.len() > KEEP_MESSAGES {
-            let cut = self.items.len() - KEEP_MESSAGES;
-            self.items.drain(..cut);
-        }
-    }
-
-    /// 画面が total=since まで持っているときの差分。持っている分が古すぎる（捨てた分より前）、
-    /// 先に進みすぎている（キャッシュを作り直した）、since が無いときは、全部を reset で返す
-    fn since(&self, since: Option<u64>) -> ConvDelta {
-        let base = self.total - self.items.len() as u64;
-        match since {
-            Some(s) if s >= base && s <= self.total => {
-                ConvDelta { items: self.items[(s - base) as usize..].to_vec(), total: self.total, reset: false, live: self.live.clone() }
-            }
-            _ => ConvDelta { items: self.items.clone(), total: self.total, reset: true, live: self.live.clone() },
-        }
-    }
-}
-
-static CONVS: Mutex<Option<HashMap<String, Conv>>> = Mutex::new(None);
-
-fn clip(s: &str, n: usize) -> String {
-    let t: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if t.chars().count() <= n { t } else { t.chars().take(n - 1).collect::<String>() + "…" }
-}
-
-fn tool_line(name: &str, input: &Value) -> String {
-    let verb = match name {
-        "Bash" => "コマンド",
-        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => "書く",
-        "Read" => "読む",
-        "Grep" | "Glob" => "探す",
-        "WebSearch" | "WebFetch" => "調べる",
-        "SendMessage" => "話す",
-        "Agent" | "Task" => "手伝いを呼ぶ",
-        n if n.contains("spawn_child") => "子を呼ぶ",
-        n if n.starts_with("mcp__") => n.split("__").last().unwrap_or(n),
-        n => n,
-    };
-    let target = ["description", "title", "command", "file_path", "pattern", "query", "url", "to"]
-        .iter()
-        .find_map(|k| input.get(*k).and_then(|v| v.as_str()))
-        .unwrap_or("");
-    let target = if target.contains('/') && matches!(name, "Edit" | "MultiEdit" | "Write" | "Read") {
-        target.rsplit('/').take(2).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/")
-    } else {
-        target.to_string()
-    };
-    if target.is_empty() { verb.to_string() } else { format!("{verb}: {}", clip(&target, 70)) }
-}
-
-/// SDK の1件を、画面に出す0件以上の項目に縮める。考えた中身と道具の結果は捨てる
-/// ccn の messages は、セッションの種類で形が違う。node はトランスクリプトの行そのまま（type、message、timestamp）。
-/// pty は {at, type, data: {type, message, …}, seq} で、中身は data に入り、時刻は at（ms）にある。
-/// 道具の結果を画面に出す長さ（字）と行数。長い出力は頭だけを持つ
-const RESULT_CHARS: usize = 1500;
-const RESULT_LINES: usize = 40;
-
-/// 道具の結果（tool_result の content）を文にする。content は文字列か、text と image の並び。改行は残し、頭だけを持つ
-fn result_text(content: &Value) -> String {
-    let t = match content {
-        Value::String(s) => s.clone(),
-        Value::Array(a) => a.iter().map(|c| match c["type"].as_str() {
-            Some("text") => c["text"].as_str().unwrap_or("").to_string(),
-            Some("image") => "[画像]".to_string(),
-            _ => String::new(),
-        }).filter(|x| !x.is_empty()).collect::<Vec<_>>().join("\n"),
-        _ => String::new(),
-    };
-    let t = t.trim();
-    let mut out: String = t.lines().take(RESULT_LINES).collect::<Vec<_>>().join("\n");
-    if out.chars().count() > RESULT_CHARS {
-        out = out.chars().take(RESULT_CHARS).collect();
-    }
-    if out.len() < t.len() {
-        out.push_str("\n…（続きは省いた）");
-    }
-    out
-}
-
-fn simplify(m: &Value) -> Vec<Value> {
-    let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
-        Some(d) => (d, m["at"].clone()),
-        None => (m, m["timestamp"].clone()),
-    };
-    let ty = m["type"].as_str().unwrap_or("");
-    let content = &m["message"]["content"];
-    let mut out = vec![];
-    match ty {
-        // ターンの終わり。止めた（interrupted）と失敗（is_error）だけを会話に出す（#83）。成功は返事の文が出ているので出さない
-        "result" => {
-            if m["subtype"].as_str() == Some("interrupted") {
-                out.push(json!({ "role": "event", "kind": "interrupted", "text": "ここで止めた", "at": at }));
-            } else if m["is_error"].as_bool() == Some(true) {
-                let t = clip(m["result"].as_str().unwrap_or(""), 300);
-                out.push(json!({ "role": "event", "kind": "error", "text": if t.is_empty() { "ターンが失敗で終わった".to_string() } else { format!("ターンが失敗で終わった: {t}") }, "at": at }));
-            }
-        }
-        "user" if content.as_array().map(|a| a.iter().any(|c| c["type"] == "tool_result")).unwrap_or(false) => {
-            // 道具の結果。画面は道具の行を開いたときに出す。Conv::push が道具の行に付ける（#83）
-            for c in content.as_array().into_iter().flatten().filter(|c| c["type"] == "tool_result") {
-                if let Some(id) = c["tool_use_id"].as_str() {
-                    out.push(json!({ "role": "result", "id": id, "text": result_text(&c["content"]), "error": c["is_error"].as_bool() == Some(true), "at": at }));
-                }
-            }
-        }
-        "user" => {
-            // 貼り付けの包み（<pasted_content>）は外してから見る。外さないと `<` で始まり、下の除外で落ちる（#69）
-            let text = user_text(content);
-            let text = text.as_str();
-            // ターミナルのセッションには、お手紙の前に「Another Claude session sent a message:」の1行が付く
-            let text = text.strip_prefix("Another Claude session sent a message:").map(str::trim_start).unwrap_or(text);
-            // 別のセッションからのお手紙（<cross-session-message from=… from-name=…>本文</cross-session-message>、後ろに注記が付くことがある）は、包みの内側の本文だけ出す
-            if let Some(rest) = text.strip_prefix("<cross-session-message") {
-                let (attrs, body) = rest.split_once('>').unwrap_or(("", ""));
-                let body = body.split("</cross-session-message>").next().unwrap_or("");
-                let attr = |k: &str| {
-                    let key = format!("{k}=\"");
-                    attrs.find(&key).and_then(|i| attrs[i + key.len()..].split('"').next()).map(String::from)
-                };
-                let body = body.trim();
-                if !body.is_empty() {
-                    out.push(json!({ "role": "user", "text": body, "from": null, "at": at,
-                        "letter": { "fromName": attr("from-name"), "fromRaw": attr("from") } }));
-                }
-                return out;
-            }
-            // 止めたときに claude が書く印（-p の子で見た。2026-11-21）。吹き出しにせず、止めた印にする（#83）
-            if text.starts_with("[Request interrupted by user") {
-                out.push(json!({ "role": "event", "kind": "interrupted", "text": "ここで止めた", "at": at }));
-                return out;
-            }
-            // 道具の結果だけの user、hook やシステムの差し込み（<...> で始まる）は出さない
-            if text.is_empty() || text.starts_with('<') || text.starts_with("Caveat:") {
-                return out;
-            }
-            // 別のセッションからの文は1行目が from 行。画像のパスを含む文を端末に貼ると、CLI はパスを画像の添付にし、
-            // 先頭に [Image #3] を置く（from 行はその後ろに回る、#69）。印を外して from 行を探し、印は本文の頭に戻す
-            // 画像だけを送ると、印の後ろが from 行だけになり改行が無いことがある（観測はしていない。来ても from 行を本文に出さない）
-            let (imgs, rest) = split_image_marks(text);
-            let (first, after) = rest.split_once('\n').unwrap_or((rest, ""));
-            let (from, body) = if first.starts_with("from ") && first.contains(" via ") && (rest.contains('\n') || !imgs.is_empty()) {
-                let after = after.trim();
-                (Some(first.trim_end().to_string()), if imgs.is_empty() { after.to_string() } else if after.is_empty() { imgs.to_string() } else { format!("{imgs}\n{after}") })
-            } else {
-                (None, text.to_string())
-            };
-            // from agent:<ノード>/<sid8>/<役割> の文は、セッションからのお手紙
-            let letter = from.as_deref().and_then(|f| f.strip_prefix("from agent:")).map(|r| {
-                let who = r.split_whitespace().next().unwrap_or("");
-                json!({ "fromName": null, "fromRaw": who })
-            });
-            out.push(json!({ "role": "user", "text": body, "from": from, "at": at, "letter": letter }));
-        }
-        "assistant" => {
-            if let Value::Array(a) = content {
-                for c in a {
-                    match c["type"].as_str() {
-                        Some("text") => {
-                            let t = c["text"].as_str().unwrap_or("").trim();
-                            if !t.is_empty() {
-                                out.push(json!({ "role": "assistant", "text": t, "at": at }));
-                            }
-                        }
-                        Some("tool_use") => {
-                            let name = c["name"].as_str().unwrap_or("");
-                            let inp = &c["input"];
-                            // 送ったお手紙（SendMessage、ccn の send_message と create_session）は、宛先と1行目を付ける
-                            let first = |v: &Value| v.as_str().unwrap_or("").lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
-                            let sent = match name {
-                                "SendMessage" if inp["message"].is_string() => Some(json!({ "to": inp["to"], "summary": inp["summary"].as_str().map(String::from).unwrap_or_else(|| first(&inp["message"])), "text": inp["message"] })),
-                                "mcp__ccn__send_message" => Some(json!({ "to": inp["session"], "peer": inp["peer"], "summary": first(&inp["text"]), "text": inp["text"] })),
-                                "mcp__ccn__create_session" if inp["prompt"].is_string() => Some(json!({ "to": null, "peer": inp["peer"], "summary": first(&inp["prompt"]), "text": inp["prompt"], "create": true })),
-                                _ => None,
-                            };
-                            let mut item = json!({ "role": "tool", "text": tool_line(name, inp), "at": at, "sent": sent, "id": c["id"] });
-                            // 計画の確認（ExitPlanMode）の本文。承認の hook の tool_input は、計画ファイルが無いと空で来るので、
-                            // 承認の欄は会話の最後の計画で補う（#83、2026-11-21 に PTY の子で見た）
-                            if name == "ExitPlanMode" {
-                                if let Some(p) = inp["plan"].as_str().filter(|p| !p.trim().is_empty()) {
-                                    item["plan"] = json!(p);
-                                }
-                            }
-                            out.push(item);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    out
-}
-
-/// ccn の messages を after=start から読む。1回で読むのは最大20ページ（4000件）。続きは次の呼び出しで読む。
-/// 返すのは (次の after, 縮めた項目, 今の動きの出来事, 最初のページの epoch)
-fn read_messages(peer: &Option<String>, session_id: &str, start: u64) -> Result<(u64, Vec<Value>, Vec<LiveEv>, Option<String>), String> {
-    let mut next = start;
-    let mut fresh = vec![];
-    let mut evs = vec![];
-    let mut epoch = None;
-    for page in 0..20 {
-        let v = get_json(&format!("{}/sessions/{session_id}/messages?after={next}", api(peer)))?;
-        let e = v["epoch"].as_str().map(String::from);
-        if page == 0 {
-            epoch = e;
-        } else if e != epoch {
-            // ページの途中で数え方が変わった（読んでいる間に ccn が起動し直した）。ここまでで止め、次の呼び出しで気づく
-            break;
-        }
-        let msgs = v["messages"].as_array().cloned().unwrap_or_default();
-        for m in &msgs {
-            fresh.extend(simplify(m));
-            evs.extend(live_events(m));
-        }
-        match v["next"].as_u64() {
-            Some(n) if n > next && !msgs.is_empty() => next = n,
-            _ => break,
-        }
-        if msgs.len() < 200 {
-            break;
-        }
-    }
-    Ok((next, fresh, evs, epoch))
-}
-
-/// 持っている cursor（from）が、今の ccn の番号と続いていないか。ccn の messages は epoch（番号の印）を返し、
-/// 再起動、pty の付け直し、終わって jsonl の位置に移ったときに変わる。前に読んだ印と違えば、from から先を読むと欠けるか重なる。
-/// 印を返さない古い ccn（got が None）では今までどおり続きを読む。前の印が None で今が Some なのは、
-/// 古い ccn から入れ替わった（再起動した）ので、読み直す
-fn cursor_is_stale(from: u64, seen: &Option<String>, got: &Option<String>) -> bool {
-    from > 0 && got.is_some() && got != seen
-}
-
-/// ネイティブの jsonl（#96）を読み位置 from から読む。read_messages と同じ形で返す。読み位置はバイト、印は native:<inode>。
-/// ファイルが読み位置より短くなったら、印を変えて返し、conversation が頭から読み直した扱いにする
-fn read_native(path: &std::path::Path, from: u64) -> Result<(u64, Vec<Value>, Vec<LiveEv>, Option<String>), String> {
-    let c = native::conv::read(path, from)?;
-    let fresh = c.lines.iter().flat_map(simplify).collect();
-    let evs = c.lines.iter().flat_map(live_events).collect();
-    let epoch = if c.restarted { format!("{}:restarted", c.epoch) } else { c.epoch };
-    Ok((c.next, fresh, evs, Some(epoch)))
-}
-
-fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<ConvDelta, String> {
-    let peer = peer.filter(|p| !p.is_empty());
-    // ネイティブのセッションと sub-agent（一覧に出したもので、ccn に無いもの）は jsonl から読む（#96）
-    let native_path = if peer.is_none() { native::path_of(&session_id) } else { None };
-    let is_native = native_path.is_some();
-    let key = format!("{}|{session_id}", peer.clone().unwrap_or_default());
-    let (from, seen, was_native) = {
-        let g = CONVS.lock().map_err(|e| e.to_string())?;
-        g.as_ref().and_then(|m| m.get(&key)).map(|c| (c.next, c.epoch.clone(), Some(c.native))).unwrap_or((0, None, None))
-    };
-    // 出どころが ccn とネイティブの間で入れ替わった（ccn が落ちた、戻った、設定を切り替えた）。読み位置は使えないので、
-    // 頭から読んで置き換える。置き換えは通し番号を1つ空けるので、画面には必ず reset で届き、2つの出どころの項目が混ざらない
-    let switched = was_native.is_some_and(|w| w != is_native);
-    let start = if switched { 0 } else { from };
-    let read = |from: u64| match &native_path {
-        Some(p) => read_native(p, from),
-        None => read_messages(&peer, &session_id, from),
-    };
-    let (mut next, mut fresh, mut evs, mut epoch) = read(start)?;
-    let restarted = epoch.as_deref().is_some_and(|e| e.ends_with(":restarted"));
-    let stale = switched || restarted || cursor_is_stale(start, &seen, &epoch);
-    if restarted {
-        // ネイティブで頭から読み直した分は、そのまま置き換えに使う。印は元の形に戻す
-        epoch = epoch.map(|e| e.trim_end_matches(":restarted").to_string());
-    } else if stale && start > 0 {
-        // 読んだページは捨て、after=0 から読み直して置き換える。読み直しに失敗したら何も変えない（次の呼び出しでもう一度気づく）
-        (next, fresh, evs, epoch) = read(0)?;
-    }
-    let mut g = CONVS.lock().map_err(|e| e.to_string())?;
-    let map = g.get_or_insert_with(HashMap::new);
-    let now = now_ms();
-    forget_idle_convs(map, &key, now);
-    let c = map.entry(key).or_insert_with(Conv::default);
-    c.used = now;
-    let changed = if stale {
-        // 読み直しが0件で、前に中身があったときは置き換えない。ccn は jsonl を読めなかったときも空で返すので、保存分まで消さない。
-        // 置き換えたら、増えたかに関係なく保存し直す（保存分は前の中身のままなので）
-        !(fresh.is_empty() && !c.items.is_empty()) && c.replace(from, &seen, next, fresh, evs, epoch)
-    } else {
-        c.absorb(from, next, fresh, evs, epoch)
-    };
-    if !stale || changed {
-        c.native = is_native;
-    }
-    // 増えたか置き換えたら、画面に出す分（最後の KEEP_MESSAGES 件）を保存する。ネットが切れたときは画面が conversation_cache で読む。
-    // 書くのは錠を持ったまま（同じセッションの取得が重なっても、古い中身があとから上書きしない）。80件の JSON なので短い
-    if changed {
-        let _ = offline::save_conv(&cache_dir(), &peer, &session_id, c.total, &c.items);
-    }
-    Ok(c.since(since))
-}
-
-/// 保存してある会話（offline.rs）。画面はセッションを開いた直後にこれを出し、ccn から読めたら差し替える
-fn conversation_cache(session_id: String, peer: Option<String>) -> Option<offline::ConvCache> {
-    let peer = peer.filter(|p| !p.is_empty());
-    offline::load_conv(&cache_dir(), &peer, &session_id)
-}
-
-fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
-    native_guard(&session_id, &peer)?;
-    if send_disabled() {
-        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
-    }
-    if text.trim().is_empty() {
-        return Err("文が空".into());
-    }
-    let peer = peer.filter(|p| !p.is_empty());
-    match agent()
-        .post(&format!("{}/sessions/{session_id}/messages", api(&peer)))
-        .send_json(json!({ "text": text }))
-    {
-        Ok(r) => Ok(r.into_string().unwrap_or_default()),
-        Err(ureq::Error::Status(code, r)) => Err(format!("ccn が {code} を返した: {}", r.into_string().unwrap_or_default())),
-        Err(e) => Err(format!("ccn に届かない: {e}")),
-    }
-}
-
-// ---------- 承認 ----------
-
-/// 承認待ちに答える。choice は "allow" か "deny"。ccn の pending と permissions の口で答える（PTY のセッションも同じ口）。
-/// 送る前に、今も承認待ちで、承認を求めている requestId が画面で見せたもの（expect_id）と同じかを確かめ、ずれていたら送らない。
-/// 質問（AskUserQuestion）は answers（質問の文から答えへの対応）があるときだけ答える。計画の確認（ExitPlanMode）は許可で承認、拒否で見直しを頼む。
-/// message は拒否の理由。空なら決まった文を送る。suggestion は「常に許可」で、pending の suggestions の何番目を updatedPermissions で返すか。
-/// 中身の組み立ては permission_body（試験あり）。
-/// 人が端末で開いたセッション（kind=terminal）は ccn から答えられないので断る。
-fn answer_permission(session_id: String, choice: String, expect_id: Option<String>, answers: Option<Value>, message: Option<String>, suggestion: Option<usize>, peer: Option<String>) -> Result<String, String> {
-    native_guard(&session_id, &peer)?;
-    if send_disabled() {
-        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
-    }
-    if choice != "allow" && choice != "deny" {
-        return Err("choice は allow か deny".into());
-    }
-    let peer = peer.filter(|p| !p.is_empty());
-    let base = api(&peer);
-    let detail = get_json(&format!("{base}/sessions/{session_id}"))?;
-    if detail["state"].as_str() != Some("waiting_permission") {
-        return Err("もう承認待ちではない（ほかで答えたか、終わった）".into());
-    }
-    if detail["capabilities"]["permissions"].as_bool() != Some(true) {
-        return Err("このセッションは ccn から承認に答えられない（人がターミナルで開いたセッション）。そのターミナルで答えて".into());
-    }
-    let pending = detail["pending"].as_array().cloned().unwrap_or_default();
-    let first = pending.first().ok_or("ccn に承認の要求が見当たらない")?;
-    let req = first["requestId"].as_str().ok_or("承認の要求に requestId が無い")?.to_string();
-    let (body, done) = permission_body(first, &choice, expect_id.as_deref(), answers.as_ref(), message.as_deref(), suggestion)?;
-    agent()
-        .post(&format!("{base}/sessions/{session_id}/permissions/{req}"))
-        .send_json(body)
-        .map_err(|e| format!("ccn に答えを届けられなかった: {e}"))?;
-    Ok(done)
-}
-
-/// 「常に許可」として返してよい提案か。addRules と setMode だけ（addDirectories は端末の承認の画面が残ったので返さない）
-fn allowed_suggestion(s: &Value) -> bool {
-    matches!(s["type"].as_str(), Some("addRules") | Some("setMode"))
-}
-
-/// 拒否の理由が空のときに送る文
-const DENY_DEFAULT: &str = "Claude Town から拒否した";
-/// 計画の見直しを頼むときに、理由が空なら送る文
-const PLAN_DENY_DEFAULT: &str = "計画を承認しなかった。計画を見直して、もう一度確認して";
-
-/// ccn の permissions の口に送る中身と、終わったときに画面に出す文を作る。first は ccn の pending の先頭。
-/// - 許可は、expect_id が requestId と同じときだけ。
-/// - AskUserQuestion の許可は、全部の質問に空でない答えがあるときだけ。元の input に answers を足して updatedInput で返す
-///   （2026-11-21 に PTY の子で、tool_result が `"<質問>"="<答え>"` になるのを確かめた。複数選択は label を「, 」でつなぐ）。
-/// - ExitPlanMode の許可は素の allow（ccn が元の input を updatedInput にして返す）。拒否は「続けて計画する」で、理由を Claude に渡す。
-/// - 「常に許可」（suggestion）は道具の許可だけで、pending の suggestions の1つをそのまま updatedPermissions で返す。画面から任意の規則は送らない。
-///   addDirectories は返さない（2026-11-21、作業場所の外の計画ファイルの Write に返したら、ccn は答えたのに端末の承認の画面が残って止まった）。
-fn permission_body(first: &Value, choice: &str, expect_id: Option<&str>, answers: Option<&Value>, message: Option<&str>, suggestion: Option<usize>) -> Result<(Value, String), String> {
-    let req = first["requestId"].as_str().ok_or("承認の要求に requestId が無い")?;
-    let tool = first["toolName"].as_str().unwrap_or_default();
-    if choice == "deny" {
-        if suggestion.is_some() {
-            return Err("拒否に「常に許可」は付けない".into());
-        }
-        let msg = message.map(str::trim).filter(|m| !m.is_empty());
-        let (msg, done) = match tool {
-            "ExitPlanMode" => (msg.unwrap_or(PLAN_DENY_DEFAULT), "計画の見直しを頼んだ".to_string()),
-            "AskUserQuestion" => (msg.unwrap_or(DENY_DEFAULT), "質問に答えずに断った".to_string()),
-            _ => (msg.unwrap_or(DENY_DEFAULT), format!("拒否した（{tool}）")),
-        };
-        return Ok((json!({ "behavior": "deny", "message": msg }), done));
-    }
-    if choice != "allow" {
-        return Err("choice は allow か deny".into());
-    }
-    if expect_id != Some(req) {
-        return Err("承認を求めている中身が変わった。もう一度見てから答えて".into());
-    }
-    match tool {
-        "AskUserQuestion" => {
-            let given = answers.and_then(|a| a.as_object()).ok_or("質問への答えが無い")?;
-            let qs = first["input"]["questions"].as_array().cloned().unwrap_or_default();
-            if qs.is_empty() {
-                return Err("質問の中身が読めない。ターミナルで答えて".into());
-            }
-            let mut out = serde_json::Map::new();
-            for q in &qs {
-                let text = q["question"].as_str().unwrap_or_default();
-                let a = given.get(text).and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty());
-                let a = a.ok_or_else(|| format!("「{text}」への答えが無い"))?;
-                out.insert(text.to_string(), json!(a));
-            }
-            let mut input = first["input"].clone();
-            input["answers"] = Value::Object(out);
-            Ok((json!({ "behavior": "allow", "updatedInput": input }), "質問に答えた".into()))
-        }
-        _ if answers.is_some() => Err(format!("{tool} は質問ではないので、答えを送らない")),
-        "ExitPlanMode" if suggestion.is_some() => Err("計画の確認に「常に許可」は付けない".into()),
-        "ExitPlanMode" => Ok((json!({ "behavior": "allow" }), "計画を承認した".into())),
-        _ => match suggestion {
-            None => Ok((json!({ "behavior": "allow" }), format!("許可した（{tool}）"))),
-            Some(i) => {
-                let s = first["suggestions"].get(i).filter(|s| allowed_suggestion(s)).ok_or("この「常に許可」は今の承認の提案に無い。もう一度見てから答えて")?;
-                Ok((json!({ "behavior": "allow", "updatedPermissions": [s] }), format!("許可して、以後は聞かないようにした（{tool}）")))
-            }
-        },
-    }
-}
-
-// ---------- 作る・止める・転出 ----------
-
-/// 付け直し（resume）の作成を待つ上限。ccn は `cam usage`（上限5秒）と `cam sync`（上限5秒）の後に claude を起動する。
-/// 引き継ぎでは、さらに後継の起動の印（上限10秒）と前任の停止を待ってから応答する
-const RESUME_TIMEOUT: Duration = Duration::from_secs(45);
-
-/// この機械のノード名（~/.config/ccn/ccn.json の name）。親を名乗るヘッダに使う
-fn node_name() -> String {
-    for rel in [".config/ccn/ccn.json", ".config/cc/cc.json"] {
-        if let Some(n) = read_json(&home().join(rel)).and_then(|v| v["name"].as_str().map(String::from)) {
-            return n;
-        }
-    }
-    "local".into()
-}
-
-/// ccn の POST /api/sessions に送る中身（create_session の分）。空の prompt と name は送らない。fork は resume があるときだけ、
-/// succeed は resume と fork があるときだけ送る（ccn は succeed に resume と fork: true を求める）
-fn create_body(cwd: String, prompt: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, succeed: Option<bool>) -> Value {
-    // ccn は 10〜1000 だけを受ける
-    let ok = |v: Option<u16>| v.filter(|n| (10..=1000).contains(n));
-    let mut body = json!({ "terminal": true, "cwd": cwd, "cols": ok(cols).unwrap_or(120), "rows": ok(rows).unwrap_or(40) });
-    if let Some(p) = prompt.filter(|p| !p.trim().is_empty()) { body["prompt"] = json!(p); }
-    if let Some(n) = name.filter(|n| !n.trim().is_empty()) { body["name"] = json!(n); }
-    if let Some(r) = resume.filter(|r| !r.trim().is_empty()) {
-        body["resume"] = json!(r);
-        if fork.unwrap_or(false) {
-            body["fork"] = json!(true);
-            if succeed.unwrap_or(false) { body["succeed"] = json!(true); }
-        }
-    }
-    body
-}
-
-/// 起動するときのモデルと権限モード（claude の --model と --permission-mode）を足す。空の値は送らない。
-/// resume があるとき（付け直し、複製、引き継ぎ）は送らない。ccn が前任の値を継ぐので、設定の既定で上書きしない
-fn with_start_config(mut body: Value, model: Option<String>, permission_mode: Option<String>) -> Value {
-    if body.get("resume").is_some() {
-        return body;
-    }
-    if let Some(m) = model.filter(|m| !m.trim().is_empty()) { body["model"] = json!(m); }
-    if let Some(p) = permission_mode.filter(|p| !p.trim().is_empty()) { body["permissionMode"] = json!(p); }
-    body
-}
-
-/// 端末（PTY）のセッションを立てる。parent を渡すと、その親の子として立てる（x-ccn-from で親を名乗る）。
-/// 渡さなければ新しい世帯（親なし）になる。cwd を省くと ~/Documents/meta（本人の指定）
-/// cols と rows は、画面のターミナルの今の大きさ。渡せば claude を最初からその大きさで起動し、開いた直後の描き直しを省く（#18）
-/// resume を渡すと、そのセッションの会話を付け直す。fork も渡すと、会話を複製した新しい id で立てる（引き継ぎ。src/succeed.ts）。
-/// このとき claude のアカウントは、ほかの作成と同じく ccn が選ぶ
-/// succeed も渡すと、ccn に引き継ぎを頼む（ccn の PR #56 から）。ccn が後継の起動を確かめ、前任の子を後継へ付け替え、前任を止め、応答に succeeded を入れる。
-/// 古い ccn は succeed を読まず、ただの複製を返す（応答に succeeded が無い）。どちらだったかは画面が応答で見分ける（src/succeed.ts）。
-/// ccn が断ったときの失敗は「ccn が <状態> を返した: <応答の JSON>」の形で返す。画面はこの JSON から code（no_account など）を読む
-/// model と permission_mode は、設定の既定（src/session/defaults.ts）。新しく立てるときだけ送る（with_start_config）
-#[allow(clippy::too_many_arguments)]
-fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, succeed: Option<bool>, peer: Option<String>, model: Option<String>, permission_mode: Option<String>) -> Result<Value, String> {
-    if send_disabled() {
-        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
-    }
-    let peer = peer.filter(|p| !p.is_empty());
-    let cwd = cwd.filter(|c| !c.is_empty()).unwrap_or_else(|| home().join("Documents/meta").to_string_lossy().to_string());
-    let body = with_start_config(create_body(cwd, prompt, name, cols, rows, resume, fork, succeed), model, permission_mode);
-    // 親を名乗る。一覧の parent に agent:<ノード>/<親の sid 先頭8>/town が入り、木がつながる
-    let from = parent.filter(|p| !p.is_empty()).map(|pid| format!("agent:{}/{}/town", node_name(), &pid[..8.min(pid.len())]));
-    post_create(&format!("{}/sessions", api(&peer)), body, from)
-}
-
-/// 作成の要求を送る。from は親を名乗るヘッダ（x-ccn-from）の値
-fn post_create(url: &str, body: Value, from: Option<String>) -> Result<Value, String> {
-    let mut req = agent().post(url);
-    if body.get("resume").is_some() {
-        // 付け直しは、ccn がアカウントを選んでから claude を起動するまで待つ。既定の8秒で切ると、ccn の側では後継が立っているのに
-        // 画面は失敗と見て前任を残し、同じ作業が二重に進む。長めに待つ。引き継ぎ（succeed）では、ccn が後継の起動の印（上限10秒）と
-        // 前任の停止まで済ませてから応答する（実測 3.5〜5.4 秒、2026-11-17）。
-        // 要求ごとの timeout は、共有の Agent の8秒より優先される（ureq 2 の Request::timeout。下の resume_create_waits_longer_than_default で確かめた）
-        req = req.timeout(RESUME_TIMEOUT);
-    }
-    if let Some(f) = from {
-        req = req.set("x-ccn-from", &f);
-    }
-    match req.send_json(body) {
-        Ok(r) => r.into_json::<Value>().map_err(|e| e.to_string()),
-        Err(ureq::Error::Status(code, r)) => Err(format!("ccn が {code} を返した: {}", r.into_string().unwrap_or_default())),
-        Err(e) => Err(format!("ccn に届かない: {e}")),
-    }
-}
-
-/// 新しい世帯のペイン（#89）の「最近使った場所」の材料。手元のノードの /api/host、/api/sessions、/api/places をそのまま返し、
-/// 合わせ方は画面（src/newHouse/places.ts）で決める。places は走査に最大3秒かかり、古い ccn は 404 を返すので、失敗したら null にする
-fn house_places() -> Result<Value, String> {
-    let base = api(&None);
-    let host = get_json_t(&format!("{base}/host"), LIST_TIMEOUT)?;
-    let sessions = get_json_t(&format!("{base}/sessions"), LIST_TIMEOUT)?;
-    let places = get_json_t(&format!("{base}/places?limit=300"), Duration::from_secs(6)).ok().and_then(|v| v.get("places").cloned());
-    Ok(json!({ "roots": host.get("roots").cloned().unwrap_or(json!([])), "lobby": host.get("lobby").cloned().unwrap_or(Value::Null), "sessions": sessions, "places": places }))
-}
-
-/// セッションの詳細（承認の pending を含む）
-fn session_detail(session_id: String, peer: Option<String>) -> Result<Value, String> {
-    native_guard(&session_id, &peer)?;
-    let peer = peer.filter(|p| !p.is_empty());
-    get_json(&format!("{}/sessions/{session_id}", api(&peer)))
-}
-
-/// 転出の下見の1段目（移動元の説明）。副作用は無い。2段目の行き先の下見は clone することがあるので、画面からは呼ばない
-fn teleport_info(session_id: String, peer: Option<String>) -> Result<Value, String> {
-    native_guard(&session_id, &peer)?;
-    let peer = peer.filter(|p| !p.is_empty());
-    get_json(&format!("{}/sessions/{session_id}/teleport", api(&peer)))
-}
-
-fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> {
-    native_guard(&session_id, &peer)?;
-    if send_disabled() {
-        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
-    }
-    let peer = peer.filter(|p| !p.is_empty());
-    agent().delete(&format!("{}/sessions/{session_id}", api(&peer))).call().map_err(|e| format!("止められなかった: {e}"))?;
-    // 止めたセッションの会話の保存は要らない
-    offline::remove_conv(&cache_dir(), &peer, &session_id);
-    Ok(())
-}
-
-/// 転出（ccn の teleport。PR #18）。移動元のノードが下見から取り込みまで1回の要求で進め、結果を返す（最大95秒）
-#[tauri::command]
-async fn teleport(session_id: String, to: String, fork: bool, subtree: Option<bool>, dry_run: Option<bool>, peer: Option<String>) -> Result<Value, String> {
-    native_guard(&session_id, &peer)?;
-    if send_disabled() {
-        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
-    }
-    let peer = peer.filter(|p| !p.is_empty());
-    tauri::async_runtime::spawn_blocking(move || {
-        let a = ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).build();
-        // subtree は子孫ごと移す口（ccn-pty が作る別 PR）。dry_run は計画だけを返す
-        let mut body = json!({ "to": to, "fork": fork });
-        if subtree.unwrap_or(false) { body["subtree"] = json!(true); }
-        if dry_run.unwrap_or(false) { body["dryRun"] = json!(true); }
-        // 移った先でも親とつながるよう、元の parent（agent:<ノード>/<親の sid8>/<役割>）を from 行として付けて頼む。
-        // 付けないと、移った先の parent は local になる（2026-11-12、fc-teleport-test の試験ノードで確かめた）
-        let mut req = a.post(&format!("{}/sessions/{session_id}/teleport", api(&peer)));
-        if let Ok(d) = get_json(&format!("{}/sessions/{session_id}", api(&peer))) {
-            if let Some(p) = d["parent"].as_str().filter(|p| p.starts_with("agent:")) {
-                req = req.set("x-ccn-from", p);
-            }
-        }
-        match req.send_json(body) {
-            Ok(r) => r.into_json::<Value>().map_err(|e| e.to_string()),
-            Err(ureq::Error::Status(code, r)) => Err(format!("転出できなかった（{code}）: {}", r.into_string().unwrap_or_default())),
-            Err(e) => Err(format!("ccn に届かない: {e}")),
-        }
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-// ---------- 端末（PTY） ----------
-// ccn の GET /api/sessions/<id>/terminal（SSE）を Rust で読み、開いた画面の Channel にだけ送る（#9）。
-// 前は "fc-term" のイベントを全部のウィンドウに emit し、出力の細かい1かたまりごとに JSON と base64 を画面で解いていた。
-// 今は、出力（data と replay）の base64 を Rust で外して UTF-8 の文字列に戻し、16ms に1回までにまとめて送る。
-// バイト列のままは送らない。Channel は 1KB 以上の生のバイト列を fetch でもう1往復して渡し、1KB 未満は数の配列の JSON にする。
-// JSON は 8KB 未満なら1回の eval で届く（tauri 2.12 の ipc/channel.rs、MAX_RAW_DIRECT_EXECUTE_THRESHOLD と MAX_JSON_DIRECT_EXECUTE_THRESHOLD）。
-// 画面は開いている端末の分だけ term_open を呼び、閉じたら term_close を呼ぶ（30本を同時に読まない）。
-// term_open は世代の番号を返し、term_close はその番号の接続だけを閉じる（A→B→A と素早く切り替えても、新しい接続を閉じない）。
-// 切れたら、受け取った最後の位置（id:）から ?after= で読み直す。
-
-/// 出力をまとめる間隔。前に送ってからこれだけたっていれば、すぐ送る（打った文字の返りを遅らせない）
-const TERM_FLUSH: Duration = Duration::from_millis(16);
-
-/// 画面へ送るもの。Text は出力（data）の文字列で、まとめて送る。Event は size、replay、exit、error などで、たまった出力を先に送ってから送る
-enum TermOut {
-    Text(String),
-    Event(String, Value),
-}
-
-struct TermConn {
-    stop: Arc<AtomicBool>,
-    generation: u64,
-    out: std::sync::mpsc::Sender<TermOut>,
-}
-static TERMS: Mutex<Option<HashMap<String, TermConn>>> = Mutex::new(None);
-static TERM_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-/// 開いたターミナルの画面に知らせる（書き手の送りそびれなど）。開いていなければ捨てる
-fn term_notice(session_id: &str, ev: &str, data: Value) {
-    if let Ok(g) = TERMS.lock() {
-        if let Some(c) = g.as_ref().and_then(|m| m.get(session_id)) {
-            let _ = c.out.send(TermOut::Event(ev.into(), data));
-        }
-    }
-}
-
-/// 続きのあるバイト列を UTF-8 の文字列に直す。末尾で途中まで来た文字は carry に残し、次の分の頭に付ける。壊れたバイトは U+FFFD にする
-fn utf8_stream(carry: &mut Vec<u8>, bytes: &[u8]) -> String {
-    carry.extend_from_slice(bytes);
-    let mut out = String::new();
-    let mut rest: &[u8] = carry;
-    loop {
-        match std::str::from_utf8(rest) {
-            Ok(s) => { out.push_str(s); rest = &[]; break; }
-            Err(e) => {
-                let (ok, after) = rest.split_at(e.valid_up_to());
-                out.push_str(std::str::from_utf8(ok).unwrap_or_default());
-                match e.error_len() {
-                    Some(n) => { out.push('\u{FFFD}'); rest = &after[n..]; }
-                    None => { rest = after; break; }
-                }
-            }
-        }
-    }
-    let keep = rest.to_vec();
-    *carry = keep;
-    out
-}
-
-/// 画面へ送るスレッド。出力は TERM_FLUSH に1回までにまとめ、ほかのイベントの前には必ずたまった分を送る（順を変えない）
-fn spawn_term_sender(ch: tauri::ipc::Channel<Value>) -> std::sync::mpsc::Sender<TermOut> {
-    use std::sync::mpsc::RecvTimeoutError;
-    use std::time::Instant;
-    let (tx, rx) = std::sync::mpsc::channel::<TermOut>();
-    std::thread::spawn(move || {
-        let send_text = |buf: &mut String| {
-            if !buf.is_empty() { let _ = ch.send(json!({ "ev": "data", "data": { "s": std::mem::take(buf) } })); }
-        };
-        let mut buf = String::new();
-        let mut last = Instant::now() - TERM_FLUSH;
-        loop {
-            let r = if buf.is_empty() {
-                rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
-            } else {
-                rx.recv_timeout(TERM_FLUSH.saturating_sub(last.elapsed()))
-            };
-            match r {
-                Ok(TermOut::Text(t)) => {
-                    buf.push_str(&t);
-                    if last.elapsed() >= TERM_FLUSH { send_text(&mut buf); last = Instant::now(); }
-                }
-                Ok(TermOut::Event(ev, data)) => {
-                    send_text(&mut buf);
-                    let _ = ch.send(json!({ "ev": ev, "data": data }));
-                    last = Instant::now();
-                }
-                Err(RecvTimeoutError::Timeout) => { send_text(&mut buf); last = Instant::now(); }
-                Err(RecvTimeoutError::Disconnected) => { send_text(&mut buf); return; }
-            }
-        }
-    });
-    tx
-}
-
-/// ターミナルを開く。出力は on_event に送る。戻り値は世代の番号で、閉じるときに term_close に渡す
-#[tauri::command]
-fn term_open(session_id: String, peer: Option<String>, on_event: tauri::ipc::Channel<Value>) -> Result<u64, String> {
-    native_guard(&session_id, &peer)?;
-    let peer = peer.filter(|p| !p.is_empty());
-    let stop = Arc::new(AtomicBool::new(false));
-    let generation = TERM_GEN.fetch_add(1, Ordering::SeqCst);
-    let out = spawn_term_sender(on_event);
-    {
-        let mut g = TERMS.lock().map_err(|e| e.to_string())?;
-        let m = g.get_or_insert_with(HashMap::new);
-        if let Some(old) = m.insert(session_id.clone(), TermConn { stop: stop.clone(), generation, out: out.clone() }) {
-            old.stop.store(true, Ordering::SeqCst);
-        }
-    }
-    let url = format!("{}/sessions/{session_id}/terminal", api(&peer));
-    std::thread::spawn(move || {
-        use base64::Engine;
-        let mut carry: Vec<u8> = vec![];
-        read_terminal(&url, &stop, |ev, data| {
-            let msg = match ev {
-                "data" | "replay" => {
-                    let bytes = base64::engine::general_purpose::STANDARD.decode(data["b64"].as_str().unwrap_or("")).unwrap_or_default();
-                    let text = utf8_stream(&mut carry, &bytes);
-                    if ev == "data" { TermOut::Text(text) } else { TermOut::Event("replay".into(), json!({ "s": text })) }
-                }
-                // 大きさが変わると ccn は replay から送り直す。途中の文字は捨てる
-                "size" => { carry.clear(); TermOut::Event(ev.into(), data) }
-                _ => TermOut::Event(ev.into(), data),
-            };
-            let _ = out.send(msg);
-        });
-    });
-    Ok(generation)
-}
-
-/// 端末の SSE を読み、イベントごとに emit を呼ぶ。stop が立つか exit を受けたら終わる。
-/// 待機中は ping が15〜30秒ごとに来る約束なので、45秒何も来なければ切れたとみなし、最後の位置（id:）から ?after= で繋ぎ直す
-fn read_terminal(url: &str, stop: &AtomicBool, mut emit: impl FnMut(&str, Value)) {
-    let mut after: Option<u64> = None;
-    // バイト位置は claude のプロセスごとに0から数えるので、size の epoch と組で続きを指す（ccn PR #19）
-    let mut epoch: Option<String> = None;
-    let mut fails = 0;
-    while !stop.load(Ordering::SeqCst) {
-        let a = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(5)).timeout_read(Duration::from_secs(45)).build();
-        let u = match (after, &epoch) {
-            (Some(p), Some(e)) => format!("{url}?after={p}&epoch={e}"),
-            (Some(p), None) => format!("{url}?after={p}"),
-            _ => url.to_string(),
-        };
-        let resp = match a.get(&u).call() {
-            Ok(r) => { fails = 0; r }
-            Err(e) => {
-                fails += 1;
-                emit("error", json!({ "message": format!("ターミナルに繋がらない: {e}"), "retry": fails }));
-                if fails > 5 { return; }
-                std::thread::sleep(Duration::from_secs(2));
-                continue;
-            }
-        };
-        let reader = BufReader::new(resp.into_reader());
-        let (mut ev, mut data, mut id) = (String::new(), String::new(), None::<u64>);
-        for line in reader.lines() {
-            if stop.load(Ordering::SeqCst) { return; }
-            let Ok(line) = line else { break };
-            if line.is_empty() {
-                if !ev.is_empty() || !data.is_empty() {
-                    let v: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
-                    if let Some(p) = id { after = Some(p); }
-                    if ev == "size" {
-                        if let Some(e) = v.get("epoch").filter(|e| !e.is_null()) {
-                            epoch = Some(e.as_str().map(String::from).unwrap_or_else(|| e.to_string()));
-                        }
-                    }
-                    if ev != "ping" { emit(&ev, v); }
-                    if ev == "exit" { return; }
-                }
-                ev.clear(); data.clear(); id = None;
-            } else if let Some(x) = line.strip_prefix("event:") {
-                ev = x.trim().to_string();
-            } else if let Some(x) = line.strip_prefix("data:") {
-                if !data.is_empty() { data.push('\n'); }
-                data.push_str(x.trim_start());
-            } else if let Some(x) = line.strip_prefix("id:") {
-                id = x.trim().parse().ok();
-            }
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-}
-
-/// ターミナルを閉じる。generation を渡したら、その世代の接続のときだけ閉じる
-#[tauri::command]
-fn term_close(session_id: String, generation: Option<u64>) -> Result<(), String> {
-    let mut g = TERMS.lock().map_err(|e| e.to_string())?;
-    let m = g.get_or_insert_with(HashMap::new);
-    if generation.is_some() && m.get(&session_id).map(|c| c.generation) != generation {
-        return Ok(());
-    }
-    if let Some(c) = m.remove(&session_id) {
-        c.stop.store(true, Ordering::SeqCst);
-    }
-    drop(g);
-    // 書き手の送り口を落とす。たまっている分を送り切ってからスレッドが終わる
-    if let Ok(mut w) = WRITERS.lock() {
-        if let Some(m) = w.as_mut() { m.retain(|k, _| !k.ends_with(&format!("|{session_id}"))); }
-    }
-    Ok(())
-}
-
-/// 打ったキーと大きさの変更。送るのはセッションごとの書き手のスレッド（term_send）で、命令はすぐ返る
-#[tauri::command]
-fn term_input(session_id: String, text: String, peer: Option<String>) -> Result<(), String> {
-    native_guard(&session_id, &peer)?;
-    if send_disabled() {
-        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
-    }
-    term_send(&session_id, peer.filter(|p| !p.is_empty()), TermCmd::Input(text))
-}
-
-#[tauri::command]
-fn term_resize(session_id: String, cols: u16, rows: u16, peer: Option<String>) -> Result<(), String> {
-    native_guard(&session_id, &peer)?;
-    term_send(&session_id, peer.filter(|p| !p.is_empty()), TermCmd::Resize(cols, rows))
-}
-
-enum TermCmd {
-    Input(String),
-    Resize(u16, u16),
-}
-static WRITERS: Mutex<Option<HashMap<String, std::sync::mpsc::Sender<TermCmd>>>> = Mutex::new(None);
-
-fn writer_key(session_id: &str, peer: &Option<String>) -> String {
-    format!("{}|{session_id}", peer.clone().unwrap_or_default())
-}
-
-/// キーと大きさの変更を、セッションごとに1本のスレッドで、受けた順に ccn へ送る。
-/// 要求ごとに別のスレッドで送ると、打った順と届く順が入れ替わりうるため（#3）。
-/// 書き手は term_close で片付ける（送り口を落とすと、残りを送り切ってからスレッドが終わる）。
-fn term_send(session_id: &str, peer: Option<String>, cmd: TermCmd) -> Result<(), String> {
-    let key = writer_key(session_id, &peer);
-    let mut cmd = cmd;
-    for _ in 0..2 {
-        let tx = {
-            let mut g = WRITERS.lock().map_err(|e| e.to_string())?;
-            g.get_or_insert_with(HashMap::new)
-                .entry(key.clone())
-                .or_insert_with(|| spawn_writer(session_id.to_string(), peer.clone()))
-                .clone()
-        };
-        match tx.send(cmd) {
-            Ok(()) => return Ok(()),
-            Err(std::sync::mpsc::SendError(c)) => {
-                // 書き手が終わっていた。作り直してもう1回
-                cmd = c;
-                if let Ok(mut g) = WRITERS.lock() {
-                    if let Some(m) = g.as_mut() { m.remove(&key); }
-                }
-            }
-        }
-    }
-    Err("ターミナルに書けなかった（書き手を作れなかった）".into())
-}
-
-fn spawn_writer(session_id: String, peer: Option<String>) -> std::sync::mpsc::Sender<TermCmd> {
-    let (tx, rx) = std::sync::mpsc::channel::<TermCmd>();
-    std::thread::spawn(move || {
-        let base = format!("{}/sessions/{session_id}/terminal", api(&peer));
-        while let Ok(first) = rx.recv() {
-            // 送っている間にたまった分をまとめる。続けて打った文字は1回で送り、大きさは続いたら最後だけ送る
-            let mut merged: Vec<TermCmd> = vec![first];
-            while let Ok(c) = rx.try_recv() {
-                let joined = match (merged.last_mut(), &c) {
-                    (Some(TermCmd::Input(a)), TermCmd::Input(b)) => { a.push_str(b); true }
-                    (Some(TermCmd::Resize(c0, r0)), TermCmd::Resize(c1, r1)) => { *c0 = *c1; *r0 = *r1; true }
-                    _ => false,
-                };
-                if !joined { merged.push(c); }
-            }
-            for c in merged {
-                let (path, body, what) = match &c {
-                    TermCmd::Input(t) => ("input", json!({ "text": t }), "ターミナルに書けなかった"),
-                    TermCmd::Resize(cols, rows) => ("resize", json!({ "cols": cols, "rows": rows }), "ターミナルの大きさを変えられなかった"),
-                };
-                if let Err(e) = agent().post(&format!("{base}/{path}")).timeout(Duration::from_secs(5)).send_json(body) {
-                    term_notice(&session_id, "input_error", json!({ "message": format!("{what}: {e}") }));
-                }
-            }
-        }
-    });
-    tx
+fn avatars_path() -> PathBuf {
+    std::env::var("FC_AVATARS").map(PathBuf::from).unwrap_or_else(|_| fc_path(Scope::App, "avatars.json"))
 }
 
 // ---------- 画面から呼ぶ命令（#3） ----------
 // async の付かない命令は Tauri のメインスレッドで動く（Tauri 2 の説明「Calling Rust from the Frontend」:
 // "Commands without the async keyword are executed on the main thread unless defined with #[tauri::command(async)]"）。
-// メインスレッドで ccn の HTTP を待つと、その間は画面の描画と入力が止まる（2026-11-12 の実測: ccn を3秒遅らせると、
-// 何もしない命令の往復が 12.5 秒、描画の間隔が 9.5 秒になった）。HTTP を待つ命令は、ここで spawn_blocking に移す。
+// ファイルを読む命令（一覧、会話、履歴）は、待つ間に画面の描画と入力を止めないよう、ここで spawn_blocking に移す。
 // 中身の関数は同期のまま残し、開発用の --snapshot などからも呼ぶ。
 
-/// 待ってよいスレッドで f を動かし、結果を待つ。ureq は同期なので、async の中で直接待たない
+/// 待ってよいスレッドで f を動かし、結果を待つ
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
@@ -1759,329 +375,45 @@ mod cmd {
     use super::*;
 
     #[tauri::command]
-    pub async fn peers() -> Result<Value, String> { blocking(super::peers).await }
-    #[tauri::command]
-    pub async fn snapshot(peer: Option<String>) -> Result<Snapshot, String> { blocking(move || Ok(super::snapshot(peer))).await }
-    #[tauri::command]
-    pub async fn town_agents(peer: Option<String>) -> Result<Vec<Value>, String> { blocking(move || super::town_agents(peer)).await }
-    #[tauri::command]
-    pub async fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<super::ConvDelta, String> {
-        blocking(move || super::conversation(session_id, peer, since)).await
-    }
-    #[tauri::command]
-    pub async fn conversation_cache(session_id: String, peer: Option<String>) -> Result<Option<super::offline::ConvCache>, String> {
-        blocking(move || Ok(super::conversation_cache(session_id, peer))).await
-    }
-    #[tauri::command]
-    pub async fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
-        blocking(move || super::send_message(session_id, text, peer)).await
-    }
-    #[tauri::command]
-    pub async fn answer_permission(session_id: String, choice: String, expect_id: Option<String>, answers: Option<Value>, message: Option<String>, suggestion: Option<usize>, peer: Option<String>) -> Result<String, String> {
-        blocking(move || super::answer_permission(session_id, choice, expect_id, answers, message, suggestion, peer)).await
-    }
-    #[tauri::command]
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_session(cwd: Option<String>, prompt: Option<String>, parent: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, resume: Option<String>, fork: Option<bool>, succeed: Option<bool>, peer: Option<String>, model: Option<String>, permission_mode: Option<String>) -> Result<Value, String> {
-        blocking(move || super::create_session(cwd, prompt, parent, name, cols, rows, resume, fork, succeed, peer, model, permission_mode)).await
-    }
-    #[tauri::command]
-    pub async fn house_places() -> Result<Value, String> { blocking(super::house_places).await }
-    /// 新しい世帯の一覧の各場所に連携しているリポジトリ名（owner/repo）。.git/config を読むだけ（#99）
-    #[tauri::command]
-    pub async fn place_repos(paths: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> { blocking(move || Ok(super::repo::repos_of(&paths))).await }
-    #[tauri::command]
-    pub async fn session_detail(session_id: String, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::session_detail(session_id, peer)).await
-    }
-    #[tauri::command]
-    pub async fn teleport_info(session_id: String, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::teleport_info(session_id, peer)).await
-    }
-    #[tauri::command]
-    pub async fn stop_session(session_id: String, peer: Option<String>) -> Result<(), String> {
-        blocking(move || super::stop_session(session_id, peer)).await
-    }
-    #[tauri::command]
-    pub async fn prompt_history(cwd: Option<String>, all: Option<bool>) -> Result<super::composer::History, String> {
-        blocking(move || super::composer::prompt_history(cwd, all.unwrap_or(false))).await
-    }
-    #[tauri::command]
-    pub async fn slash_commands(cwd: Option<String>) -> Result<Vec<super::composer::SlashCommand>, String> {
-        blocking(move || Ok(super::composer::slash_commands(cwd))).await
-    }
-    #[tauri::command]
-    pub async fn file_suggestions(cwd: String, query: String) -> Result<Vec<String>, String> {
-        blocking(move || super::composer::file_suggestions(cwd, query)).await
-    }
-    #[tauri::command]
-    pub async fn send_direct(session_id: String, text: String, peer: Option<String>) -> Result<(), String> {
-        super::native_guard(&session_id, &peer)?;
-        blocking(move || super::composer::send_direct(session_id, text, peer)).await
-    }
-    #[tauri::command]
-    pub async fn interrupt_session(session_id: String, peer: Option<String>) -> Result<(), String> {
-        super::native_guard(&session_id, &peer)?;
-        blocking(move || super::composer::interrupt_session(session_id, peer)).await
-    }
-    /// モデルの切り替えとコマンドの口がノードにあるか（#97）。{ status, body } を返す
-    #[tauri::command]
-    pub async fn session_controls(session_id: String, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::composer::session_controls(session_id, peer)).await
-    }
-    /// モデルと権限モードを替える（#97）。{ status, body } を返す
-    #[tauri::command]
-    pub async fn configure_session(session_id: String, model: Option<String>, permission_mode: Option<String>, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::composer::configure_session(session_id, model, permission_mode, peer)).await
-    }
-    /// 組み込みコマンドを command の口へ送る（#97）。{ status, body } を返す
-    #[tauri::command]
-    pub async fn run_command(session_id: String, text: String, peer: Option<String>) -> Result<Value, String> {
-        blocking(move || super::composer::run_command(session_id, text, peer)).await
-    }
-    /// 入力欄への貼り付け（#64）。クリップボードのファイルのパスか、保存した画像のパスを返す
-    #[tauri::command]
-    pub async fn paste_clipboard(save_image: bool) -> Result<super::attach::Pasted, String> {
-        blocking(move || super::attach::clipboard(&super::fc_path(Scope::App, "attachments"), save_image)).await
-    }
-    /// ドロップと貼り付けで受けたファイルのうち、一時の場所のものを attachments に写し、入力欄に入れるパスを返す（#69）
-    #[tauri::command]
-    pub async fn stage_files(paths: Vec<String>) -> Result<Vec<String>, String> {
-        blocking(move || super::attach::stage(&super::fc_path(Scope::App, "attachments"), paths)).await
-    }
+    pub async fn snapshot() -> Result<Snapshot, String> { blocking(|| Ok(super::snapshot())).await }
 }
 
-// ---------- 町の一覧の見張り（#5） ----------
-//
-// 画面が決まった間隔で snapshot を呼ぶのをやめ、Rust のスレッドが一覧を取り、前回と変わったときだけ Channel で画面へ送る。
-// 変化が無ければ画面（JS）は一度も起きない。ccn に変化を流す口（SSE）が町の全部を覆うまでのつなぎ。
-// ccn の GET /api/events は、コードを読んだ範囲では hook の状態ファイル（state/、close-check）とお手紙の変化を含まないので、まだ使わない。
-// 間隔は、変化が無い回が続くと 2秒→4秒→8秒と延ばし、8秒で止める。変わったら2秒に戻す。つながらない回は毎回送り、2秒で取り直す。
-// 上限を8秒にしたのは、静かな町で承認待ちや返事待ちが出たとき、画面に出るまでの遅れを8秒までに抑えるため（「あなたの番」を早く見せる）
-// 画面が見えていない間は、画面が town_unwatch で止める（#6）。
-
-/// 変化が無い回が続いたときの間隔の下限と上限
-const WATCH_MIN: Duration = Duration::from_secs(2);
-const WATCH_MAX: Duration = Duration::from_secs(8);
-
-enum WatchCmd {
-    Kick,
-    Stop,
-    /// 一覧の SSE が送ってきた一覧（ccn #35 の GET /api/sessions/stream?state=live の event: sessions の data）
-    List(Vec<Value>),
-    /// 一覧の SSE が終わった、または使えなかった。理由と、404 だったか（古い版のノード）
-    StreamEnded(String, bool),
+/// 開発用の引数 --paths。identifier と、状態ファイルの置き場所を出す
+fn print_paths() {
+    println!("{}", serde_json::to_string_pretty(&json!({
+        "identifier": APP_ID.get(),
+        "shared": fc_path(Scope::Shared, ""),
+        "app": fc_path(Scope::App, ""),
+        "avatars": avatars_path(),
+        "avatarsRecent": avatars::recent_path(&avatars_path()),
+    })).unwrap_or_default());
 }
 
-/// 一覧の SSE を、この長さ何も来なければ切ってポーリングに戻す。ccn は15秒ごとに keep-alive を送る。
-/// Cloudflare の中継などで本文が溜められたときも、これで戻る
-const STREAM_SILENT: Duration = Duration::from_secs(20);
-/// 一覧の SSE が切れたときに、次に試すまでの長さ。404（古い版のノード）なら長くあける。
-/// 404 でも試し直すのは、開いたままの窓が、ノードを新しくした後に乗り替われるようにするため
-const STREAM_RETRY: Duration = Duration::from_secs(60);
-const STREAM_RETRY_NOT_FOUND: Duration = Duration::from_secs(300);
-
-/// 一覧の SSE の本文を読み、event: sessions の data（一覧の配列）ごとに on を呼ぶ。on が false を返すか stop が立てば終わる。
-/// 枠は ccn の src/api/sse.ts の形（`id: <ETag>` `event: sessions` `data: <1行の JSON>` と空行、keep-alive は `: keep-alive` と空行）。
-/// id（引用符つきの ETag）は使わない。つなぎ直すたびに一覧の全体を受ける。返り値は終わった理由
-fn pump_sessions_sse(reader: impl BufRead, stop: &AtomicBool, mut on: impl FnMut(Vec<Value>) -> bool) -> String {
-    let (mut ev, mut data) = (String::new(), String::new());
-    for line in reader.lines() {
-        if stop.load(Ordering::SeqCst) {
-            return "止めた".into();
-        }
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => return format!("読めなくなった（{}秒何も来ないときも含む）: {e}", STREAM_SILENT.as_secs()),
-        };
-        if line.is_empty() {
-            if ev == "sessions" {
-                match serde_json::from_str::<Value>(&data) {
-                    Ok(Value::Array(v)) => {
-                        if !on(v) {
-                            return "止めた".into();
-                        }
-                    }
-                    _ => return "一覧の形が想定と違う".into(),
-                }
-            }
-            ev.clear();
-            data.clear();
-        } else if let Some(x) = line.strip_prefix("event:") {
-            ev = x.trim().to_string();
-        } else if let Some(x) = line.strip_prefix("data:") {
-            if !data.is_empty() {
-                data.push('\n');
-            }
-            data.push_str(x.trim_start());
-        }
-        // id: と、: で始まる keep-alive は読み捨てる
-    }
-    "ccn が閉じた".into()
+/// 開発用の引数 --native-list。~/.claude（FC_CLAUDE_HOME）から一覧を2回作り、件数と時間だけを出す
+fn print_native_list() {
+    let root = native::claude_home();
+    let first = native::list(&root, native::now_ms());
+    let second = native::list(&root, native::now_ms());
+    let convs: Vec<Value> = first.sessions.iter().chain(first.subagents.iter()).filter_map(|r| {
+        let p = PathBuf::from(r["native"]["jsonl"].as_str()?);
+        let t = std::time::Instant::now();
+        let c = native::conv::read(&p, 0).ok()?;
+        let items: usize = c.lines.iter().map(|l| simplify(l).len()).sum();
+        Some(json!({ "kind": r["kind"], "bytes": fs::metadata(&p).map(|m| m.len()).unwrap_or(0), "lines": c.lines.len(), "items": items, "ms": t.elapsed().as_secs_f64() * 1000.0 }))
+    }).collect();
+    let mut odd = first.stats.unexpected.clone();
+    for (k, v) in native::conv::odd_counts() { *odd.entry(k).or_default() += v; }
+    println!("{}", serde_json::to_string_pretty(&json!({
+        "first": first.stats, "second": second.stats,
+        "rows": first.sessions.iter().chain(first.subagents.iter()).map(|r| json!({ "kind": r["kind"], "state": r["state"], "hasParent": !r["parent"].is_null() || !r["native"]["parentId"].is_null() })).collect::<Vec<_>>(),
+        "conversations": convs,
+        "unexpected": odd,
+    })).unwrap_or_default());
 }
 
-/// 一覧の SSE につないで読む。200 で text/event-stream のときだけ読み、それ以外（404、502、HTML のページなど）はすぐ理由を返す。
-/// 共有の agent() は全体の時間切れ（8秒）が付いていて長い接続が切れるので、読みの時間切れ（STREAM_SILENT）だけの agent を使う
-fn read_sessions_stream(url: &str, stop: &AtomicBool, on: impl FnMut(Vec<Value>) -> bool) -> (String, bool) {
-    let a = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(5)).timeout_read(STREAM_SILENT).build();
-    match a.get(url).call() {
-        Ok(r) if r.status() == 200 && r.content_type() == "text/event-stream" => (pump_sessions_sse(BufReader::new(r.into_reader()), stop, on), false),
-        Ok(r) => (format!("SSE ではない応答（{} {}）", r.status(), r.content_type()), false),
-        Err(ureq::Error::Status(code, _)) => (format!("ccn が {code} を返した"), code == 404),
-        Err(e) => (format!("つながらない: {e}"), false),
-    }
-}
-/// いま動いている見張り（窓は1つなので1本だけ）。世代と、止めるための口
-static WATCH: Mutex<Option<(u64, std::sync::mpsc::Sender<WatchCmd>)>> = Mutex::new(None);
-static WATCH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-/// 前回と同じかを比べる鍵。取得した時刻（fetched_at）は毎回変わるので除く
-fn snapshot_key(s: &Snapshot) -> String {
-    let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
-    if let Some(o) = v.as_object_mut() {
-        o.remove("fetched_at");
-    }
-    v.to_string()
-}
-
-/// 次に取るまでの間隔。変わったら下限に戻し、変わらなければ倍にする（上限で止める）
-fn next_wait(cur: Duration, changed: bool) -> Duration {
-    if changed { WATCH_MIN } else { (cur * 2).min(WATCH_MAX) }
-}
-
-/// 見張りの本体。一覧を受け取り、前回と変わったとき（つながらない回は毎回）だけ send に渡す。send が false を返すか Stop で終わる。
-/// 一覧は、ccn の一覧の SSE が使えればそこから受け、使えなければ GET /sessions で取る（#5）。
-/// どちらのときも 2秒→4秒→8秒 の周期で町を作り直す。SSE が運ぶのは ccn の一覧だけで、hook の状態ファイル、close-check、
-/// 世帯の名前、お手紙の変化は来ないため。SSE の間の作り直しは、最後に受けた一覧を使い、HTTP の要求は出さない
-fn watch_loop(peer: Option<String>, tx: std::sync::mpsc::Sender<WatchCmd>, rx: std::sync::mpsc::Receiver<WatchCmd>, mut send: impl FnMut(Value) -> bool) {
-    use std::sync::mpsc::RecvTimeoutError;
-    use std::time::Instant;
-    let mut last: Option<String> = None;
-    let mut wait = WATCH_MIN;
-    // SSE から受けた最後の一覧。Some の間は GET /sessions を出さない
-    let mut list: Option<Vec<Value>> = None;
-    // 次に SSE を試す時刻。None はつないでいる最中
-    let mut stream_at = Some(Instant::now());
-    let stop = Arc::new(AtomicBool::new(false));
-    let url = format!("{}/sessions/stream?state=live", api(&peer));
-    loop {
-        // 設定で ccn を切ったら SSE を読まない（つないでいたら、受けた一覧を捨てる。agents_from も使わない）
-        let ccn_off = peer.is_none() && !ccn_use();
-        if ccn_off {
-            list = None;
-        }
-        if !ccn_off && stream_at.is_some_and(|at| Instant::now() >= at) {
-            stream_at = None;
-            let (u, st, t) = (url.clone(), stop.clone(), tx.clone());
-            std::thread::spawn(move || {
-                let (why, not_found) = read_sessions_stream(&u, &st, |v| t.send(WatchCmd::List(v)).is_ok());
-                let _ = t.send(WatchCmd::StreamEnded(why, not_found));
-            });
-        }
-        let s = match &list {
-            Some(v) => snapshot_from(peer.clone(), Ok(v.clone())),
-            None => snapshot(peer.clone()),
-        };
-        let key = snapshot_key(&s);
-        let changed = last.as_deref() != Some(key.as_str());
-        // つながらない回は、同じ中身でも毎回送る（画面が続けて失敗した回数を数え、「つながりにくい」を出す）
-        if (changed || !s.ccn_ok) && !send(serde_json::to_value(&s).unwrap_or(Value::Null)) {
-            break;
-        }
-        wait = if s.ccn_ok { next_wait(wait, changed) } else { WATCH_MIN };
-        last = Some(key);
-        // SSE を試し直す時刻が先に来るなら、そこで起きる
-        let nap = stream_at.map(|at| wait.min(at.saturating_duration_since(Instant::now()))).unwrap_or(wait);
-        match rx.recv_timeout(nap) {
-            // すぐ取り直す（新しい世帯を作った直後など）。間隔も下限に戻す
-            Ok(WatchCmd::Kick) => wait = WATCH_MIN,
-            // 一覧が変わった。すぐ作り直す
-            Ok(WatchCmd::List(v)) => {
-                if list.is_none() {
-                    eprintln!("[town] 一覧の SSE につないだ（{url}）");
-                }
-                list = Some(v);
-                wait = WATCH_MIN;
-            }
-            // SSE が使えない、切れた。ポーリングに戻り、しばらくしてから試し直す
-            Ok(WatchCmd::StreamEnded(why, not_found)) => {
-                eprintln!("[town] 一覧の SSE をやめてポーリングに戻す: {why}");
-                list = None;
-                stream_at = Some(Instant::now() + if not_found { STREAM_RETRY_NOT_FOUND } else { STREAM_RETRY });
-            }
-            Ok(WatchCmd::Stop) | Err(RecvTimeoutError::Disconnected) => break,
-            Err(RecvTimeoutError::Timeout) => {}
-        }
-    }
-    // SSE を読んでいるスレッドは、次の行（keep-alive は15秒ごと）か時間切れで、この旗を見て終わる
-    stop.store(true, Ordering::SeqCst);
-}
-
-/// 町の一覧の見張りを始める。前の見張りがあれば止める。戻り値の世代を town_unwatch に渡す
-#[tauri::command]
-fn town_watch(peer: Option<String>, on_event: tauri::ipc::Channel<Value>) -> u64 {
-    let (tx, rx) = std::sync::mpsc::channel::<WatchCmd>();
-    let generation = WATCH_GEN.fetch_add(1, Ordering::SeqCst);
-    // 見張りは、SSE を読むスレッドに渡すために送り口の写しを持つ
-    let tx2 = tx.clone();
-    if let Some((_, old)) = WATCH.lock().unwrap_or_else(|e| e.into_inner()).replace((generation, tx)) {
-        let _ = old.send(WatchCmd::Stop);
-    }
-    std::thread::spawn(move || watch_loop(peer, tx2, rx, |v| on_event.send(v).is_ok()));
-    generation
-}
-
-/// 見張りを止める。世代が今の見張りと違えば何もしない（後から始めた見張りを止めない）
-#[tauri::command]
-fn town_unwatch(generation: u64) {
-    let mut w = WATCH.lock().unwrap_or_else(|e| e.into_inner());
-    if w.as_ref().map(|(g, _)| *g) == Some(generation) {
-        if let Some((_, tx)) = w.take() {
-            let _ = tx.send(WatchCmd::Stop);
-        }
-    }
-}
-
-/// 見張りに、すぐ取り直させる
-#[tauri::command]
-fn town_kick() {
-    if let Some((_, tx)) = WATCH.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        let _ = tx.send(WatchCmd::Kick);
-    }
-}
-
-// ---------- 計測（#18） ----------
-
-/// 画面の計測（src/term/perf.ts）の1行を書く。FC_PERF_LOG があればそのファイルに足し、無ければ標準エラーに出す
-#[tauri::command]
-fn perf_log(line: String) {
-    match std::env::var("FC_PERF_LOG") {
-        Ok(p) if !p.is_empty() => {
-            use std::io::Write;
-            if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(p) {
-                let _ = writeln!(f, "{line}");
-            }
-        }
-        _ => eprintln!("[perf] {line}"),
-    }
-}
-
-/// 何もしない命令。async を付けないので、メインスレッドで動く。往復が長ければ、メインスレッドが止まっている
-#[tauri::command]
-fn perf_ping() {}
-
-/// 軽さの計測（scripts/bench.ts、#2）で、窓を隠すか最小化する。FC_PERF_LOG があるとき（計測のとき）だけ動く
-#[tauri::command]
-fn perf_window(window: tauri::WebviewWindow, op: String) -> Result<(), String> {
-    if std::env::var("FC_PERF_LOG").map(|p| p.is_empty()).unwrap_or(true) {
-        return Err("計測のときだけ使える".into());
-    }
-    match op.as_str() {
-        "hide" => window.hide(),
-        "minimize" => window.minimize(),
-        _ => return Err(format!("知らない操作: {op}")),
-    }
-    .map_err(|e| e.to_string())
+/// 開発用の引数 --snapshot。画面に渡すのと同じ一覧の JSON を出す
+fn print_snapshot() {
+    println!("{}", serde_json::to_string_pretty(&snapshot()).unwrap_or_default());
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2089,7 +421,6 @@ pub fn run() {
     // 開発用: 画面に渡すのと同じ JSON を出して終わる（ブラウザでの見た目の確認に使う）
     //   family-computing --snapshot             一覧
     //   family-computing --conversation <id>    会話
-    //   family-computing --answer <sessionId> <allow|deny> [expectId]
     // identifier はビルド時の設定（開発版は tauri.conf.json、安定版は tauri.stable.conf.json を重ねたもの）から取る。
     // 下の開発用の引数も、画面と同じ置き場所を使う
     // 軽さの計測（scripts/bench.ts）: プロセスが始まった時刻を書く。画面が町を描いた時刻との差を、起動の時間にする
@@ -2102,92 +433,33 @@ pub fn run() {
     let arg_after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     // family-computing --paths   identifier と、状態ファイルの置き場所を出す（両版で分かれているかの確認に使う）
     if args.iter().any(|a| a == "--paths") {
-        let (houses_shared, houses_own) = houses_paths();
-        println!("{}", serde_json::to_string_pretty(&json!({
-            "identifier": APP_ID.get(),
-            "shared": fc_path(Scope::Shared, ""),
-            "app": fc_path(Scope::App, ""),
-            "avatars": avatars_path(&None),
-            "avatarsRecent": avatars::recent_path(&avatars_path(&None)),
-            "housesShared": houses_shared,
-            "houses": houses_own,
-        })).unwrap_or_default());
+        print_paths();
         return;
     }
     // family-computing --native-list   ~/.claude（FC_CLAUDE_HOME）から一覧を2回作り、件数と時間だけを出す（中身の文は出さない。#96）。
     // 生きているセッションの会話を末尾から読んだ件数と時間も出す。読むだけで、~/.claude にも ~/.family-computing にも書かない
     if args.iter().any(|a| a == "--native-list") {
-        let root = native::claude_home();
-        let first = native::list(&root, native::now_ms());
-        let second = native::list(&root, native::now_ms());
-        let convs: Vec<Value> = first.sessions.iter().chain(first.subagents.iter()).filter_map(|r| {
-            let p = PathBuf::from(r["native"]["jsonl"].as_str()?);
-            let t = std::time::Instant::now();
-            let c = native::conv::read(&p, 0).ok()?;
-            let items: usize = c.lines.iter().map(|l| simplify(l).len()).sum();
-            Some(json!({ "kind": r["kind"], "bytes": fs::metadata(&p).map(|m| m.len()).unwrap_or(0), "lines": c.lines.len(), "items": items, "ms": t.elapsed().as_secs_f64() * 1000.0 }))
-        }).collect();
-        let mut odd = first.stats.unexpected.clone();
-        for (k, v) in native::conv::odd_counts() { *odd.entry(k).or_default() += v; }
-        println!("{}", serde_json::to_string_pretty(&json!({
-            "first": first.stats, "second": second.stats,
-            "rows": first.sessions.iter().chain(first.subagents.iter()).map(|r| json!({ "kind": r["kind"], "state": r["state"], "hasParent": !r["parent"].is_null() || !r["native"]["parentId"].is_null() })).collect::<Vec<_>>(),
-            "conversations": convs,
-            "unexpected": odd,
-        })).unwrap_or_default());
+        print_native_list();
         return;
     }
     if args.iter().any(|a| a == "--snapshot") {
-        println!("{}", serde_json::to_string_pretty(&snapshot(arg_after("--peer"))).unwrap_or_default());
+        print_snapshot();
         return;
     }
     if let Some(id) = arg_after("--conversation") {
-        // 出力の形は前と同じ（Ok に項目の配列）。public/dev-conversation.json に使う
-        println!("{}", serde_json::to_string_pretty(&conversation(id, None, None).map(|d| d.items)).unwrap_or_default());
+        // 出力の形は前と同じ（Ok に項目の配列）。public/dev-conversation.json に使う。jsonl の場所を登録するために、先に一覧を作る
+        let _ = town_rows();
+        println!("{}", serde_json::to_string_pretty(&conversation(id, None).map(|d| d.items)).unwrap_or_default());
         return;
     }
-    // family-computing --answer <sessionId> <allow|deny> [requestId]   承認待ちに答える（画面のボタンと同じ処理）
-    if let Some(i) = args.iter().position(|a| a == "--answer") {
-        let sid = args.get(i + 1).cloned().unwrap_or_default();
-        let choice = args.get(i + 2).cloned().unwrap_or_default();
-        println!("{:?}", answer_permission(sid, choice, args.get(i + 3).cloned(), None, None, None, None));
-        return;
-    }
-    // family-computing --term <sessionId> [秒]   端末の SSE を読んで、イベントを1行ずつ出す（画面の端末と同じ読み方）
-    if let Some(i) = args.iter().position(|a| a == "--term") {
-        let sid = args.get(i + 1).cloned().unwrap_or_default();
-        let secs: u64 = args.get(i + 2).and_then(|x| x.parse().ok()).unwrap_or(3);
-        let stop = Arc::new(AtomicBool::new(false));
-        let s2 = stop.clone();
-        std::thread::spawn(move || { std::thread::sleep(Duration::from_secs(secs)); s2.store(true, Ordering::SeqCst); });
-        let url = format!("{}/api/sessions/{sid}/terminal", ccn_base());
-        read_terminal(&url, &stop, |ev, data| {
-            let n = data["b64"].as_str().map(|b| b.len()).unwrap_or(0);
-            println!("{ev} {}", if n > 0 { format!("b64 {n}字") } else { data.to_string() });
-        });
-        return;
-    }
-    // family-computing --create [cwd] [prompt] [parentId]   端末のセッションを立てる（画面の「子を足す」「新しい世帯」と同じ処理）
-    if let Some(i) = args.iter().position(|a| a == "--create") {
-        println!("{:?}", create_session(args.get(i + 1).cloned(), args.get(i + 2).cloned(), args.get(i + 3).cloned(), None, None, None, None, None, None, None, None, None));
-        return;
-    }
-    // family-computing --send <sessionId> <文>   注文を送る（画面の送信と同じ処理）
-    if let Some(i) = args.iter().position(|a| a == "--send") {
-        println!("{:?}", send_message(args.get(i + 1).cloned().unwrap_or_default(), args.get(i + 2).cloned().unwrap_or_default(), None));
-        return;
-    }
-    // 会話の保存のうち、古いものと多すぎる分を消す。起動を待たせないよう別のスレッドで
-    std::thread::spawn(|| {
-        let n = offline::prune_conv(&cache_dir(), offline::CONV_MAX_AGE, offline::CONV_MAX_FILES);
-        if n > 0 {
-            eprintln!("[offline] 古い会話の保存を {n} 件消した");
-        }
-    });
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
+            // 前回開いていた端末を立て直す（#152）。ログインシェルに PATH を聞くので（最大5秒）、別のスレッドで
+            if std::env::var("FC_NO_RESTORE").is_err() {
+                std::thread::spawn(session_ops::restore_terminals);
+            }
             // 開発の計測用（src/term/bench.ts、scripts/bench.ts）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、
             // 最前面に出し、どのデスクトップにも出す（本人が別のデスクトップに移っても隠れないように）。
             // 前面は奪わない（FC_BENCH_FOCUS=1 のときだけ奪う）。起動のたびに前面を奪うと、本人の作業の邪魔になる
@@ -2204,329 +476,29 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            cmd::snapshot, cmd::town_agents, cmd::peers, cmd::conversation, cmd::conversation_cache, cmd::send_message, cmd::answer_permission,
-            cmd::create_session, cmd::stop_session, teleport, cmd::teleport_info, cmd::session_detail, cmd::house_places, cmd::place_repos, term_open, term_close, term_input, term_resize,
-            perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick, town_settings, set_town_settings,
-            cmd::prompt_history, cmd::slash_commands, cmd::file_suggestions, cmd::send_direct, cmd::interrupt_session, cmd::session_controls, cmd::configure_session, cmd::run_command, cmd::paste_clipboard, cmd::stage_files
+            cmd::snapshot, conversation::cmd::conversation,
+            session_ops::cmd::create_session, session_ops::cmd::resume_session, session_ops::cmd::stop_session, session_ops::cmd::house_places, repo::cmd::place_repos,
+            term_open, term_close, term_input, term_resize,
+            perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
+            composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::send_or_queue, composer::cmd::cancel_queued, composer::cmd::boot_status, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files,
+            switch::cmd::session_settings, switch::cmd::switch_session, switch::cmd::cancel_switch
         ])
-        .run(context)
-        .expect("error while running tauri application");
+        .build(context)
+        .expect("error while building tauri application")
+        .run(|_app, ev| {
+            // アプリを終えるとき、ここから立てた claude を全部止める（pty.rs）。Exit は窓を閉じても ⌘Q でも来る
+            if let tauri::RunEvent::Exit = ev {
+                pty::kill_all();
+            }
+        });
 }
 
 #[cfg(test)]
+pub(crate) static NATIVE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
 mod tests {
-    fn ask() -> serde_json::Value {
-        serde_json::json!({ "requestId": "r1", "toolName": "AskUserQuestion", "input": { "questions": [
-            { "question": "色は？", "header": "色", "options": [{ "label": "赤" }, { "label": "青" }], "multiSelect": false },
-            { "question": "数は？", "header": "数", "options": [{ "label": "1" }, { "label": "2" }], "multiSelect": true }
-        ] } })
-    }
-
-    #[test]
-    fn permission_body_answers_questions() {
-        let a = serde_json::json!({ "色は？": "青", "数は？": "1, 2" });
-        let (b, done) = super::permission_body(&ask(), "allow", Some("r1"), Some(&a), None, None).unwrap();
-        assert_eq!(b["behavior"], "allow");
-        assert_eq!(b["updatedInput"]["answers"], a);
-        // 元の questions はそのまま返す
-        assert_eq!(b["updatedInput"]["questions"], ask()["input"]["questions"]);
-        assert_eq!(done, "質問に答えた");
-    }
-
-    #[test]
-    fn permission_body_refuses_partial_or_stale_answers() {
-        let some = serde_json::json!({ "色は？": "青" });
-        assert!(super::permission_body(&ask(), "allow", Some("r1"), Some(&some), None, None).unwrap_err().contains("数は？"));
-        let blank = serde_json::json!({ "色は？": "青", "数は？": "  " });
-        assert!(super::permission_body(&ask(), "allow", Some("r1"), Some(&blank), None, None).is_err());
-        assert!(super::permission_body(&ask(), "allow", Some("r1"), None, None, None).is_err());
-        let full = serde_json::json!({ "色は？": "青", "数は？": "1" });
-        assert!(super::permission_body(&ask(), "allow", Some("old"), Some(&full), None, None).unwrap_err().contains("変わった"));
-    }
-
-    #[test]
-    fn permission_body_always_allow_uses_the_pending_suggestion() {
-        // 2026-11-21 に本番のノードで見た pending の形（mcp__ccn__list_peers）
-        let mcp = serde_json::json!({ "requestId": "r4", "toolName": "mcp__ccn__list_peers", "input": {}, "suggestions": [
-            { "type": "addRules", "rules": [{ "toolName": "mcp__ccn__list_peers" }], "behavior": "allow", "destination": "localSettings" },
-            { "type": "addDirectories", "directories": ["/x"], "destination": "session" }
-        ] });
-        let (b, done) = super::permission_body(&mcp, "allow", Some("r4"), None, None, Some(0)).unwrap();
-        assert_eq!(b["updatedPermissions"], serde_json::json!([mcp["suggestions"][0]]));
-        assert!(done.contains("以後は聞かない"));
-        // addDirectories と、無い番号は返さない
-        assert!(super::permission_body(&mcp, "allow", Some("r4"), None, None, Some(1)).is_err());
-        assert!(super::permission_body(&mcp, "allow", Some("r4"), None, None, Some(9)).is_err());
-        // 中身が変わっていたら送らない。拒否と計画には付けない
-        assert!(super::permission_body(&mcp, "allow", Some("old"), None, None, Some(0)).is_err());
-        assert!(super::permission_body(&mcp, "deny", None, None, None, Some(0)).is_err());
-        let plan = serde_json::json!({ "requestId": "r2", "toolName": "ExitPlanMode", "input": {}, "suggestions": [{ "type": "setMode", "mode": "acceptEdits", "destination": "session" }] });
-        assert!(super::permission_body(&plan, "allow", Some("r2"), None, None, Some(0)).is_err());
-    }
-
-    #[test]
-    fn permission_body_plan_and_tools() {
-        let plan = serde_json::json!({ "requestId": "r2", "toolName": "ExitPlanMode", "input": { "plan": "p" } });
-        assert_eq!(super::permission_body(&plan, "allow", Some("r2"), None, None, None).unwrap().0, serde_json::json!({ "behavior": "allow" }));
-        let (b, done) = super::permission_body(&plan, "deny", None, None, Some("  "), None).unwrap();
-        assert_eq!(b, serde_json::json!({ "behavior": "deny", "message": super::PLAN_DENY_DEFAULT }));
-        assert_eq!(done, "計画の見直しを頼んだ");
-        assert_eq!(super::permission_body(&plan, "deny", None, None, Some("テストも足して"), None).unwrap().0["message"], "テストも足して");
-        let bash = serde_json::json!({ "requestId": "r3", "toolName": "Bash", "input": { "command": "ls" } });
-        assert_eq!(super::permission_body(&bash, "allow", Some("r3"), None, None, None).unwrap().0, serde_json::json!({ "behavior": "allow" }));
-        assert_eq!(super::permission_body(&bash, "deny", None, None, None, None).unwrap().0["message"], super::DENY_DEFAULT);
-        // 質問でない待ちに答えを付けたら送らない
-        assert!(super::permission_body(&bash, "allow", Some("r3"), Some(&serde_json::json!({ "x": "y" })), None, None).is_err());
-    }
-
-    #[test]
-    fn live_tracks_open_tools_and_thinking() {
-        use super::{live_events, Live};
-        use serde_json::json;
-        let pty = |ts: &str, data: serde_json::Value| json!({ "at": 1, "type": "x", "seq": 0, "data": { "timestamp": ts, "type": data["type"], "message": data["message"] } });
-        let mut l = Live::default();
-        let feed = |l: &mut Live, m: serde_json::Value| for e in live_events(&m) { l.apply(e) };
-        feed(&mut l, pty("t0", json!({ "type": "user", "message": { "content": "やって" } })));
-        assert_eq!(l.turn_at, json!("t0"));
-        feed(&mut l, pty("t1", json!({ "type": "assistant", "message": { "content": [{ "type": "thinking", "thinking": "" }] } })));
-        assert_eq!(l.last, Some("thinking"));
-        feed(&mut l, pty("t2", json!({ "type": "assistant", "message": { "content": [
-            { "type": "tool_use", "id": "a", "name": "Bash", "input": { "command": "git status", "description": "見る" } },
-            { "type": "tool_use", "id": "b", "name": "mcp__ccn__send_message", "input": { "session": "abc", "text": "x" } } ] } })));
-        assert_eq!(l.tools.len(), 2);
-        assert_eq!(l.tools[0].text, "コマンド: git status");
-        assert_eq!(l.tools[1].kind, "ccn");
-        assert_eq!(l.tools[1].text, "send_message: abc");
-        // node の形（timestamp が外）でも読む
-        feed(&mut l, json!({ "type": "user", "timestamp": "t3", "message": { "content": [{ "type": "tool_result", "tool_use_id": "a" }] } }));
-        assert_eq!(l.tools.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["b"]);
-        assert_eq!((l.last, l.last_at.clone()), (Some("result"), json!("t3")));
-        // hook の差し込みはターンの始まりにしない。人の文が来たら、結果の来なかった道具は捨てる
-        feed(&mut l, pty("t4", json!({ "type": "user", "message": { "content": "<system-reminder>x</system-reminder>" } })));
-        assert_eq!(l.tools.len(), 1);
-        feed(&mut l, pty("t5", json!({ "type": "user", "message": { "content": [{ "type": "text", "text": "[Request interrupted by user]" }] } })));
-        assert!(l.tools.is_empty());
-        assert_eq!(l.turn_at, json!("t5"));
-    }
-
-    #[test]
-    fn conversation_returns_only_what_the_screen_lacks() {
-        use super::{Conv, KEEP_MESSAGES};
-        use serde_json::json;
-        let mut c = Conv::default();
-        let item = |i: usize| json!({ "role": "assistant", "text": format!("t{i}") });
-        c.push((0..3).map(item).collect());
-        // 初めて開いたときは全部
-        let d = c.since(None);
-        assert!(d.reset);
-        assert_eq!(d.total, 3);
-        assert_eq!(d.items.iter().map(|v| v["n"].as_u64().unwrap()).collect::<Vec<_>>(), vec![0, 1, 2]);
-        // 増えていなければ空
-        let d = c.since(Some(3));
-        assert!(!d.reset && d.items.is_empty() && d.total == 3);
-        // 増えた分だけ
-        c.push(vec![item(3)]);
-        let d = c.since(Some(3));
-        assert!(!d.reset);
-        assert_eq!(d.items, vec![json!({ "role": "assistant", "text": "t3", "n": 3 })]);
-        // 一度に KEEP_MESSAGES を超えて増え、画面の持つ分が捨てた分より前になったら、全部を reset で
-        c.push((4..4 + KEEP_MESSAGES + 5).map(item).collect());
-        let d = c.since(Some(4));
-        assert!(d.reset);
-        assert_eq!(d.items.len(), KEEP_MESSAGES);
-        assert_eq!(d.items[0]["n"], json!(9));
-        assert_eq!(d.total, 4 + KEEP_MESSAGES as u64 + 5);
-        // 画面のほうが先に進んでいる（キャッシュを作り直した）ときも reset
-        assert!(c.since(Some(d.total + 1)).reset);
-    }
-
-    #[test]
-    fn overlapping_reads_do_not_add_twice() {
-        use super::Conv;
-        use serde_json::json;
-        let mut c = Conv::default();
-        let fresh = || vec![json!({ "role": "user", "text": "a" })];
-        // 同じ after=0 から読んだ2回。先に終わった方だけ足す
-        c.absorb(0, 5, fresh(), vec![], None);
-        c.absorb(0, 5, fresh(), vec![], None);
-        assert_eq!(c.total, 1);
-        assert_eq!(c.next, 5);
-        c.absorb(5, 6, fresh(), vec![], None);
-        assert_eq!(c.total, 2);
-    }
-
-    #[test]
-    fn idle_conversations_are_forgotten() {
-        use super::{forget_idle_convs, Conv, CONV_IDLE_MS};
-        use std::collections::HashMap;
-        let mut m: HashMap<String, Conv> = HashMap::new();
-        let now = 100 * CONV_IDLE_MS;
-        m.insert("|open".into(), Conv { used: now - 2500, ..Default::default() });
-        m.insert("|closed".into(), Conv { used: now - CONV_IDLE_MS - 1, ..Default::default() });
-        m.insert("|asked".into(), Conv { used: 0, ..Default::default() });
-        forget_idle_convs(&mut m, "|asked", now);
-        let mut keys: Vec<_> = m.keys().cloned().collect();
-        keys.sort();
-        // 読んでいる会話と、いま読もうとしている会話は残し、長く読まれていない会話は捨てる
-        assert_eq!(keys, vec!["|asked", "|open"]);
-    }
-
-    #[test]
-    fn a_changed_epoch_means_the_cursor_does_not_continue() {
-        use super::cursor_is_stale;
-        let s = |x: &str| Some(x.to_string());
-        // 初めて読む（from=0）ときは、印が何でも続きとして読む
-        assert!(!cursor_is_stale(0, &None, &s("a")));
-        // 同じ印なら続き
-        assert!(!cursor_is_stale(3, &s("a"), &s("a")));
-        // 印が変わった（ccn の再起動、付け直し、終わって jsonl の位置へ）
-        assert!(cursor_is_stale(3, &s("a"), &s("b")));
-        assert!(cursor_is_stale(3, &s("a"), &s("history")));
-        // 印を返さない古い ccn から入れ替わった
-        assert!(cursor_is_stale(3, &None, &s("b")));
-        // 印を返さない古い ccn では今までどおり
-        assert!(!cursor_is_stale(3, &None, &None));
-        assert!(!cursor_is_stale(3, &s("a"), &None));
-    }
-
-    /// 読み直して置き換えた後は、画面が前に持っていた数（since）で呼んでも必ず reset になる。
-    /// 読み直しが前より短い、同じ、長い（KEEP_MESSAGES を超える）の3通り
-    #[test]
-    fn replacing_after_a_reread_always_resets_the_screen() {
-        use super::{Conv, KEEP_MESSAGES};
-        use serde_json::json;
-        let item = |i: usize| json!({ "role": "assistant", "text": format!("t{i}") });
-        let a = Some("a".to_string());
-        for len in [1usize, 3, KEEP_MESSAGES + 7] {
-            let mut c = Conv::default();
-            c.absorb(0, 3, (0..3).map(item).collect(), vec![], a.clone());
-            let old = c.since(None).total;
-            assert!(c.replace(3, &a, 5, (0..len).map(item).collect(), vec![], Some("b".into())));
-            let d = c.since(Some(old));
-            assert!(d.reset, "len={len}");
-            assert_eq!(d.items.len(), len.min(KEEP_MESSAGES));
-            assert_eq!(d.items.last().unwrap()["text"], json!(format!("t{}", len - 1)));
-            // n は前より大きいところから続く
-            assert!(d.items[0]["n"].as_u64().unwrap() > old);
-            assert_eq!((c.next, c.epoch.as_deref()), (5, Some("b")));
-            // 画面が追いついた後は、続きの差分だけ
-            assert!(c.absorb(5, 6, vec![item(99)], vec![], Some("b".into())));
-            let e = c.since(Some(d.total));
-            assert!(!e.reset);
-            assert_eq!(e.items.len(), 1);
-        }
-        // 0件に読み直しても、画面は reset で空になり、その後は reset を繰り返さない
-        let mut c = Conv::default();
-        c.absorb(0, 3, (0..3).map(item).collect(), vec![], a.clone());
-        assert!(c.replace(3, &a, 0, vec![], vec![], Some("b".into())));
-        let d = c.since(Some(3));
-        assert!(d.reset && d.items.is_empty());
-        assert!(!c.since(Some(d.total)).reset);
-    }
-
-    #[test]
-    fn a_second_overlapping_reread_does_not_replace_twice() {
-        use super::Conv;
-        use serde_json::json;
-        let a = Some("a".to_string());
-        let mut c = Conv::default();
-        c.absorb(0, 3, vec![json!({ "role": "user", "text": "x" })], vec![], a.clone());
-        assert!(c.replace(3, &a, 5, vec![json!({ "role": "user", "text": "y" })], vec![], Some("b".into())));
-        let total = c.total;
-        // 同じ時に読み始めたもう1回は、もう進んでいるので置き換えない
-        assert!(!c.replace(3, &a, 5, vec![json!({ "role": "user", "text": "y" })], vec![], Some("b".into())));
-        assert_eq!(c.total, total);
-        // 古い印のまま続きを足そうとした取得も足さない
-        assert!(!c.absorb(3, 4, vec![json!({ "role": "user", "text": "z" })], vec![], a.clone()));
-        assert_eq!(c.total, total);
-    }
-
-    #[test]
-    fn conv_delta_is_sent_as_an_object() {
-        use super::ConvDelta;
-        use serde_json::json;
-        let d = ConvDelta { items: vec![json!({ "role": "user", "text": "a", "n": 0 })], total: 1, reset: true, live: Default::default() };
-        assert_eq!(serde_json::to_value(&d).unwrap(), json!({ "items": [{ "role": "user", "text": "a", "n": 0 }], "total": 1, "reset": true,
-            "live": { "tools": [], "last": null, "last_at": null, "turn_at": null } }));
-    }
-
-    /// 試験用の ccn（FC_CCN_URL）のセッション（FC_CONV_ID）の会話を、画面と同じ形で FC_CONV_SECS 秒読み続ける。
-    /// 同じプロセスで cursor を持ったまま、外で ccn を起動し直して会話を足す。終わりに、画面が持つ分と、
-    /// after=0 から読んだ分を比べる（再起動の前後で欠けも二重も無いか）。HOME は空のディレクトリにする（保存分を分ける）。
-    /// HOME=<空> FC_CCN_URL=http://127.0.0.1:<ポート> FC_CONV_ID=<id> FC_CONV_SECS=120 <試験のバイナリ> conversation_across_restart --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn conversation_across_restart() {
-        use super::{conversation, read_messages, offline, cache_dir};
-        let id = std::env::var("FC_CONV_ID").expect("FC_CONV_ID");
-        let secs: u64 = std::env::var("FC_CONV_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
-        // 画面（App.tsx の load と conv.ts の mergeConv）と同じ持ち方
-        let mut since: Option<u64> = None;
-        let mut screen: Vec<Value> = vec![];
-        let texts = |v: &[Value]| v.iter().map(|x| format!("{}:{}", x["role"].as_str().unwrap_or(""), x["text"].as_str().unwrap_or(""))).collect::<Vec<_>>();
-        let t0 = std::time::Instant::now();
-        // FC_CONV_PAUSE のファイルがある間は読まない（再起動して1往復進めてから読む順序を作る）
-        let pause = std::env::var("FC_CONV_PAUSE").ok().map(std::path::PathBuf::from);
-        while t0.elapsed() < Duration::from_secs(secs) {
-            if pause.as_ref().is_some_and(|p| p.exists()) {
-                std::thread::sleep(Duration::from_millis(500));
-                continue;
-            }
-            match conversation(id.clone(), None, since) {
-                Ok(d) => {
-                    if d.reset {
-                        screen = d.items.clone();
-                    } else {
-                        let last = screen.last().and_then(|x| x["n"].as_u64());
-                        screen.extend(d.items.iter().filter(|x| last.map_or(true, |l| x["n"].as_u64().unwrap_or(u64::MAX) > l)).cloned());
-                    }
-                    let prev = since;
-                    since = Some(if d.reset { d.total } else { since.unwrap_or(0).max(d.total) });
-                    if d.reset || !d.items.is_empty() {
-                        let g = super::CONVS.lock().unwrap();
-                        let c = g.as_ref().and_then(|m| m.get(&format!("|{id}"))).unwrap();
-                        println!("[{:>5.1}s] since {prev:?}→{since:?} reset={} +{} 画面{}件 cursor={} epoch={:?} {:?}",
-                            t0.elapsed().as_secs_f32(), d.reset, d.items.len(), screen.len(), c.next, c.epoch, texts(&d.items));
-                    }
-                }
-                Err(e) => println!("[{:>5.1}s] 読めない: {e}", t0.elapsed().as_secs_f32()),
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        let (_, fresh, _, epoch) = read_messages(&None, &id, 0).expect("after=0");
-        let cached = offline::load_conv(&cache_dir(), &None, &id).map(|c| texts(&c.items)).unwrap_or_default();
-        println!("画面 {}件: {:?}", screen.len(), texts(&screen));
-        println!("after=0 {}件（epoch {epoch:?}）: {:?}", fresh.len(), texts(&fresh));
-        println!("保存分 {}件", cached.len());
-        assert_eq!(texts(&screen), texts(&fresh));
-        assert_eq!(cached, texts(&fresh));
-    }
-
-    /// 見張りを、モックの町（FC_CCN_URL）につないで決まった秒数だけ回し、画面へ送った回数を数える（#5）。
-    /// ccn への要求の回数は、モックの /__bench/stats で数える。
-    /// HOME=<空のディレクトリ> FC_CCN_URL=http://127.0.0.1:<ポート> FC_WATCH_SECS=60 <cargo test --no-run で作った試験のバイナリ> watch_against_mock --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn watch_against_mock() {
-        let secs: u64 = std::env::var("FC_WATCH_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
-        let (tx, rx) = std::sync::mpsc::channel::<WatchCmd>();
-        let sent = Arc::new(Mutex::new(0u32));
-        let s2 = sent.clone();
-        let tx2 = tx.clone();
-        let t0 = std::time::Instant::now();
-        let t = std::thread::spawn(move || watch_loop(None, tx2, rx, |v| {
-            *s2.lock().unwrap() += 1;
-            // 送った時刻と、町の人数、作業中か承認待ちの人数を出す（状態ファイルだけを変えたときに送られるかを見る）
-            let agents = v["agents"].as_array().cloned().unwrap_or_default();
-            let busy = agents.iter().filter(|a| a["report"]["phase"].is_string()).count();
-            println!("送った {:.1}秒 {}人 報告あり{}人 ccn_ok={}", t0.elapsed().as_secs_f32(), agents.len(), busy, v["ccn_ok"]);
-            true
-        }));
-        std::thread::sleep(Duration::from_secs(secs));
-        let _ = tx.send(WatchCmd::Stop);
-        let _ = t.join();
-        println!("見張りを {secs} 秒回して、画面へ送ったのは {} 回", sent.lock().unwrap());
-    }
+    use super::*;
 
     #[test]
     fn letters_read_only_what_was_added() {
@@ -2610,83 +582,77 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn sessions_sse_frames_are_read() {
-        use std::io::Cursor;
-        let stop = AtomicBool::new(false);
-        // ccn の src/api/sse.ts と同じ枠。keep-alive と id は読み捨てる
-        let body = ": keep-alive\n\nid: \"e1\"\nevent: sessions\ndata: [{\"id\":\"a\"}]\n\n: keep-alive\n\nid: \"e2\"\nevent: sessions\ndata: [{\"id\":\"a\"},{\"id\":\"b\"}]\n\n";
-        let mut got = vec![];
-        let why = pump_sessions_sse(Cursor::new(body), &stop, |v| { got.push(v.len()); true });
-        assert_eq!(got, vec![1, 2]);
-        assert_eq!(why, "ccn が閉じた");
-        // 形の違う data が来たら終わる（ポーリングに戻る）
-        let why = pump_sessions_sse(Cursor::new("event: sessions\ndata: {\"error\":1}\n\n"), &stop, |_| true);
-        assert_eq!(why, "一覧の形が想定と違う");
-        // 受け手が閉じたら終わる
-        let mut n = 0;
-        let why = pump_sessions_sse(Cursor::new(body), &stop, |_| { n += 1; false });
-        assert_eq!((n, why.as_str()), (1, "止めた"));
+
+    /// Report（src/model.ts）の形。hook が足すだけで Report には無いキーは HOOK_ONLY に分ける。
+    /// deny_unknown_fields なので、見本に知らないキーが出たら読めずに落ちる
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct ReportShape {
+        phase: Option<String>,
+        asked: Option<String>,
+        doing: Option<String>,
+        said: Option<String>,
+        next: Option<String>,
+        needs: Option<String>,
+        tools: Option<u64>,
+        turn_started_at: Option<u64>,
+        updated_at: Option<u64>,
+        pending: Option<PermShape>,
+        pending_count: Option<u64>,
+        perm_queue: Option<Vec<PermShape>>,
+        session_id: Option<String>,
+        asked_by: Option<String>,
+        cwd: Option<String>,
+    }
+    /// Report に無く、hook だけが書くキー
+    const HOOK_ONLY: [&str; 3] = ["session_id", "asked_by", "cwd"];
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct PermShape {
+        tool: String,
+        summary: String,
+        detail: String,
+        id: Option<String>,
     }
 
+    /// src/report-cases.json（hooks/test_report_fixture.py が fc-report.py の実出力と突き合わせる。bun test は src/report.test.ts で同じものを読む）
     #[test]
-    fn watch_wait_backs_off_and_resets() {
-        let mut w = WATCH_MIN;
-        let mut seen = vec![];
-        for _ in 0..6 { w = next_wait(w, false); seen.push(w.as_secs()); }
-        assert_eq!(seen, vec![4, 8, 8, 8, 8, 8]);
-        assert_eq!(next_wait(WATCH_MAX, true), WATCH_MIN);
-    }
-
-    #[test]
-    fn snapshot_key_ignores_fetched_at() {
-        let mk = |at: u128, n: usize| Snapshot { ccn: "x".into(), peer: None, ccn_ok: true, ccn_error: None, agents: vec![json!({"id": n})], letters: vec![], fetched_at: at, cached_at: None, sources: None };
-        assert_eq!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(2, 1)));
-        assert_ne!(snapshot_key(&mk(1, 1)), snapshot_key(&mk(1, 2)));
-    }
-
-    #[test]
-    fn town_is_saved_only_when_it_changes() {
-        let dir = std::env::temp_dir().join(format!("fc-town-{}-{}", std::process::id(), fastrand::u64(..)));
-        let file = dir.join("towns").join("_local.json");
-        let saved_at = || offline::read(&file).and_then(|c| c["savedAt"].as_u64());
-        let a = json!({ "id": "a", "state": "idle", "report": { "doing": "x" } });
-        let b = json!({ "id": "b", "state": "idle" });
-        let t0 = now_ms();
-        let mut prev = None;
-
-        // 初めては書く
-        assert!(save_town_to(&file, &[a.clone()], t0, &mut prev));
-        let first = saved_at().expect("書いた");
-        // 同じ中身は、どれだけ時間が経っても書かない（前は30秒ごとに書いていた）
-        assert!(!save_town_to(&file, &[a.clone()], t0 + 60_000, &mut prev));
-        assert!(!save_town_to(&file, &[a.clone()], t0 + 3_600_000, &mut prev));
-        assert_eq!(saved_at(), Some(first));
-
-        // 顔ぶれが変わったら、間隔を待たずに書く
-        assert!(save_town_to(&file, &[a.clone(), b.clone()], t0 + 3_600_001, &mut prev));
-        assert_eq!(offline::read(&file).unwrap()["agents"], json!([a, b]));
-
-        // 顔ぶれが同じで中身だけ変わったら、前の書き込みから TOWN_SAVE_GAP_MS 空けて書く
-        let a2 = json!({ "id": "a", "state": "running", "report": { "doing": "y" } });
-        let t1 = t0 + 3_600_001;
-        assert!(!save_town_to(&file, &[a2.clone(), b.clone()], t1 + 1_000, &mut prev));
-        assert!(save_town_to(&file, &[a2.clone(), b.clone()], t1 + TOWN_SAVE_GAP_MS, &mut prev));
-        assert_eq!(offline::read(&file).unwrap()["agents"], json!([a2, b]));
-
-        // 起動し直した（前回の記録が無い）ときは、保存してあるファイルと比べ、同じなら書かない
-        let before = saved_at();
-        let mut fresh = None;
-        assert!(!save_town_to(&file, &[a2.clone(), b.clone()], t0 + 7_200_000, &mut fresh));
-        assert_eq!(saved_at(), before);
-        // 違えば書く
-        let mut fresh = None;
-        assert!(save_town_to(&file, &[a.clone()], t0 + 7_200_000, &mut fresh));
-
+    fn report_cases() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            state: Value,
+        }
+        let cases: Vec<Case> = serde_json::from_str(include_str!("../../src/report-cases.json")).unwrap();
+        assert!(cases.len() >= 8);
+        // src/model.ts の Report のキー（型の本体の行から拾う）
+        let model = include_str!("../../src/model.ts");
+        let body = model.split("export type Report = {").nth(1).and_then(|s| s.split("\n};").next()).unwrap();
+        let keys: Vec<&str> = body
+            .lines()
+            .filter(|l| l.starts_with("  ") && !l.trim_start().starts_with("/**"))
+            .filter_map(|l| l.trim_start().split(['?', ':']).next())
+            .collect();
+        assert_eq!(keys.len(), 12, "Report のキー: {keys:?}");
+        let dir = std::env::temp_dir().join(format!("fc-report-cases-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        for (i, c) in cases.iter().enumerate() {
+            // snapshot が使う読み方（read_json_cached）で読んだ中身を、Report の形で解釈する
+            let p = dir.join(format!("{i}.json"));
+            fs::write(&p, c.state.to_string()).unwrap();
+            let got = read_json_cached(&p).unwrap();
+            assert_eq!(got, c.state, "{}", c.name);
+            let shape: ReportShape = serde_json::from_value(got).unwrap_or_else(|e| panic!("{}: {e}", c.name));
+            assert!(matches!(shape.phase.as_deref(), Some("working" | "needs_you" | "resting")), "{}", c.name);
+            for k in c.state.as_object().unwrap().keys() {
+                assert!(keys.contains(&k.as_str()) || HOOK_ONLY.contains(&k.as_str()), "{}: model.ts の Report に無いキー {k}", c.name);
+            }
+        }
         let _ = fs::remove_dir_all(&dir);
     }
-
-    use super::*;
 
     #[test]
     fn dev_keeps_app_files_apart_from_stable() {
@@ -2709,97 +675,11 @@ mod tests {
     }
 
     #[test]
-    fn create_body_sends_fork_only_with_resume() {
-        let s = |v: &str| Some(v.to_string());
-        // 新しい世帯: resume も fork も succeed も送らない。空の prompt と name も送らない
-        let b = create_body("/w".into(), s(" "), None, Some(100), Some(30), None, Some(true), Some(true));
-        assert_eq!(b, json!({ "terminal": true, "cwd": "/w", "cols": 100, "rows": 30 }));
-        // 複製: 前任の ID を resume に、fork を true にして送る
-        let b = create_body("/w".into(), s("続き"), s("meta"), None, Some(5), s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), None);
-        assert_eq!(b, json!({ "terminal": true, "cwd": "/w", "cols": 120, "rows": 40, "prompt": "続き", "name": "meta", "resume": "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa", "fork": true }));
-        // 引き継ぎ: resume と fork に succeed を足す
-        let b = create_body("/w".into(), s("続き"), None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), Some(true));
-        assert_eq!(b, json!({ "terminal": true, "cwd": "/w", "cols": 120, "rows": 40, "prompt": "続き", "resume": "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa", "fork": true, "succeed": true }));
-        // fork 無しの付け直しは resume だけ。succeed を渡されても送らない（ccn は fork の無い succeed を 400 で断る）
-        let b = create_body("/w".into(), None, None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), None, Some(true));
-        assert_eq!(b["resume"], "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa");
-        assert!(b.get("fork").is_none());
-        assert!(b.get("succeed").is_none());
-    }
-
-    #[test]
-    fn start_config_only_for_new_sessions() {
-        let s = |v: &str| Some(v.to_string());
-        // 新しい世帯: 設定の既定のモデルと権限モードを送る
-        let b = with_start_config(create_body("/w".into(), None, None, None, None, None, None, None), s("sonnet"), s("plan"));
-        assert_eq!(b, json!({ "terminal": true, "cwd": "/w", "cols": 120, "rows": 40, "model": "sonnet", "permissionMode": "plan" }));
-        // 設定していない項目と空の値は送らない
-        let b = with_start_config(create_body("/w".into(), None, None, None, None, None, None, None), None, s(" "));
-        assert!(b.get("model").is_none());
-        assert!(b.get("permissionMode").is_none());
-        // 引き継ぎ: ccn が前任の値を継ぐので送らない
-        let b = with_start_config(create_body("/w".into(), None, None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), Some(true)), s("opus"), s("default"));
-        assert!(b.get("model").is_none());
-        assert!(b.get("permissionMode").is_none());
-    }
-
-    /// 付け直し（resume）の作成は、共有の Agent の8秒より長く待つ（RESUME_TIMEOUT）。10秒かけて返す偽の ccn で確かめる。
-    /// 時間がかかる（約18秒）ので、ふだんは回さない: cargo test resume_create_waits -- --ignored
-    #[test]
-    #[ignore]
-    fn resume_create_waits_longer_than_default() {
-        use std::io::{Read, Write};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut s) = stream else { continue };
-                std::thread::spawn(move || {
-                    let mut buf = [0u8; 8192];
-                    let _ = s.read(&mut buf);
-                    std::thread::sleep(Duration::from_secs(10));
-                    let body = r#"{"id":"f7a05063-6d62-40d7-b13c-3604a655dfda","depth":0}"#;
-                    let _ = write!(s, "HTTP/1.1 201 Created\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body);
-                });
-            }
-        });
-        let url = format!("http://127.0.0.1:{port}/api/sessions");
-        let s = |v: &str| Some(v.to_string());
-        // resume 無し: 既定の8秒で切れる
-        let t = std::time::Instant::now();
-        let plain = post_create(&url, create_body("/w".into(), None, None, None, None, None, None, None), None);
-        assert!(plain.is_err(), "{plain:?}");
-        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
-        // resume あり: 10秒かかる応答を受け取る
-        let t = std::time::Instant::now();
-        let got = post_create(&url, create_body("/w".into(), s("続き"), None, None, None, s("1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa"), Some(true), Some(true)), None);
-        assert_eq!(got.unwrap()["id"], "f7a05063-6d62-40d7-b13c-3604a655dfda");
-        assert!(t.elapsed() >= Duration::from_secs(10), "{:?}", t.elapsed());
-    }
-
-    #[test]
-    fn agents_carry_account_when_ccn_lists_it() {
-        // 別の機械の町として読む（この機械の状態ファイルを読まない）
-        let peer = Some("vm".to_string());
-        let list = vec![
-            json!({ "id": "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa", "kind": "pty", "state": "idle", "cwd": "/w/a", "account": "acct-a", "accountEmail": "a@example.invalid" }),
-            // 古い ccn の一覧にはアカウントが無い
-            json!({ "id": "f7a05063-6d62-40d7-b13c-3604a655dfda", "kind": "pty", "state": "idle", "cwd": "/w/b" }),
-        ];
-        let (agents, err) = agents_from(&peer, Ok(list));
-        assert!(err.is_none());
-        assert_eq!(agents[0]["account"], "acct-a");
-        assert_eq!(agents[0]["accountEmail"], "a@example.invalid");
-        assert!(agents[1]["account"].is_null());
-        assert!(agents[1]["accountEmail"].is_null());
-    }
-
-    #[test]
-    fn local_town_merges_native_sessions_and_subagents() {
+    fn town_reads_native_sessions_and_subagents() {
         // 会話を読む先の登録（native::register）はプロセスで1つなので、使う試験を1本ずつ動かす
         let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use native::testtree::*;
-        // 合成の ~/.claude: ccn にもあるセッション A（sub-agent 1体）と、ccn に無いセッション B
+        // 合成の ~/.claude: セッション A（sub-agent 1体）と、from 行で A の子になるセッション B
         let root = tmp("merge");
         let a = "aaaaaaaa-0000-4000-8000-00000000000a";
         let b = "bbbbbbbb-0000-4000-8000-00000000000b";
@@ -2812,17 +692,12 @@ mod tests {
         write(&sub.join("agent-x1.jsonl"), "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"見た\"}]}}\n");
         write(&sub.join("agent-x1.meta.json"), &json!({ "agentType": "Explore", "description": "探す" }).to_string());
         native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
-        CCN_USE.store(1, Ordering::SeqCst);
-        let ccn = vec![json!({ "id": a, "kind": "pty", "state": "running", "cwd": "/tmp/合成/a", "capabilities": { "send": true, "stop": true }, "parent": "local" })];
-        let (agents, err) = agents_from(&None, Ok(ccn));
-        assert!(err.is_none());
+        let agents = agents_from(town_rows());
         let by = |id: &str| agents.iter().find(|x| x["id"] == id).cloned().unwrap_or(Value::Null);
-        // A は ccn の行（送れる）、B はネイティブの行（読むだけ）で、from 行から A の子になる
-        assert_eq!(by(a)["source"], "ccn");
-        assert_eq!(by(a)["canSend"], true);
-        assert_eq!(by(b)["source"], "native");
-        assert_eq!(by(b)["canSend"], false);
-        assert_eq!(by(b)["capabilities"]["permissions"], false);
+        // どちらもこのアプリが立てたものではないので、読むだけ。B は from 行から A の子になる
+        assert_eq!(by(a)["source"], "native");
+        assert_eq!(by(a)["canSend"], false);
+        assert_eq!(by(b)["capabilities"]["terminal"], false);
         assert_eq!(by(b)["parent"], a);
         let x1 = native::subagents::sub_id("x1", a);
         assert_eq!(by(&x1)["kind"], "subagent");
@@ -2830,59 +705,20 @@ mod tests {
         assert_eq!(by(&x1)["name"], "Explore");
         assert_eq!(by(&x1)["report"]["asked"], "探す");
         assert_eq!(agents.len(), 3);
-        // 操作は、ネイティブの id だけ断る
-        assert!(native_guard(b, &None).is_err());
-        assert!(native_guard(&x1, &None).is_err());
-        assert!(native_guard(a, &None).is_ok());
-        assert!(native_guard(b, &Some("vm".into())).is_ok());
-        // 会話は jsonl から読む（印は native:）。conversation() は会話の保存（~/.family-computing の cache）を書くので、試験では読む関数だけを通す
+        // 操作は、このアプリが立てていないものを全部断る
+        assert!(app_guard(a).is_err());
+        assert!(app_guard(&x1).is_err());
+        // 会話は jsonl から読む（印は native:）
         let path = native::path_of(b).unwrap();
         let (next, items, _, epoch) = read_native(&path, 0).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["text"], "やって");
         assert!(epoch.unwrap().starts_with("native:"));
         assert_eq!(next, fs::metadata(&path).unwrap().len());
-        // ccn につながらなくても、ネイティブで読めたら町は読めたことにする
-        let (agents, err) = agents_from(&None, Err("つながらない".into()));
-        assert!(err.is_none());
-        assert_eq!(agents.len(), 3);
-        assert_eq!(LAST_SOURCES.lock().unwrap().as_ref().unwrap()["ccn"], "つながらない");
-    }
-
-    static NATIVE_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn switching_between_ccn_and_native_always_resets_the_screen() {
-        // 会話を読む先の登録（native::register）はプロセスで1つなので、使う試験を1本ずつ動かす
-        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        use native::testtree::*;
-        let root = tmp("switch");
-        TEST_CACHE.with(|c| *c.borrow_mut() = Some(root.join("cache")));
-        let id = "cccccccc-0000-4000-8000-00000000000c";
-        let path = root.join("c.jsonl");
-        write(&path, "{\"type\":\"user\",\"message\":{\"content\":\"ネイティブ\"}}\n");
-        // ccn から読んだ会話が 10 件ある（読み位置 7、印 e1）
-        {
-            let mut g = CONVS.lock().unwrap();
-            let map = g.get_or_insert_with(HashMap::new);
-            let mut c = Conv { next: 7, epoch: Some("e1".into()), used: now_ms(), ..Default::default() };
-            c.push((0..10).map(|i| json!({ "role": "user", "text": format!("ccn {i}") })).collect());
-            map.insert(format!("|{id}"), c);
-        }
-        // 同じ id がネイティブの行になった（ccn が落ちた）。画面は 8 件目まで持っている
-        let mut reg = HashMap::new();
-        reg.insert(id.to_string(), path.clone());
-        native::register(reg);
-        let d = conversation(id.into(), None, Some(8)).unwrap();
-        assert!(d.reset, "出どころが変わったら必ず reset");
+        let d = conversation(b.into(), None).unwrap();
         assert_eq!(d.items.len(), 1);
-        assert_eq!(d.items[0]["text"], "ネイティブ");
-        // 続きはネイティブの読み位置で読む（もう reset しない）
-        let d2 = conversation(id.into(), None, Some(d.total)).unwrap();
-        assert!(!d2.reset);
-        assert!(d2.items.is_empty());
-        native::register(HashMap::new());
-        CONVS.lock().unwrap().as_mut().unwrap().remove(&format!("|{id}"));
+        assert_eq!(LAST_SOURCES.lock().unwrap().as_ref().unwrap()["app"], 0);
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
     }
 
     #[test]
@@ -2893,173 +729,4 @@ mod tests {
         assert_ne!(dev["identifier"], STABLE_ID);
     }
 
-    // 2026-11-12 に本番のノードの pty のセッションから読んだ messages の形
-    #[test]
-    fn pty_messages_are_read_from_data() {
-        let user = json!({"at": 1794490104245u64, "type": "user", "seq": 1,
-            "data": {"type": "user", "message": {"role": "user", "content": "from local via konaito-pro\n\nちゃんと動くのかテスト"}}});
-        let out = simplify(&user);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0]["role"], "user");
-        assert_eq!(out[0]["text"], "ちゃんと動くのかテスト");
-        assert_eq!(out[0]["from"], "from local via konaito-pro");
-        assert_eq!(out[0]["at"], 1794490104245u64);
-
-        let asst = json!({"at": 1794490107988u64, "type": "assistant", "seq": 2,
-            "data": {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "届いてる"}]}}});
-        let out = simplify(&asst);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0]["role"], "assistant");
-        assert_eq!(out[0]["text"], "届いてる");
-
-        let result = json!({"at": 1794490107988u64, "type": "result", "seq": 3, "data": {"type": "result", "result": "届いてる"}});
-        assert!(simplify(&result).is_empty());
-    }
-
-    #[test]
-    fn utf8_stream_keeps_split_characters() {
-        let all = "あ❯x".as_bytes();
-        let mut carry = vec![];
-        // 「あ」の3バイトを途中で切る
-        assert_eq!(utf8_stream(&mut carry, &all[..2]), "");
-        assert_eq!(utf8_stream(&mut carry, &all[2..5]), "あ");
-        assert_eq!(utf8_stream(&mut carry, &all[5..]), "❯x");
-        assert!(carry.is_empty());
-        // 壊れたバイトは置き換えて先へ進む
-        assert_eq!(utf8_stream(&mut carry, &[b'a', 0xff, b'b']), "a\u{FFFD}b");
-    }
-
-    #[test]
-    fn tool_results_attach_to_tool_lines() {
-        let asst = |id: &str| json!({"type": "assistant", "timestamp": "t", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": id, "name": "Bash", "input": {"command": "ls"}}]}});
-        let res = |id: &str, err: bool| json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": [{"type": "text", "text": "a\nb"}], "is_error": err}]}});
-        let mut c = Conv::default();
-        // 同じ読み出しの結果は、道具の行に付くだけで項目は増えない
-        c.push([asst("t1"), res("t1", false)].iter().flat_map(simplify).collect());
-        assert_eq!(c.items.len(), 1);
-        assert_eq!(c.items[0]["result"], json!({"text": "a\nb", "error": false}));
-        // 後の読み出しの結果は、道具の行に付け、画面に送る result の項目も足す
-        c.push(simplify(&asst("t2")));
-        c.push(simplify(&res("t2", true)));
-        assert_eq!(c.items.len(), 3);
-        assert_eq!(c.items[1]["result"]["error"], true);
-        assert_eq!(c.items[2]["role"], "result");
-        assert_eq!(c.items[2]["id"], "t2");
-        // 道具の行が無い結果は捨てる
-        c.push(simplify(&res("nope", false)));
-        assert_eq!(c.items.len(), 3);
-    }
-
-    #[test]
-    fn turn_end_events() {
-        let r = |o: Value| simplify(&json!({"at": 5, "type": "result", "data": o}));
-        assert_eq!(r(json!({"type": "result", "subtype": "interrupted", "is_error": true, "result": ""}))[0]["kind"], "interrupted");
-        let e = r(json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "result": "API Error: limit"}));
-        assert_eq!(e[0]["kind"], "error");
-        assert!(e[0]["text"].as_str().unwrap().contains("API Error: limit"));
-        assert!(r(json!({"type": "result", "subtype": "success", "is_error": false, "result": "ok"})).is_empty());
-    }
-
-    #[test]
-    fn node_interrupt_is_one_mark() {
-        // 2026-11-21 に -p の子を止めたときの行（中身は縮めた）
-        let user = json!({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user for tool use]"}]}, "timestamp": "t"});
-        let end = json!({"type": "result", "subtype": "error_during_execution", "is_error": true, "result": ""});
-        let mut c = Conv::default();
-        c.push(simplify(&user));
-        c.push(simplify(&end));
-        assert_eq!(c.items.len(), 1);
-        assert_eq!(c.items[0]["kind"], "interrupted");
-    }
-
-    #[test]
-    fn result_text_keeps_the_head() {
-        assert_eq!(result_text(&json!("x")), "x");
-        assert_eq!(result_text(&json!([{"type": "text", "text": "a"}, {"type": "image"}])), "a\n[画像]");
-        let long = (0..100).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
-        let t = result_text(&json!(long));
-        assert!(t.ends_with("…（続きは省いた）"));
-        assert_eq!(t.lines().count(), RESULT_LINES + 1);
-    }
-
-    #[test]
-    fn exit_plan_mode_keeps_the_plan() {
-        let asst = json!({"type": "assistant", "timestamp": "t", "message": {"role": "assistant", "content": [
-            {"type": "tool_use", "name": "ExitPlanMode", "input": {"plan": "# 計画\n- a"}},
-            {"type": "tool_use", "name": "Read", "input": {"file_path": "/a/b"}}]}});
-        let out = simplify(&asst);
-        assert_eq!(out[0]["plan"], "# 計画\n- a");
-        assert!(out[1].get("plan").is_none());
-    }
-
-    #[test]
-    fn node_messages_keep_the_transcript_shape() {
-        let asst = json!({"type": "assistant", "timestamp": "2026-11-12T13:00:00Z",
-            "message": {"role": "assistant", "content": [{"type": "text", "text": "はい"}]}});
-        let out = simplify(&asst);
-        assert_eq!(out[0]["text"], "はい");
-        assert_eq!(out[0]["at"], "2026-11-12T13:00:00Z");
-        // トランスクリプトの行に data が付いていても、message があればそちらを読む
-        let with_data = json!({"type": "user", "timestamp": "t", "data": {"type": "hook_progress"}, "message": {"role": "user", "content": "やあ"}});
-        assert_eq!(simplify(&with_data)[0]["text"], "やあ");
-    }
-
-    // 2026-11-14 14:21 に本人が meta（8074d764）へ続けて送った3通。ccn の GET messages が返した形のまま（#69）。
-    // 1通目と3通目は CLI が <pasted_content> で包んでいた。包みのまま `<` で始まるので会話から落ち、仮の吹き出しが消えずに末尾に残った
-    #[test]
-    fn pasted_content_is_unwrapped_not_dropped() {
-        let first = json!({"at": 1794633665654u64, "type": "user", "seq": 442, "data": {"type": "user", "message": {"role": "user",
-            "content": "\n\n<pasted_content id=\"9779\">\nfrom local via konaito-pro\n\n/var/folders/lp/twxk19yd58v9rb7ytpcxt6pm0000gn/T/TemporaryItems/NSIRD_screencaptureui_GJ7Y9w/スクリーンショット\\ 2026-11-14\\ 14.20.54.png \n\nこれ挙動がおかしいぞ、掘ってくれ\n</pasted_content id=\"9779\">\n"}}});
-        let second = json!({"at": 1794633683710u64, "type": "user", "seq": 453, "data": {"type": "user", "message": {"role": "user",
-            "content": "from local via konaito-pro\n\n先に送ったやつが先に反映されてない"}}});
-        let third = json!({"at": 1794633703956u64, "type": "user", "seq": 460, "data": {"type": "user", "message": {"role": "user",
-            "content": "<pasted_content id=\"9779\">\nfrom local via konaito-pro\n\n/var/folders/lp/twxk19yd58v9rb7ytpcxt6pm0000gn/T/TemporaryItems/NSIRD_screencaptureui_s8ZkFz/スクリーンショット\\ 2026-11-14\\ 14.21.28.png \n今回も、多分送られてるし、読まれてるんだけど、判定がおかしいんだと思う\n</pasted_content id=\"9779\">"}}});
-        let a = simplify(&first);
-        assert_eq!(a.len(), 1);
-        assert_eq!(a[0]["from"], "from local via konaito-pro");
-        assert_eq!(a[0]["text"], "/var/folders/lp/twxk19yd58v9rb7ytpcxt6pm0000gn/T/TemporaryItems/NSIRD_screencaptureui_GJ7Y9w/スクリーンショット\\ 2026-11-14\\ 14.20.54.png \n\nこれ挙動がおかしいぞ、掘ってくれ");
-        assert_eq!(simplify(&second)[0]["text"], "先に送ったやつが先に反映されてない");
-        let c = simplify(&third);
-        assert_eq!(c.len(), 1);
-        assert!(c[0]["text"].as_str().unwrap().ends_with("判定がおかしいんだと思う"));
-        // 包まれた文も、ターンの始まりとして数える
-        for m in [&first, &second, &third] {
-            assert!(matches!(live_events(m).as_slice(), [LiveEv::User(_)]));
-        }
-        // hook の差し込みは今までどおり落とす
-        let hook = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": "<command-name>/clear</command-name>"}});
-        assert!(simplify(&hook).is_empty());
-    }
-
-    // 2026-11-14、写した画像のパスを入れて送った文を、CLI が画像の添付にした形（ccn の GET messages のまま、#69）
-    #[test]
-    fn image_marks_before_the_from_line() {
-        let m = json!({"at": 1794634823274u64, "type": "user", "seq": 51, "data": {"type": "user", "message": {"role": "user",
-            "content": "[Image #3]from local via konaito-pro\n（ドロップの確認）上のパスの画像を Read で開いて"}}});
-        let out = simplify(&m);
-        assert_eq!(out[0]["from"], "from local via konaito-pro");
-        assert_eq!(out[0]["text"], "[Image #3]\n（ドロップの確認）上のパスの画像を Read で開いて");
-        // 画像だけを送り、from 行の後ろに何も無い形
-        let only = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": "[Image #4]from local via konaito-pro"}});
-        assert_eq!(simplify(&only)[0]["from"], "from local via konaito-pro");
-        assert_eq!(simplify(&only)[0]["text"], "[Image #4]");
-        // 印が無く改行も無い from 始まりの文は、今までどおり本文として出す
-        let plain = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": "from A via B"}});
-        assert_eq!(simplify(&plain)[0]["text"], "from A via B");
-        assert_eq!(split_image_marks("[Image #1] [Image #12]from x"), ("[Image #1] [Image #12]", "from x"));
-        assert_eq!(split_image_marks("[Image #]x"), ("", "[Image #]x"));
-        assert_eq!(split_image_marks("ふつう"), ("", "ふつう"));
-    }
-
-    #[test]
-    fn unwrap_pasted_keeps_text_around_and_odd_tags() {
-        assert_eq!(unwrap_pasted("  ふつう  "), "ふつう");
-        // 打った文と貼った文が混ざっている
-        assert_eq!(unwrap_pasted("見て <pasted_content id=\"1\">\n長い文\n</pasted_content id=\"1\"> どう？"), "見て \n長い文\n どう？");
-        // 閉じの印に id が無い形も外す
-        assert_eq!(unwrap_pasted("<pasted_content id=\"2\">a</pasted_content>"), "a");
-        // 名前が続いているもの、> で閉じないものは文のまま残す
-        assert_eq!(unwrap_pasted("<pasted_contents>x"), "<pasted_contents>x");
-        assert_eq!(unwrap_pasted("<pasted_content\nx"), "<pasted_content\nx");
-    }
 }

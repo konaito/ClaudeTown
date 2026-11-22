@@ -1,7 +1,7 @@
 // 生きている対話セッション。~/.claude/sessions/<pid>.json を読み、pid が生きているものだけを残す。
 // 形（2.1.330 で実ファイルを読んだ）: pid、sessionId、cwd、startedAt、kind（interactive）、entrypoint（cli）、
 // status（busy、waiting、idle）、updatedAt、name、messagingSocketPath など。
-// ccn と同じく、制御端末が無く引数に -p か --print がある裏方（Stop hook や launchd のジョブ）は外す（claude-code-nodes の agents.ts）。
+// 制御端末が無く引数に -p か --print がある裏方（Stop hook や launchd のジョブ）は外す（決め方は claude-code-nodes の agents.ts から借りた）。
 
 use super::Stats;
 use serde_json::{json, Value};
@@ -24,7 +24,7 @@ pub struct Session {
     pub kind: String,
     /// 会話の jsonl（まだ無ければ、書かれるはずの場所）
     pub jsonl: PathBuf,
-    /// 最初の文の from 行の呼び手（agent:<ノード>/<sid8>/<役割>）。ccn の一覧の parent と同じ値
+    /// 最初の文の from 行の呼び手（agent:<ノード>/<sid8>/<役割>）。ccn などが子を立てるときに付ける
     pub parent_raw: Option<String>,
 }
 
@@ -52,7 +52,7 @@ pub fn project_dir_name(cwd: &str) -> String {
     cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
-/// ccn の agents.ts と同じ status の読み替え
+/// status の読み替え（claude-code-nodes の agents.ts と同じ）
 fn state_of(status: Option<&str>, stats: &mut Stats) -> &'static str {
     match status {
         Some("busy") => "running",
@@ -84,7 +84,7 @@ fn headless_of(list: &[(u32, u64)]) -> HashMap<u32, bool> {
     if !ask.is_empty() {
         let found = ps_headless(&ask);
         for k in list.iter().filter(|k| ask.contains(&k.0)) {
-            // ps に出なかった（読めなかった）ものは残す（ccn と同じ）
+            // ps に出なかった（読めなかった）ものは残す
             known.insert(*k, found.get(&k.0).copied().unwrap_or(false));
         }
     }
@@ -169,6 +169,60 @@ pub fn caller_of(text: &str) -> Option<String> {
     let mut it = rest.split_whitespace();
     let who = it.next()?;
     (it.next()? == "via" && it.next().is_some()).then(|| who.to_string())
+}
+
+/// pid の sessions/<pid>.json を、覚えた値を使わずに今読む。返すのは state、startedAt、lastActivityAt（無ければ None）
+pub fn fresh_row(root: &Path, pid: u32) -> Option<Value> {
+    let v: Value = serde_json::from_str(&fs::read_to_string(root.join(format!("sessions/{pid}.json"))).ok()?).ok()?;
+    let mut st = Stats::default();
+    Some(json!({
+        "state": state_of(v["status"].as_str(), &mut st),
+        "startedAt": v["startedAt"],
+        "lastActivityAt": v["updatedAt"].as_u64().or(v["startedAt"].as_u64()),
+    }))
+}
+
+/// id の会話の jsonl を projects/*/ から探す。無ければ None（resume すると exit 1 で終わるので、立て直す前に見る）
+pub fn find_jsonl(root: &Path, id: &str) -> Option<PathBuf> {
+    let name = format!("{id}.jsonl");
+    fs::read_dir(root.join("projects")).ok()?.flatten().map(|d| d.path().join(&name)).find(|p| p.is_file())
+}
+
+/// id を名乗っている、生きているプロセスの pid（sessions/<pid>.json を今読む）。無ければ None
+pub fn live_pid_of(root: &Path, id: &str) -> Option<u32> {
+    fs::read_dir(root.join("sessions")).ok()?.flatten().find_map(|e| {
+        let v: Value = serde_json::from_str(&fs::read_to_string(e.path()).ok()?).ok()?;
+        let pid = v["pid"].as_u64()? as u32;
+        (v["sessionId"].as_str() == Some(id) && pid_alive(pid)).then_some(pid)
+    })
+}
+
+/// id を名乗るプロセスが消えるのを、limit まで待つ。消えた（もともと無い）なら true。
+/// アプリを入れ替えた直後は、前のアプリの claude が SIGHUP を受けてから終わるまでに1秒ほどかかる（2026-11-22 の実測で 1.27 秒）。
+/// その間に立て直しを判定すると「よそで動いている」と見て外してしまうので、起動のときの立て直しはここで待ってから判定する
+pub fn wait_gone(root: &Path, id: &str, limit: std::time::Duration) -> bool {
+    let t0 = std::time::Instant::now();
+    loop {
+        if live_pid_of(root, id).is_none() {
+            return true;
+        }
+        if t0.elapsed() >= limit {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// resume するときの cwd。jsonl の行の cwd のうち、projects/ の下のディレクトリ名（project_dir_name）が jsonl の置き場所と合うもの。
+/// claude は cwd から projects/ の下を引いて jsonl を探すので、合わない cwd では resume できない。途中で cd したセッションは最初の行の cwd が合う
+pub fn resume_cwd(jsonl: &Path) -> Option<String> {
+    let dir = jsonl.parent()?.file_name()?.to_str()?.to_string();
+    let f = fs::File::open(jsonl).ok()?;
+    BufReader::new(f).lines().take(2000).map_while(Result::ok).find_map(|l| {
+        let v: Value = serde_json::from_str(&l).ok()?;
+        let c = v["cwd"].as_str()?;
+        (project_dir_name(c) == dir).then(|| c.to_string())
+    })
 }
 
 /// 生きている対話セッション（開始の古い順）

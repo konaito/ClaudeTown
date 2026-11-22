@@ -1,5 +1,5 @@
-// 右パネルの端末。ccn の PTY の出力を xterm.js に流し、打ったキーを PTY に書く。
-// 開いている間だけ繋ぎ、閉じたら切る（30本を同時に描かない）。開いたときに自分の大きさを ccn に伝える（後勝ち）。
+// 右パネルの端末。このアプリが立てた claude の PTY（src-tauri/src/pty.rs）の出力を xterm.js に流し、打ったキーを PTY に書く。
+// ブラウザ版（PWA）では ccn の端末の口を読む。開いている間だけ繋ぎ、閉じたら切る（30本を同時に描かない）。開いたときに自分の大きさを PTY に伝える。
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -11,6 +11,8 @@ import { TERM_URL_RE, openExternal } from "../links";
 import { perfCounters, perfMark, perfEnd, perfTerm, perfWaitingPrompt } from "./perf";
 import { benchParams } from "./bench";
 import { SIZE_KEY } from "./size";
+import { createWriteGate } from "./writeGate";
+import { isVisible, onVisibleChange } from "../visible";
 
 /** ほかの画面の大きさが右パネルに収まらないとき、こちらの大きさを送り返す間隔の下限 */
 const FOREIGN_RECLAIM_MS = 5000;
@@ -22,8 +24,8 @@ const FOREIGN_RECLAIM_MS = 5000;
  */
 type Shared = { term: Terminal; fit: FitAddon; el: HTMLDivElement; gl: WebglAddon | null };
 let shared: Shared | null = null;
-// 開発の計測用: ?renderer=dom（scripts/bench.ts では VITE_FC_BENCH の renderer=dom）で DOM の描き方のまま比べる
-const forceDom = () => (import.meta.env.DEV && benchParams.get("renderer") === "dom") || import.meta.env.VITE_FC_SOAK_RENDERER === "dom";
+// 開発の計測用: ?renderer=dom（VITE_FC_BENCH では renderer=dom）で DOM の描き方のまま比べる
+const forceDom = () => import.meta.env.DEV && benchParams.get("renderer") === "dom";
 
 /**
  * GPU で描く（#8）。何も指定しないと xterm.js は DOM で描き、claude の書き換えのたびに WebContent の負荷になる。
@@ -69,7 +71,7 @@ function sharedTerm(): Shared {
   return shared;
 }
 
-export function TerminalView({ sessionId, peer, onError }: { sessionId: string; peer: string | null; onError: (m: string) => void }) {
+export function TerminalView({ sessionId, onError }: { sessionId: string; onError: (m: string) => void }) {
   const box = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<string>("起動中…");
 
@@ -85,6 +87,9 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
     // 前に開いたセッションの画面と、大きさの記録を消す。中身はこのあと replay で書き直す
     term.reset();
     if (import.meta.env.DEV) perfTerm.current = term;
+    // 窓が見えていない間は xterm に書かずにため、見えたときにまとめて書く（#8）
+    const gate = createWriteGate((s, done) => term.write(s, done), isVisible());
+    const offVisible = onVisibleChange((v) => gate.setOpen(v));
     let pendingReset = false;
     // replay を書いている間に xterm.js が返す自動応答（カーソル位置の報告など）は PTY に送らない（claude の入力に混ざるため）
     let replaying = 0;
@@ -130,7 +135,7 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
         perfCounters.resizes++;
         perfCounters.lastResizeAt = performance.now();
         sentSize = `${term.cols}x${term.rows}`;
-        call("term_resize", { sessionId, cols: term.cols, rows: term.rows, peer }).catch((e) => onError(`ターミナルの大きさを変えられなかった: ${e}`));
+        call("term_resize", { sessionId, cols: term.cols, rows: term.rows }).catch((e) => onError(`ターミナルの大きさを変えられなかった: ${e}`));
       }, 150);
     };
     // 本人がここで打ったら（キー、貼り付け、IME の確定）、こちらの大きさに戻す。onData では見ない。
@@ -140,10 +145,10 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
     for (const ev of ["keydown", "paste", "compositionend"]) ta?.addEventListener(ev, reclaim);
     const disposeInput = term.onData((text) => {
       if (replaying > 0) return;
-      call("term_input", { sessionId, text, peer }).catch((e) => onError(`ターミナルに書けなかった: ${e}`));
+      call("term_input", { sessionId, text }).catch((e) => onError(`ターミナルに書けなかった: ${e}`));
     });
     let close = () => {};
-    openTerminal(sessionId, peer, (e) => {
+    openTerminal(sessionId, (e) => {
       if (closed) return;
       switch (e.ev) {
         case "size":
@@ -154,7 +159,7 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
           let reclaimNow = false;
           if (sentSize && e.data?.cols && `${e.data.cols}x${e.data.rows}` !== sentSize) {
             const fits = fit.proposeDimensions();
-            const tooBig = !!fits && (e.data.cols > fits.cols || e.data.rows > fits.rows);
+            const tooBig = !!fits && (e.data.cols > fits.cols || (e.data.rows ?? 0) > fits.rows);
             if (tooBig && Date.now() - reclaimedAt > FOREIGN_RECLAIM_MS) { following = false; reclaimedAt = Date.now(); reclaimNow = true; }
             else following = true;
           }
@@ -165,15 +170,15 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
           if (reclaimNow) { lastSize = ""; pushSize(); }
           break;
         case "replay":
-          if (pendingReset) { term.reset(); pendingReset = false; }
+          if (pendingReset) { gate.drop(); term.reset(); pendingReset = false; }
           replaying++;
           // 書き終えたら、右パネルの大きさに合わせ直して PTY にも伝える。ほかの画面の大きさに合わせている間は送り返さない
-          term.write(e.data?.s ?? "", () => { replaying--; if (!following) { lastSize = ""; pushSize(); } afterWrite(); });
+          gate.push(e.data?.s ?? "", () => { replaying--; if (!following) { lastSize = ""; pushSize(); } afterWrite(); });
           if (e.data?.s) onFirstOutput();
           break;
         case "data":
           pendingReset = false;
-          term.write(e.data?.s ?? "", afterWrite);
+          gate.push(e.data?.s ?? "", afterWrite);
           onFirstOutput();
           break;
         case "exit":
@@ -202,6 +207,8 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
     ro.observe(box.current);
     return () => {
       closed = true;
+      offVisible();
+      gate.drop();
       ro.disconnect();
       for (const ev of ["keydown", "paste", "compositionend"]) ta?.removeEventListener(ev, reclaim);
       disposeInput.dispose();
@@ -209,7 +216,7 @@ export function TerminalView({ sessionId, peer, onError }: { sessionId: string; 
       // ターミナルは使い回すので dispose しない。要素を外すだけ
       el.remove();
     };
-  }, [sessionId, peer]);
+  }, [sessionId]);
 
   return (
     <div className="term-wrap">

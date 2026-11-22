@@ -25,7 +25,6 @@ export function reuseSnap(prev: Snapshot | null, next: Snapshot): Snapshot {
   if (!prev) return next;
   const agents = reuseAgents(prev.agents, next.agents);
   const letters = same(prev.letters ?? [], next.letters ?? []) ? prev.letters : next.letters;
-  if (agents === prev.agents && letters === prev.letters && prev.ccn === next.ccn && prev.peer === next.peer
-    && prev.ccn_ok === next.ccn_ok && prev.ccn_error === next.ccn_error) return prev;
+  if (agents === prev.agents && letters === prev.letters && same(prev.sources, next.sources)) return prev;
   return { ...next, agents, letters };
 }

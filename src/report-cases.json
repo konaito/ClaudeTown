@@ -1,0 +1,423 @@
+[
+  {
+    "name": "依頼を受けて考え中",
+    "events": [
+      {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "試し\n2行目",
+        "cwd": "/tmp/x"
+      }
+    ],
+    "state": {
+      "phase": "working",
+      "doing": "考え中",
+      "needs": null,
+      "tools": 0,
+      "turn_started_at": 0,
+      "perm_queue": [],
+      "pending": null,
+      "pending_count": 0,
+      "asked": "試し",
+      "asked_by": "human",
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/x",
+      "updated_at": 0
+    }
+  },
+  {
+    "name": "道具を使っている",
+    "events": [
+      {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "a",
+        "cwd": "/tmp/x"
+      },
+      {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {
+          "file_path": "/a/b/c.ts"
+        }
+      }
+    ],
+    "state": {
+      "phase": "working",
+      "doing": "読む: b/c.ts",
+      "needs": null,
+      "tools": 1,
+      "turn_started_at": 0,
+      "perm_queue": [],
+      "pending": null,
+      "pending_count": 0,
+      "asked": "a",
+      "asked_by": "human",
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/x",
+      "updated_at": 0
+    }
+  },
+  {
+    "name": "承認待ちが1件（pending に中身が入る）",
+    "events": [
+      {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "a",
+        "cwd": "/tmp/x"
+      },
+      {
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "rm x"
+        }
+      }
+    ],
+    "state": {
+      "phase": "needs_you",
+      "doing": "考え中",
+      "needs": "承認待ち: コマンド: rm x",
+      "tools": 0,
+      "turn_started_at": 0,
+      "perm_queue": [
+        {
+          "tool": "Bash",
+          "summary": "コマンド: rm x",
+          "detail": "rm x",
+          "id": "h:34e8833cbda93ab4"
+        }
+      ],
+      "pending": {
+        "tool": "Bash",
+        "summary": "コマンド: rm x",
+        "detail": "rm x",
+        "id": "h:34e8833cbda93ab4"
+      },
+      "pending_count": 1,
+      "asked": "a",
+      "asked_by": "human",
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/x",
+      "updated_at": 0
+    }
+  },
+  {
+    "name": "承認待ちが2件（pending は null、件数は2）",
+    "events": [
+      {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "a",
+        "cwd": "/tmp/x"
+      },
+      {
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "rm x"
+        }
+      },
+      {
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Write",
+        "tool_input": {
+          "file_path": "/a/b.txt"
+        }
+      }
+    ],
+    "state": {
+      "phase": "needs_you",
+      "doing": "考え中",
+      "needs": "承認待ち: 書く: a/b.txt",
+      "tools": 0,
+      "turn_started_at": 0,
+      "perm_queue": [
+        {
+          "tool": "Bash",
+          "summary": "コマンド: rm x",
+          "detail": "rm x",
+          "id": "h:34e8833cbda93ab4"
+        },
+        {
+          "tool": "Write",
+          "summary": "書く: a/b.txt",
+          "detail": "/a/b.txt",
+          "id": "h:18775189486aa041"
+        }
+      ],
+      "pending": null,
+      "pending_count": 2,
+      "asked": "a",
+      "asked_by": "human",
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/x",
+      "updated_at": 0
+    }
+  },
+  {
+    "name": "承認が済んで作業に戻る",
+    "events": [
+      {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "a",
+        "cwd": "/tmp/x"
+      },
+      {
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "rm x"
+        }
+      },
+      {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "rm x"
+        }
+      }
+    ],
+    "state": {
+      "phase": "working",
+      "doing": "考え中",
+      "needs": null,
+      "tools": 0,
+      "turn_started_at": 0,
+      "perm_queue": [],
+      "pending": null,
+      "pending_count": 0,
+      "asked": "a",
+      "asked_by": "human",
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/x",
+      "updated_at": 0
+    }
+  },
+  {
+    "name": "終わって休む（次の一手つき）",
+    "events": [
+      {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "a",
+        "cwd": "/tmp/x"
+      },
+      {
+        "hook_event_name": "Stop",
+        "last_assistant_message": "# 終わった\n詳細\n次: PRを出す"
+      }
+    ],
+    "state": {
+      "phase": "resting",
+      "doing": null,
+      "needs": null,
+      "tools": 0,
+      "turn_started_at": 0,
+      "perm_queue": [],
+      "pending": null,
+      "pending_count": 0,
+      "asked": "a",
+      "asked_by": "human",
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/x",
+      "updated_at": 0,
+      "said": "終わった",
+      "next": "PRを出す"
+    }
+  },
+  {
+    "name": "問いかけで止まる",
+    "events": [
+      {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "a",
+        "cwd": "/tmp/x"
+      },
+      {
+        "hook_event_name": "Stop",
+        "last_assistant_message": "どうする？"
+      }
+    ],
+    "state": {
+      "phase": "needs_you",
+      "doing": null,
+      "needs": "質問に答えてほしい",
+      "tools": 0,
+      "turn_started_at": 0,
+      "perm_queue": [],
+      "pending": null,
+      "pending_count": 0,
+      "asked": "a",
+      "asked_by": "human",
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/x",
+      "updated_at": 0,
+      "said": "どうする？",
+      "next": "どうする？"
+    }
+  },
+  {
+    "name": "セッションが始まったところ",
+    "events": [
+      {
+        "hook_event_name": "SessionStart",
+        "cwd": "/tmp/y"
+      }
+    ],
+    "state": {
+      "phase": "resting",
+      "doing": null,
+      "needs": null,
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/y",
+      "updated_at": 0
+    }
+  },
+  {
+    "name": "休んだリードは、チームメイトが道具を使っても休んだまま",
+    "events": [
+      {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "a",
+        "cwd": "/tmp/x"
+      },
+      {
+        "hook_event_name": "Stop",
+        "last_assistant_message": "beta を呼んだ"
+      },
+      {
+        "hook_event_name": "PreToolUse",
+        "agent_id": "abeta-584d11236f35ece0",
+        "agent_type": "beta",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "touch beta.txt"
+        }
+      },
+      {
+        "hook_event_name": "PostToolUse",
+        "agent_id": "abeta-584d11236f35ece0",
+        "agent_type": "beta",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "touch beta.txt"
+        }
+      }
+    ],
+    "state": {
+      "phase": "resting",
+      "doing": null,
+      "needs": null,
+      "tools": 0,
+      "turn_started_at": 0,
+      "perm_queue": [],
+      "pending": null,
+      "pending_count": 0,
+      "asked": "a",
+      "asked_by": "human",
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/x",
+      "updated_at": 0,
+      "said": "beta を呼んだ",
+      "next": null
+    }
+  },
+  {
+    "name": "チームメイトの承認待ちはリードの承認待ちになる（画面はリードの端末に出る）",
+    "events": [
+      {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "a",
+        "cwd": "/tmp/x"
+      },
+      {
+        "hook_event_name": "Stop",
+        "last_assistant_message": "beta を呼んだ"
+      },
+      {
+        "hook_event_name": "PermissionRequest",
+        "agent_id": "abeta-584d11236f35ece0",
+        "agent_type": "beta",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "touch beta.txt"
+        }
+      }
+    ],
+    "state": {
+      "phase": "needs_you",
+      "doing": null,
+      "needs": "承認待ち: コマンド: touch beta.txt",
+      "tools": 0,
+      "turn_started_at": 0,
+      "perm_queue": [
+        {
+          "tool": "Bash",
+          "summary": "コマンド: touch beta.txt",
+          "detail": "touch beta.txt",
+          "id": "h:3debb1d6a2408f6b"
+        }
+      ],
+      "pending": {
+        "tool": "Bash",
+        "summary": "コマンド: touch beta.txt",
+        "detail": "touch beta.txt",
+        "id": "h:3debb1d6a2408f6b"
+      },
+      "pending_count": 1,
+      "asked": "a",
+      "asked_by": "human",
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/x",
+      "updated_at": 0,
+      "said": "beta を呼んだ",
+      "next": null
+    }
+  },
+  {
+    "name": "チームメイトの承認が済むと、休んだリードは休みに戻る",
+    "events": [
+      {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "a",
+        "cwd": "/tmp/x"
+      },
+      {
+        "hook_event_name": "Stop",
+        "last_assistant_message": "beta を呼んだ"
+      },
+      {
+        "hook_event_name": "PermissionRequest",
+        "agent_id": "abeta-584d11236f35ece0",
+        "agent_type": "beta",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "touch beta.txt"
+        }
+      },
+      {
+        "hook_event_name": "PostToolUse",
+        "agent_id": "abeta-584d11236f35ece0",
+        "agent_type": "beta",
+        "tool_name": "Bash",
+        "tool_input": {
+          "command": "touch beta.txt"
+        }
+      }
+    ],
+    "state": {
+      "phase": "resting",
+      "doing": null,
+      "needs": null,
+      "tools": 0,
+      "turn_started_at": 0,
+      "perm_queue": [],
+      "pending": null,
+      "pending_count": 0,
+      "asked": "a",
+      "asked_by": "human",
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/x",
+      "updated_at": 0,
+      "said": "beta を呼んだ",
+      "next": null
+    }
+  }
+]
