@@ -1,5 +1,5 @@
 // 町の一覧を受け取る口（#5）。Tauri では Rust の見張り（lib.rs の town_watch）が、前回と変わったときだけ Channel で送ってくる。
-// ブラウザ表示（開発中の見た目の確認）では Rust が無いので、今までどおり2秒ごとに snapshot を呼ぶ。
+// ブラウザ（ブラウザ版の PWA と、開発中の見た目の確認）では Rust が無いので、2秒ごとに snapshot を呼ぶ。
 // どちらも、ウィンドウが見えていない間は止め、見えたらすぐ1回取り直す（#6）。
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { call } from "./bridge";
@@ -10,14 +10,14 @@ const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
 const BROWSER_POLL_MS = 2000;
 let browserKick: (() => void) | null = null;
 
-/** peer の町の一覧を受け取り始める。on は一覧を、fail は命令そのものの失敗を受ける。戻り値で止める */
-export function watchTown(peer: string | null, on: (s: Snapshot) => void, fail: (msg: string) => void): () => void {
+/** 町の一覧を受け取り始める。on は一覧を、fail は命令そのものの失敗を受ける。戻り値で止める */
+export function watchTown(on: (s: Snapshot) => void, fail: (msg: string) => void): () => void {
   if (!inTauri) {
     let running = false;
     const load = async () => {
       if (running) return;
       running = true;
-      try { on(await call<Snapshot>("snapshot", { peer })); } catch (e) { fail(String(e)); } finally { running = false; }
+      try { on(await call<Snapshot>("snapshot")); } catch (e) { fail(String(e)); } finally { running = false; }
     };
     browserKick = load;
     const stop = pollWhileVisible(load, BROWSER_POLL_MS);
@@ -28,7 +28,7 @@ export function watchTown(peer: string | null, on: (s: Snapshot) => void, fail: 
   const start = () => {
     if (gen) return;
     const ch = new Channel<Snapshot>((s) => { if (open) on(s); });
-    gen = invoke<number>("town_watch", { peer, onEvent: ch });
+    gen = invoke<number>("town_watch", { onEvent: ch });
     gen.catch((e) => { gen = null; if (open) fail(String(e)); });
   };
   const stop = () => {
@@ -45,12 +45,4 @@ export function watchTown(peer: string | null, on: (s: Snapshot) => void, fail: 
 export function kickTown(): void {
   if (inTauri) invoke("town_kick").catch(() => {});
   else browserKick?.();
-}
-
-/**
- * 別の町の一覧を取れなかったときに、次に取りに行くまでの長さ（#14）。続けて失敗した回数から決める。
- * 取れている町は OTHER_TOWNS_POLL_MS ごと。1回失敗したら1分、2回以上続けて失敗したら5分あける
- */
-export function otherTownRetryMs(fails: number, pollMs: number): number {
-  return fails <= 0 ? pollMs : fails === 1 ? 60_000 : 300_000;
 }

@@ -5,28 +5,30 @@ import { perfMark, perfSetId, perfStart } from "../term/perf";
 import { benchName } from "../term/bench";
 import { onVisibleChange } from "../visible";
 import { DEFAULT_PLACE_LABEL, placeFailure } from "./placeSetting";
-import { placeLabel, placeName, placeTime, recentPlaces, type PlaceRepos, type PlacesInput, type RecentPlace } from "./places";
+import { RECENT_PLACES_MAX, placeLabel, placeName, placeTime, recentPlaces, withoutPlace, type PlaceRepos, type PlacesInput, type RecentPlace } from "./places";
+import type { CreatedSession } from "../types";
 
 /**
- * 新しい世帯（親なしの端末のセッション）を手元のノードに立てる。cwd が null なら ~/Documents/meta（Rust の create_session の既定）。
- * 町の「＋ 新しい世帯」（#89 より前）と同じ呼び方で、前に開いたターミナルの大きさで起動する
+ * 新しい世帯（親なしの claude）を立てる。アプリではこのアプリの中の端末で claude を起動する（src-tauri/src/pty.rs）。
+ * cwd が null なら ~/Documents/meta（Rust の create_session の既定）。前に開いたターミナルの大きさで起動する
  */
-export async function createHousehold(cwd: string | null): Promise<any> {
+export async function createHousehold(cwd: string | null): Promise<CreatedSession> {
   perfStart("new");
   const { cols, rows } = lastTermSize() ?? { cols: null, rows: null };
-  const r = await invoke<any>("create_session", { cwd, prompt: null, parent: null, name: benchName(), cols, rows, peer: null });
+  const r = await invoke<CreatedSession>("create_session", { cwd, name: benchName(), cols, rows });
   perfMark("create");
   if (r?.id) perfSetId(r.id);
   return r;
 }
 
-type Load = { state: "loading" } | { state: "ok"; list: RecentPlace[] } | { state: "error"; msg: string };
+type Load = { state: "loading" } | { state: "ok"; list: RecentPlace[]; defaultPlace: string | null } | { state: "error"; msg: string };
 
 /**
  * 左のペイン（#89）。新しい世帯を作るためだけのペインで、最近使った場所を新しい順に出し、押した場所で親を立てる。
- * 先頭の「＋ 新しい世帯」は一覧を待たずに押せる。立てる場所は設定（place、#92）で、無ければ ~/Documents/meta。disabled は別の町を見ているとき（世帯は手元のノードにだけ作る）
+ * 先頭の「＋ 新しい世帯」は一覧を待たずに押せる。立てる場所は設定（place、#92）で、無ければ ~/Documents/meta。
+ * 一覧からは、その立てる場所を除く（withoutPlace）。見出しは出さない（2026-11-21 本人の決定）
  */
-export function NewHousePane({ disabled, place, onCreated, onError }: { disabled: boolean; place: string | null; onCreated: (r: any) => void; onError: (m: string) => void }) {
+export function NewHousePane({ place, onCreated, onError }: { place: string | null; onCreated: (r: CreatedSession | null) => void; onError: (m: string) => void }) {
   const [load, setLoad] = useState<Load>({ state: "loading" });
   // 立てている場所。"" は先頭のボタン（既定の場所）
   const [busy, setBusy] = useState<string | null>(null);
@@ -35,13 +37,13 @@ export function NewHousePane({ disabled, place, onCreated, onError }: { disabled
   const reload = useCallback(() => {
     invoke<PlacesInput>("house_places")
       .then((v) => {
-        const list = v ? recentPlaces(v) : [];
-        setLoad({ state: "ok", list });
+        const list = v ? recentPlaces(v, RECENT_PLACES_MAX + 1) : [];
+        setLoad({ state: "ok", list, defaultPlace: v?.defaultPlace ?? null });
         invoke<PlaceRepos>("place_repos", { paths: list.map((p) => p.path) }).then((r) => setRepos(r ?? {})).catch(() => setRepos({}));
       })
       .catch((e) => setLoad((l) => (l.state === "ok" ? l : { state: "error", msg: String(e) })));
   }, []);
-  // 開いたときと、窓が見えるようになったときに読み直す（places は ccn が10秒覚えるので、続けて読んでも走査し直さない）
+  // 開いたときと、窓が見えるようになったときに読み直す（Rust は履歴のファイルが変わったときだけ読み直す）
   useEffect(() => { reload(); return onVisibleChange((v) => { if (v) reload(); }); }, [reload]);
 
   const go = async (cwd: string | null, top = false) => {
@@ -51,18 +53,16 @@ export function NewHousePane({ disabled, place, onCreated, onError }: { disabled
     catch (e) { onCreated(null); onError(placeFailure(top ? place : null, e)); }
     finally { setBusy(null); }
   };
-  const off = disabled || busy !== null;
+  const off = busy !== null;
+  // 置き場所を除いた一覧。除いても件数が減らないよう、1件多く読んでおき、ここで RECENT_PLACES_MAX 件に切る
+  const shown = load.state === "ok" ? withoutPlace(load.list, place, load.defaultPlace).slice(0, RECENT_PLACES_MAX) : [];
 
   return (
     <aside className="nh">
-      <div className="nh-head">
-        <span className="nh-title">新しい世帯</span>
-      </div>
       <div className="nh-top">
         <button className="pane-btn new-house nh-new" disabled={off} onClick={() => go(place, true)} title={`${place ? placeLabel(place) : DEFAULT_PLACE_LABEL} で親を立てる（場所は右上の設定で変えられる）`}>
           {busy === "" ? "立てている…" : "＋ 新しい世帯"}
         </button>
-        {disabled && <p className="nh-note">別の町を見ている間は作れない。新しい世帯は、このMacの町にだけ作る</p>}
       </div>
       <div className="nh-sub">最近の場所</div>
       <div className="nh-list">
@@ -70,8 +70,8 @@ export function NewHousePane({ disabled, place, onCreated, onError }: { disabled
         {load.state === "error" && (
           <p className="nh-note bad" title={load.msg}>一覧を読めなかった。<button className="lnk" onClick={reload}>読み直す</button></p>
         )}
-        {load.state === "ok" && load.list.length === 0 && <p className="nh-note">最近使った場所が無い</p>}
-        {load.state === "ok" && load.list.map((p) => (
+        {load.state === "ok" && shown.length === 0 && <p className="nh-note">最近使った場所が無い</p>}
+        {shown.map((p) => (
           <button key={p.path} className="nh-row" disabled={off} onClick={() => go(p.path)} title={`${placeLabel(p.path)}${repos[p.path] ? `\n${repos[p.path]}` : ""}\nで親を立てる`}>
             <span className="nh-name">{placeName(p.path)}</span>
             {repos[p.path] && <span className="nh-repo">{repos[p.path]}</span>}

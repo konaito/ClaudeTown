@@ -73,8 +73,8 @@ export function resolve(raw: string | null | undefined, agents: Agent[]): string
  * teammate: の形で、チームの中に1人に決まらなければ null（町の全員から名前で引くと、別のチームの同名に結ぶ）
  */
 /**
- * Claude Code の記録から読んだ sub-agent か teammate か。いまの一覧は teammate も kind: "subagent" で出す。
- * チームメイトを kind: "teammate" で出す版（ccn を外す作業のブランチ）でも引けるように、両方を受ける
+ * Claude Code の記録から読んだ sub-agent か teammate か。一覧は、チームメイトを kind: "teammate"、それ以外の sub-agent を kind: "subagent" で出す
+ * （src-tauri/src/native/subagents.rs と teams.rs）。どちらも親の下の子として引く
  */
 const SUB_KINDS: readonly string[] = ["subagent", "teammate"];
 const isSub = (a: Agent) => SUB_KINDS.includes(a.kind);

@@ -1,0 +1,5 @@
+~/.claude/projects/-private-tmp-fc-team-obs-inproc1/4a38e9d3-8cde-4d65-894d-cd8192f6d8d3.jsonl
+~/.claude/projects/-private-tmp-fc-team-obs-inproc1/4a38e9d3-8cde-4d65-894d-cd8192f6d8d3/subagents/agent-abeta-770e6dc0871690da.jsonl
+~/.claude/projects/-private-tmp-fc-team-obs-inproc1/4a38e9d3-8cde-4d65-894d-cd8192f6d8d3/subagents/agent-aalpha-08031d97a7e1dd9b.jsonl
+~/.claude/projects/-private-tmp-fc-team-obs-inproc1/4a38e9d3-8cde-4d65-894d-cd8192f6d8d3/subagents/agent-aalpha-08031d97a7e1dd9b.meta.json
+~/.claude/projects/-private-tmp-fc-team-obs-inproc1/4a38e9d3-8cde-4d65-894d-cd8192f6d8d3/subagents/agent-abeta-770e6dc0871690da.meta.json

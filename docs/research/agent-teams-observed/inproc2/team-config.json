@@ -1,0 +1,51 @@
+{
+  "name": "session-4efbd1ba",
+  "createdAt": 1795250257516,
+  "leadAgentId": "team-lead@session-4efbd1ba",
+  "leadSessionId": "4efbd1ba-8898-43c5-9e29-0e0c948dc52b",
+  "leadProcess": {
+    "pid": 45185,
+    "pidSpace": "MacBooks.local",
+    "claimedAt": 1795250257516
+  },
+  "members": [
+    {
+      "agentId": "team-lead@session-4efbd1ba",
+      "name": "team-lead",
+      "agentType": "team-lead",
+      "joinedAt": 1795250257516,
+      "tmuxPaneId": "leader",
+      "cwd": "/private/tmp/fc-team-obs/inproc2",
+      "subscriptions": [],
+      "backendType": "in-process"
+    },
+    {
+      "agentId": "alpha@session-4efbd1ba",
+      "name": "alpha",
+      "color": "blue",
+      "joinedAt": 1795250273363,
+      "tmuxPaneId": "in-process",
+      "subscriptions": [],
+      "agentType": "general-purpose",
+      "model": "haiku",
+      "prompt": "Write the text ALPHA (no trailing spaces, just the word and a newline) into the file /private/tmp/fc-team-obs/inproc2/alpha.txt. Create the file if it does not exist, and overwrite it if it does. Do not touch any other file. Then read the file back to confirm its contents and reply with one line: \"done: alpha.txt = <contents>\". Do not use ccn.",
+      "planModeRequired": false,
+      "cwd": "/private/tmp/fc-team-obs/inproc2",
+      "backendType": "in-process"
+    },
+    {
+      "agentId": "beta@session-4efbd1ba",
+      "name": "beta",
+      "color": "green",
+      "joinedAt": 1795250274024,
+      "tmuxPaneId": "in-process",
+      "subscriptions": [],
+      "agentType": "general-purpose",
+      "model": "haiku",
+      "prompt": "Write the text BETA (no trailing spaces, just the word and a newline) into the file /private/tmp/fc-team-obs/inproc2/beta.txt. Create the file if it does not exist, and overwrite it if it does. Do not touch any other file. Then read the file back to confirm its contents and reply with one line: \"done: beta.txt = <contents>\". Do not use ccn.",
+      "planModeRequired": false,
+      "cwd": "/private/tmp/fc-team-obs/inproc2",
+      "backendType": "in-process"
+    }
+  ]
+}

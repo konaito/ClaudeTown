@@ -109,6 +109,22 @@ export function withNotes(items: ConvItem[], notes: PendingItem[]): ConvItem[] {
 }
 
 /**
+ * -p の子（kind node）の会話には、送った文の user が出ない（#55。ccn の messages は assistant と result だけを返す）。
+ * settlePending では消えないので、送り始めたあとに assistant の返事が出たら「届けた・まだ読まれていない」の印だけ外し、
+ * after の位置に残す（withNotes が置く）。変わらなければ pending をそのまま返す
+ */
+export function answerPending(items: ConvItem[], pending: PendingItem[]): PendingItem[] {
+  if (!pending.some((x) => x.pending)) return pending;
+  let changed = false;
+  const out = pending.map((x) => {
+    if (!x.pending || !items.some((y) => (y.n ?? -1) > x.after && y.role === "assistant")) return x;
+    changed = true;
+    return { ...x, pending: false };
+  });
+  return changed ? out : pending;
+}
+
+/**
  * 画像のファイルのパス。文の頭か空白の直後で、/ か ~ から始まるもの（空白は \ 付きか、引用符で囲んだもの）。
  * CLI は読める画像のパスを [Image #3] の添付に置き換える
  */

@@ -1,10 +1,12 @@
 // チャット欄の「送信先」の行に置く、モデルと権限モードの切り替え（#97）。決まりは control.ts。
+// ccn の口を使うので、出すのはブラウザ版（PWA）の ccn の行だけ。アプリ（Tauri）では出さない（モデルはターミナルで /model を打つ）。
 // 今の値は ccn の GET /api/sessions/<id>（session_detail）の model と permissionMode で読み、替えたら PATCH の応答で置き換える。
 // 一覧（snapshot）には載せない（Rust の一覧の取り込みは別の作業が触っているので、こちらは詳細を読む）。
 import { useEffect, useRef, useState } from "react";
 import { call as invoke } from "../bridge";
 import type { Agent } from "../model";
-import { configureError, isHttp, lockReason, noRoute, viaCcn, modelOptions, modeOptions, showReason, supportOf, type Support } from "./control";
+import type { SessionDetail } from "../types";
+import { bodyObj, configureError, isHttp, lockReason, noRoute, viaCcn, modelOptions, modeOptions, showReason, supportOf, type Support } from "./control";
 
 // ノードごとに、口があるかを覚える。あれば以後は確かめない。無ければ1分たったら確かめ直す（ノードを新しくしたとき）
 const supportByNode = new Map<string, { v: Support; at: number }>();
@@ -22,19 +24,18 @@ const cachedSupport = (kind: Agent["kind"], nodeKey: string): Support => {
  * このセッションのノードに、モデルの切り替えとコマンドの口があるか（ノードごとに1回確かめる）。
  * 2つ目の戻り値は、使ったときに 404 が返ったら「無い」に直す口
  */
-export function useNodeSupport(agent: Agent | null, peer: string): [Support, () => void] {
-  const nodeKey = peer || "";
+export function useNodeSupport(agent: Agent | null): [Support, () => void] {
+  const nodeKey = "";
   const id = agent?.id ?? "";
-  // 転出のゴースト（別の町の本物の写し）は、この町のノードにいないので確かめない
-  // ネイティブの記録だけのセッションと sub-agent（#96）も、ccn の口が使えないので確かめない
-  const kind = agent && !agent.ghost && viaCcn(agent) ? agent.kind : "terminal";
+  // ブラウザ版（PWA）の ccn の行のほかは、ccn の口が無いので確かめない
+  const kind = agent && viaCcn(agent) ? agent.kind : "terminal";
   const [support, setSupport] = useState<Support>(() => cachedSupport(kind, nodeKey));
   useEffect(() => {
     const v = cachedSupport(kind, nodeKey);
     setSupport(v);
     if (!id || v !== "unknown") return;
     let on = true;
-    invoke<unknown>("session_controls", { sessionId: id, peer: peer || null })
+    invoke<unknown>("session_controls", { sessionId: id })
       .then((r) => {
         const got = supportOf(r);
         if (got !== "unknown") supportByNode.set(nodeKey, { v: got, at: Date.now() });
@@ -48,8 +49,8 @@ export function useNodeSupport(agent: Agent | null, peer: string): [Support, () 
   return [support, markNo];
 }
 
-export function SessionControls({ agent, peer, support, onNoSupport, onSwitching, onDone, onError }: {
-  agent: Agent; peer: string;
+export function SessionControls({ agent, support, onNoSupport, onSwitching, onDone, onError }: {
+  agent: Agent;
   support: Support; onNoSupport: () => void;
   /** 替えている間（pty は起動し直しの約3秒）。この間はチャットの送信も止める */
   onSwitching: (on: boolean) => void;
@@ -63,11 +64,11 @@ export function SessionControls({ agent, peer, support, onNoSupport, onSwitching
   // 今の値。開いたとき、状態が変わったとき（承認に答えた後、計画の承認でモードが替わる）に読み直す
   useEffect(() => {
     let on = true;
-    invoke<any>("session_detail", { sessionId: agent.id, peer: peer || null })
+    invoke<SessionDetail | null>("session_detail", { sessionId: agent.id })
       .then((d) => { if (on && d && typeof d === "object") setCur({ model: str(d.model), mode: str(d.permissionMode) }); })
       .catch(() => {});
     return () => { on = false; };
-  }, [agent.id, peer, agent.state]);
+  }, [agent.id, agent.state]);
 
   const reason = lockReason(agent, support, switching);
   const apply = async (change: { model?: string; permissionMode?: string }) => {
@@ -75,7 +76,7 @@ export function SessionControls({ agent, peer, support, onNoSupport, onSwitching
     setSwitching(true);
     onSwitching(true);
     try {
-      const r = await invoke<unknown>("configure_session", { sessionId: agent.id, model: change.model ?? null, permissionMode: change.permissionMode ?? null, peer: peer || null });
+      const r = await invoke<unknown>("configure_session", { sessionId: agent.id, model: change.model ?? null, permissionMode: change.permissionMode ?? null });
       if (!isHttp(r)) throw new Error("ccn の応答が読めなかった");
       const err = configureError(r);
       if (err) {
@@ -83,7 +84,7 @@ export function SessionControls({ agent, peer, support, onNoSupport, onSwitching
         onError(`${agent.name}: ${err}`);
         return;
       }
-      if (alive.current) setCur({ model: str(r.body?.model), mode: str(r.body?.permissionMode) });
+      if (alive.current) setCur({ model: str(bodyObj(r.body).model), mode: str(bodyObj(r.body).permissionMode) });
       onDone(change.model ? `${agent.name} のモデルを ${change.model} にした` : `${agent.name} の権限モードを ${change.permissionMode} にした`);
     } catch (e) {
       onError(`${agent.name}: 替えられなかった: ${e}`);

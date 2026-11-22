@@ -7,7 +7,12 @@
 import type { Agent } from "../model";
 
 /** Rust の session_controls と configure_session が返す形。HTTP の応答をそのまま渡す */
-export type Http = { status: number; body: any };
+export type Http = { status: number; body: unknown };
+
+/** 応答の本文がオブジェクトならそれ、でなければ空のオブジェクト。フィールドは unknown のまま、読む側が型を確かめる */
+export function bodyObj(body: unknown): Record<string, unknown> {
+  return typeof body === "object" && body ? (body as Record<string, unknown>) : {};
+}
 
 /** 候補は仕様書にある別名だけにする。今の値が別名でなければ（node は claude-sonnet-5-5 のような id で返る）、その値も選択肢に出す */
 export const MODELS: { value: string; label: string }[] = [
@@ -37,7 +42,7 @@ export type Support = "unknown" | "yes" | "no";
  */
 export function supportOf(r: unknown): Support {
   if (!isHttp(r)) return "unknown";
-  if (r.status === 400 && r.body?.code === "not_command") return "yes";
+  if (r.status === 400 && bodyObj(r.body).code === "not_command") return "yes";
   if (r.status === 409) return "yes";
   if (noRoute(r)) return "no";
   return "unknown";
@@ -45,7 +50,7 @@ export function supportOf(r: unknown): Support {
 
 /** 口そのものが無い（古いノード）。セッションが無い 404 とは本文で見分ける */
 export function noRoute(r: Http): boolean {
-  return r.status === 405 || (r.status === 404 && r.body?.error === "not found");
+  return r.status === 405 || (r.status === 404 && bodyObj(r.body).error === "not found");
 }
 
 export function isHttp(r: unknown): r is Http {
@@ -60,7 +65,7 @@ export const NO_SUPPORT = "このノードでは使えません（ccn が古く�
  * switching は、こちらが替えている最中（pty は起動し直しを待っている）
  */
 export function lockReason(a: Pick<Agent, "kind" | "state" | "source">, support: Support, switching: boolean): string | null {
-  if (!viaCcn(a)) return "Claude Code の記録から読んでいるだけのセッションなので、ここからは替えられない";
+  if (!viaCcn(a)) return "ccn の行ではない（Claude Code の記録から読んでいるだけか、アプリが立てた端末）ので、ここからは替えられない。ターミナルで /model を打つ";
   if (a.kind === "terminal") return "端末で起動したセッションなので、ここからは替えられない";
   if (support === "no") return NO_SUPPORT;
   if (support === "unknown") return "このノードで使えるかを確かめている";
@@ -71,9 +76,9 @@ export function lockReason(a: Pick<Agent, "kind" | "state" | "source">, support:
   return null;
 }
 
-/** ccn が動かしているセッションか。ネイティブの記録だけから読んだもの（#96）と sub-agent は ccn の口が使えない */
+/** ccn が動かしているセッションか。ブラウザ版（PWA）が ccn から読む行だけで、アプリ（Tauri）の行はどれも当たらない */
 export function viaCcn(a: Pick<Agent, "kind" | "source">): boolean {
-  return a.source !== "native" && a.kind !== "subagent";
+  return a.source === "ccn";
 }
 
 /** 理由のうち、画面にいつも出しておくもの（確かめている最中は出さない） */
@@ -84,7 +89,7 @@ export function showReason(reason: string | null, support: Support): boolean {
 /** configure_session が断られたときの文言。成功（2xx）なら null */
 export function configureError(r: Http): string | null {
   if (r.status >= 200 && r.status < 300) return null;
-  const b = typeof r.body === "object" && r.body ? r.body : {};
+  const b = bodyObj(r.body);
   const msg = typeof b.error === "string" ? b.error : typeof r.body === "string" ? r.body : JSON.stringify(r.body);
   if (noRoute(r)) return NO_SUPPORT;
   if (r.status === 404) return "セッションが見つからなかった（終わったか、別のノードに移った）";
