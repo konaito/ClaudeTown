@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { call as invoke } from "../bridge";
 import type { ConvItem } from "../model";
-import { answerPending, mergeConv, sameLive, settlePending, type ConvDelta, type Live, type PendingItem } from "../conv";
+import { answerPending, convFailed, mergeConv, sameLive, settlePending, type ConvDelta, type Live, type PendingItem } from "../conv";
 import { pollBackoff } from "../visible";
 
 const CONV_POLL_MS = 2500;
@@ -34,19 +34,23 @@ export function useConversation(id: string | undefined, isFast: boolean, working
     let alive = true;
     // 画面が持っている数。Rust は、これより後の発言だけを返す（#10）。増えていなければ items を変えず、描き直さない
     let since: number | null = null;
+    // 続けて失敗した回数。1回の失敗では印を出さず、成功したら戻す
+    let failures = 0;
     const load = async () => {
       try {
         const d = await invoke<ConvDelta>("conversation", { sessionId: id, since });
         if (!alive) return false;
         since = Math.max(since ?? 0, d.total);
         if (d.reset) since = d.total;
+        failures = 0;
         setConvErr(null);
         if (d.reset || d.items.length) setItems((prev) => mergeConv(prev, d));
         const nextLive = d.live ?? null;
         setLive((prev) => (sameLive(prev, nextLive) ? prev : nextLive));
         return d.reset || d.items.length > 0;
       } catch (e) {
-        if (alive) setConvErr(String(e));
+        failures += 1;
+        if (alive && convFailed(failures)) setConvErr(String(e));
         return false;
       }
     };

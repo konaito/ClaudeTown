@@ -591,26 +591,41 @@ pub(crate) fn read_native(path: &std::path::Path, from: u64) -> Result<MessagesR
     Ok((c.next, fresh, evs, Some(epoch)))
 }
 
+/// 前に読んだ分を、増えた分なしで返す。読めないのが当たり前の場面（起動直後で jsonl がまだ無い、セッションが終わって登録から消えた、
+/// 読む直前に jsonl が消えた）で使う。エラーにせず、画面が持っている分を空に置き換えない（キャッシュが無ければ空）
+fn quiet(session_id: &str, since: Option<u64>) -> Result<ConvDelta, String> {
+    let g = CONVS.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(match g.as_ref().and_then(|m| m.get(session_id)) {
+        Some(c) => c.since(since),
+        None => ConvDelta { items: vec![], total: 0, reset: true, live: Live::default() },
+    })
+}
+
+fn not_found(path: &std::path::Path) -> bool {
+    matches!(std::fs::metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
 pub(crate) fn conversation(session_id: String, since: Option<u64>) -> Result<ConvDelta, String> {
-    // jsonl の場所は一覧を作るときに登録する。起動したばかりで、まだ jsonl が無いセッションは空で返す
+    // jsonl の場所は一覧を作るときに登録する。登録が無いのは、起動したばかりで一覧にまだ出ていない、jsonl の無いチームメイト、
+    // 終わって一覧から消えたセッション。どれも読めなくて当たり前なので、前に読んだ分を返す
     let Some(path) = native::path_of(&session_id) else {
-        return Ok(ConvDelta { items: vec![], total: 0, reset: true, live: Live::default() });
+        return quiet(&session_id, since);
     };
-    // 登録はあっても、jsonl は最初の文が処理されるまで作られない。NotFound は空で返す（権限などの失敗は下で今までどおり出す）。
-    // 前に読んだ分があれば、それを返す（消えたのを見て画面を空にしない）
-    if matches!(std::fs::metadata(&path), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
-        let g = CONVS.lock().map_err(|e| e.to_string())?;
-        return Ok(match g.as_ref().and_then(|m| m.get(&session_id)) {
-            Some(c) => c.since(since),
-            None => ConvDelta { items: vec![], total: 0, reset: true, live: Live::default() },
-        });
+    // 登録はあっても、jsonl は最初の文が処理されるまで作られない。NotFound は空で返す（権限などの失敗は下で今までどおり出す）
+    if not_found(&path) {
+        return quiet(&session_id, since);
     }
     let key = session_id.clone();
     let (from, seen) = {
-        let g = CONVS.lock().map_err(|e| e.to_string())?;
+        let g = CONVS.lock().unwrap_or_else(|e| e.into_inner());
         g.as_ref().and_then(|m| m.get(&key)).map(|c| (c.next, c.epoch.clone())).unwrap_or((0, None))
     };
-    let (mut next, mut fresh, mut evs, mut epoch) = read_native(&path, from)?;
+    // 確認のあとに jsonl が消えた場合も、読めなくて当たり前の場面として扱う
+    let (mut next, mut fresh, mut evs, mut epoch) = match read_native(&path, from) {
+        Ok(r) => r,
+        Err(_) if not_found(&path) => return quiet(&key, since),
+        Err(e) => return Err(e),
+    };
     let restarted = epoch.as_deref().is_some_and(|e| e.ends_with(":restarted"));
     let stale = restarted || cursor_is_stale(from, &seen, &epoch);
     if restarted {
@@ -618,13 +633,17 @@ pub(crate) fn conversation(session_id: String, since: Option<u64>) -> Result<Con
         epoch = epoch.map(|e| e.trim_end_matches(":restarted").to_string());
     } else if stale && from > 0 {
         // 読んだ分は捨て、頭から読み直して置き換える。読み直しに失敗したら何も変えない（次の呼び出しでもう一度気づく）
-        (next, fresh, evs, epoch) = read_native(&path, 0)?;
+        (next, fresh, evs, epoch) = match read_native(&path, 0) {
+            Ok(r) => r,
+            Err(_) if not_found(&path) => return quiet(&key, since),
+            Err(e) => return Err(e),
+        };
     }
-    let mut g = CONVS.lock().map_err(|e| e.to_string())?;
+    let mut g = CONVS.lock().unwrap_or_else(|e| e.into_inner());
     let map = g.get_or_insert_with(HashMap::new);
     let now = now_ms();
     forget_idle_convs(map, &key, now);
-    let c = map.entry(key).or_insert_with(Conv::default);
+    let c = map.entry(key).or_default();
     c.used = now;
     if stale {
         // 読み直しが0件で、前に中身があったときは置き換えない（読めなかっただけかもしれないので、持っている分まで消さない）
@@ -1055,6 +1074,38 @@ mod tests {
         // 作られたら読める
         std::fs::write(d.join("not-yet.jsonl"), "").unwrap();
         assert!(conversation(id, None).is_ok());
+    }
+
+    /// 当たり前に読めない場面（セッションが終わって登録から消えた、読む直前に jsonl が消えた）は、エラーにせず、
+    /// 前に読んだ分があればそれを返す。画面を空にしない（reset も立てない）
+    #[test]
+    fn expected_unreadable_scenes_keep_what_was_read() {
+        use crate::native::testtree::{tmp, write};
+        let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let d = tmp("expected");
+        let p = d.join("s.jsonl");
+        write(&p, "{\"type\":\"user\",\"message\":{\"content\":\"こんにちは\"}}\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"はい\"}]}}\n");
+        let id = "expected-unreadable-session".to_string();
+        native::register(HashMap::from([(id.clone(), p.clone())]));
+        let first = conversation(id.clone(), None).expect("読める");
+        assert_eq!(first.items.len(), 2);
+
+        // 場面1: セッションが終わり、一覧の登録から消えた。画面は since=2 まで持っている。持っている分を消さず、増えた分は無い
+        native::register(HashMap::new());
+        let d1 = conversation(id.clone(), Some(first.total)).expect("登録が無くてもエラーにしない");
+        assert!(!d1.reset, "画面を空に置き換えない");
+        assert!(d1.items.is_empty());
+        assert_eq!(d1.total, first.total);
+        // 開き直した画面（since が無い）には、前に読んだ分を渡す
+        let d1b = conversation(id.clone(), None).expect("登録が無くてもエラーにしない");
+        assert_eq!(d1b.items.len(), 2);
+
+        // 場面2: 登録はあるが、読む直前に jsonl が消えた（metadata の確認のあとに消えるのと同じ。ここでは消えた後）
+        native::register(HashMap::from([(id.clone(), p.clone())]));
+        std::fs::remove_file(&p).unwrap();
+        let d2 = conversation(id.clone(), Some(first.total)).expect("jsonl が消えてもエラーにしない");
+        assert!(!d2.reset && d2.items.is_empty());
+        assert_eq!(d2.total, first.total);
     }
 
     #[test]

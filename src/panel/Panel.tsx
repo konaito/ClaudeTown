@@ -215,10 +215,10 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
       {tab === "term" ? (
         <Suspense fallback={<div className="term-wrap"><div className="term" /></div>}><TerminalView sessionId={agent.id} onError={onError} /></Suspense>
       ) : tab === "talk" ? (<div className="talk-box">
-        {/* 会話を読めなかったときの印。会話の欄の流れに入れると欄とグラデーションの始まりがずれるので、欄の上端の中央に重ねる（position: absolute）。
+        {/* 想定外の失敗で、最新の会話を取れていないときの印（起動直後や終わったセッションなど、読めなくて当たり前の場面では出ない。続けて失敗したときだけ）。会話の欄の流れに入れると欄とグラデーションの始まりがずれるので、欄の上端の中央に重ねる（position: absolute）。
             中身の失敗は title に入れる */}
         {convErr && shown.length > 0 && (
-          <span className="offline-note" title={convErr}><i /><span>読めない・最後に読めた履歴</span></span>
+          <span className="offline-note" title={convErr}><i /><span>最新を取れていない・最後に読めた履歴</span></span>
         )}
         {/* 印が出ている間は、中身の上に印の高さぶんの余白を足す（上端まで送ったとき、いちばん古い行が印の下に入らない）。外枠とグラデーションの位置は変えない */}
         <ScrollEdgeGradient className={`talk ${hasNote ? "has-note" : ""}`} wrapClassName="seg-fill" ref={scroller}

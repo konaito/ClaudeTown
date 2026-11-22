@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, settlePending, answerPending, withNotes, withQueued, type Live, type PendingItem } from "./conv";
+import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, settlePending, answerPending, withNotes, withQueued, convFailed, type Live, type PendingItem } from "./conv";
 import type { ConvItem } from "./model";
 
 const item = (n: number): ConvItem => ({ role: "assistant", text: `t${n}`, n });
@@ -174,5 +174,14 @@ describe("withQueued（順番待ち）", () => {
     const w = [sent];
     expect(withQueued(w, q, false)).toEqual({ waiting: w, queued: [] });
     expect(withQueued(w, undefined, true).waiting).toBe(w);
+  });
+});
+
+describe("convFailed（取得の失敗を画面に出す条件）", () => {
+  test("1回の失敗では出さない。続けて CONV_ERR_AFTER 回失敗したら出す", () => {
+    expect(convFailed(0)).toBe(false);
+    expect(convFailed(1)).toBe(false);
+    expect(convFailed(2)).toBe(true);
+    expect(convFailed(5)).toBe(true);
   });
 });

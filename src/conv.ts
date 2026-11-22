@@ -5,6 +5,10 @@ import type { ConvItem } from "./model";
 /** 画面に持つ件数。Rust の KEEP_MESSAGES と同じ */
 export const KEEP_CONV = 80;
 
+/** 会話の取得が続けて何回失敗したら、画面に出すか。1回だけの失敗（ファイルの書き換え中、ブラウザ版の通信の揺れ）は次の取り直しで直るので出さない */
+export const CONV_ERR_AFTER = 2;
+export const convFailed = (failures: number): boolean => failures >= CONV_ERR_AFTER;
+
 /** 今の動き（#59）。時刻は ISO の文字列か ms の数 */
 export type LiveTool = { id: string; kind: string; text: string; at: string | number | null };
 export type Live = {
