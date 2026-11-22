@@ -250,3 +250,50 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 }
+
+#[cfg(test)]
+mod real_restart {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn config_dir_of(pid: u32) -> String {
+        let ps = std::process::Command::new("/bin/ps").args(["eww", "-o", "command=", "-p", &pid.to_string()]).output().unwrap();
+        String::from_utf8_lossy(&ps.stdout).split_whitespace().find(|w| w.starts_with("CLAUDE_CONFIG_DIR=")).unwrap_or("CLAUDE_CONFIG_DIR なし").to_string()
+    }
+
+    /// 本物の claude（haiku）で、立てる → 1往復 → 再起動 を通し、前後の pid・id・アカウント・会話の記録を出す。
+    /// FC_RESTART_CWD に信頼済みの捨てのディレクトリを渡す。1往復分の API を使う。
+    /// env -u CLAUDE_CONFIG_DIR FC_CAM_BIN=$HOME/.cam/bin/cam FC_RESTART_CWD=<dir> cargo test --lib real_restart -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_restart_keeps_the_id_and_replaces_the_process() {
+        let cwd = std::env::var("FC_RESTART_CWD").expect("FC_RESTART_CWD");
+        let start = pty::start_args(Some("haiku"), None).unwrap();
+        let r = pty::spawn(&cwd, Some("ct-probe-restart"), &start, 120, 40, || {}).unwrap();
+        let (id, pid1) = (r["id"].as_str().unwrap().to_string(), r["pid"].as_u64().unwrap() as u32);
+        std::thread::sleep(Duration::from_secs(6));
+        pty::write(&id, "ok とだけ返して\r").unwrap();
+        let root = native::claude_home();
+        let t0 = Instant::now();
+        while native::sessions::find_jsonl(&root, &id).is_none() && t0.elapsed() < Duration::from_secs(90) {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let jsonl = native::sessions::find_jsonl(&root, &id).expect("1往復の後に jsonl が出来る");
+        std::thread::sleep(Duration::from_secs(8));
+        let lines_before = std::fs::read_to_string(&jsonl).unwrap().lines().count();
+        println!("前: id {id} pid {pid1} {} jsonl {lines_before} 行", config_dir_of(pid1));
+        println!("前の画面: {}", pty::screen_text(&id).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).take(8).collect::<Vec<_>>().join(" / "));
+        let t1 = Instant::now();
+        let r2 = restart_session(id.clone()).unwrap();
+        let pid2 = r2["pid"].as_u64().unwrap() as u32;
+        println!("後: id {} pid {pid2} {} 所要 {:.1}s", r2["id"], config_dir_of(pid2), t1.elapsed().as_secs_f32());
+        std::thread::sleep(Duration::from_secs(6));
+        println!("後の画面: {}", pty::screen_text(&id).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).take(8).collect::<Vec<_>>().join(" / "));
+        let alive1 = unsafe { libc::kill(pid1 as i32, 0) } == 0;
+        println!("前任の pid {pid1} 生存: {alive1}、jsonl {} 行", std::fs::read_to_string(&jsonl).unwrap().lines().count());
+        pty::kill(&id).unwrap();
+        assert_eq!(r2["id"].as_str(), Some(id.as_str()));
+        assert_ne!(pid1, pid2);
+        assert!(!alive1);
+    }
+}
