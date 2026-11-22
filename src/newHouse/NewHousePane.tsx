@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Plus } from "lucide-react";
 import { ICON, STROKE } from "../icons";
-import { call as invoke } from "../bridge";
+import { IS_WEB, call as invoke } from "../bridge";
 import { lastTermSize } from "../term/size";
 import { perfMark, perfSetId, perfStart } from "../term/perf";
 import { benchName } from "../term/bench";
@@ -21,6 +21,15 @@ export async function createHousehold(cwd: string | null): Promise<CreatedSessio
   perfMark("create");
   if (r?.id) perfSetId(r.id);
   return r;
+}
+
+/**
+ * 終わったセッションを、id を指定して Claude Town の端末で開き直す（#152）。場所は Rust が会話の記録（jsonl）から取る。
+ * 会話の記録が無いもの、よそで同じ id が動いているものは Rust が断る
+ */
+export async function resumeHousehold(sessionId: string): Promise<CreatedSession> {
+  const { cols, rows } = lastTermSize() ?? { cols: null, rows: null };
+  return invoke<CreatedSession>("resume_session", { sessionId, cols, rows });
 }
 
 type Load = { state: "loading" } | { state: "ok"; list: RecentPlace[]; defaultPlace: string | null } | { state: "error"; msg: string };
@@ -55,6 +64,17 @@ export function NewHousePane({ place, onCreated, onError }: { place: string | nu
     catch (e) { onCreated(null); onError(placeFailure(top ? place : null, e)); }
     finally { setBusy(null); }
   };
+  // id で開き直す欄（#152）
+  const [resumeId, setResumeId] = useState("");
+  const reopen = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const id = resumeId.trim();
+    if (!id || busy !== null) return;
+    setBusy("resume");
+    try { onCreated(await resumeHousehold(id)); setResumeId(""); }
+    catch (err) { onCreated(null); onError(`開き直せなかった: ${String(err)}`); }
+    finally { setBusy(null); }
+  };
   const off = busy !== null;
   // 置き場所を除いた一覧。除いても件数が減らないよう、1件多く読んでおき、ここで RECENT_PLACES_MAX 件に切る
   const shown = load.state === "ok" ? withoutPlace(load.list, place, load.defaultPlace).slice(0, RECENT_PLACES_MAX) : [];
@@ -81,6 +101,14 @@ export function NewHousePane({ place, onCreated, onError }: { place: string | nu
           </button>
         ))}
       </div>
+      {!IS_WEB && (
+        <form className="nh-resume" onSubmit={reopen}>
+          <input className="set-input" value={resumeId} onChange={(e) => setResumeId(e.target.value)} disabled={off}
+            placeholder="セッション id で開き直す" aria-label="Claude Town で開き直すセッションの id" spellCheck={false}
+            title="終わったセッションの id を入れて Enter。前と同じ場所で claude --resume を起動する" />
+          {busy === "resume" && <span className="nh-note">開いている…</span>}
+        </form>
+      )}
     </aside>
   );
 }

@@ -561,6 +561,9 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .set-list .nh-row { display: flex; align-items: baseline; gap: 10px; border-bottom: 0; border-radius: 8px; }
 .nh-note { margin: 6px 10px; font-size: 12px; color: var(--sub); }
 .nh-note.bad { color: #c2410c; }
+.nh-resume { padding: 8px 12px 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+.nh-resume .set-input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 5px 8px; }
+.nh-resume .nh-note { margin: 0; }
 
 /* 右のチャットの見出しの ×（選ぶのをやめると右のペインが閉じる） */
 .p-close { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; color: var(--sub); background: transparent; }
