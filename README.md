@@ -236,11 +236,11 @@ scripts/rollback-stable.sh    # 今の版と1つ前の版を入れ替える。�
 
 戻すときも、状態 hook を戻した先の版のタグから写し直す。アプリを入れ替えずに hook だけを写し直すときは `scripts/install-stable-hooks.sh [タグ]` を使う（タグを省くと、いま入っている版のタグから写す）。
 
-作業ツリーの hook を試すときは、手で見本の入力を流す。`FC_STATE_DIR`、`FC_LETTERS` を一時の場所に向けると、本物の状態ファイルに書かない。
+作業ツリーの hook を試すときは、手で見本の入力を流す。`FC_STATE_DIR`、`FC_LETTERS`、`FC_PERM_DIR` の3つを一時の場所に向けると、本物の状態ファイルに書かない。`FC_PERM_DIR` を忘れると、PermissionRequest が本物の `perm/` に書き、SessionStart と SessionEnd が本物の `perm/` のファイルを消す。
 
 ```bash
 echo '{"session_id":"0123abcd-0000-0000-0000-000000000001","hook_event_name":"UserPromptSubmit","prompt":"試し"}' \
-  | FC_STATE_DIR=/tmp/fc-try FC_LETTERS=/tmp/fc-try/letters.jsonl python3 hooks/fc-report.py
+  | FC_STATE_DIR=/tmp/fc-try FC_LETTERS=/tmp/fc-try/letters.jsonl FC_PERM_DIR=/tmp/fc-try/perm python3 hooks/fc-report.py
 ```
 
 hook が書く状態ファイルとお手紙の形は、`python3 -m unittest discover -s hooks -v` で確かめる（`hooks/test_fc_report.py`、標準ライブラリだけ、一時の場所にだけ書く）。
