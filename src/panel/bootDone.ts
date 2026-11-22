@@ -59,3 +59,41 @@ export const headOf = (text: string, n = 30) => {
   const one = text.replace(/\s+/g, " ").trim();
   return one.length > n ? `${one.slice(0, n)}…` : one;
 };
+
+/** 見張りが読む boot_status の要るところ */
+export type WatchStatus = { startedAt: number | null; queued: unknown[]; done: Done[] } | null;
+
+/**
+ * 見張りの1周（useQueuedWatch が WATCH_MS ごとに呼ぶ）。預けたセッションを読み、まだ知らせていない失敗を知らせる。
+ * 開いているパネルが読んでいるセッションは飛ばす。端末が残っていて一覧にもいる子だけ、文を入力欄に戻す（いない子はチャットを開けない）。
+ * 端末が残っているかは startedAt で見る（Rust の pty の台帳に無ければ null）。町の一覧は少し遅れて消えるので、一覧だけでは決めない。
+ * 読めなかった（null）か、預かった文が無くなったら見張りから外す。stopped が true になったら途中でやめる
+ */
+export async function watchOnce(
+  status: (sid: string) => Promise<WatchStatus>,
+  toast: (text: string, bad?: boolean) => void,
+  listed: (sid: string) => boolean,
+  stopped: () => boolean = () => false,
+) {
+  for (const [id, name] of doneLog.watching()) {
+    if (doneLog.ownedByPanel(id)) continue;
+    let s: WatchStatus = null;
+    try { s = await status(id); } catch { s = null; }
+    if (stopped()) return;
+    if (!s) { doneLog.unwatch(id); continue; }
+    // 読んでいる間にパネルが開いたら、パネルに任せる
+    if (doneLog.ownedByPanel(id)) continue;
+    const { failed } = sortDone(id, s.done, null, doneLog.reported);
+    doneLog.claim(id, failed);
+    const alive = s.startedAt != null && listed(id);
+    for (const d of failed) {
+      if (alive) {
+        doneLog.giveBack(id, d.text);
+        toast(`${name} に届かなかった（「${headOf(d.text)}」）: ${d.error}。チャットを開くと入力欄に戻る`, true);
+      } else {
+        toast(`${name} に届かなかった: ${d.error}。送れなかった文:「${headOf(d.text, 80)}」`, true);
+      }
+    }
+    if (s.queued.length === 0) doneLog.unwatch(id);
+  }
+}
