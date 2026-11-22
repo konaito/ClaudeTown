@@ -57,7 +57,12 @@ export function useKill(h: {
     const closed = closedDescendants(a, ride, ok);
     if (failed.length) toast(`止められなかった: ${failed.map((x) => x.name).join("、")}`, true);
     else toast(`${a.name}${closed ? ` と子孫 ${closed} 人` : ""}を閉じた`);
-    if (skipped.length) toast(`Claude Town の外で起動したので、ここからは止められない。残した: ${skipped.map((x) => x.name).join("、")}`, true);
+    // 残す分のうち、kind が teammate なのは tmux のチームメイト（in-process のチームメイトは killPlan が ride に入れる）。
+    // 外で起動した claude ではないので、理由を分ける。リードが止まった後にプロセスが残るかは未確認なので「止めていない」とだけ言う
+    const mates = skipped.filter((x) => x.kind === "teammate");
+    const outside = skipped.filter((x) => x.kind !== "teammate");
+    if (outside.length) toast(`Claude Town の外で起動したので、ここからは止められない。残した: ${outside.map((x) => x.name).join("、")}`, true);
+    if (mates.length) toast(`tmux で動くチームメイトは、ここからは止められない。止めていない: ${mates.map((x) => x.name).join("、")}`, true);
     return failed.length === 0 && skipped.length === 0;
   }, [tree, selected, toast]);
   const askKill = useCallback((a: Agent, instant: boolean) => { if (instant) kill(a); else setKillAsk(a); }, [kill]);
