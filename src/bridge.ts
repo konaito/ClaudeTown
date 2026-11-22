@@ -129,6 +129,10 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   // 見た目の確認用: public/dev-house-places.json（Rust の house_places の出力）。無ければ空の一覧
   if (cmd === "house_places") return devJson<T>("dev-house-places.json", { roots: [], lobby: null, sessions: [], places: null } as T);
   if (cmd === "place_repos") return devJson<T>("dev-place-repos.json", {} as T);
+  // 見た目の確認用: ?approval=<名前> を付けると、承認の欄の中身に public/dev-approval-<名前>.json（Rust の session_detail の出力の形）を返す
+  if (cmd === "session_detail" && location.search.includes("approval=")) {
+    return devJson<T>(`dev-approval-${new URLSearchParams(location.search).get("approval")}.json`, { pending: [] } as T);
+  }
   // ブラウザ表示では本物の会話を読めない。別のセッションの会話を見せて取り違えに見えないよう、仮の1件だけ返す
   // 見た目の確認用: ?longconv を付けると、スクロールが要る長さの仮の会話を返す
   // 見た目の確認用: ?conv を付けると public/dev-conversation.json（`--conversation <id>` の出力の Ok）を返す

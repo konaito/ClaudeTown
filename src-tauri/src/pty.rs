@@ -339,6 +339,11 @@ pub fn pid_of_id(id: &str) -> Option<u32> {
     with(|m| pid_of(m, id))
 }
 
+/// 同じ端末が名乗ったことのある session id の全部（/clear や計画の承認で id が変わっても、pid は同じ）。台帳に無ければ id だけ
+pub fn ids_of(id: &str) -> Vec<String> {
+    with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| p.ids.clone())).unwrap_or_else(|| vec![id.to_string()])
+}
+
 pub fn resize(id: &str, cols: u16, rows: u16) -> Result<(), String> {
     if !(2..=1000).contains(&cols) || !(2..=1000).contains(&rows) {
         return Err(format!("大きさが範囲の外: {cols}x{rows}"));

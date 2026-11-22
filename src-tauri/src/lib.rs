@@ -12,6 +12,7 @@
 mod attach;
 mod avatars;
 mod composer;
+mod dialog;
 mod naming;
 mod places;
 mod pty;
@@ -233,9 +234,9 @@ fn town_rows() -> Vec<Value> {
     rows
 }
 
-/// このアプリが立てたセッションでできること。承認は端末で答える（構造化した承認の口は無い）
+/// このアプリが立てたセッションでできること。承認は、端末の承認の画面にキーを書いて答える（dialog.rs、#83）
 fn app_caps() -> Value {
-    json!({ "send": true, "permissions": false, "interrupt": true, "stop": true, "terminal": true, "events": false })
+    json!({ "send": true, "permissions": true, "interrupt": true, "stop": true, "terminal": true, "events": false })
 }
 
 /// 一覧の行を、画面に渡すセッションの形に直す。hook の報告と close-check の判定を足す。キャラの割り当ては足さない
@@ -471,7 +472,9 @@ pub fn run() {
             term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
             composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files,
-            switch::cmd::session_settings, switch::cmd::switch_session, switch::cmd::cancel_switch
+            switch::cmd::session_settings,
+            dialog::cmd::session_detail,
+            dialog::cmd::answer_dialog, switch::cmd::switch_session, switch::cmd::cancel_switch
         ])
         .build(context)
         .expect("error while building tauri application")

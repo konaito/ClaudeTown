@@ -184,10 +184,10 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
         {hasTerm && <button className={tab === "term" ? "on" : ""} onClick={() => setTab("term")}>ターミナル</button>}
       </div>
       {mood === "approval" && tab === "state" && (
-        <div className="ap-float">{canAnswer ? <Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} /> : <AnswerInTerminal agent={agent} onTerm={() => setTab("term")} />}</div>
+        <div className="ap-float">{canAnswer ? <Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} onTerm={hasTerm ? () => setTab("term") : undefined} /> : <AnswerInTerminal agent={agent} onTerm={() => setTab("term")} />}</div>
       )}
       {mood === "approval" && tab === "term" && canAnswer && (
-        <div className="ap-float"><Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} /></div>
+        <div className="ap-float"><Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} onTerm={hasTerm ? () => setTab("term") : undefined} /></div>
       )}
 
       {tab === "term" ? (
@@ -206,7 +206,7 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
           {shown.map((x, i) => <Bubble key={x.n ?? `p${x.at ?? i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "working" && live && <LiveLine live={live} turnAt={agent.report?.turn_started_at ?? null} />}
           {mood === "approval" && (canAnswer
-            ? <Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} />
+            ? <Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} onTerm={hasTerm ? () => setTab("term") : undefined} />
             : <AnswerInTerminal agent={agent} onTerm={() => setTab("term")} />)}
           {choices.length > 0 && (
             <div className="choices">
