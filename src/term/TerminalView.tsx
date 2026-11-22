@@ -12,6 +12,7 @@ import { perfCounters, perfMark, perfEnd, perfTerm, perfWaitingPrompt } from "./
 import { benchParams } from "./bench";
 import { SIZE_KEY } from "./size";
 import { createWriteGate } from "./writeGate";
+import { connectTerminal } from "./connect";
 import { isVisible, onVisibleChange } from "../visible";
 
 /** ほかの画面の大きさが右パネルに収まらないとき、こちらの大きさを送り返す間隔の下限 */
@@ -148,7 +149,7 @@ export function TerminalView({ sessionId, onError }: { sessionId: string; onErro
       call("term_input", { sessionId, text }).catch((e) => onError(`ターミナルに書けなかった: ${e}`));
     });
     let close = () => {};
-    openTerminal(sessionId, (e) => {
+    connectTerminal(() => openTerminal(sessionId, (e) => {
       if (closed) return;
       switch (e.ev) {
         case "size":
@@ -191,9 +192,9 @@ export function TerminalView({ sessionId, onError }: { sessionId: string; onErro
           setStatus(e.data?.message ?? "ターミナルに繋がらない");
           break;
       }
-    }).then((c) => {
-      perfMark("term_open", sessionId);
-      if (closed) c(); else { close = c; pushSize(); term.focus(); }
+    }), () => closed, {
+      onOpen: (c) => { perfMark("term_open", sessionId); close = c; pushSize(); term.focus(); },
+      onFail: (m) => { setStatus(m); onError(m); },
     });
     let boxSize = "";
     const ro = new ResizeObserver((es) => {
