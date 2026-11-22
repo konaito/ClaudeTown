@@ -1,10 +1,10 @@
-// 画像とファイルの貼り付けとドロップ（#64、#69）。ccn の送信は文しか受けないので、手元のファイルのパスを文として入れる。受け手の Claude はパスを読む
+// 画像とファイルの貼り付けとドロップ（#64、#69）。端末への送信は文しか運べないので、手元のファイルのパスを文として入れる。受け手の Claude はパスを読む
 import { useEffect, useRef, useState } from "react";
 import { call as invoke, onFileDrop } from "../bridge";
 import { insertPaths, type Edit, type Sel } from "./edit";
 
-/** 別の機械のセッションには手元のパスが届かないので、画像とファイルは断る */
-export const REMOTE_FILES = "別の機械のセッションには画像やファイルを渡せない（手元のパスは届かない）";
+/** ブラウザ版（PWA）からは手元のパスが届かないので、画像とファイルは断る */
+export const REMOTE_FILES = "ブラウザ版からは画像やファイルを渡せない（手元のパスは届かない）";
 
 type Pasted = { files: string[]; image: string | null };
 

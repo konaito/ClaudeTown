@@ -1,33 +1,26 @@
 // family-computing の裏側。画面から呼ばれる命令:
-// - snapshot(peer): ccn の一覧（状態、送信先、親子）、hook の報告、close-check の判定を1つにまとめる
-// - peers: ccn につながっている機械の一覧
-// - conversation(session_id, peer, since): ccn の messages を差分で読み、画面に出す形（発言と道具の1行）に縮め、画面がまだ持っていない分だけ返す
-// - send_message(session_id, text, peer): ccn の POST /api/sessions/<id>/messages で文を届ける
-// - create_session / stop_session / teleport / teleport_info / session_detail: ccn の口をそのまま呼ぶ
-// - term_open / term_close / term_input / term_resize: ccn の端末（PTY）の口を読み書きし、開いた画面の Channel へ流す
+// - snapshot: この機械の Claude Code の記録（native/）、このアプリが立てた端末（pty.rs）、hook の報告、close-check の判定を1つにまとめる
+// - conversation(session_id, since): セッションの jsonl を差分で読み、画面に出す形（発言と道具の1行）に縮め、画面がまだ持っていない分だけ返す
+// - create_session / stop_session: 新しい世帯の claude をこのアプリの中の端末で起動する、止める（pty.rs）
+// - term_open / term_close / term_input / term_resize: このアプリが立てた端末を読み書きし、開いた画面の Channel へ流す
+// - house_places: 新しい世帯のペインの「最近の場所」の材料（places.rs）
 // - prompt_history / slash_commands / file_suggestions / send_direct / interrupt_session: チャットの入力欄を CLI と同じ動きにする（composer.rs）
-// - session_controls / configure_session / run_command: チャット欄からモデルと権限モードを替え、組み込みコマンドを送る（composer.rs、#97）
-// HTTP を待つ命令は spawn_blocking で動かし、メインスレッドを止めない（下の「画面から呼ぶ命令」）
-//
-// ccn は Origin 付きの要求を CSRF として断るので、HTTP は必ずこちら（webview ではなく Rust）から出す。
-// 別の機械（peer）は手元のノードの中継 /n/<peer>/api/... を通す。
+// ファイルを読む命令は spawn_blocking で動かし、メインスレッドを止めない（下の「画面から呼ぶ命令」）。
+// 操作（送信、停止、端末）は、このアプリが立てたセッションにだけできる。ほかのセッションは記録から読むだけ。
 
 mod attach;
-mod ccn;
 mod avatars;
 mod composer;
 mod naming;
+mod places;
+mod pty;
 mod repo;
 mod native;
-mod offline;
 mod perf;
 use perf::*;
 mod conversation;
 use conversation::*;
-mod permission;
-use permission::*;
 mod session_ops;
-use session_ops::*;
 mod terminal;
 use terminal::*;
 mod watch;
@@ -38,9 +31,8 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::io::{BufRead, BufReader};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use std::time::Duration;
 
 /// 非常停止。~/.family-computing/send-disabled があると、アプリからの送信（注文と承認のキー）を全部断る。
@@ -91,21 +83,6 @@ fn place(home: &std::path::Path, app_id: Option<&str>, app_home: Option<String>,
     dir.join(name)
 }
 
-/// オフラインのキャッシュの置き場所（src-tauri/src/offline.rs）。開発版と安定版で分かれる
-fn cache_dir() -> PathBuf {
-    #[cfg(test)]
-    if let Some(p) = TEST_CACHE.with(|c| c.borrow().clone()) {
-        return p;
-    }
-    fc_path(Scope::App, "cache")
-}
-
-#[cfg(test)]
-thread_local! {
-    /// 試験のスレッドごとの会話の保存先（本物の ~/.family-computing に書かない）
-    static TEST_CACHE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
-}
-
 fn read_json(p: &PathBuf) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(p).ok()?).ok()
 }
@@ -119,7 +96,7 @@ fn stamp_of(meta: &fs::Metadata) -> FileStamp {
 }
 
 /// read_json と同じ中身を返す。前に読んだときから更新時刻、大きさ、inode のどれも変わっていなければ、読まずに覚えた中身を返す（#11）。
-/// snapshot は一覧を取るたびに、セッションごとの state/{id}.json と close-check/{id}.json、houses.json、ccn.json を読んでいた。
+/// snapshot は一覧を取るたびに、セッションごとの state/{id}.json と close-check/{id}.jsonを読む。
 /// 無いファイルは覚えない（できたら次の回に読む）
 fn read_json_cached(p: &std::path::Path) -> Option<Value> {
     type Entry = (FileStamp, Option<Value>);
@@ -145,63 +122,21 @@ fn now_ms() -> u128 {
 
 #[derive(Serialize)]
 struct Snapshot {
-    ccn: String,
-    peer: Option<String>,
-    ccn_ok: bool,
-    ccn_error: Option<String>,
     agents: Vec<Value>,
-    /// お手紙（セッションどうしのやり取り）の最近の記録。hook が ~/.family-computing/letters.jsonl に書く。この機械の町だけ
+    /// お手紙（セッションどうしのやり取り）の最近の記録。hook が ~/.family-computing/letters.jsonl に書く
     letters: Vec<Value>,
     fetched_at: u128,
-    /// 一覧を読めず、保存してあった一覧（offline.rs）を agents に入れたときの、保存した時刻（ms）
-    cached_at: Option<u64>,
-    /// 一覧の出どころ（#96）。この機械の町だけ。ccn は on、off（設定で切った）、つながらなかった理由。native は件数
+    /// 一覧の出どころの件数（#96）。native は Claude Code の記録から読んだ件数、app はこのアプリが立てた端末の数
     sources: Option<Value>,
 }
 
-// ---------- ccn を使うかの設定（#96） ----------
-// 既定は使う（ネイティブの一覧に、ccn に接続できるときだけ ccn の一覧を重ねる）。切ると ccn の一覧を読まない。
-// 読むのは Rust の見張りのスレッドなので、アプリ側の置き場所（開発版は dev/ の下）のファイルに置く。形は {"ccn": true|false}
-
-const SETTINGS_FILE: &str = "town-settings.json";
-/// 0 はまだ読んでいない、1 は使う、2 は使わない
-static CCN_USE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-fn ccn_use() -> bool {
-    match CCN_USE.load(Ordering::SeqCst) {
-        1 => true,
-        2 => false,
-        _ => {
-            let on = read_json(&fc_path(Scope::App, SETTINGS_FILE)).and_then(|v| v["ccn"].as_bool()).unwrap_or(true);
-            CCN_USE.store(if on { 1 } else { 2 }, Ordering::SeqCst);
-            on
-        }
-    }
+/// このアプリが立てていないセッションへの操作を断る
+fn app_guard(session_id: &str) -> Result<(), String> {
+    if pty::owns(session_id) { Ok(()) } else { Err(native::READ_ONLY.into()) }
 }
 
-#[tauri::command]
-fn town_settings() -> Value {
-    json!({ "ccn": ccn_use() })
-}
-
-#[tauri::command]
-fn set_town_settings(ccn: bool) -> Result<Value, String> {
-    let p = fc_path(Scope::App, SETTINGS_FILE);
-    if let Some(d) = p.parent() {
-        fs::create_dir_all(d).map_err(|e| e.to_string())?;
-    }
-    fs::write(&p, json!({ "ccn": ccn }).to_string()).map_err(|e| format!("設定を保存できなかった: {e}"))?;
-    CCN_USE.store(if ccn { 1 } else { 2 }, Ordering::SeqCst);
-    town_kick();
-    Ok(town_settings())
-}
-
-/// 設定で ccn を切ったときの、ccn の一覧の代わりの理由
-const CCN_OFF: &str = "ccn を使わない設定";
-
-/// ネイティブの記録から読んでいるだけのセッションへの操作を断る（この機械の町だけ）
-fn native_guard(session_id: &str, peer: &Option<String>) -> Result<(), String> {
-    if peer.as_deref().unwrap_or("").is_empty() { native::refuse_if_native(session_id) } else { Ok(()) }
+fn refuse_if_disabled() -> Result<(), String> {
+    if send_disabled() { Err("送信を止めている（~/.family-computing/send-disabled がある）".into()) } else { Ok(()) }
 }
 
 /// お手紙の記録のうち、直近 LETTERS_WINDOW_MS のものを古い順に返す（多くても LETTERS_MAX 件）
@@ -255,187 +190,100 @@ fn letters_from(path: &std::path::Path, now: u128, tail: &mut Option<LetterTail>
     t.recs[n.saturating_sub(LETTERS_MAX)..].to_vec()
 }
 
-/// ccn の peers。手元のノードは peers を Cloudflare の API から引くので、ネットが切れると失敗する。
-/// 読めたら保存し、読めなければ保存した一覧を返す（別の機械の status は "cached" にして、裏で取りに行かせない）
-fn peers() -> Result<Value, String> {
-    let file = offline::peers_file(&cache_dir());
-    match ccn::peers() {
-        Ok(v) => {
-            if v.as_array().is_some_and(|a| !a.is_empty()) && offline::read(&file).map(|c| c["peers"] != v).unwrap_or(true) {
-                let _ = offline::write(&file, json!({ "peers": v }));
-            }
-            Ok(v)
+/// 町の一覧の行。Claude Code の記録から読んだセッション、sub-agent、チームメイトに、このアプリが立てた端末を重ねる。
+/// このアプリが立てたもので、まだ sessions/<pid>.json が無い（起動したばかり）ものは、台帳から仮の行を作る
+fn town_rows() -> Vec<Value> {
+    let n = native::list(&native::claude_home(), native::now_ms());
+    let mut rows: Vec<Value> = n.sessions.into_iter().chain(n.subagents).collect();
+    // /clear で id が変わっても同じ pid なら同じ端末。一覧で見えた id を台帳に足してから、どれがこのアプリのものかを決める
+    pty::note_ids(&rows.iter().filter(|r| r["kind"] == "terminal").filter_map(|r| Some((r["id"].as_str()?.to_string(), r["pid"].as_u64()? as u32))).collect::<Vec<_>>());
+    let seen: HashSet<String> = rows.iter().filter_map(|r| r["id"].as_str().map(String::from)).collect();
+    let mut app = 0;
+    for p in pty::list() {
+        app += 1;
+        if p.ids.iter().any(|i| seen.contains(i)) {
+            continue;
         }
-        Err(e) => match offline::read(&file).and_then(|c| c["peers"].as_array().cloned()) {
-            Some(list) => Ok(Value::Array(list.into_iter().map(|mut p| {
-                if p["self"] != json!(true) {
-                    p["status"] = json!("cached");
-                }
-                p
-            }).collect())),
-            None => Err(e),
-        },
-    }
-}
-
-/// 顔ぶれが同じまま中身だけ変わったときに、前の書き込みから空ける時間。
-/// 動いているセッションがあると report の doing などが取るたびに変わるので、毎回は書かない
-const TOWN_SAVE_GAP_MS: u128 = 30_000;
-
-/// 町ごとの、前回保存した一覧の鍵と顔ぶれと時刻
-struct TownSaved {
-    key: u64,
-    ids: Vec<String>,
-    at: u128,
-}
-static TOWN_SAVED: Mutex<Option<HashMap<String, Option<TownSaved>>>> = Mutex::new(None);
-
-/// 保存した一覧と同じかを比べる鍵。agents を JSON にしたもののハッシュ（保存した時刻の savedAt は agents の外にあるので入らない）
-fn town_key(agents: &[Value]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_string(agents).unwrap_or_default().hash(&mut h);
-    h.finish()
-}
-
-fn town_ids(agents: &[Value]) -> Vec<String> {
-    agents.iter().filter_map(|a| a["id"].as_str().map(String::from)).collect()
-}
-
-fn save_town(peer: &Option<String>, agents: &[Value]) {
-    let mut g = TOWN_SAVED.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = g.get_or_insert_with(HashMap::new).entry(offline::town(peer)).or_insert(None);
-    save_town_to(&offline::town_file(&cache_dir(), peer), agents, now_ms(), prev);
-}
-
-/// save_town の中身（試験のために置き場所、時刻、前回の記録を受け取る）。書いたら true。
-/// 中身が前回保存と同じなら書かない。顔ぶれが同じで中身だけ変わったときは、前の書き込みから TOWN_SAVE_GAP_MS 空ける
-/// （空けている間に変わった分は、間隔が過ぎた後の回で書く）。前回の記録が無い（起動直後）ときは、保存してあるファイルと比べる
-fn save_town_to(file: &std::path::Path, agents: &[Value], now: u128, prev: &mut Option<TownSaved>) -> bool {
-    if prev.is_none() {
-        *prev = offline::read(file).map(|c| {
-            let saved = c["agents"].as_array().cloned().unwrap_or_default();
-            TownSaved { key: town_key(&saved), ids: town_ids(&saved), at: c["savedAt"].as_u64().unwrap_or(0) as u128 }
-        });
-    }
-    let key = town_key(agents);
-    let ids = town_ids(agents);
-    if let Some(p) = prev.as_ref()
-        && (p.key == key || (p.ids == ids && now.saturating_sub(p.at) < TOWN_SAVE_GAP_MS)) {
-            return false;
-        }
-    // 書けたときだけ覚える（書けなかったら、次の回にまた書く）
-    if offline::write(file, json!({ "agents": agents })).is_err() {
-        return false;
-    }
-    *prev = Some(TownSaved { key, ids, at: now });
-    true
-}
-
-/// ccn の一覧を、画面に渡すセッションの形に直す。読めなければ（空の一覧, 理由）。
-/// この機械の町（peer が None）だけ、hook の報告と close-check の判定を足す。キャラの割り当ては足さない
-fn fetch_agents(peer: &Option<String>) -> (Vec<Value>, Option<String>) {
-    agents_from(peer, list_sessions(peer))
-}
-
-/// ccn の一覧（GET /sessions）。読めなければ理由
-fn list_sessions(peer: &Option<String>) -> Result<Vec<Value>, String> {
-    match ccn::sessions(peer) {
-        Ok(Value::Array(v)) => Ok(v),
-        Ok(_) => Err("一覧の形が想定と違う".into()),
-        Err(e) => Err(e),
-    }
-}
-
-/// ccn の一覧を、画面に渡すセッションの形に直す（fetch_agents の中身）。一覧は GET /sessions でも、一覧の SSE（#5）でもよい
-fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<Value>, Option<String>) {
-    let local = peer.is_none();
-    let (sessions, mut ccn_error) = match got {
-        // 設定で ccn を切ったら、SSE で受けた一覧が残っていても使わない
-        Ok(_) if local && !ccn_use() => (vec![], Some(CCN_OFF.to_string())),
-        Ok(v) => (v, None),
-        Err(e) => (vec![], Some(e)),
-    };
-    let mut live: Vec<&Value> = sessions
-        .iter()
-        .filter(|s| s.get("state").and_then(|x| x.as_str()) != Some("exited"))
-        .collect();
-    // この機械の町は、ネイティブの記録（~/.claude）の一覧を重ねる（#96）。同じ sessionId が ccn にもあれば ccn の行を使う。
-    // ccn の行は、送信や承認の口（capabilities）、from 行の親、アカウントを持つ。ネイティブからは、ccn に無いセッションと sub-agent を足す
-    let native_rows: Vec<Value> = if local {
-        let n = native::list(&native::claude_home(), native::now_ms());
-        let ccn_ids: HashSet<&str> = live.iter().filter_map(|s| s["id"].as_str()).collect();
-        let rows: Vec<Value> = n.sessions.into_iter().filter(|r| !r["id"].as_str().is_some_and(|id| ccn_ids.contains(id))).chain(n.subagents).collect();
-        native::register(native::paths_of(&rows.iter().collect::<Vec<_>>()));
-        let mut odd = n.stats.unexpected.clone();
-        for (k, v) in native::conv::odd_counts() {
-            *odd.entry(k).or_default() += v;
-        }
-        let mut st = serde_json::to_value(&n.stats).unwrap_or(Value::Null);
-        st["unexpected"] = json!(odd);
-        // 時間は毎回変わるので、一覧が変わったかの比べ（snapshot_key）に入れない
-        if let Some(o) = st.as_object_mut() {
-            o.remove("ms");
-        }
-        *LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!({
-            "ccn": match &ccn_error { None => "on".to_string(), Some(e) if e == CCN_OFF => "off".to_string(), Some(e) => e.clone() },
-            "native": st,
+        rows.push(json!({
+            "id": p.id, "kind": "terminal", "state": "idle", "cwd": p.cwd, "pid": p.pid, "startedAt": p.started_at,
+            "lastActivityAt": p.started_at, "parent": null, "title": null,
         }));
-        // ccn につながらなくても、ネイティブの一覧は読めているので、町は読めたものとして扱う（保存した一覧に差し替えない）
-        ccn_error = None;
-        rows
-    } else {
-        vec![]
-    };
-    live.extend(native_rows.iter());
-    let live_ids: HashSet<String> = live.iter().filter_map(|s| s["id"].as_str().map(String::from)).collect();
+    }
+    for r in rows.iter_mut() {
+        let mine = r["id"].as_str().is_some_and(pty::owns);
+        r["capabilities"] = if mine { app_caps() } else { native::read_only_caps() };
+        if mine {
+            r["source"] = json!("app");
+        }
+    }
+    native::register(native::paths_of(&rows.iter().collect::<Vec<_>>()));
+    let mut odd = n.stats.unexpected.clone();
+    for (k, v) in native::conv::odd_counts() {
+        *odd.entry(k).or_default() += v;
+    }
+    let mut st = serde_json::to_value(&n.stats).unwrap_or(Value::Null);
+    st["unexpected"] = json!(odd);
+    // 時間は毎回変わるので、一覧が変わったかの比べ（snapshot_key）に入れない
+    if let Some(o) = st.as_object_mut() {
+        o.remove("ms");
+    }
+    *LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!({ "native": st, "app": app }));
+    rows
+}
 
-    // ccn の parent は from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）
-    let parent_from_ccn = |s: &Value| -> Option<String> {
+/// このアプリが立てたセッションでできること。承認は端末で答える（構造化した承認の口は無い）
+fn app_caps() -> Value {
+    json!({ "send": true, "permissions": false, "interrupt": true, "stop": true, "terminal": true, "events": false })
+}
+
+/// 一覧の行を、画面に渡すセッションの形に直す。hook の報告と close-check の判定を足す。キャラの割り当ては足さない
+fn agents_from(rows: Vec<Value>) -> Vec<Value> {
+    let live_ids: HashSet<String> = rows.iter().filter_map(|s| s["id"].as_str().map(String::from)).collect();
+    // 別のプロダクト（ccn など）が子に付ける from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）から親を引く。Claude Code の記録の1行目にある
+    let parent_from_line = |s: &Value| -> Option<String> {
         let p = s["parent"].as_str()?;
         let sid8 = p.strip_prefix("agent:")?.split('/').nth(1)?;
         live_ids.iter().find(|id| id.starts_with(sid8)).cloned()
     };
 
-    // 名前は、そのセッションが作業しているプロジェクトの名前（src-tauri/src/naming.rs）。
-    // .git を読むのはこの機械の町だけ。別の機械の cwd はパスの形だけで決める
-    let whos: Vec<naming::Who> = live.iter().map(|s| {
+    // 名前は、そのセッションが作業しているプロジェクトの名前（src-tauri/src/naming.rs）
+    let whos: Vec<naming::Who> = rows.iter().map(|s| {
         let id = s["id"].as_str().unwrap_or_default().to_string();
         let cwd = s["cwd"].as_str().filter(|c| !c.is_empty());
         naming::Who {
             cwd: cwd.map(String::from),
             title: s["title"].as_str().map(String::from),
-            project: cwd.and_then(|c| naming::project_of(c, local)),
+            project: cwd.and_then(|c| naming::project_of(c, true)),
             id,
         }
     }).collect();
     let name_of = naming::card_names(&whos);
     let project_of: HashMap<&str, Option<&String>> = whos.iter().map(|w| (w.id.as_str(), w.project.as_ref())).collect();
     let mut agents = vec![];
-    for s in &live {
+    for s in &rows {
         let id = s["id"].as_str().unwrap_or_default().to_string();
-        // 親は ccn の parent（from 行の呼び手）から引く。sub-agent は置き場所で決めた親（#96）。親が生きていなければ根として扱う
+        // sub-agent とチームメイトは置き場所で決めた親（#96）。ほかは from 行の呼び手。親が生きていなければ根として扱う
         let native_parent = s["native"]["parentId"].as_str().filter(|p| live_ids.contains(*p)).map(String::from);
-        let parent = native_parent.or_else(|| parent_from_ccn(s)).filter(|p| *p != id);
-        let sub = s["kind"] == "subagent";
-        let (report, close_check) = if sub {
-            // sub-agent の様子は hook の報告ではなく、meta.json の説明と jsonl の末尾から作る（hook の報告は親のセッションの分しか無い）
+        let parent = native_parent.or_else(|| parent_from_line(s)).filter(|p| *p != id);
+        // sub-agent と in-process のチームメイトは、リードと同じ session id で hook が届くので、hook の報告を使わない。
+        // 様子は meta.json の説明と jsonl の末尾から作る。tmux のチームメイトは自分の session id を持つので hook の報告を読む
+        let from_meta = s["native"]["report"].is_object();
+        let (report, close_check) = if from_meta {
             (Some(s["native"]["report"].clone()), None)
-        } else if peer.is_none() {
+        } else {
             (
                 read_json_cached(&fc_path(Scope::Shared, &format!("state/{id}.json"))),
                 read_json_cached(&home().join(format!(".claude/close-check/{id}.json"))),
             )
-        } else {
-            (None, None)
         };
+        let named = matches!(s["kind"].as_str(), Some("subagent") | Some("teammate"));
         agents.push(json!({
             "id": id,
-            // sub-agent は、親と同じプロジェクトの名前になって見分けられないので、teammate の名前か種類（Explore など）にする
-            "name": if sub { s["title"].clone() } else { json!(name_of.get(&id)) },
-            // 一覧の出どころ（#96）。native は Claude Code の記録から読んでいるだけで、操作はできない
-            "source": if s.get("native").is_some() { "native" } else { "ccn" },
-            // cwd のプロジェクトの名前（worktree なら本体の名前）。振り分けの場所でも cwd の分を入れる
+            // sub-agent とチームメイトは、親と同じプロジェクトの名前になって見分けられないので、チームメイトの名前か種類（Explore など）にする
+            "name": if named { s["title"].clone() } else { json!(name_of.get(&id)) },
+            // 一覧の出どころ。app はこのアプリが立てた端末、native は Claude Code の記録から読んでいるだけで、操作はできない
+            "source": s.get("source").cloned().unwrap_or(json!("native")),
+            // cwd のプロジェクトの名前（worktree なら本体の名前）
             "project": project_of.get(id.as_str()).copied().flatten(),
             "kind": s["kind"],
             "state": s["state"],
@@ -445,12 +293,7 @@ fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<V
             "lastActivityAt": s["lastActivityAt"],
             "canSend": s["capabilities"]["send"],
             "parent": parent,
-            // ccn の parent の生の値。別の町にいる親を引くのに使う（src/ghost.ts）
-            "parentRaw": s["parent"],
             "capabilities": s["capabilities"],
-            // どのアカウントで動いているか（cam のコマンド名と email）。ccn の PR #56 から載る。古い ccn と、選べなかったセッションでは null
-            "account": s["account"],
-            "accountEmail": s["accountEmail"],
             "report": report,
             // status が ok/ng なら short は直下、working/checking なら前回の判定が last に入っている
             "closeCheck": close_check.map(|c| json!({
@@ -459,24 +302,16 @@ fn agents_from(peer: &Option<String>, got: Result<Vec<Value>, String>) -> (Vec<V
             })),
         }));
     }
-    (agents, ccn_error)
+    agents
 }
 
-/// 最後に作ったこの機械の町の一覧の出どころ（Snapshot の sources）
+/// 最後に作った町の一覧の出どころ（Snapshot の sources）
 static LAST_SOURCES: Mutex<Option<Value>> = Mutex::new(None);
 
-fn snapshot(peer: Option<String>) -> Snapshot {
-    let peer = peer.filter(|p| !p.is_empty());
-    // 設定で ccn を切ったら、ccn に一覧を取りに行かない
-    let got = if peer.is_none() && !ccn_use() { Err(CCN_OFF.to_string()) } else { list_sessions(&peer) };
-    snapshot_from(peer, got)
-}
-
-/// 受け取った一覧から、画面に渡す町の形を作る。キャラの割り当て、状態ファイル、お手紙はここで足す
-fn snapshot_from(peer: Option<String>, got: Result<Vec<Value>, String>) -> Snapshot {
-    let (mut agents, ccn_error) = agents_from(&peer, got);
-    // キャラの絵の割り当て。世代（親をたどった深さ）に合う見た目を重み付きの乱数で選び、保存して以後変えない。
-    // 別の機械の町も、機械ごとのファイルに保存する（乱数なので、保存しないと読むたびに顔が変わる）
+/// 画面に渡す町を作る。キャラの割り当て、状態ファイル、お手紙はここで足す
+fn snapshot() -> Snapshot {
+    let mut agents = agents_from(town_rows());
+    // キャラの絵の割り当て。世代（親をたどった深さ）に合う見た目を重み付きの乱数で選び、保存して以後変えない
     let mut order: Vec<&Value> = agents.iter().collect();
     order.sort_by(|a, b| a["startedAt"].as_u64().unwrap_or(0).cmp(&b["startedAt"].as_u64().unwrap_or(0)).then(a["id"].as_str().cmp(&b["id"].as_str())));
     let parent_of: HashMap<String, Option<String>> = agents.iter()
@@ -488,15 +323,14 @@ fn snapshot_from(peer: Option<String>, got: Result<Vec<Value>, String>) -> Snaps
         let d = depth.get(&id).copied().unwrap_or(0);
         (id, d)
     }).collect();
-    let path = avatars_path(&peer);
+    let path = avatars_path();
     let next = {
         // 読む、決める、書くの間に、同じアプリの別の snapshot が割り込まないようにする
         let _guard = AVATARS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (prev, mut recent) = avatars::load(&path);
         let before = recent.clone();
         let next = avatars::assign(&prev, &mut recent, &live, &mut fastrand::Rng::new());
-        // 一覧を読めなかったときは、全員がいなくなったように見えるので書かない
-        if ccn_error.is_none() && (next != prev || recent != before) {
+        if next != prev || recent != before {
             avatars::save(&path, &next, &recent);
         }
         next
@@ -506,64 +340,25 @@ fn snapshot_from(peer: Option<String>, got: Result<Vec<Value>, String>) -> Snaps
             a["avatar"] = json!({ "char": v.char, "hue": v.hue });
         }
     }
-    let letters = if peer.is_none() { recent_letters() } else { vec![] };
-    // 読めたら町の一覧を保存する。読めなければ保存した一覧を出す（ネットが切れて起動しても、世帯を選んで会話の保存を見られる）
-    let mut cached_at = None;
-    if ccn_error.is_none() {
-        save_town(&peer, &agents);
-    } else if let Some(c) = offline::read(&offline::town_file(&cache_dir(), &peer)) {
-        agents = c["agents"].as_array().cloned().unwrap_or_default();
-        cached_at = c["savedAt"].as_u64();
-    }
-    let sources = if peer.is_none() { LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner()).clone() } else { None };
-    Snapshot { ccn: ccn::base(), peer, ccn_ok: ccn_error.is_none(), ccn_error, agents, letters, fetched_at: now_ms(), cached_at, sources }
+    let sources = LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    Snapshot { agents, letters: recent_letters(), fetched_at: now_ms(), sources }
 }
 
 static AVATARS_LOCK: Mutex<()> = Mutex::new(());
 
-/// 別の町（いま見ていない町）のセッションの一覧（#14）。お便りと転出のゴーストにだけ使う。
-/// snapshot と違い、キャラを割り当てず保存もしない（前に割り当てた分を読むだけ）。お手紙の記録も読まない。
-/// まだ割り当てていないセッションは avatar が無く、画面は ID から決まる仮の顔を出す。その町を開いたときに snapshot が割り当てる
-fn town_agents(peer: Option<String>) -> Result<Vec<Value>, String> {
-    let peer = peer.filter(|p| !p.is_empty());
-    let (mut agents, err) = fetch_agents(&peer);
-    if let Some(e) = err {
-        return Err(e);
-    }
-    let (assigned, _) = avatars::load(&avatars_path(&peer));
-    for a in agents.iter_mut() {
-        if let Some(v) = a["id"].as_str().and_then(|id| assigned.get(id)) {
-            a["avatar"] = json!({ "char": v.char, "hue": v.hue });
-        }
-    }
-    Ok(agents)
-}
-
-/// キャラの割り当ての保存先。FC_AVATARS で差し替えられる（モックの ccn で試すとき、本物の割り当てを消さないため）。
-/// 別の機械の町は、同じ場所の avatars-peer-<機械>.json に分けて置く
-/// FC_CCN_URL で別のノード（モックなど）に向けたのに FC_AVATARS が無いときは、avatars-custom-ccn.json に分ける。
-/// 本物の avatars.json を使うと、モックにいない本物のセッションの割り当てが全部消える（乱数なので元に戻らない）。
+/// キャラの割り当ての保存先。FC_AVATARS で差し替えられる（試すときに本物の割り当てを消さないため）。
 /// 直近の記録（avatars-recent.json）は、同じ場所に avatars::recent_path が組み立てる。開発版はどれも dev/ の下になる
-fn avatars_path(peer: &Option<String>) -> PathBuf {
-    let default = if std::env::var("FC_CCN_URL").is_ok() { "avatars-custom-ccn.json" } else { "avatars.json" };
-    let base = std::env::var("FC_AVATARS").map(PathBuf::from).unwrap_or_else(|_| fc_path(Scope::App, default));
-    match peer {
-        None => base,
-        Some(p) => {
-            let safe: String = p.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
-            base.with_file_name(format!("avatars-peer-{safe}.json"))
-        }
-    }
+fn avatars_path() -> PathBuf {
+    std::env::var("FC_AVATARS").map(PathBuf::from).unwrap_or_else(|_| fc_path(Scope::App, "avatars.json"))
 }
 
 // ---------- 画面から呼ぶ命令（#3） ----------
 // async の付かない命令は Tauri のメインスレッドで動く（Tauri 2 の説明「Calling Rust from the Frontend」:
 // "Commands without the async keyword are executed on the main thread unless defined with #[tauri::command(async)]"）。
-// メインスレッドで ccn の HTTP を待つと、その間は画面の描画と入力が止まる（2026-11-12 の実測: ccn を3秒遅らせると、
-// 何もしない命令の往復が 12.5 秒、描画の間隔が 9.5 秒になった）。HTTP を待つ命令は、ここで spawn_blocking に移す。
+// ファイルを読む命令（一覧、会話、履歴）は、待つ間に画面の描画と入力を止めないよう、ここで spawn_blocking に移す。
 // 中身の関数は同期のまま残し、開発用の --snapshot などからも呼ぶ。
 
-/// 待ってよいスレッドで f を動かし、結果を待つ。ureq は同期なので、async の中で直接待たない
+/// 待ってよいスレッドで f を動かし、結果を待つ
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
@@ -572,11 +367,7 @@ mod cmd {
     use super::*;
 
     #[tauri::command]
-    pub async fn peers() -> Result<Value, String> { blocking(super::peers).await }
-    #[tauri::command]
-    pub async fn snapshot(peer: Option<String>) -> Result<Snapshot, String> { blocking(move || Ok(super::snapshot(peer))).await }
-    #[tauri::command]
-    pub async fn town_agents(peer: Option<String>) -> Result<Vec<Value>, String> { blocking(move || super::town_agents(peer)).await }
+    pub async fn snapshot() -> Result<Snapshot, String> { blocking(|| Ok(super::snapshot())).await }
 }
 
 /// 開発用の引数 --paths。identifier と、状態ファイルの置き場所を出す
@@ -585,8 +376,8 @@ fn print_paths() {
         "identifier": APP_ID.get(),
         "shared": fc_path(Scope::Shared, ""),
         "app": fc_path(Scope::App, ""),
-        "avatars": avatars_path(&None),
-        "avatarsRecent": avatars::recent_path(&avatars_path(&None)),
+        "avatars": avatars_path(),
+        "avatarsRecent": avatars::recent_path(&avatars_path()),
     })).unwrap_or_default());
 }
 
@@ -613,8 +404,8 @@ fn print_native_list() {
 }
 
 /// 開発用の引数 --snapshot。画面に渡すのと同じ一覧の JSON を出す
-fn print_snapshot(peer: Option<String>) {
-    println!("{}", serde_json::to_string_pretty(&snapshot(peer)).unwrap_or_default());
+fn print_snapshot() {
+    println!("{}", serde_json::to_string_pretty(&snapshot()).unwrap_or_default());
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -622,7 +413,6 @@ pub fn run() {
     // 開発用: 画面に渡すのと同じ JSON を出して終わる（ブラウザでの見た目の確認に使う）
     //   family-computing --snapshot             一覧
     //   family-computing --conversation <id>    会話
-    //   family-computing --answer <sessionId> <allow|deny> [expectId]
     // identifier はビルド時の設定（開発版は tauri.conf.json、安定版は tauri.stable.conf.json を重ねたもの）から取る。
     // 下の開発用の引数も、画面と同じ置き場所を使う
     // 軽さの計測（scripts/bench.ts）: プロセスが始まった時刻を書く。画面が町を描いた時刻との差を、起動の時間にする
@@ -645,52 +435,15 @@ pub fn run() {
         return;
     }
     if args.iter().any(|a| a == "--snapshot") {
-        print_snapshot(arg_after("--peer"));
+        print_snapshot();
         return;
     }
     if let Some(id) = arg_after("--conversation") {
-        // 出力の形は前と同じ（Ok に項目の配列）。public/dev-conversation.json に使う
-        println!("{}", serde_json::to_string_pretty(&conversation(id, None, None).map(|d| d.items)).unwrap_or_default());
+        // 出力の形は前と同じ（Ok に項目の配列）。public/dev-conversation.json に使う。jsonl の場所を登録するために、先に一覧を作る
+        let _ = town_rows();
+        println!("{}", serde_json::to_string_pretty(&conversation(id, None).map(|d| d.items)).unwrap_or_default());
         return;
     }
-    // family-computing --answer <sessionId> <allow|deny> [requestId]   承認待ちに答える（画面のボタンと同じ処理）
-    if let Some(i) = args.iter().position(|a| a == "--answer") {
-        let sid = args.get(i + 1).cloned().unwrap_or_default();
-        let choice = args.get(i + 2).cloned().unwrap_or_default();
-        println!("{:?}", answer_permission(sid, choice, args.get(i + 3).cloned(), None, None, None, None));
-        return;
-    }
-    // family-computing --term <sessionId> [秒]   端末の SSE を読んで、イベントを1行ずつ出す（画面の端末と同じ読み方）
-    if let Some(i) = args.iter().position(|a| a == "--term") {
-        let sid = args.get(i + 1).cloned().unwrap_or_default();
-        let secs: u64 = args.get(i + 2).and_then(|x| x.parse().ok()).unwrap_or(3);
-        let stop = Arc::new(AtomicBool::new(false));
-        let s2 = stop.clone();
-        std::thread::spawn(move || { std::thread::sleep(Duration::from_secs(secs)); s2.store(true, Ordering::SeqCst); });
-        let url = ccn::local_terminal_url(&sid);
-        read_terminal(&url, &stop, |ev, data| {
-            let n = data["b64"].as_str().map(|b| b.len()).unwrap_or(0);
-            println!("{ev} {}", if n > 0 { format!("b64 {n}字") } else { data.to_string() });
-        });
-        return;
-    }
-    // family-computing --create [cwd] [prompt] [parentId]   端末のセッションを立てる（画面の「子を足す」「新しい世帯」と同じ処理）
-    if let Some(i) = args.iter().position(|a| a == "--create") {
-        println!("{:?}", create_session(session_ops::CreateReq { cwd: args.get(i + 1).cloned(), prompt: args.get(i + 2).cloned(), parent: args.get(i + 3).cloned(), ..Default::default() }));
-        return;
-    }
-    // family-computing --send <sessionId> <文>   注文を送る（画面の送信と同じ処理）
-    if let Some(i) = args.iter().position(|a| a == "--send") {
-        println!("{:?}", send_message(args.get(i + 1).cloned().unwrap_or_default(), args.get(i + 2).cloned().unwrap_or_default(), None));
-        return;
-    }
-    // 会話の保存のうち、古いものと多すぎる分を消す。起動を待たせないよう別のスレッドで
-    std::thread::spawn(|| {
-        let n = offline::prune_conv(&cache_dir(), offline::CONV_MAX_AGE, offline::CONV_MAX_FILES);
-        if n > 0 {
-            eprintln!("[offline] 古い会話の保存を {n} 件消した");
-        }
-    });
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -711,13 +464,20 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            cmd::snapshot, cmd::town_agents, cmd::peers, conversation::cmd::conversation, conversation::cmd::conversation_cache, conversation::cmd::send_message, permission::cmd::answer_permission,
-            session_ops::cmd::create_session, session_ops::cmd::stop_session, teleport, session_ops::cmd::teleport_info, session_ops::cmd::session_detail, session_ops::cmd::house_places, repo::cmd::place_repos, term_open, term_close, term_input, term_resize,
-            perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick, town_settings, set_town_settings,
-            composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::interrupt_session, composer::cmd::session_controls, composer::cmd::configure_session, composer::cmd::run_command, attach::cmd::paste_clipboard, attach::cmd::stage_files
+            cmd::snapshot, conversation::cmd::conversation,
+            session_ops::cmd::create_session, session_ops::cmd::stop_session, session_ops::cmd::house_places, repo::cmd::place_repos,
+            term_open, term_close, term_input, term_resize,
+            perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
+            composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files
         ])
-        .run(context)
-        .expect("error while running tauri application");
+        .build(context)
+        .expect("error while building tauri application")
+        .run(|_app, ev| {
+            // アプリを終えるとき、ここから立てた claude を全部止める（pty.rs）。Exit は窓を閉じても ⌘Q でも来る
+            if let tauri::RunEvent::Exit = ev {
+                pty::kill_all();
+            }
+        });
 }
 
 #[cfg(test)]
@@ -808,6 +568,7 @@ mod tests {
         assert!(read_json_cached(&p).is_none());
         let _ = fs::remove_dir_all(&dir);
     }
+
 
     /// Report（src/model.ts）の形。hook が足すだけで Report には無いキーは HOOK_ONLY に分ける。
     /// deny_unknown_fields なので、見本に知らないキーが出たら読めずに落ちる
@@ -901,28 +662,11 @@ mod tests {
     }
 
     #[test]
-    fn agents_carry_account_when_ccn_lists_it() {
-        // 別の機械の町として読む（この機械の状態ファイルを読まない）
-        let peer = Some("vm".to_string());
-        let list = vec![
-            json!({ "id": "1f3efa8b-b958-4e3f-bc51-d2cf09cb0eaa", "kind": "pty", "state": "idle", "cwd": "/w/a", "account": "acct-a", "accountEmail": "a@example.invalid" }),
-            // 古い ccn の一覧にはアカウントが無い
-            json!({ "id": "f7a05063-6d62-40d7-b13c-3604a655dfda", "kind": "pty", "state": "idle", "cwd": "/w/b" }),
-        ];
-        let (agents, err) = agents_from(&peer, Ok(list));
-        assert!(err.is_none());
-        assert_eq!(agents[0]["account"], "acct-a");
-        assert_eq!(agents[0]["accountEmail"], "a@example.invalid");
-        assert!(agents[1]["account"].is_null());
-        assert!(agents[1]["accountEmail"].is_null());
-    }
-
-    #[test]
-    fn local_town_merges_native_sessions_and_subagents() {
+    fn town_reads_native_sessions_and_subagents() {
         // 会話を読む先の登録（native::register）はプロセスで1つなので、使う試験を1本ずつ動かす
         let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use native::testtree::*;
-        // 合成の ~/.claude: ccn にもあるセッション A（sub-agent 1体）と、ccn に無いセッション B
+        // 合成の ~/.claude: セッション A（sub-agent 1体）と、from 行で A の子になるセッション B
         let root = tmp("merge");
         let a = "aaaaaaaa-0000-4000-8000-00000000000a";
         let b = "bbbbbbbb-0000-4000-8000-00000000000b";
@@ -935,17 +679,12 @@ mod tests {
         write(&sub.join("agent-x1.jsonl"), "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"見た\"}]}}\n");
         write(&sub.join("agent-x1.meta.json"), &json!({ "agentType": "Explore", "description": "探す" }).to_string());
         native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
-        CCN_USE.store(1, Ordering::SeqCst);
-        let ccn = vec![json!({ "id": a, "kind": "pty", "state": "running", "cwd": "/tmp/合成/a", "capabilities": { "send": true, "stop": true }, "parent": "local" })];
-        let (agents, err) = agents_from(&None, Ok(ccn));
-        assert!(err.is_none());
+        let agents = agents_from(town_rows());
         let by = |id: &str| agents.iter().find(|x| x["id"] == id).cloned().unwrap_or(Value::Null);
-        // A は ccn の行（送れる）、B はネイティブの行（読むだけ）で、from 行から A の子になる
-        assert_eq!(by(a)["source"], "ccn");
-        assert_eq!(by(a)["canSend"], true);
-        assert_eq!(by(b)["source"], "native");
-        assert_eq!(by(b)["canSend"], false);
-        assert_eq!(by(b)["capabilities"]["permissions"], false);
+        // どちらもこのアプリが立てたものではないので、読むだけ。B は from 行から A の子になる
+        assert_eq!(by(a)["source"], "native");
+        assert_eq!(by(a)["canSend"], false);
+        assert_eq!(by(b)["capabilities"]["terminal"], false);
         assert_eq!(by(b)["parent"], a);
         let x1 = native::subagents::sub_id("x1", a);
         assert_eq!(by(&x1)["kind"], "subagent");
@@ -953,23 +692,20 @@ mod tests {
         assert_eq!(by(&x1)["name"], "Explore");
         assert_eq!(by(&x1)["report"]["asked"], "探す");
         assert_eq!(agents.len(), 3);
-        // 操作は、ネイティブの id だけ断る
-        assert!(native_guard(b, &None).is_err());
-        assert!(native_guard(&x1, &None).is_err());
-        assert!(native_guard(a, &None).is_ok());
-        assert!(native_guard(b, &Some("vm".into())).is_ok());
-        // 会話は jsonl から読む（印は native:）。conversation() は会話の保存（~/.family-computing の cache）を書くので、試験では読む関数だけを通す
+        // 操作は、このアプリが立てていないものを全部断る
+        assert!(app_guard(a).is_err());
+        assert!(app_guard(&x1).is_err());
+        // 会話は jsonl から読む（印は native:）
         let path = native::path_of(b).unwrap();
         let (next, items, _, epoch) = read_native(&path, 0).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["text"], "やって");
         assert!(epoch.unwrap().starts_with("native:"));
         assert_eq!(next, fs::metadata(&path).unwrap().len());
-        // ccn につながらなくても、ネイティブで読めたら町は読めたことにする
-        let (agents, err) = agents_from(&None, Err("つながらない".into()));
-        assert!(err.is_none());
-        assert_eq!(agents.len(), 3);
-        assert_eq!(LAST_SOURCES.lock().unwrap().as_ref().unwrap()["ccn"], "つながらない");
+        let d = conversation(b.into(), None).unwrap();
+        assert_eq!(d.items.len(), 1);
+        assert_eq!(LAST_SOURCES.lock().unwrap().as_ref().unwrap()["app"], 0);
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
     }
 
     #[test]

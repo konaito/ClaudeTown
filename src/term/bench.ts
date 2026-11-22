@@ -3,17 +3,16 @@
 // - new: 「＋ 新しい世帯」のボタンを押し、右パネルのチャットの入力欄にフォーカスが入るまでを測る（端末は開かない）。測り終えたら、作ったセッションだけを止める
 // - open: 自分で作ったセッション1つを、選び直して右クリックと同じ操作で開き直し、❯ が見えるまでを測る
 // - all: new を n 回、続けて最後に作ったセッションで open を n 回
-// - watch: 40秒、1秒ごとに町の人数と接続の表示を記録する
+// - watch: 40秒、1秒ごとに町の人数と赤い帯を記録する
 // - resize: 新しい世帯の右パネルの境目をドラッグし、claude が新しい幅で描き直すまでを測る（#19）
-// - offline: ?sid=<セッション> のチャットを開き、?secs=<秒>（既定 60）のあいだ1秒ごとに、会話の欄の吹き出しの数、保存した履歴の印、
-//   町の人数、接続の表示、赤い帯を記録する（オフラインのキャッシュ、src-tauri/src/offline.rs。scripts/offline-ccn-proxy.ts と使う）
-// - cpu: ?sid=<セッション> のターミナルを開いたまま30秒、IPC の回数を数える（#8、#9。scripts/mock-ccn-flood.ts と使う）
+// - cpu: ?sid=<セッション> のターミナルを開いたまま30秒、IPC の回数を数える（#8、#9）
 // - order: ?sid=<セッション> のチャットを開き、子が作業中になったら、入力欄から ?a= と ?b= の2通を続けて送る。?secs=<秒>（既定 90）のあいだ1秒ごとに、
 //   会話の欄の吹き出しの並び（自分の文と、仮の吹き出しか）を記録する（#69、送った順と出る順が入れ替わらないか）
 // - drop: ?sid=<セッション> のチャットを開き、?file=<パス> を落としたときと同じドロップの出来事（tauri://drag-drop）を起こす。
 //   入力欄に入ったパスを記録し、?ask= を続けて送る（#69、一時の場所のファイルを写したパスが入り、子が読めるか）
-// - scene: 軽さの計測（scripts/bench.ts、#2）。場面（scene=idle|hidden|minimized|terminal|talk|town）を用意して ready を書き、
-//   wait（ms）たったら post を書く。CPU とメモリは bench.ts が外から ps で測る。測っている間は、ここでは何も回さない
+// - scene: 軽さの計測（#2）。場面（scene=idle|hidden|minimized|terminal|talk|town）を用意して ready を書き、
+//   wait（ms）たったら post を書く。CPU とメモリは外から ps で測る。測っている間は、ここでは何も回さない。
+//   外から回していた scripts/bench.ts はモックの ccn で町を作っていたので、ccn を外したときに消した（作り直すまで、この場面は手で使う）
 // 結果は perf.ts が1回ごとに perf_log に書く。作るセッションには name に bench-ct-term を付ける。
 // 引数は URL（?bench=…）か、環境変数 VITE_FC_BENCH（"bench=scene&scene=idle" の形）で渡す。
 // 環境変数なら devUrl を変えずに済むので、場面ごとに Rust を組み直さない（devUrl は Rust に埋め込まれる）
@@ -127,7 +126,7 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       const mine0 = `${t.cols}x${t.rows}`;
       for (const [cols, rows] of [[50, 20], [200, 50]]) {
         const r0 = perfCounters.resizes;
-        await call("term_resize", { sessionId: r.id, cols, rows, peer: null });
+        await call("term_resize", { sessionId: r.id, cols, rows });
         await sleep(3000);
         // 窓から離れて戻る（claude はフォーカスの報告を有効にしているので、ESC[O と ESC[I が onData に流れる）
         t.blur();
@@ -149,27 +148,10 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       }
       return;
     }
-    // watch: 40秒、1秒ごとに町の人数と接続の表示を記録する（一覧の取得が失敗しても町が消えないかを見る）
+    // watch: 40秒、1秒ごとに町の人数と赤い帯を記録する（一覧の取得が失敗しても町が消えないかを見る）
     if (mode === "watch") {
       for (let i = 0; i < 40; i++) {
-        await log({ t: i, at: new Date().toISOString().slice(11, 23), town: document.querySelector(".fam-title")?.textContent ?? "", conn: document.querySelector(".conn")?.textContent ?? "", banner: !!document.querySelector(".banner.bad") });
-        await sleep(1000);
-      }
-      return;
-    }
-    if (mode === "offline") {
-      h().select(params.get("sid"));
-      const secs = Number(params.get("secs") ?? 60);
-      const text = (sel: string) => document.querySelector(sel)?.textContent ?? null;
-      // 会話の欄とグラデーションの上端（印が出ても位置が変わらないか）
-      const top = (sel: string) => { const e = document.querySelector(sel); return e ? Math.round(e.getBoundingClientRect().top) : null; };
-      for (let i = 0; i < secs; i++) {
-        await log({ t: i, at: new Date().toISOString().slice(11, 23), town: text(".fam-title"), conn: text(".conn"), banner: text(".banner.bad"),
-          note: text(".offline-note"), msgs: document.querySelectorAll(".talk .msg, .talk .tool-line").length, empty: !!document.querySelector(".talk .hint.center"),
-          tabs: document.querySelectorAll(".panel .tabs button").length, segTop: top(".panel .seg-top"), scrollTop: top(".panel .seg-scroll"), noteTop: top(".offline-note"),
-          // 一番下からの距離（印の余白が付いても、一番下に留まっているか）と、町の選択肢の数（保存した peers が出るか）
-          bottomGap: (() => { const e = document.querySelector(".panel .seg-scroll"); return e ? Math.round(e.scrollHeight - e.scrollTop - e.clientHeight) : null; })(),
-          towns: document.querySelectorAll("select.node option").length });
+        await log({ t: i, at: new Date().toISOString().slice(11, 23), town: document.querySelector(".fam-title")?.textContent ?? "", banner: !!document.querySelector(".banner.bad") });
         await sleep(1000);
       }
       return;
@@ -258,7 +240,7 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
         // 最後の1つは open の計測に残す
         if (r.id && (mode === "new" || i < rounds - 1)) {
           h().select(null);
-          await call("stop_session", { sessionId: r.id, peer: null }).catch(() => {});
+          await call("stop_session", { sessionId: r.id }).catch(() => {});
           await sleep(2500);
         }
       }
@@ -273,19 +255,19 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
         await done;
         await sleep(800);
       }
-      // ?type=1: 1字ずつ待たずに term_input を投げ、打った順に届くかを見る（#3）。届いた画面は ccn の replay で確かめる
+      // ?type=1: 1字ずつ待たずに term_input を投げ、打った順に届くかを見る（#3）。届いた画面は replay で確かめる
       if (params.get("type")) {
         const text = "ordercheck-0123456789abcdefghijklmnopqrstuvwxyz";
-        for (const ch of text) call("term_input", { sessionId: last, text: ch, peer: null });
+        for (const ch of text) call("term_input", { sessionId: last, text: ch });
         await sleep(1500);
         await log({ typed: text, id: last });
         await sleep(15000);
-        await call("term_input", { sessionId: last, text: "\x15", peer: null });
+        await call("term_input", { sessionId: last, text: "\x15" });
       }
     }
   } finally {
     h().select(null);
-    for (const id of mine) await call("stop_session", { sessionId: id, peer: null }).catch(() => {});
+    for (const id of mine) await call("stop_session", { sessionId: id }).catch(() => {});
     await log({ done: true, stopped: mine });
   }
 }

@@ -3,7 +3,7 @@ import type { Snapshot } from "../model";
 import { pollWhileVisible } from "../visible";
 
 /**
- * 閉じたセッションのうち、演出が終わって隠しているもの（id と隠した時刻）。ccn の一覧から消えたら忘れる。
+ * 閉じたセッションのうち、演出が終わって隠しているもの（id と隠した時刻）。一覧から消えたら忘れる。
  * 10秒たっても消えなければ戻して失敗を出す。agents は隠したものを除いた一覧
  */
 export function useHidden(snap: Snapshot | null, toast: (text: string, bad?: boolean) => void) {

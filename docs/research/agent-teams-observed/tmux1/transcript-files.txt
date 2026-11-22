@@ -1,0 +1,3 @@
+~/.claude/projects/-private-tmp-fc-team-obs-tmux1/ccdd10c6-4b19-40ac-8fcd-23888fb4ae8f.jsonl
+~/.claude/projects/-private-tmp-fc-team-obs-tmux1/b3fb04b0-4b4c-4d79-880e-c07440099d7b.jsonl
+~/.claude/projects/-private-tmp-fc-team-obs-tmux1/58eebd3d-8938-4275-b592-baf159242295.jsonl

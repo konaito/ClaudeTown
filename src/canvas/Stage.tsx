@@ -26,7 +26,7 @@ export function Stage({ zoom, items, onBlank }: { zoom: number | "fit"; items: {
   const at = new Map(packed.items.map((p) => [p.id, p]));
   return (
     <ScrollEdgeGradient className="stage" wrapClassName="seg-fill stage-bg" strength="town" ref={outer}
-      onClick={(e) => { if (!(e.target as HTMLElement).closest(".card, .mini, .pop, .g-head, .ghost-card, .card-acts, .letter-mark")) onBlank(); }}>
+      onClick={(e) => { if (!(e.target as HTMLElement).closest(".card, .mini, .pop, .g-head, .card-acts, .letter-mark")) onBlank(); }}>
       <div className="stage-inner" style={{ zoom: scale, width, height: packed.height + 20 }}>
         {items.map((b) => {
           const p = at.get(b.id)!;

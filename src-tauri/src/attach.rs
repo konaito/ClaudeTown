@@ -1,5 +1,5 @@
 // チャットの入力欄に貼る画像とファイル（#64）。
-// ccn の送信は文しか受けないので、画像は手元のファイルにして、入力欄にはそのパスを入れる。
+// 端末への送信は文しか運べないので、画像は手元のファイルにして、入力欄にはそのパスを入れる。
 // webview の貼り付けの中身からはファイルのパスが取れない（Finder でコピーしたファイルも名前しか見えない）ので、
 // macOS の NSPasteboard を osascript（JavaScript for Automation）で読む。
 // 公式の tauri-plugin-clipboard-manager は文と画像（RGBA）しか読めず、ファイルの URL を読む口が無い

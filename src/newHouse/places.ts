@@ -1,8 +1,7 @@
-// 新しい世帯のペイン（#89）に出す「最近使った場所」の一覧を、手元のノードの ccn の3つの応答から作る。
-// 合わせ方は ccn の MCP の list_places と同じで、ccn には手を入れない:
-// - GET /api/places の候補（lastUsedAt は、その場所かその下で動いたセッションの最後の活動）
-// - GET /api/sessions の cwd と lastActivityAt（止まったセッションも含む）
-// - GET /api/host の roots と lobby（ccn が立てられるのは roots の内側だけ。受け口は新しい世帯の行き先にしない）
+// 新しい世帯のペイン（#89）に出す「最近使った場所」の一覧を作る。材料は Rust の house_places（アプリ）か、ccn の3つの応答（ブラウザ版）:
+// - places: 場所の候補と最後に使った時刻。アプリは Claude Code の入力の履歴（src-tauri/src/places.rs）、ブラウザ版は ccn の GET /api/places
+// - sessions: いま動いているセッションの cwd と lastActivityAt
+// - roots と lobby: ブラウザ版だけ。ccn が立てられるのは roots の内側だけで、受け口は新しい世帯の行き先にしない。アプリでは空
 // セッションの cwd が places の候補の下（worktree や下のフォルダ）にあれば、その候補にまとめる。
 // どの候補の下でもない cwd（~/Documents の直下など）は、その cwd のまま出す
 
@@ -12,6 +11,8 @@ export type PlacesInput = {
   sessions: { cwd?: string | null; lastActivityAt?: number | null }[];
   /** 古い ccn には /api/places が無い（404）。そのときは null */
   places: { path: string; lastUsedAt?: number | null }[] | null;
+  /** 場所を設定していないときに新しい世帯を立てる場所（絶対パス）。アプリの Rust だけが返す */
+  defaultPlace?: string | null;
 };
 export type RecentPlace = { path: string; at: number };
 
@@ -38,6 +39,17 @@ export function recentPlaces(input: PlacesInput, limit = RECENT_PLACES_MAX): Rec
   return [...at].map(([path, t]) => ({ path, at: t }))
     .sort((a, b) => b.at - a.at || a.path.localeCompare(b.path))
     .slice(0, limit);
+}
+
+/**
+ * 新しい世帯の置き場所（設定した場所、無ければ既定の場所）を一覧から除く（2026-11-21 本人の決定）。
+ * 「＋ 新しい世帯」のボタンがその場所で立てるので、一覧に同じ場所を並べない。設定を変えたら、変えた先を除く。どちらも無ければ除かない
+ */
+export function withoutPlace(list: RecentPlace[], place: string | null, defaultPlace: string | null | undefined): RecentPlace[] {
+  const target = place ?? defaultPlace ?? null;
+  if (!target) return list;
+  const t = trim(target);
+  return list.filter((p) => trim(p.path) !== t);
 }
 
 /** 一覧の日時。本人の見本と同じ「11-21 14:40」の形（手元の時刻） */

@@ -3,7 +3,7 @@ import type { Agent, Snapshot } from "./model";
 import { reuseAgents, reuseSnap } from "./snap";
 
 const ag = (id: string, state: Agent["state"] = "idle"): Agent => ({ id, name: id, kind: "node", state, cwd: `/tmp/${id}`, canSend: true, parent: null });
-const snap = (agents: Agent[], at: number, letters: any[] = []): Snapshot => ({ ccn: "x", peer: null, ccn_ok: true, ccn_error: null, agents, letters, fetched_at: at });
+const snap = (agents: Agent[], at: number, letters: any[] = []): Snapshot => ({ agents, letters, fetched_at: at, sources: { native: { live: agents.length }, app: 0 } });
 
 describe("reuseSnap（#4）", () => {
   test("取得した時刻のほかが同じなら、前回のオブジェクトを返す", () => {
@@ -31,9 +31,9 @@ describe("reuseSnap（#4）", () => {
     expect(r.letters).toHaveLength(1);
   });
 
-  test("つながらなくなったら、新しい一覧を返す", () => {
+  test("出どころの件数が変わったら、新しい一覧を返す", () => {
     const a = snap([ag("a")], 1);
-    const b = { ...snap([ag("a")], 2), ccn_ok: false, ccn_error: "x" };
+    const b = { ...snap([ag("a")], 2), sources: { native: { live: 1 }, app: 1 } };
     expect(reuseSnap(a, b)).not.toBe(a);
   });
 });

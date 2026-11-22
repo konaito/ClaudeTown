@@ -9,7 +9,7 @@ import { isSlashCommand } from "../composer/edit";
 import type { useNodeSupport } from "../session/SessionControls";
 
 type Opts = {
-  agent: Agent | null; peer: string; hasTerm: boolean; items: ConvItem[]; switching: boolean;
+  agent: Agent | null; hasTerm: boolean; items: ConvItem[]; switching: boolean;
   support: ReturnType<typeof useNodeSupport>[0]; markNoSupport: () => void;
   addNote: (sid: string, n: PendingItem) => void; setTab: (t: "term" | "talk" | "state") => void;
   setPending: React.Dispatch<React.SetStateAction<PendingItem[]>>; setText: (v: string) => void;
@@ -18,23 +18,25 @@ type Opts = {
 };
 
 /** パネルからの送信。send は毎回の描画で作り直す（busy や items を読むため）。agent が無いときは何も送らない */
-export function usePanelSend({ agent, peer, hasTerm, items, switching, support, markNoSupport, addNote, setTab, setPending, setText, stick, convKick, onSent, onError }: Opts) {
+export function usePanelSend({ agent, hasTerm, items, switching, support, markNoSupport, addNote, setTab, setPending, setText, stick, convKick, onSent, onError }: Opts) {
   const [busy, setBusy] = useState(false);
   /** quick はカードのボタンから送るとき。入力欄の下書きは消さない */
   const send = async (body: string, quick = false) => {
     if (!agent || !body.trim() || busy || switching) return false;
-    // / で始まる組み込みのコマンドの振り分け（#97、src/composer/route.ts）。使えないものは送らずに理由を出す
-    // ccn を通さないセッション（#96）は端末のセッションと同じく振り分けない（送る口のほうが断る）
+    // / で始まる組み込みのコマンドの振り分け（#97、src/composer/route.ts）。使えないものは送らずに理由を出す。
+    // ブラウザ版（PWA）の ccn の行のほかは、端末のセッションと同じく振り分けない
     const route = routeOf(body, viaCcn(agent) ? agent.kind : "terminal", support);
     if (route?.kind === "blocked") { onError(route.reason); return false; }
     setBusy(true);
     const after = items[items.length - 1]?.n ?? -1;
-    // 先頭が / か ! の文は、端末のあるセッションなら入力欄へ直接貼る。ccn の send_message は from の1行を前に付けるので、
+    // アプリが立てたセッションは、どの文も端末の入力欄へ貼って Enter を押す（CLI に打ったのと同じ）。
+    // ブラウザ版の ccn の行では、先頭が / か ! の文だけを入力欄へ貼る。ccn の send_message は from の1行を前に付けるので、
     // CLI のコマンドやシェルモードとして動かない（docs/research/cli-input.md）
-    const direct = hasTerm && (body.startsWith("!") || isSlashCommand(body));
+    const plain = !(body.startsWith("!") || isSlashCommand(body));
+    const direct = hasTerm && (!viaCcn(agent) || !plain);
     try {
       if (route?.kind === "command") {
-        const r = await invoke<unknown>("run_command", { sessionId: agent.id, text: route.text, peer: peer || null });
+        const r = await invoke<unknown>("run_command", { sessionId: agent.id, text: route.text });
         if (!isHttp(r)) throw new Error("ccn の応答が読めなかった");
         const err = commandError(r);
         if (err) {
@@ -43,11 +45,12 @@ export function usePanelSend({ agent, peer, hasTerm, items, switching, support, 
         }
         addNote(agent.id, { role: "event", kind: "command", text: `/${route.name} を実行した${route.note ? `。${route.note}` : ""}`, at: new Date().toISOString(), after });
       } else if (direct) {
-        await invoke("send_direct", { sessionId: agent.id, text: body, peer: peer || null });
+        await invoke("send_direct", { sessionId: agent.id, text: body });
         // 画面を開くコマンド（/model など）は、ターミナルで操作してもらう
-        if (opensDialog(body, BUILTINS)) setTab("term");
+        if (!plain && opensDialog(body, BUILTINS)) setTab("term");
+        if (plain) setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
       } else {
-        await invoke("send_message", { sessionId: agent.id, text: body, peer: peer || null });
+        await invoke("send_message", { sessionId: agent.id, text: body });
         setPending((p) => [...p, { role: "user", text: body, pending: true, at: new Date().toISOString(), after }]);
       }
       if (!quick) setText("");

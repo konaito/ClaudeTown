@@ -8,28 +8,28 @@ import { SessionControls, useNodeSupport } from "../session/SessionControls";
 import { Approval } from "../approval/Approval";
 import { openPlan } from "../approval/answers";
 import { Avatar, roleOf } from "../kid/Avatar";
-import { type Agent, type Peer, MOOD_LABEL, accountText, choicesOf, moodOf, targetLabel, taskOf } from "../model";
+import { type Agent, MOOD_LABEL, accountText, choicesOf, moodOf, targetLabel, taskOf } from "../model";
 import { linkify } from "../Markdown";
-import { savedLabel, withNotes, type PendingItem } from "../conv";
+import { withNotes, type PendingItem } from "../conv";
 import { Bubble, collapseTools, withResults } from "../chat/Bubble";
 import { LiveLine } from "../chat/LiveLine";
 import { TownCtx } from "../contexts";
 import { DocIcon } from "../icons";
-import { Teleport } from "../teleport/Teleport";
 import { CardActions } from "../card/CardActions";
 import { StateTab } from "./StateTab";
 import { useConversation } from "./useConversation";
 import { usePanelSend } from "./usePanelSend";
-import { hasTerminal } from "../abilities";
+import { canAnswerPermission, hasTerminal } from "../abilities";
+import { viaCcn } from "../session/control";
 
 const NO_NOTES: PendingItem[] = [];
 
-export function Panel({ agent, peer, lineage, descendants, termReq, chatReq, composeReq, peers, sendHook, onSent, onSent2, onError, needs, onSelect, mobile, onBack, onClose }: {
-  /** スマホ専用の画面（src/mobile）。見出しを戻るつきの1行にし、転出と細かいボタンは出さない */
+export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, onSent, onSent2, onError, needs, onSelect, mobile, onBack, onClose }: {
+  /** スマホ専用の画面（src/mobile）。見出しを戻るつきの1行にし、細かいボタンは出さない */
   mobile?: boolean; onBack?: () => void;
   /** 見出しの × で選ぶのをやめる（#89）。右パネルが閉じる */
   onClose?: () => void;
-  agent: Agent | null; peer: string; lineage: Agent[]; descendants: Agent[]; termReq: number; chatReq: number; composeReq: number; peers: Peer[];
+  agent: Agent | null; lineage: Agent[]; termReq: number; chatReq: number; composeReq: number;
   /** カードのボタン（#63）が、選んでいるセッションへの送信をこのパネルに任せる口。選んでいないセッションなら null を返す */
   sendHook: React.MutableRefObject<((id: string, text: string) => Promise<boolean> | null) | null>;
   onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
@@ -37,9 +37,8 @@ export function Panel({ agent, peer, lineage, descendants, termReq, chatReq, com
   const hasTerm = hasTerminal(agent);
   const town = useContext(TownCtx);
   const [tab, setTab] = useState<"term" | "talk" | "state">("talk");
-  const [sheet, setSheet] = useState<"teleport" | null>(null);
   // セッションを選んだときと新しい世帯を作ったときはチャットを出す。右クリックなどの termReq だけ端末を開く
-  useEffect(() => { setTab("talk"); setSheet(null); }, [agent?.id, hasTerm]);
+  useEffect(() => { setTab("talk"); }, [agent?.id, hasTerm]);
   useEffect(() => { if (termReq && hasTerm) setTab("term"); }, [termReq]);
   useEffect(() => { if (chatReq) setTab("talk"); }, [chatReq]);
   // composeReq が来たら、チャットの入力欄にフォーカスする。前に選んでいた子が端末を開いていると、
@@ -62,8 +61,8 @@ export function Panel({ agent, peer, lineage, descendants, termReq, chatReq, com
   // モデルか権限モードを替えている間（#97）。pty は claude を起動し直すので、その間は送らない
   const [switching, setSwitching] = useState(false);
   useEffect(() => { setSwitching(false); }, [agent?.id]);
-  // ノードにモデルの切り替えとコマンドの口があるか（#97）
-  const [support, markNoSupport] = useNodeSupport(agent, peer);
+  // ノードにモデルの切り替えとコマンドの口があるか（#97）。ブラウザ版（PWA）の ccn の行だけが確かめる
+  const [support, markNoSupport] = useNodeSupport(agent);
   // チャットからコマンドを実行した印（#97）。画面だけで出す。セッションごとに持ち、ほかのセッションを見て戻っても残す（アプリを閉じたら消える）
   const notesBy = useRef(new Map<string, PendingItem[]>());
   const [, bumpNotes] = useState(0);
@@ -86,8 +85,8 @@ export function Panel({ agent, peer, lineage, descendants, termReq, chatReq, com
   // チャットを開いたとき（セッションを選んだ、タブを切り替えた）は、必ず一番下から始める。
   // 以前は stick を読み込みの effect でしか戻さず、タブの切り替えでは前の値が残り、容れ物も作り直されるのに items が変わらないので下へ送られなかった
   useLayoutEffect(() => { stick.current = true; }, [id, tab, chatReq]);
-  const { items, live, pending, setPending, convErr, cachedAt, convKick } = useConversation(id, peer, isFast, working, stick, agent?.kind !== "node");
-  const { busy, send } = usePanelSend({ agent, peer, hasTerm, items, switching, support, markNoSupport, addNote, setTab, setPending, setText, stick, convKick, onSent, onError });
+  const { items, live, pending, setPending, convErr, convKick } = useConversation(id, isFast, working, stick, agent?.kind !== "node");
+  const { busy, send } = usePanelSend({ agent, hasTerm, items, switching, support, markNoSupport, addNote, setTab, setPending, setText, stick, convKick, onSent, onError });
 
   // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
   // -p の子は返事が出ると、送った文の仮の印が外れる（#55、answerPending）。外れた分は after の位置に置く（withNotes）
@@ -96,8 +95,8 @@ export function Panel({ agent, peer, lineage, descendants, termReq, chatReq, com
     const placed = pending.length === waiting.length ? notes : [...notes, ...pending.filter((x) => !x.pending)].sort((a, b) => a.after - b.after);
     return collapseTools(withResults(withNotes([...items, ...waiting], placed)));
   }, [items, pending, notes]);
-  // 保存した履歴の印が出ているか。出ている間は中身の上に余白を足す（下の has-note）
-  const hasNote = shown.length > 0 && !!(convErr || cachedAt);
+  // 読めなかった印が出ているか。出ている間は中身の上に余白を足す（下の has-note）
+  const hasNote = shown.length > 0 && !!convErr;
   // 会話の最後のまだ答えていない計画（ExitPlanMode の本文）。承認の hook の入力が空のとき、承認の欄に出す（#83）
   const lastPlan = useMemo(() => openPlan(items), [items]);
   const lastChoices = useMemo(() => {
@@ -141,6 +140,8 @@ export function Panel({ agent, peer, lineage, descendants, termReq, chatReq, com
   }
 
   const mood = moodOf(agent);
+  // 承認の欄から答えられるか。答えられるのはブラウザ版（PWA）の ccn の行だけ。アプリが立てたセッションは、端末の承認の画面で答える
+  const canAnswer = canAnswerPermission(agent);
   // 同じ名前の人が町にいたら、送信先に ID の先頭8字を添える（#36）。見出しは幅が足りず ID が切れるので名前だけにする
   const target = targetLabel(agent, town);
   quickSend.current = (to, body) => (to === agent.id ? send(body, true) : null);
@@ -173,32 +174,31 @@ export function Panel({ agent, peer, lineage, descendants, termReq, chatReq, com
         </div>
         <div className="p-actions">
           {onClose && <button className="p-close" onClick={onClose} aria-label="チャットを閉じる" title="チャットを閉じる"><X size={16} strokeWidth={1.8} /></button>}
-          <button className="pane-btn" disabled={!!peer} title={peer ? "転出できない: 別の機械のセッションの転出は、まだ出していない" : "転出: このセッションを別の機械（ccn のノード）へ移すか、複製する"} onClick={() => setSheet(sheet === "teleport" ? null : "teleport")}>転出</button>
           {/* カードの右下と同じボタン（CARD_ACTIONS）。カードに乗せなくても押せるよう、ここにも並べる */}
-          {!agent.ghost && <CardActions agent={agent} place="head" />}
+          <CardActions agent={agent} place="head" />
         </div>
       </div>
       )}
-      {!mobile && sheet === "teleport" && <Teleport agent={agent} descendants={descendants} peers={peers} onDone={(m) => { setSheet(null); onSent2(m); }} onError={onError} />}
       <div className="tabs">
         <button className={tab === "talk" ? "on" : ""} onClick={() => setTab("talk")}>チャット</button>
         <button className={tab === "state" ? "on" : ""} onClick={() => setTab("state")}>状態</button>
         {hasTerm && <button className={tab === "term" ? "on" : ""} onClick={() => setTab("term")}>ターミナル</button>}
       </div>
-      {mood === "approval" && (tab === "term" || tab === "state") && (
-        <div className="ap-float"><Approval agent={agent} peer={peer} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} /></div>
+      {mood === "approval" && tab === "state" && (
+        <div className="ap-float">{canAnswer ? <Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} /> : <AnswerInTerminal agent={agent} onTerm={() => setTab("term")} />}</div>
+      )}
+      {mood === "approval" && tab === "term" && canAnswer && (
+        <div className="ap-float"><Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} /></div>
       )}
 
       {tab === "term" ? (
-        <Suspense fallback={<div className="term-wrap"><div className="term" /></div>}><TerminalView sessionId={agent.id} peer={peer || null} onError={onError} /></Suspense>
+        <Suspense fallback={<div className="term-wrap"><div className="term" /></div>}><TerminalView sessionId={agent.id} onError={onError} /></Suspense>
       ) : tab === "talk" ? (<div className="talk-box">
-        {/* 保存した履歴を出しているときの印。会話の欄の流れに入れると欄とグラデーションの始まりがずれ、タブの行は端末のタブがあると幅が足りない。
-            そのため、欄の上端の中央に重ねる（position: absolute）。中身の失敗は title に入れる */}
-        {convErr && shown.length > 0 ? (
-          <span className="offline-note" title={convErr}><i /><span>つながらない・{cachedAt ? `${savedLabel(cachedAt)} 時点の履歴` : "最後に読めた履歴"}</span></span>
-        ) : !convErr && cachedAt ? (
-          <span className="offline-note wait" title="最新を読み込んでいる"><i /><span>{savedLabel(cachedAt)} 時点の履歴・更新中</span></span>
-        ) : null}
+        {/* 会話を読めなかったときの印。会話の欄の流れに入れると欄とグラデーションの始まりがずれるので、欄の上端の中央に重ねる（position: absolute）。
+            中身の失敗は title に入れる */}
+        {convErr && shown.length > 0 && (
+          <span className="offline-note" title={convErr}><i /><span>読めない・最後に読めた履歴</span></span>
+        )}
         {/* 印が出ている間は、中身の上に印の高さぶんの余白を足す（上端まで送ったとき、いちばん古い行が印の下に入らない）。外枠とグラデーションの位置は変えない */}
         <ScrollEdgeGradient className={`talk ${hasNote ? "has-note" : ""}`} wrapClassName="seg-fill" ref={scroller}
           onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; }}>
@@ -206,9 +206,9 @@ export function Panel({ agent, peer, lineage, descendants, termReq, chatReq, com
           {shown.length === 0 && !convErr && <p className="hint center">まだチャットが無い</p>}
           {shown.map((x, i) => <Bubble key={x.n ?? `p${x.at ?? i}`} item={x} agent={agent} lineageDepth={lineage.length - 1} />)}
           {mood === "working" && live && <LiveLine live={live} turnAt={agent.report?.turn_started_at ?? null} />}
-          {mood === "approval" && (
-            <Approval agent={agent} peer={peer} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} />
-          )}
+          {mood === "approval" && (canAnswer
+            ? <Approval agent={agent} planHint={lastPlan} onDone={(m) => onSent2(m)} onError={onError} />
+            : <AnswerInTerminal agent={agent} onTerm={() => setTab("term")} />)}
           {choices.length > 0 && (
             <div className="choices">
               {choices.map((c) => <button key={c} className="choice" disabled={busy} onClick={() => send(c)}>{c}</button>)}
@@ -221,10 +221,24 @@ export function Panel({ agent, peer, lineage, descendants, termReq, chatReq, com
 
       {tab !== "term" && <div className="composer" ref={composerBox}>
         <div className="to"><span className="to-name">送信先: {target}</span>
-          {!agent.ghost && <SessionControls key={agent.id} agent={agent} peer={peer} support={support} onNoSupport={markNoSupport} onSwitching={setSwitching} onDone={onSent2} onError={onError} />}
+          {viaCcn(agent) && <SessionControls key={agent.id} agent={agent} support={support} onNoSupport={markNoSupport} onSwitching={setSwitching} onDone={onSent2} onError={onError} />}
         </div>
-        <Composer key={agent.id} touch={mobile} agent={agent} peer={peer} text={text} setText={setText} busy={busy || switching} running={mood === "working"} support={support} onSubmit={send} onError={onError} />
+        <Composer key={agent.id} touch={mobile} agent={agent} text={text} setText={setText} busy={busy || switching} running={mood === "working"} support={support} onSubmit={send} onError={onError} />
       </div>}
     </aside>
+  );
+}
+
+/**
+ * 承認待ちで、ここからは答えられないとき（ブラウザ版の ccn の行のほか全部）。承認は端末の承認の画面で答える。
+ * アプリが立てたセッションなら、ターミナルのタブを開くボタンを出す。外で起動したセッションは、起動した端末で答える
+ */
+function AnswerInTerminal({ agent, onTerm }: { agent: Agent; onTerm: () => void }) {
+  const mine = hasTerminal(agent);
+  return (
+    <div className="ap ap-term">
+      <p className="hint">{mine ? "承認を待っている。ターミナルの承認の画面で答える。" : "承認を待っている。このセッションは Claude Town の外で起動したので、起動した端末で答える。"}</p>
+      {mine && <button className="primary" onClick={onTerm}>ターミナルを開く</button>}
+    </div>
   );
 }

@@ -1,7 +1,7 @@
 // チャットの入力欄。キーの動きは Claude Code の CLI の入力に合わせる。
 // 何をどう合わせたか、合わせなかったものと理由は docs/research/cli-input.md の表にある。
 import { useLayoutEffect, useRef, useState } from "react";
-import { call as invoke } from "../bridge";
+import { IS_WEB, call as invoke } from "../bridge";
 import getCaretCoordinates from "textarea-caret";
 import type { Agent } from "../model";
 import { usePaste, REMOTE_FILES } from "./usePaste";
@@ -42,16 +42,17 @@ const HELP: [string, string][] = [
   ["Ctrl+C", "作業を止める（作業中）・打ちかけを消す"],
 ];
 
-export function Composer({ agent, peer, text, setText, busy, running, support = "no", onSubmit, onError, touch }: {
+export function Composer({ agent, text, setText, busy, running, support = "no", onSubmit, onError, touch }: {
   /** ノードに command の口があるか（#97）。/ のコマンドの振り分けと、補完の印に使う */
   support?: Support;
   /** スマホ（ソフトキーボード）。Enter は改行にし、送るのは送信ボタンだけにする */
   touch?: boolean;
-  agent: Agent; peer: string; text: string; setText: (v: string) => void; busy: boolean; running: boolean;
+  agent: Agent; text: string; setText: (v: string) => void; busy: boolean; running: boolean;
   onSubmit: (body: string) => Promise<boolean>; onError: (m: string) => void;
 }) {
   const ta = useRef<HTMLTextAreaElement>(null);
-  const local = !peer;
+  // 手元のファイル（履歴、@ の候補、ドロップしたファイルのパス）を使えるか。アプリでは使える。ブラウザ版（PWA）には手元のファイルの口が無い
+  const local = !IS_WEB;
   const hasTerm = hasTerminal(agent);
   const canInterrupt = abilityInterrupt(agent);
   const [caret, setCaret] = useState(text.length);
@@ -97,7 +98,7 @@ export function Composer({ agent, peer, text, setText, busy, running, support = 
   const moveTo = (p: number) => { ta.current!.setSelectionRange(p, p); setCaret(p); };
 
   const [stopping, setStopping] = useState(false);
-  const interrupt = () => invoke("interrupt_session", { sessionId: agent.id, peer: peer || null }).catch((e) => onError(`止められなかった: ${e}`));
+  const interrupt = () => invoke("interrupt_session", { sessionId: agent.id }).catch((e) => onError(`止められなかった: ${e}`));
   const clearDraft = () => { if (text.trim()) remember(text); histSt.current = { index: -1, draft: "" }; replaceAll(""); };
 
   // onKeyDown の分岐。true を返したら、そのキーは処理済みで、あとの分岐へ進まない

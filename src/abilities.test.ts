@@ -14,8 +14,8 @@ const rows: [string, HasCaps, Want][] = [
   ["全部 true", { capabilities: ALL }, yes],
   ["全部 false（native の合成の行 NO_CAPS）", { capabilities: NO_CAPS }, no],
   ["空のオブジェクト", { capabilities: {} }, no],
-  ["新しい世帯の仮の値（端末と停止だけ）", { capabilities: NEW_HOUSE_CAPS }, { stop: true, interrupt: false, answer: false, term: true }],
-  ["停止だけ true（succeed.test.ts の ag と同じ形）", { capabilities: { send: true, stop: true } }, { stop: true, interrupt: false, answer: false, term: false }],
+  ["新しい世帯の仮の値（端末、停止、割り込み）", { capabilities: NEW_HOUSE_CAPS }, { stop: true, interrupt: true, answer: false, term: true }],
+  ["送信と停止だけ true", { capabilities: { send: true, stop: true } }, { stop: true, interrupt: false, answer: false, term: false }],
   ["承認だけ true", { capabilities: { permissions: true } }, { stop: false, interrupt: false, answer: true, term: false }],
   ["割り込みだけ true", { capabilities: { interrupt: true } }, { stop: false, interrupt: true, answer: false, term: false }],
   ["端末だけ true", { capabilities: { terminal: true } }, { stop: false, interrupt: false, answer: false, term: true }],
@@ -29,8 +29,8 @@ describe("abilities", () => {
     });
   }
 
-  test("偽の capabilities の定数は、置き換え前の4か所の値のまま", () => {
-    expect(NEW_HOUSE_CAPS).toEqual({ terminal: true, send: true, stop: true });
+  test("仮の capabilities の定数の値", () => {
+    expect(NEW_HOUSE_CAPS).toEqual({ terminal: true, send: true, stop: true, interrupt: true });
     expect(NO_CAPS).toEqual({ send: false, permissions: false, interrupt: false, stop: false, terminal: false });
   });
 });

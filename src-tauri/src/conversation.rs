@@ -4,43 +4,41 @@ use super::*;
 
 #[derive(Default)]
 pub(crate) struct Conv {
-    /// ccn の messages の次の読み出し位置（after=）
-    pub(crate) next: u64,
-    /// next の数え方の印（ccn の messages の epoch）。印を返さない古い ccn では None のまま
-    pub(crate) epoch: Option<String>,
+    /// jsonl の次の読み位置（バイト）
+    next: u64,
+    /// next の数え方の印（native:<inode>）。ファイルが入れ替わったら変わる
+    epoch: Option<String>,
     /// これまでに縮めた項目の数。項目の通し番号 n は 0 から数える
-    pub(crate) total: u64,
+    total: u64,
     /// 最後の KEEP_MESSAGES 件
-    pub(crate) items: Vec<Value>,
+    items: Vec<Value>,
     /// 最後に読まれた時刻（ms）
-    pub(crate) used: u128,
+    used: u128,
     /// 今の動き（#59）
-    pub(crate) live: Live,
-    /// ネイティブの jsonl から読んだか（#96）。同じ id が ccn とネイティブの間で入れ替わったら、読み位置の数え方が違うので頭から読み直す
-    pub(crate) native: bool,
+    live: Live,
 }
 
 /// 今の動き（#59）。会話を頭から読みながら、結果がまだ無い道具、最後の出来事、ターンの始まりを持つ。
-/// 時刻は node なら ISO の文字列、pty なら jsonl の timestamp（無ければ ccn の at の ms）のまま渡し、画面が Date で読む
+/// 時刻は jsonl の timestamp（ISO の文字列。data で包んだ形では at の ms）のまま渡し、画面が Date で読む
 #[derive(Default, Clone, Serialize, Debug, PartialEq)]
 pub(crate) struct Live {
     /// 結果がまだ無い道具（古い順）
-    pub(crate) tools: Vec<LiveTool>,
+    tools: Vec<LiveTool>,
     /// 最後の出来事の種類（user、thinking、text、tool、result）と時刻
-    pub(crate) last: Option<&'static str>,
-    pub(crate) last_at: Value,
+    last: Option<&'static str>,
+    last_at: Value,
     /// 最後に人（かほかのセッション）から文が届いた時刻
-    pub(crate) turn_at: Value,
+    turn_at: Value,
 }
 
 #[derive(Clone, Serialize, Debug, PartialEq)]
 pub(crate) struct LiveTool {
-    pub(crate) id: String,
-    /// まとめるときの種類（シェル、ccn など）
-    pub(crate) kind: String,
+    id: String,
+    /// まとめるときの種類（シェル、MCP のサーバー名など）
+    kind: String,
     /// 1行の中身（Bash ならコマンドの頭）
-    pub(crate) text: String,
-    pub(crate) at: Value,
+    text: String,
+    at: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -53,7 +51,7 @@ pub(crate) enum LiveEv {
 }
 
 impl Live {
-    pub(crate) fn apply(&mut self, ev: LiveEv) {
+    fn apply(&mut self, ev: LiveEv) {
         let (kind, at) = match ev {
             // 新しい文が来たら、前のターンで結果が来なかった道具（中断など）は捨てる
             LiveEv::User(at) => { self.tools.clear(); self.turn_at = at.clone(); ("user", at) }
@@ -82,7 +80,7 @@ pub(crate) fn tool_kind(name: &str) -> String {
 }
 
 /// CLI が貼り付けた文に付ける包み（`<pasted_content id="…">` と `</pasted_content id="…">`）を外す。
-/// ccn は文を端末に貼るので、送った文が包まれて届くことがある（2026-11-14 の meta、8074d764 の jsonl）。
+/// 文を端末に貼って送ると、送った文が包まれて記録されることがある（2026-11-14 の meta、8074d764 の jsonl）。
 /// 包みのまま `<` で始まると、hook の差し込みと見分けられず会話から落ちていた（#69）。外した後の前後の空白は落とす
 pub(crate) fn unwrap_pasted(text: &str) -> String {
     const TAGS: [&str; 2] = ["<pasted_content", "</pasted_content"];
@@ -134,7 +132,7 @@ pub(crate) fn user_text(content: &Value) -> String {
     }
 }
 
-/// ccn の1件から、今の動きに効く出来事を取り出す。simplify と同じく node と pty の両方の形を読む
+/// 会話の1行から、今の動きに効く出来事を取り出す。simplify と同じく、jsonl の行と data で包んだ形の両方を読む
 pub(crate) fn live_events(m: &Value) -> Vec<LiveEv> {
     let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
         Some(d) => (d, if d["timestamp"].is_string() { d["timestamp"].clone() } else { m["at"].clone() }),
@@ -167,7 +165,7 @@ pub(crate) fn live_events(m: &Value) -> Vec<LiveEv> {
                     Some("tool_use") => {
                         let name = c["name"].as_str().unwrap_or("");
                         let inp = &c["input"];
-                        // Bash はコマンドそのもの、ccn などは宛先（session、name）を頭に出す。終わった道具の行（tool_line）は変えない
+                        // Bash はコマンドそのもの、MCP の道具は宛先（session、name）を頭に出す。終わった道具の行（tool_line）は変えない
                         let text = match (name, inp["command"].as_str()) {
                             ("Bash", Some(cmd)) => format!("コマンド: {}", clip(cmd, 70)),
                             _ => {
@@ -191,7 +189,7 @@ pub(crate) fn live_events(m: &Value) -> Vec<LiveEv> {
 
 /// 会話のキャッシュを残す時間（#15）。画面は開いている会話だけを 2.5 秒ごとに読むので、
 /// これより長く読まれていない会話（閉じたセッション、ほかのセッションに切り替えた後）は捨てる。
-/// 捨てた後に開き直したら、ccn の after=0 から読み直し、画面は reset で受け取る
+/// 捨てた後に開き直したら、jsonl を頭から読み直し、画面は reset で受け取る
 pub(crate) const CONV_IDLE_MS: u128 = 10 * 60 * 1000;
 
 pub(crate) fn forget_idle_convs(map: &mut HashMap<String, Conv>, keep: &str, now: u128) {
@@ -210,10 +208,10 @@ pub(crate) struct ConvDelta {
 }
 
 impl Conv {
-    /// ccn の after=from から next まで読んだ分を足す。同じセッションの取得が重なり、
+    /// 読み位置 from から next まで読んだ分を足す。同じセッションの取得が重なり、
     /// ほかの呼び出しが先に同じ範囲を足していたら（c.next が読み始めと違う）、足さない
     /// 項目が増えたら true
-    pub(crate) fn absorb(&mut self, from: u64, next: u64, fresh: Vec<Value>, evs: Vec<LiveEv>, epoch: Option<String>) -> bool {
+    fn absorb(&mut self, from: u64, next: u64, fresh: Vec<Value>, evs: Vec<LiveEv>, epoch: Option<String>) -> bool {
         if self.next != from {
             return false;
         }
@@ -234,7 +232,7 @@ impl Conv {
     /// since() が reset を返し、画面は持っている分を捨てて置き換える（App.tsx と conv.ts は変えない）。
     /// n は減らないので、送ったばかりの仮の項目（pending の after）とも比べられる
     /// 今の動き（#59）も、頭から読んだ出来事（evs）で作り直す
-    pub(crate) fn replace(&mut self, from: u64, seen: &Option<String>, next: u64, fresh: Vec<Value>, evs: Vec<LiveEv>, epoch: Option<String>) -> bool {
+    fn replace(&mut self, from: u64, seen: &Option<String>, next: u64, fresh: Vec<Value>, evs: Vec<LiveEv>, epoch: Option<String>) -> bool {
         if self.next != from || &self.epoch != seen {
             return false;
         }
@@ -250,7 +248,7 @@ impl Conv {
         true
     }
 
-    pub(crate) fn push(&mut self, fresh: Vec<Value>) {
+    fn push(&mut self, fresh: Vec<Value>) {
         let start = self.total;
         for mut v in fresh {
             // 止めた印の直後の印は重ねない。-p の子は、止めると止めた印の文に続いて error_during_execution の result を書く（#83）
@@ -282,7 +280,7 @@ impl Conv {
 
     /// 画面が total=since まで持っているときの差分。持っている分が古すぎる（捨てた分より前）、
     /// 先に進みすぎている（キャッシュを作り直した）、since が無いときは、全部を reset で返す
-    pub(crate) fn since(&self, since: Option<u64>) -> ConvDelta {
+    fn since(&self, since: Option<u64>) -> ConvDelta {
         let base = self.total - self.items.len() as u64;
         match since {
             Some(s) if s >= base && s <= self.total => {
@@ -326,8 +324,8 @@ pub(crate) fn tool_line(name: &str, input: &Value) -> String {
 }
 
 /// SDK の1件を、画面に出す0件以上の項目に縮める。考えた中身と道具の結果は捨てる
-/// ccn の messages は、セッションの種類で形が違う。node はトランスクリプトの行そのまま（type、message、timestamp）。
-/// pty は {at, type, data: {type, message, …}, seq} で、中身は data に入り、時刻は at（ms）にある。
+/// 読むのは jsonl の行そのまま（type、message、timestamp）。{at, type, data: {type, message, …}, seq} の形
+/// （中身が data に入り、時刻が at の ms にある。前に ccn の PTY の会話が返した形で、試験の材料がこの形で残っている）も読む。
 /// 道具の結果を画面に出す長さ（字）と行数。長い出力は頭だけを持つ
 pub(crate) const RESULT_CHARS: usize = 1500;
 pub(crate) const RESULT_LINES: usize = 40;
@@ -443,7 +441,8 @@ pub(crate) fn simplify(m: &Value) -> Vec<Value> {
                         Some("tool_use") => {
                             let name = c["name"].as_str().unwrap_or("");
                             let inp = &c["input"];
-                            // 送ったお手紙（SendMessage、ccn の send_message と create_session）は、宛先と1行目を付ける
+                            // 送ったお手紙（SendMessage と、MCP の mcp__ccn__send_message、mcp__ccn__create_session）は、宛先と1行目を付ける。
+                            // ccn の MCP は別のプロダクトの道具で、ここでは記録の道具名を読むだけ
                             let first = |v: &Value| v.as_str().unwrap_or("").lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
                             let sent = match name {
                                 "SendMessage" if inp["message"].is_string() => Some(json!({ "to": inp["to"], "summary": inp["summary"].as_str().map(String::from).unwrap_or_else(|| first(&inp["message"])), "text": inp["message"] })),
@@ -470,51 +469,16 @@ pub(crate) fn simplify(m: &Value) -> Vec<Value> {
     out
 }
 
-/// 読んだ結果。(次の after, 縮めた項目, 今の動きの出来事, 最初のページの epoch)
-type MessagesRead = (u64, Vec<Value>, Vec<LiveEv>, Option<String>);
+/// 読んだ結果。(次の読み位置, 縮めた項目, 今の動きの出来事, 印)
+pub(crate) type MessagesRead = (u64, Vec<Value>, Vec<LiveEv>, Option<String>);
 
-/// ccn の messages を after=start から読む。1回で読むのは最大20ページ（4000件）。続きは次の呼び出しで読む。
-/// 返すのは (次の after, 縮めた項目, 今の動きの出来事, 最初のページの epoch)
-pub(crate) fn read_messages(peer: &Option<String>, session_id: &str, start: u64) -> Result<MessagesRead, String> {
-    let mut next = start;
-    let mut fresh = vec![];
-    let mut evs = vec![];
-    let mut epoch = None;
-    for page in 0..20 {
-        let v = ccn::messages(peer, session_id, next)?;
-        let e = v["epoch"].as_str().map(String::from);
-        if page == 0 {
-            epoch = e;
-        } else if e != epoch {
-            // ページの途中で数え方が変わった（読んでいる間に ccn が起動し直した）。ここまでで止め、次の呼び出しで気づく
-            break;
-        }
-        let msgs = v["messages"].as_array().cloned().unwrap_or_default();
-        for m in &msgs {
-            fresh.extend(simplify(m));
-            evs.extend(live_events(m));
-        }
-        match v["next"].as_u64() {
-            Some(n) if n > next && !msgs.is_empty() => next = n,
-            _ => break,
-        }
-        if msgs.len() < 200 {
-            break;
-        }
-    }
-    Ok((next, fresh, evs, epoch))
-}
-
-/// 持っている cursor（from）が、今の ccn の番号と続いていないか。ccn の messages は epoch（番号の印）を返し、
-/// 再起動、pty の付け直し、終わって jsonl の位置に移ったときに変わる。前に読んだ印と違えば、from から先を読むと欠けるか重なる。
-/// 印を返さない古い ccn（got が None）では今までどおり続きを読む。前の印が None で今が Some なのは、
-/// 古い ccn から入れ替わった（再起動した）ので、読み直す
+/// 持っている cursor（from）が、今の jsonl の読み位置と続いていないか。前に読んだ印（inode）と違えば、from から先を読むと欠けるか重なる
 pub(crate) fn cursor_is_stale(from: u64, seen: &Option<String>, got: &Option<String>) -> bool {
     from > 0 && got.is_some() && got != seen
 }
 
-/// ネイティブの jsonl（#96）を読み位置 from から読む。read_messages と同じ形で返す。読み位置はバイト、印は native:<inode>。
-/// ファイルが読み位置より短くなったら、印を変えて返し、conversation が頭から読み直した扱いにする
+/// セッションの jsonl を読み位置 from から読む。返すのは (次の読み位置, 縮めた項目, 今の動きの出来事, 印)。読み位置はバイト、印は native:<inode>。
+/// ファイルが読み位置より短くなったら、印に :restarted を付けて返し、conversation が頭から読み直した扱いにする
 pub(crate) fn read_native(path: &std::path::Path, from: u64) -> Result<MessagesRead, String> {
     let c = native::conv::read(path, from)?;
     let fresh = c.lines.iter().flat_map(simplify).collect();
@@ -523,33 +487,25 @@ pub(crate) fn read_native(path: &std::path::Path, from: u64) -> Result<MessagesR
     Ok((c.next, fresh, evs, Some(epoch)))
 }
 
-pub(crate) fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<ConvDelta, String> {
-    let peer = peer.filter(|p| !p.is_empty());
-    // ネイティブのセッションと sub-agent（一覧に出したもので、ccn に無いもの）は jsonl から読む（#96）
-    let native_path = if peer.is_none() { native::path_of(&session_id) } else { None };
-    let is_native = native_path.is_some();
-    let key = format!("{}|{session_id}", peer.clone().unwrap_or_default());
-    let (from, seen, was_native) = {
+pub(crate) fn conversation(session_id: String, since: Option<u64>) -> Result<ConvDelta, String> {
+    // jsonl の場所は一覧を作るときに登録する。起動したばかりで、まだ jsonl が無いセッションは空で返す
+    let Some(path) = native::path_of(&session_id) else {
+        return Ok(ConvDelta { items: vec![], total: 0, reset: true, live: Live::default() });
+    };
+    let key = session_id.clone();
+    let (from, seen) = {
         let g = CONVS.lock().map_err(|e| e.to_string())?;
-        g.as_ref().and_then(|m| m.get(&key)).map(|c| (c.next, c.epoch.clone(), Some(c.native))).unwrap_or((0, None, None))
+        g.as_ref().and_then(|m| m.get(&key)).map(|c| (c.next, c.epoch.clone())).unwrap_or((0, None))
     };
-    // 出どころが ccn とネイティブの間で入れ替わった（ccn が落ちた、戻った、設定を切り替えた）。読み位置は使えないので、
-    // 頭から読んで置き換える。置き換えは通し番号を1つ空けるので、画面には必ず reset で届き、2つの出どころの項目が混ざらない
-    let switched = was_native.is_some_and(|w| w != is_native);
-    let start = if switched { 0 } else { from };
-    let read = |from: u64| match &native_path {
-        Some(p) => read_native(p, from),
-        None => read_messages(&peer, &session_id, from),
-    };
-    let (mut next, mut fresh, mut evs, mut epoch) = read(start)?;
+    let (mut next, mut fresh, mut evs, mut epoch) = read_native(&path, from)?;
     let restarted = epoch.as_deref().is_some_and(|e| e.ends_with(":restarted"));
-    let stale = switched || restarted || cursor_is_stale(start, &seen, &epoch);
+    let stale = restarted || cursor_is_stale(from, &seen, &epoch);
     if restarted {
-        // ネイティブで頭から読み直した分は、そのまま置き換えに使う。印は元の形に戻す
+        // 頭から読み直した分は、そのまま置き換えに使う。印は元の形に戻す
         epoch = epoch.map(|e| e.trim_end_matches(":restarted").to_string());
-    } else if stale && start > 0 {
-        // 読んだページは捨て、after=0 から読み直して置き換える。読み直しに失敗したら何も変えない（次の呼び出しでもう一度気づく）
-        (next, fresh, evs, epoch) = read(0)?;
+    } else if stale && from > 0 {
+        // 読んだ分は捨て、頭から読み直して置き換える。読み直しに失敗したら何も変えない（次の呼び出しでもう一度気づく）
+        (next, fresh, evs, epoch) = read_native(&path, 0)?;
     }
     let mut g = CONVS.lock().map_err(|e| e.to_string())?;
     let map = g.get_or_insert_with(HashMap::new);
@@ -557,57 +513,22 @@ pub(crate) fn conversation(session_id: String, peer: Option<String>, since: Opti
     forget_idle_convs(map, &key, now);
     let c = map.entry(key).or_insert_with(Conv::default);
     c.used = now;
-    let changed = if stale {
-        // 読み直しが0件で、前に中身があったときは置き換えない。ccn は jsonl を読めなかったときも空で返すので、保存分まで消さない。
-        // 置き換えたら、増えたかに関係なく保存し直す（保存分は前の中身のままなので）
-        (!fresh.is_empty() || c.items.is_empty()) && c.replace(from, &seen, next, fresh, evs, epoch)
+    if stale {
+        // 読み直しが0件で、前に中身があったときは置き換えない（読めなかっただけかもしれないので、持っている分まで消さない）
+        if !fresh.is_empty() || c.items.is_empty() {
+            c.replace(from, &seen, next, fresh, evs, epoch);
+        }
     } else {
-        c.absorb(from, next, fresh, evs, epoch)
-    };
-    if !stale || changed {
-        c.native = is_native;
-    }
-    // 増えたか置き換えたら、画面に出す分（最後の KEEP_MESSAGES 件）を保存する。ネットが切れたときは画面が conversation_cache で読む。
-    // 書くのは錠を持ったまま（同じセッションの取得が重なっても、古い中身があとから上書きしない）。80件の JSON なので短い
-    if changed {
-        let _ = offline::save_conv(&cache_dir(), &peer, &session_id, c.total, &c.items);
+        c.absorb(from, next, fresh, evs, epoch);
     }
     Ok(c.since(since))
 }
 
-/// 保存してある会話（offline.rs）。画面はセッションを開いた直後にこれを出し、ccn から読めたら差し替える
-pub(crate) fn conversation_cache(session_id: String, peer: Option<String>) -> Option<offline::ConvCache> {
-    let peer = peer.filter(|p| !p.is_empty());
-    offline::load_conv(&cache_dir(), &peer, &session_id)
-}
-
-pub(crate) fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
-    native_guard(&session_id, &peer)?;
-    if send_disabled() {
-        return Err("送信を止めている（~/.family-computing/send-disabled がある）".into());
-    }
-    if text.trim().is_empty() {
-        return Err("文が空".into());
-    }
-    let peer = peer.filter(|p| !p.is_empty());
-    ccn::post_message(&peer, &session_id, &text)
-}
-
 /// 画面から呼ぶ命令の包み。中身の関数は上にある。待つ命令は blocking で別のスレッドへ出す
 pub(crate) mod cmd {
-    use super::*;
-
     #[tauri::command]
-    pub async fn conversation(session_id: String, peer: Option<String>, since: Option<u64>) -> Result<super::ConvDelta, String> {
-        blocking(move || super::conversation(session_id, peer, since)).await
-    }
-    #[tauri::command]
-    pub async fn conversation_cache(session_id: String, peer: Option<String>) -> Result<Option<super::offline::ConvCache>, String> {
-        blocking(move || Ok(super::conversation_cache(session_id, peer))).await
-    }
-    #[tauri::command]
-    pub async fn send_message(session_id: String, text: String, peer: Option<String>) -> Result<String, String> {
-        blocking(move || super::send_message(session_id, text, peer)).await
+    pub async fn conversation(session_id: String, since: Option<u64>) -> Result<super::ConvDelta, String> {
+        crate::blocking(move || super::conversation(session_id, since)).await
     }
 }
 
@@ -715,12 +636,12 @@ mod tests {
         assert!(!cursor_is_stale(0, &None, &s("a")));
         // 同じ印なら続き
         assert!(!cursor_is_stale(3, &s("a"), &s("a")));
-        // 印が変わった（ccn の再起動、付け直し、終わって jsonl の位置へ）
+        // 印が変わった（jsonl が入れ替わった）
         assert!(cursor_is_stale(3, &s("a"), &s("b")));
         assert!(cursor_is_stale(3, &s("a"), &s("history")));
-        // 印を返さない古い ccn から入れ替わった
+        // 前の印が無い（読んだことが無い）のに読み位置がある
         assert!(cursor_is_stale(3, &None, &s("b")));
-        // 印を返さない古い ccn では今までどおり
+        // 印が無ければ今までどおり
         assert!(!cursor_is_stale(3, &None, &None));
         assert!(!cursor_is_stale(3, &s("a"), &None));
     }
@@ -784,92 +705,6 @@ mod tests {
         let d = ConvDelta { items: vec![json!({ "role": "user", "text": "a", "n": 0 })], total: 1, reset: true, live: Default::default() };
         assert_eq!(serde_json::to_value(&d).unwrap(), json!({ "items": [{ "role": "user", "text": "a", "n": 0 }], "total": 1, "reset": true,
             "live": { "tools": [], "last": null, "last_at": null, "turn_at": null } }));
-    }
-
-    /// 試験用の ccn（FC_CCN_URL）のセッション（FC_CONV_ID）の会話を、画面と同じ形で FC_CONV_SECS 秒読み続ける。
-    /// 同じプロセスで cursor を持ったまま、外で ccn を起動し直して会話を足す。終わりに、画面が持つ分と、
-    /// after=0 から読んだ分を比べる（再起動の前後で欠けも二重も無いか）。HOME は空のディレクトリにする（保存分を分ける）。
-    /// HOME=<空> FC_CCN_URL=http://127.0.0.1:<ポート> FC_CONV_ID=<id> FC_CONV_SECS=120 <試験のバイナリ> conversation_across_restart --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn conversation_across_restart() {
-        use super::{conversation, read_messages, offline, cache_dir};
-        let id = std::env::var("FC_CONV_ID").expect("FC_CONV_ID");
-        let secs: u64 = std::env::var("FC_CONV_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
-        // 画面（App.tsx の load と conv.ts の mergeConv）と同じ持ち方
-        let mut since: Option<u64> = None;
-        let mut screen: Vec<Value> = vec![];
-        let texts = |v: &[Value]| v.iter().map(|x| format!("{}:{}", x["role"].as_str().unwrap_or(""), x["text"].as_str().unwrap_or(""))).collect::<Vec<_>>();
-        let t0 = std::time::Instant::now();
-        // FC_CONV_PAUSE のファイルがある間は読まない（再起動して1往復進めてから読む順序を作る）
-        let pause = std::env::var("FC_CONV_PAUSE").ok().map(std::path::PathBuf::from);
-        while t0.elapsed() < Duration::from_secs(secs) {
-            if pause.as_ref().is_some_and(|p| p.exists()) {
-                std::thread::sleep(Duration::from_millis(500));
-                continue;
-            }
-            match conversation(id.clone(), None, since) {
-                Ok(d) => {
-                    if d.reset {
-                        screen = d.items.clone();
-                    } else {
-                        let last = screen.last().and_then(|x| x["n"].as_u64());
-                        screen.extend(d.items.iter().filter(|x| last.is_none_or(|l| x["n"].as_u64().unwrap_or(u64::MAX) > l)).cloned());
-                    }
-                    let prev = since;
-                    since = Some(if d.reset { d.total } else { since.unwrap_or(0).max(d.total) });
-                    if d.reset || !d.items.is_empty() {
-                        let g = super::CONVS.lock().unwrap();
-                        let c = g.as_ref().and_then(|m| m.get(&format!("|{id}"))).unwrap();
-                        println!("[{:>5.1}s] since {prev:?}→{since:?} reset={} +{} 画面{}件 cursor={} epoch={:?} {:?}",
-                            t0.elapsed().as_secs_f32(), d.reset, d.items.len(), screen.len(), c.next, c.epoch, texts(&d.items));
-                    }
-                }
-                Err(e) => println!("[{:>5.1}s] 読めない: {e}", t0.elapsed().as_secs_f32()),
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        let (_, fresh, _, epoch) = read_messages(&None, &id, 0).expect("after=0");
-        let cached = offline::load_conv(&cache_dir(), &None, &id).map(|c| texts(&c.items)).unwrap_or_default();
-        println!("画面 {}件: {:?}", screen.len(), texts(&screen));
-        println!("after=0 {}件（epoch {epoch:?}）: {:?}", fresh.len(), texts(&fresh));
-        println!("保存分 {}件", cached.len());
-        assert_eq!(texts(&screen), texts(&fresh));
-        assert_eq!(cached, texts(&fresh));
-    }
-
-    #[test]
-    fn switching_between_ccn_and_native_always_resets_the_screen() {
-        // 会話を読む先の登録（native::register）はプロセスで1つなので、使う試験を1本ずつ動かす
-        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        use native::testtree::*;
-        let root = tmp("switch");
-        TEST_CACHE.with(|c| *c.borrow_mut() = Some(root.join("cache")));
-        let id = "cccccccc-0000-4000-8000-00000000000c";
-        let path = root.join("c.jsonl");
-        write(&path, "{\"type\":\"user\",\"message\":{\"content\":\"ネイティブ\"}}\n");
-        // ccn から読んだ会話が 10 件ある（読み位置 7、印 e1）
-        {
-            let mut g = CONVS.lock().unwrap();
-            let map = g.get_or_insert_with(HashMap::new);
-            let mut c = Conv { next: 7, epoch: Some("e1".into()), used: now_ms(), ..Default::default() };
-            c.push((0..10).map(|i| json!({ "role": "user", "text": format!("ccn {i}") })).collect());
-            map.insert(format!("|{id}"), c);
-        }
-        // 同じ id がネイティブの行になった（ccn が落ちた）。画面は 8 件目まで持っている
-        let mut reg = HashMap::new();
-        reg.insert(id.to_string(), path.clone());
-        native::register(reg);
-        let d = conversation(id.into(), None, Some(8)).unwrap();
-        assert!(d.reset, "出どころが変わったら必ず reset");
-        assert_eq!(d.items.len(), 1);
-        assert_eq!(d.items[0]["text"], "ネイティブ");
-        // 続きはネイティブの読み位置で読む（もう reset しない）
-        let d2 = conversation(id.into(), None, Some(d.total)).unwrap();
-        assert!(!d2.reset);
-        assert!(d2.items.is_empty());
-        native::register(HashMap::new());
-        CONVS.lock().unwrap().as_mut().unwrap().remove(&format!("|{id}"));
     }
 
     // 2026-11-12 に本番のノードの pty のセッションから読んだ messages の形
@@ -970,7 +805,7 @@ mod tests {
         assert_eq!(simplify(&with_data)[0]["text"], "やあ");
     }
 
-    // 2026-11-14 14:21 に本人が meta（8074d764）へ続けて送った3通。ccn の GET messages が返した形のまま（#69）。
+    // 2026-11-14 14:21 に本人が meta（8074d764）へ続けて送った3通。当時の会話の形（data で包んだ形）のまま（#69）。
     // 1通目と3通目は CLI が <pasted_content> で包んでいた。包みのまま `<` で始まるので会話から落ち、仮の吹き出しが消えずに末尾に残った
     #[test]
     fn pasted_content_is_unwrapped_not_dropped() {
@@ -997,7 +832,7 @@ mod tests {
         assert!(simplify(&hook).is_empty());
     }
 
-    // 2026-11-14、写した画像のパスを入れて送った文を、CLI が画像の添付にした形（ccn の GET messages のまま、#69）
+    // 2026-11-14、写した画像のパスを入れて送った文を、CLI が画像の添付にした形（当時の会話の形のまま、#69）
     #[test]
     fn image_marks_before_the_from_line() {
         let m = json!({"at": 1794634823274u64, "type": "user", "seq": 51, "data": {"type": "user", "message": {"role": "user",

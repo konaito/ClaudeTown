@@ -7,7 +7,6 @@ import { KillCtx, LetterCtx } from "../contexts";
 import { LETTER_IMG } from "../useLetterMarks";
 import { CardActions } from "../card/CardActions";
 import { Since } from "../Since";
-import { SuitcaseIcon } from "../icons";
 
 /** グループ（根のセッション1つとその子孫）ごとの淡い色。名前から決まる */
 const GROUP_TINTS = ["#f3f7ff", "#fff6ec", "#f1faf3", "#f8f3ff", "#fff2f5", "#eff9f9", "#fbf8ec"];
@@ -101,9 +100,7 @@ export const FamilyCanvas = memo(function FamilyCanvas({ all, result, selected, 
       <svg className="edges" width={W} height={H}>
         {result.nodes.filter((n) => n.parent).map((n) => {
           const p = pos.get(n.parent!)!;
-          // ゴーストへの線は点線
-          const ghostEdge = !!(byId.get(n.id)?.ghost || byId.get(n.parent!)?.ghost);
-          return <line key={n.id} className={ghostEdge ? "ghost-edge" : undefined} x1={p.x + ox} y1={p.y + oy} x2={n.x + ox} y2={n.y + oy} />;
+          return <line key={n.id} x1={p.x + ox} y1={p.y + oy} x2={n.x + ox} y2={n.y + oy} />;
         })}
       </svg>
       {result.nodes.map((n) => {
@@ -116,10 +113,10 @@ export const FamilyCanvas = memo(function FamilyCanvas({ all, result, selected, 
             {/* 右下のボタンはカード（札）の縁を基準に置くので、カードと同じ大きさの包みに入れる（カードは overflow: hidden） */}
             <div className={`fnode-body ${n.depth >= 2 ? "k-mini" : "k-card"}`} data-aid={n.id}
               style={n.depth >= 2 ? { ["--kx-k" as string]: boxOf(n.depth, a.name).scale } : undefined}>
-              {a.ghost ? <GhostCard agent={a} depth={n.depth} onSelect={onSelect} /> : <Card agent={a} depth={n.depth} selected={selected === n.id} onSelect={onSelect} onFocus={onFocus} />}
+              <Card agent={a} depth={n.depth} selected={selected === n.id} onSelect={onSelect} onFocus={onFocus} />
               {letters.has(n.id) && <img className="letter-mark" src={LETTER_IMG} alt="お手紙が届いた" title="お手紙が届いた" />}
               {/* 孫より下の小さい札には付けない。選んだときに重なる大きいカード（.pop）の中で付ける（Card） */}
-              {!a.ghost && n.depth <= 1 && delay === undefined && <CardActions agent={a} />}
+              {n.depth <= 1 && delay === undefined && <CardActions agent={a} />}
             </div>
             {delay !== undefined && <KillFx w={n.w} h={n.h} />}
           </div>
@@ -191,27 +188,6 @@ function KillFx({ w, h }: { w: number; h: number }) {
     </div>
   );
 }
-
-/**
- * 転出のゴースト（src/ghost.ts）。別の町にいる親か子の影。半透明、点線の枠、旅行かばんの印で、閉じる演出の 👻 と分ける。
- * 押すと本物がいる町に切り替えて、その子を選ぶ。右下のボタンは出さない（ここからは閉じない）。
- */
-const GhostCard = memo(function GhostCard({ agent, depth, onSelect }: { agent: Agent; depth: number; onSelect: (a: Agent) => void }) {
-  const g = agent.ghost!;
-  const mini = depth >= 2;
-  const box = mini ? boxOf(depth, agent.name) : { w: LAYOUT.card.w, h: LAYOUT.card.h, scale: 1 };
-  const label = g.role === "parent" ? `親は ${g.town}` : `${g.town} へ転出`;
-  return (
-    <button className={`ghost-card ${mini ? "is-mini" : ""}`} style={{ width: box.w, height: box.h }}
-      onClick={() => onSelect(agent)} title={`${agent.name}（${label}）\nクリックで ${g.town} の町に切り替える`}>
-      <span className="ghost-tag"><SuitcaseIcon />{label}</span>
-      <span className="ghost-body">
-        <span className="ghost-av"><Avatar pick={agent.avatar} seed={agent.id} mood="idle" role={roleOf(depth)} size={mini ? 26 : 40} /></span>
-        <span className="ghost-name">{agent.name}</span>
-      </span>
-    </button>
-  );
-});
 
 function FullCard({ agent, depth, selected, onSelect, onFocus }: {
   agent: Agent; depth: number; selected: boolean; onSelect: (a: Agent) => void; onFocus: (a: Agent) => void;

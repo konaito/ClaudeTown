@@ -1,0 +1,2 @@
+67253 66501 /Users/konaito/.local/share/claude/versions/2.1.330 --agent-id alpha@session-d35eb879 --agent-name alpha --team-name session-d35eb879 --agent-color blue --parent-session-id d35eb879-b166-4f7e-a890-c8a462e5ff26 --lead-verify-key <省略> --permission-mode acceptEdits --model haiku
+67338 66501 /Users/konaito/.local/share/claude/versions/2.1.330 --agent-id beta@session-d35eb879 --agent-name beta --team-name session-d35eb879 --agent-color green --parent-session-id d35eb879-b166-4f7e-a890-c8a462e5ff26 --lead-verify-key <省略> --permission-mode acceptEdits --model haiku
