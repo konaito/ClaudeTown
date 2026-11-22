@@ -161,7 +161,12 @@ pub fn first_prompt_caller(jsonl: &Path) -> Option<Option<String>> {
             return Some(None);
         }
         // 改行の無い最後の行は、読めれば使い、読めなければ書きかけとみなして次の回に読み直す
-        let Ok(v) = serde_json::from_slice::<Value>(&buf) else { continue };
+        let Ok(v) = serde_json::from_slice::<Value>(&buf) else {
+            if buf.ends_with(b"\n") {
+                continue;
+            }
+            return None;
+        };
         if v["type"] != "user" || v["isMeta"].as_bool() == Some(true) {
             continue;
         }
@@ -392,6 +397,13 @@ mod tests {
         // 書きかけの user の行で終わっている短い記録も None
         let p = root.join("half.jsonl");
         write(&p, "{\"type\":\"file-history-snapshot\",\"snapshot\":{}}\n{\"type\":\"user\",\"message\":{\"content\":\"from a via");
+        assert_eq!(first_prompt_caller(&p), None);
+        // 1MB を超える user の行を書いている途中も None（Some(None) で覚えると、from 行があっても親子がつながらない）
+        let p = root.join("half-big.jsonl");
+        write(&p, &format!(
+            "{{\"type\":\"file-history-snapshot\",\"snapshot\":{{}}}}\n{{\"type\":\"user\",\"message\":{{\"content\":\"from agent:n/1/r via n\\n{}",
+            "x".repeat(2 << 20),
+        ));
         assert_eq!(first_prompt_caller(&p), None);
     }
 
