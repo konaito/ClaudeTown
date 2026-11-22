@@ -109,6 +109,8 @@ echo "入れた: $DEST ($tag $sha)"
 
 # 6. 起動
 if [ "${CT_NO_OPEN:-0}" != 1 ]; then
-  open "$DEST"
+  # 呼んだシェルの環境（CLAUDE_CONFIG_DIR、CLAUDE_CODE_*、FC_* など）を安定版に渡さない（#260）。
+  # open は自分の環境をアプリに渡す。空の環境で呼ぶと、launchd の既定（Finder から開いたときと同じ HOME、PATH、SHELL、TMPDIR、SSH_AUTH_SOCK）になる
+  /usr/bin/env -i /usr/bin/open "$DEST"
   echo "起動した（前に動いていた: ${was_running}）"
 fi
