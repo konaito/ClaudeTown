@@ -20,6 +20,7 @@ import { StateTab } from "./StateTab";
 import { useConversation } from "./useConversation";
 import { usePanelSend } from "./usePanelSend";
 import { useBoot } from "./useBoot";
+import { doneLog } from "./bootDone";
 import { isSlashCommand } from "../composer/edit";
 import { call as invoke } from "../bridge";
 import { canAnswerPermission, hasTerminal } from "../abilities";
@@ -60,6 +61,12 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const text = agent ? drafts[agent.id] ?? "" : "";
   const setText = (v: string) => { if (agent) setDrafts((d) => ({ ...d, [agent.id]: v })); };
+  // パネルを開く前に送れなかった預けた文（#184、App の見張りが知らせた分）を、開いたら入力欄に戻す（打ちかけがあれば、その前に置く）
+  useEffect(() => {
+    if (!agent) return;
+    const back = doneLog.takeBack(agent.id);
+    if (back.length) setText([...back, text].filter((x) => x.trim()).join("\n"));
+  }, [agent?.id]);
   // モデルか権限モードを替えている間（#97）。pty は claude を起動し直すので、その間は送らない
   const [switching, setSwitching] = useState(false);
   useEffect(() => { setSwitching(false); }, [agent?.id]);

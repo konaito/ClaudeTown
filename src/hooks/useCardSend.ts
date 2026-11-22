@@ -3,6 +3,7 @@ import { call as invoke } from "../bridge";
 import type { Agent } from "../model";
 import { kickTown } from "../town";
 import { viaCcn } from "../session/control";
+import { doneLog } from "../panel/bootDone";
 
 /**
  * カードのボタンから文を送る（#63）。選んでいるセッションなら、右パネルの送信（仮の吹き出しと会話の取り直し）に任せる。
@@ -18,9 +19,9 @@ export function useCardSend(toast: (text: string, bad?: boolean) => void) {
     try {
       if (viaCcn(a)) await invoke("send_message", { sessionId: a.id, text });
       else {
-        // 起動前なら Rust が預かり、起動したら送る（composer.rs の send_or_queue）
+        // 起動前なら Rust が預かり、起動したら送る（composer.rs の send_or_queue）。送れなかったら App の見張りが知らせる（#184）
         const r = await invoke<{ queued?: boolean } | null>("send_or_queue", { sessionId: a.id, text });
-        if (r?.queued) { toast(`${a.name} は起動中。起動したら届ける`); return true; }
+        if (r?.queued) { doneLog.watch(a.id, a.name); toast(`${a.name} は起動中。起動したら届ける`); return true; }
       }
       kickTown();
       toast(`${a.name} に届けた`);
