@@ -117,16 +117,17 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .stage-inner { position: relative; margin: 10px auto 0; }
 .slot { position: absolute; }
 
-/* グループ（根のセッション1つとその子孫）。淡い色の角丸の背景で分ける。色は App.tsx の GROUP_TINTS */
-.group { box-sizing: border-box; position: relative; border: 1.5px solid #e3e6ee; border-radius: 18px; padding: 12px 18px 18px; overflow: hidden; }
+/* グループ（根のセッション1つとその子孫）。淡い色の角丸の背景で分ける。色は FamilyCanvas.tsx の GROUP_TINTS。
+   余白は 1 層（--g-pad）で、見出しとカードの左端が同じ。値は src/layout/params.ts の LAYOUT.group で、groupCssVars() が .group に渡す */
+.group { box-sizing: border-box; position: relative; border: var(--g-border) solid #e3e6ee; border-radius: 18px; padding: var(--g-pad); overflow: hidden; }
 .group.has-needs { border-color: #f1d79c; }
-.g-head { display: flex; align-items: baseline; gap: 10px; height: 34px; overflow: hidden; white-space: nowrap; cursor: text; }
+.g-head { display: flex; align-items: baseline; gap: 10px; height: var(--g-head); margin-bottom: var(--g-head-gap); overflow: hidden; white-space: nowrap; cursor: text; }
 .g-name { font-size: 15px; font-weight: 700; color: #3d3a45; }
 .g-sub { font-size: 12px; color: var(--sub); }
 .g-needs { font-size: 11px; color: var(--approval-ink); background: #fff3d6; border-radius: 99px; padding: 1px 8px; }
 
 /* 家族の木。座標は src/layout が決め、ここでは置くだけ */
-.canvas { position: relative; margin: 0 auto; }
+.canvas { position: relative; }
 .edges { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
 .edges line { stroke: var(--tree); stroke-width: 2; stroke-linecap: round; }
 .fnode { position: absolute; display: flex; align-items: center; justify-content: center; }

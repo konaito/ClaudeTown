@@ -196,18 +196,18 @@ describe("家族の木の配置", () => {
     report.push({ ケース: 10, "弧の計算で1→5人に選んだ候補": radial, "既定で1→8人に選んだ候補": fixed, ...layoutFamily(town("e8c798cd", KIDS8)).metrics });
   });
 
-  test("11. 親1人・子5人の世帯の枠: 弧の計算では候補0の扇形 878×580 から候補3の 609×502 に小さくなる。格子では 619×307", () => {
+  test("11. 親1人・子5人の世帯の枠: 弧の計算では候補0の扇形 837×551 から候補3の 568×473 に小さくなる。格子では 578×278", () => {
     const r = layoutFamily(town("e8c798cd", KIDS), RADIAL);
     const before = r.candidates.find((c) => c.arcIndex === 0)!;
     const after = r.candidates.find((c) => c.arcIndex === r.arcIndex)!;
     const fb = groupSizeOf(before), fa = groupSizeOf(r.metrics);
-    expect(fb).toEqual({ w: 878, h: 580 });
-    expect(fa).toEqual({ w: 609, h: 502 });
+    expect(fb).toEqual({ w: 837, h: 551 });
+    expect(fa).toEqual({ w: 568, h: 473 });
     expect(groupSizeOf(after)).toEqual(fa);
     const areaB = fb.w * fb.h, areaA = fa.w * fa.h;
     expect(areaA).toBeLessThan(areaB * 0.65);
     const grid = groupSizeOf(layoutFamily(town("e8c798cd", KIDS)).metrics);
-    expect(grid).toEqual({ w: 619, h: 307 });
+    expect(grid).toEqual({ w: 578, h: 278 });
     report.push({ ケース: 11, 直す前の枠: `${fb.w}×${fb.h}（${areaB}）`, 直した後の枠: `${fa.w}×${fa.h}（${areaA}）`, 面積の比: (areaA / areaB).toFixed(3), 格子の枠: `${grid.w}×${grid.h}`, ...r.metrics });
   });
 
@@ -221,7 +221,7 @@ describe("家族の木の配置", () => {
   };
   // 本人の条件のまま書く: |xA-xB| >= w+m か |yA-yB| >= h+m
   const apart = (a: Placed, b: Placed) => Math.abs(a.x - b.x) >= 176 + 8 || Math.abs(a.y - b.y) >= 96 + 8;
-  const SIZE: Record<number, { w: number; h: number }> = { 1: { w: 251, h: 303 }, 2: { w: 435, h: 303 }, 3: { w: 619, h: 303 } };
+  const SIZE: Record<number, { w: number; h: number }> = { 1: { w: 240, h: 274 }, 2: { w: 394, h: 274 }, 3: { w: 578, h: 274 } };
 
   for (const n of [1, 2, 3]) {
     test(`12-${n}. 子${n}人: 本人が決めた固定の座標に、兄弟の順で置く。どのカードの組も重ならない`, () => {
@@ -281,7 +281,7 @@ describe("家族の木の配置", () => {
     8: [[-184, -108], [0, -108], [184, -108], [-184, 0], [184, 0], [-184, 108], [0, 108], [184, 108]],
   };
   const GRID_SIZE: Record<number, { w: number; h: number }> = {
-    4: { w: 619, h: 307 }, 5: { w: 619, h: 307 }, 6: { w: 619, h: 415 }, 7: { w: 619, h: 415 }, 8: { w: 619, h: 415 },
+    4: { w: 578, h: 278 }, 5: { w: 578, h: 278 }, 6: { w: 578, h: 386 }, 7: { w: 578, h: 386 }, 8: { w: 578, h: 386 },
   };
   // 下の段と上の段の枚数
   const ROWS: Record<number, { below: number; above: number }> = {

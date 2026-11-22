@@ -25,19 +25,35 @@ export const LAYOUT = {
   gridMaxAdjust: 400,
   /** s の基準にする表示領域（右の会話欄を除いた左側）。窓の大きさが変わっても配置し直さないよう固定値にする */
   view: { w: 1000, h: 660 },
-  /** 家族の枠の内側の余白 */
-  framePad: 18,
-  /** 世帯モジュール（淡い色の枠）の寸法。並べ方（pack.ts）はこの大きさで箱を置く */
-  group: { padX: 18, padTop: 12, padBottom: 18, head: 34, border: 1.5, minW: 240, gap: 28 },
+  /**
+   * 世帯モジュール（淡い色の枠）の寸法。並べ方（pack.ts）はこの大きさで箱を置く。CSS には groupCssVars() で渡す。
+   * 余白は 4px グリッドの 1 層だけ。pad は枠の線の内側から、見出し（上）、カードの箱（左右と下）までの距離で、見出しとカードの左端がそろう。
+   * headGap は見出しとカードの間で、同じ階層の要素の間として pad と同じ値にする。
+   * border は 1。1.5 だと Chromium が 1 に丸めて描き、枠の外寸の計算と 1px ずれた（agent-browser の DPR 2 で computed が 1px）。
+   * gap は世帯どうしの間。pad（16）より広く、枠が別の塊に見える最小の 24 にした（旧 28 から 4 だけ詰める）。
+   */
+  group: { pad: 16, head: 24, headGap: 16, border: 1, minW: 240, gap: 24 },
   /** 新しい座標へ移るアニメーションの時間（ms） */
   moveMs: 350,
 };
 
-/** 世帯モジュールの外寸（並べ方に渡す大きさ）。配置の幅と高さに、家族の枠の余白と世帯の枠の見出し・余白・線を足す。描くときもこの大きさにする */
+/** 世帯の枠の左端から、見出しとカードの箱（配置の外接の箱）の左端までの距離。同じ値にして左端をそろえる */
+export function groupInsetOf(): { x: number; headY: number; cardsY: number } {
+  const G = LAYOUT.group;
+  return { x: G.border + G.pad, headY: G.border + G.pad, cardsY: G.border + G.pad + G.head + G.headGap };
+}
+
+/** 世帯モジュールの外寸（並べ方に渡す大きさ）。配置の幅と高さに、世帯の枠の線・余白・見出しを足す。描くときもこの大きさにする */
 export function groupSizeOf(m: { width: number; height: number }): { w: number; h: number } {
   const G = LAYOUT.group;
-  const cw = m.width + LAYOUT.framePad * 2, ch = m.height + LAYOUT.framePad * 2;
-  return { w: Math.ceil(Math.max(G.minW, cw + G.padX * 2 + G.border * 2)), h: Math.ceil(G.head + ch + G.padTop + G.padBottom + G.border * 2) };
+  const i = groupInsetOf();
+  return { w: Math.ceil(Math.max(G.minW, m.width + i.x * 2)), h: Math.ceil(i.cardsY + m.height + G.pad + G.border) };
+}
+
+/** 世帯の枠（.group）の CSS が読む変数。余白を CSS に数字で書かず、LAYOUT.group と同じ値を使う */
+export function groupCssVars(): Record<string, string> {
+  const G = LAYOUT.group;
+  return { "--g-pad": `${G.pad}px`, "--g-head": `${G.head}px`, "--g-head-gap": `${G.headGap}px`, "--g-border": `${G.border}px` };
 }
 
 /** 名前の幅の見積もり（11px の太字）。全角は 11px、半角は 6.8px で数える */
