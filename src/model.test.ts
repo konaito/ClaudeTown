@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { accountText, cardNames, houseNameOf, projectFromPath, targetLabel, type Agent, type Who } from "./model";
+import { accountText, cardNames, houseNameOf, projectFromPath, statusClass, statusLabel, targetLabel, type Agent, type Who } from "./model";
 import cases from "./naming-cases.json";
 
 const ag = (id: string, cwd: string, over: Partial<Agent> = {}): Agent => ({
@@ -59,5 +59,14 @@ describe("アカウントの表示", () => {
   test("アカウントが無い（古い ccn、選べなかったセッション）なら null", () => {
     expect(accountText(ag("a", "/w"))).toBeNull();
     expect(accountText(ag("a", "/w", { account: null, accountEmail: "a@example.invalid" }))).toBeNull();
+  });
+});
+
+describe("起動中の札", () => {
+  test("起動中は様子に関係なく「起動中」と回る輪", () => {
+    expect(statusLabel({ booting: true }, "idle")).toBe("起動中");
+    expect(statusClass({ booting: true }, "idle")).toBe("st st-idle st-boot");
+    expect(statusLabel({}, "idle")).toBe("待機");
+    expect(statusClass({ booting: false }, "working")).toBe("st st-working");
   });
 });

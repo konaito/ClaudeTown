@@ -1,5 +1,5 @@
 import { memo, useContext } from "react";
-import { type Agent, MOOD_LABEL, houseNameOf, moodOf, nowOf, accountText, taskOf } from "../model";
+import { type Agent, houseNameOf, moodOf, nowOf, accountText, taskOf, statusClass, statusLabel } from "../model";
 import { layoutFamily, type LNode } from "../layout/layout";
 import { LAYOUT, boxOf } from "../layout/params";
 import { Avatar, hash as hashOf, roleOf, ROLE_LABEL } from "../kid/Avatar";
@@ -148,7 +148,7 @@ const Card = memo(function Card(props: { agent: Agent; depth: number; selected: 
         style={{ zoom: box.scale, width: box.w / box.scale, height: box.h / box.scale }}
         onClick={() => onSelect(agent)}
         onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
-        title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}${acct ? `\nアカウント: ${acct}` : ""}\nクリックで広げてチャット・右クリックでターミナル`}
+        title={`${agent.name}\n${statusLabel(agent, mood)}${now ? `: ${now}` : ""}${acct ? `\nアカウント: ${acct}` : ""}\nクリックで広げてチャット・右クリックでターミナル`}
       >
         <Avatar pick={agent.avatar} seed={agent.id} mood={mood} role={roleOf(depth)} size={32} dead={dying.has(agent.id)} />
         <span className="mini-name"><i className={`dot st-${mood}`} />{agent.name}</span>
@@ -207,7 +207,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
       style={{ width: LAYOUT.card.w, height: LAYOUT.card.h }}
       onClick={() => onSelect(agent)}
       onContextMenu={(e) => { e.preventDefault(); onFocus(agent); }}
-      title={`${agent.name}\n${MOOD_LABEL[mood]}${now ? `: ${now}` : ""}${acct ? `\nアカウント: ${acct}` : ""}\nクリックでチャット・右クリックでターミナル`}
+      title={`${agent.name}\n${statusLabel(agent, mood)}${now ? `: ${now}` : ""}${acct ? `\nアカウント: ${acct}` : ""}\nクリックでチャット・右クリックでターミナル`}
     >
       <div className="card-top">
         <RoleTag depth={depth} />
@@ -218,7 +218,7 @@ function FullCard({ agent, depth, selected, onSelect, onFocus }: {
         <div className="card-info">
           {/* このセッションの claude が動いているアカウント（cam のコマンド名）。ccn が載せたときだけ出す */}
           {agent.account && <span className="cacct">{agent.account}</span>}
-          <span className={`st st-${mood}`}><i />{MOOD_LABEL[mood]}{started ? <em><Since at={started} /></em> : null}</span>
+          <span className={statusClass(agent, mood)}><i />{statusLabel(agent, mood)}{started ? <em><Since at={started} /></em> : null}</span>
           <span className="cname">{agent.name}</span>
         </div>
       </div>

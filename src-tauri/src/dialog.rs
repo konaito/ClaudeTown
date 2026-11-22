@@ -924,7 +924,7 @@ mod tests {
     #[ignore]
     fn real_claude_answers_through_the_pty() {
         let dir = std::env::var("FC_E2E_DIR").expect("FC_E2E_DIR");
-        let r = crate::pty::spawn(&dir, None, 140, 45, || {}).unwrap();
+        let r = crate::pty::spawn(&dir, None, &[], 140, 45, || {}).unwrap();
         let id = r["id"].as_str().unwrap().to_string();
         let pid = r["pid"].as_u64().unwrap();
         let home = crate::native::claude_home();

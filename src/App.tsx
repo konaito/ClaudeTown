@@ -32,6 +32,7 @@ import { Panel } from "./panel/Panel";
 import { DepthCtx, KillCtx, LetterCtx, SendCtx, TownCtx } from "./contexts";
 import { loadPlace, savePlace } from "./newHouse/placeSetting";
 import { SettingsDialog } from "./settings/SettingsDialog";
+import { loadDefaults, sameDefaults, saveDefaults } from "./session/defaults";
 import "./App.css";
 import "./mobile/mobile.css";
 import { MobileShell } from "./mobile/MobileShell";
@@ -147,7 +148,7 @@ export default function App() {
 
   // 3枚のペイン（#89）。左の新しい世帯のペインはヘッダーのボタンとドラッグで開け閉めする。
   // 右のチャットは、セッションを選んでいないときに閉じ、選んだら開く。閉じても Panel は残す（入力欄の下書きを Panel が持っているため）
-  const { housesRef, sideRef, housesOpen, setHousesOpen, sideOpen, setSideOpen, selRef, toggleHouses } = usePanes(!!sel, mobile);
+  const { housesRef, sideRef, housesOpen, setHousesOpen, sideOpen, setSideOpen, selRef, toggleHouses } = usePanes(!!sel, mobile, HOUSES_MIN + TOWN_MIN + SIDE_MIN);
   // 設定（#92）。「新しい世帯」で親を立てる場所。null は既定（~/Documents/meta）
   const [place, setPlace] = useState<string | null>(loadPlace);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -250,7 +251,13 @@ export default function App() {
       </SplitGroup>
       </>)}
 
-      {settingsOpen && <SettingsDialog place={place} onSave={(p) => { savePlace(p); setPlace(p); toast(p ? "新しい世帯の場所を変えた" : "新しい世帯の場所を既定に戻した"); }} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsDialog place={place} defaults={loadDefaults()} onSave={(p, d) => {
+        // 変えた項目を知らせる
+        const msgs: string[] = [];
+        if (p !== place) { savePlace(p); setPlace(p); msgs.push(p ? "新しい世帯の場所を変えた" : "新しい世帯の場所を既定に戻した"); }
+        if (!sameDefaults(d, loadDefaults())) { saveDefaults(d); msgs.push("新しい世帯のモデルと権限モードを変えた"); }
+        toast(msgs.length ? msgs.join("。") : "設定を保存した");
+      }} onClose={() => setSettingsOpen(false)} />}
 
       {killAsk && (
         <KillConfirm agent={killAsk} descendants={countDesc(tree.childrenOf, killAsk.id)}

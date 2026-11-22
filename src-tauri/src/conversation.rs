@@ -29,6 +29,39 @@ pub(crate) struct Live {
     last_at: Value,
     /// 最後に人（かほかのセッション）から文が届いた時刻
     turn_at: Value,
+    /// 作業中に打たれて、まだ読まれていない文（順番待ち、古い順）。画面に出す形（role: user の項目）。空なら送らない
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    queued: Vec<Value>,
+    /// 待ちの中身。jsonl の queue-operation の行をたどって持つ。人の文でないもの（道具の終わりの知らせ、中身の無いもの）も入る
+    #[serde(skip)]
+    queue: Vec<QItem>,
+}
+
+#[derive(Default, Clone, Debug, PartialEq)]
+pub(crate) struct QItem {
+    /// 打たれた文。queue-operation の content に無いときは None
+    text: Option<String>,
+    at: Value,
+}
+
+impl QItem {
+    /// 人の打った文か（道具の終わりの知らせなどの <...> で始まる差し込みでない）
+    fn human(&self) -> bool {
+        self.text.as_deref().is_some_and(|t| !t.trim().is_empty() && !t.trim_start().starts_with('<'))
+    }
+}
+
+/// 順番待ちの出来事。CLI（2.1.330）は打った文を enqueue し、ターンの終わりに dequeue（中身なし、人の文が先）、
+/// ターンの途中で取り込んだら remove（中身あり）を書く
+#[derive(Debug, Clone)]
+pub(crate) enum QEv {
+    Enqueue(Option<String>, Value),
+    Dequeue,
+    Remove(Option<String>),
+    /// 知らない操作と起動し直した印。待ちを空にする
+    Clear,
+    /// 文が会話に出た（user の行か、途中で取り込まれた印）。同じ文が待ちに残っていたら消す
+    Delivered(String),
 }
 
 #[derive(Clone, Serialize, Debug, PartialEq)]
@@ -48,10 +81,15 @@ pub(crate) enum LiveEv {
     Text(Value),
     Tool(LiveTool),
     Result(Vec<String>, Value),
+    Queue(QEv),
 }
 
 impl Live {
     fn apply(&mut self, ev: LiveEv) {
+        if let LiveEv::Queue(q) = ev {
+            self.apply_queue(q);
+            return;
+        }
         let (kind, at) = match ev {
             // 新しい文が来たら、前のターンで結果が来なかった道具（中断など）は捨てる
             LiveEv::User(at) => { self.tools.clear(); self.turn_at = at.clone(); ("user", at) }
@@ -59,9 +97,33 @@ impl Live {
             LiveEv::Text(at) => ("text", at),
             LiveEv::Tool(t) => { let at = t.at.clone(); self.tools.retain(|x| x.id != t.id); self.tools.push(t); ("tool", at) }
             LiveEv::Result(ids, at) => { self.tools.retain(|x| !ids.contains(&x.id)); ("result", at) }
+            LiveEv::Queue(_) => return,
         };
         self.last = Some(kind);
         self.last_at = at;
+    }
+
+    fn apply_queue(&mut self, ev: QEv) {
+        let same = |a: &Option<String>, b: &str| a.as_deref().map(|t| unwrap_pasted(t) == b).unwrap_or(false);
+        match ev {
+            QEv::Enqueue(text, at) => self.queue.push(QItem { text, at }),
+            QEv::Dequeue => {
+                // 人の文が先に読まれる（道具の終わりの知らせは後回し）
+                let i = self.queue.iter().position(QItem::human).or(if self.queue.is_empty() { None } else { Some(0) });
+                if let Some(i) = i { self.queue.remove(i); }
+            }
+            QEv::Remove(text) => {
+                if let Some(i) = self.queue.iter().position(|q| q.text == text) { self.queue.remove(i); }
+            }
+            QEv::Clear => self.queue.clear(),
+            QEv::Delivered(text) => {
+                if let Some(i) = self.queue.iter().position(|q| same(&q.text, &text)) { self.queue.remove(i); }
+            }
+        }
+        // 画面に出す形は simplify に任せる（from 行を外す、貼り付けの包みを外す、差し込みを落とす）
+        self.queued = self.queue.iter().filter(|q| q.human()).flat_map(|q| {
+            simplify(&json!({ "type": "user", "timestamp": q.at, "message": { "role": "user", "content": q.text } }))
+        }).filter(|x| x["role"] == "user").collect();
     }
 }
 
@@ -132,6 +194,23 @@ pub(crate) fn user_text(content: &Value) -> String {
     }
 }
 
+/// スラッシュコマンドの入力を、端末と同じ「/名前 引数」の文に直す（#157）。コマンドの行でなければ None。
+/// jsonl には <command-message>、<command-name>、<command-args> の組で残る。並び順は2通りあり、引数は無いこともある。
+/// 引数には `<` を含む本文も入るので、引数の終わりは最後の </command-args> で決める
+pub(crate) fn slash_command(text: &str) -> Option<String> {
+    let t = text.trim_start();
+    if !(t.starts_with("<command-name>") || t.starts_with("<command-message>")) {
+        return None;
+    }
+    let name = t.split_once("<command-name>")?.1.split("</command-name>").next()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let name = if name.starts_with('/') { name.to_string() } else { format!("/{name}") };
+    let args = t.split_once("<command-args>").and_then(|(_, r)| r.rfind("</command-args>").map(|i| r[..i].trim())).unwrap_or("");
+    Some(if args.is_empty() { name } else { format!("{name} {args}") })
+}
+
 /// 会話の1行から、今の動きに効く出来事を取り出す。simplify と同じく、jsonl の行と data で包んだ形の両方を読む
 pub(crate) fn live_events(m: &Value) -> Vec<LiveEv> {
     let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
@@ -141,6 +220,16 @@ pub(crate) fn live_events(m: &Value) -> Vec<LiveEv> {
     let content = &m["message"]["content"];
     let mut out = vec![];
     match m["type"].as_str().unwrap_or("") {
+        "queue-operation" => {
+            let text = m["content"].as_str().map(String::from);
+            out.push(LiveEv::Queue(match m["operation"].as_str() {
+                Some("enqueue") => QEv::Enqueue(text, at),
+                Some("dequeue") => QEv::Dequeue,
+                Some("remove") => QEv::Remove(text),
+                _ => QEv::Clear,
+            }));
+        }
+        "session-start" => out.push(LiveEv::Queue(QEv::Clear)),
         "user" => {
             let ids: Vec<String> = content.as_array().map(|a| a.iter()
                 .filter(|c| c["type"] == "tool_result")
@@ -150,9 +239,17 @@ pub(crate) fn live_events(m: &Value) -> Vec<LiveEv> {
                 out.push(LiveEv::Result(ids, at));
             } else {
                 let text = user_text(content);
+                if !text.is_empty() {
+                    out.push(LiveEv::Queue(QEv::Delivered(text.clone())));
+                }
+                // ターンの途中で取り込まれた文は、ターンの始まりにしない（道具は動いたまま）
+                if m["queued"].as_bool() == Some(true) {
+                    return out;
+                }
                 // hook やシステムの差し込み（<...>、Caveat:）はターンの始まりにしない。お手紙（<cross-session-message>）は始まりにする
                 let letter = text.contains("<cross-session-message");
-                if !text.is_empty() && !m["isMeta"].as_bool().unwrap_or(false) && (letter || !(text.starts_with('<') || text.starts_with("Caveat:"))) {
+                let command = slash_command(&text).is_some();
+                if !text.is_empty() && !m["isMeta"].as_bool().unwrap_or(false) && (letter || command || !(text.starts_with('<') || text.starts_with("Caveat:"))) {
                     out.push(LiveEv::User(at));
                 }
             }
@@ -406,6 +503,9 @@ pub(crate) fn simplify(m: &Value) -> Vec<Value> {
                 out.push(json!({ "role": "event", "kind": "interrupted", "text": "ここで止めた", "at": at }));
                 return out;
             }
+            // スラッシュコマンドの入力は「/名前 引数」の文にしてから見る。そのままだと `<` で始まり、下の除外で落ちる（#157）
+            let command = slash_command(text);
+            let text = command.as_deref().unwrap_or(text);
             // 道具の結果だけの user、hook やシステムの差し込み（<...> で始まる）は出さない
             if text.is_empty() || text.starts_with('<') || text.starts_with("Caveat:") {
                 return out;
@@ -825,11 +925,34 @@ mod tests {
         assert!(c[0]["text"].as_str().unwrap().ends_with("判定がおかしいんだと思う"));
         // 包まれた文も、ターンの始まりとして数える
         for m in [&first, &second, &third] {
-            assert!(matches!(live_events(m).as_slice(), [LiveEv::User(_)]));
+            // 文が会話に出た印（順番待ちを消す Delivered）も一緒に出る
+            assert!(live_events(m).iter().any(|e| matches!(e, LiveEv::User(_))));
         }
         // hook の差し込みは今までどおり落とす
-        let hook = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": "<command-name>/clear</command-name>"}});
+        let hook = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": "<system-reminder>x</system-reminder>"}});
         assert!(simplify(&hook).is_empty());
+    }
+
+    // 2026-11-22 に fix-storage-gui（e545f8a7）で本人が打った /merge の行。当時の形のまま。`<` で始まるので会話から落ちていた（#157）
+    #[test]
+    fn slash_commands_show_as_user_text() {
+        let line = |c: &str| json!({"type": "user", "timestamp": "2026-11-22T12:53:39.294Z", "message": {"role": "user", "content": c}});
+        let merge = line("<command-message>merge</command-message>\n<command-name>/merge</command-name>");
+        let out = simplify(&merge);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[0]["text"], "/merge");
+        // ターンの始まりとして数える（順番待ちを消す Delivered も一緒に出る、#153）
+        assert!(live_events(&merge).iter().any(|e| matches!(e, LiveEv::User(_))));
+        // 名前が先で、引数が付く形（字下げも当時のまま）
+        let login = line("<command-name>/login</command-name>\n            <command-message>login</command-message>\n            <command-args></command-args>");
+        assert_eq!(simplify(&login)[0]["text"], "/login");
+        // 引数に < を含む本文が入る形
+        let surf = line("<command-message>surf</command-message>\n<command-name>/surf</command-name>\n<command-args>https://a.example/x <b>強</b></command-args>");
+        assert_eq!(simplify(&surf)[0]["text"], "/surf https://a.example/x <b>強</b>");
+        // 本文の配列で来ても同じ
+        let arr = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": [{"type": "text", "text": "<command-name>/clear</command-name>"}]}});
+        assert_eq!(simplify(&arr)[0]["text"], "/clear");
     }
 
     // 2026-11-14、写した画像のパスを入れて送った文を、CLI が画像の添付にした形（当時の会話の形のまま、#69）
@@ -894,5 +1017,69 @@ mod tests {
             };
             assert_eq!(got, c.expect, "{}", c.name);
         }
+    }
+
+    /// 作業中に打った文（順番待ち）。jsonl の queue-operation の行と、途中で取り込まれた文の attachment（queued_command）の形は、
+    /// 2026-11-22 の 16270b20 の jsonl（2.1.330）の 348、390、394、396 行目から写した。中身のない enqueue と dequeue の組は a9c909ad から
+    #[test]
+    fn queued_prompts_wait_then_land() {
+        use crate::native::testtree::{tmp, write};
+        let a = "/Users/x/.family-computing/attachments/drop-1.png 一回オンにしたけど、開き直す？";
+        let b = "claudetownがccnに依存していないなら開き直しても動く？";
+        let op = |ts: &str, o: &str, c: Option<&str>| {
+            let mut v = json!({ "type": "queue-operation", "operation": o, "timestamp": ts, "sessionId": "s" });
+            if let Some(c) = c { v["content"] = json!(c); }
+            v.to_string()
+        };
+        let mut lines = vec![
+            json!({ "type": "user", "timestamp": "2026-11-22T11:47:00Z", "message": { "role": "user", "content": "監査して" } }).to_string(),
+            // 道具の終わりの知らせ（人の文ではない）と、中身のない enqueue は、人の文が無いときに dequeue される
+            op("2026-11-22T11:48:00Z", "enqueue", Some("<task-notification>\n<task-id>b1</task-id>\n</task-notification>")),
+            op("2026-11-22T11:48:01Z", "dequeue", None),
+            op("2026-11-22T11:48:02Z", "enqueue", None),
+            op("2026-11-22T11:48:03Z", "dequeue", None),
+            json!({ "type": "assistant", "timestamp": "2026-11-22T11:49:00Z", "message": { "content": [{ "type": "tool_use", "id": "t1", "name": "Bash", "input": { "command": "ls" } }] } }).to_string(),
+            op("2026-11-22T11:49:56.503Z", "enqueue", Some(a)),
+            op("2026-11-22T11:49:57Z", "enqueue", Some("from local via konaito-pro\n\nこんにちは")),
+            op("2026-11-22T11:50:18.098Z", "enqueue", Some(b)),
+            op("2026-11-22T11:50:18.353Z", "remove", Some(b)),
+            json!({ "type": "attachment", "timestamp": "2026-11-22T11:50:18.000Z", "attachment": { "type": "queued_command", "prompt": b,
+                "source_uuid": "u1", "commandMode": "prompt", "origin": { "kind": "human" }, "timestamp": "2026-11-22T11:50:18.000Z", "humanTurn": true } }).to_string(),
+            // 人の文でない取り込み（道具の知らせ）は会話に出さない
+            json!({ "type": "attachment", "timestamp": "2026-11-22T11:50:19Z", "attachment": { "type": "queued_command", "prompt": "<task-notification>x</task-notification>",
+                "commandMode": "task-notification", "origin": { "kind": "task-notification" } } }).to_string(),
+        ];
+        let d = tmp("queue");
+        let p = d.join("s.jsonl");
+        write(&p, &(lines.join("\n") + "\n"));
+        let mut c = Conv::default();
+        let (next, fresh, evs, _) = read_native(&p, 0).unwrap();
+        c.absorb(0, next, fresh, evs, None);
+        let users = |c: &Conv| c.since(None).items.iter().filter(|x| x["role"] == "user").map(|x| x["text"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>();
+        let queued = |c: &Conv| serde_json::to_value(c.since(None).live).unwrap()["queued"].as_array().cloned().unwrap_or_default();
+        // 途中で取り込まれた文は、取り込まれた所に人の文として出る
+        assert_eq!(users(&c), vec!["監査して", b]);
+        // まだ読まれていない文は順番待ちに出る。別のセッションからの文は from 行を外す
+        let q = queued(&c);
+        assert_eq!(q.iter().map(|x| x["text"].as_str().unwrap()).collect::<Vec<_>>(), vec![a, "こんにちは"]);
+        assert_eq!(q[0]["at"], "2026-11-22T11:49:56.503Z");
+        assert_eq!(q[1]["from"], "from local via konaito-pro");
+        // ターンが終わって順に読まれると、順番待ちから消えて会話に出る
+        lines.push(op("2026-11-22T11:55:00Z", "dequeue", None));
+        lines.push(json!({ "type": "user", "timestamp": "2026-11-22T11:55:00Z", "message": { "role": "user", "content": a } }).to_string());
+        lines.push(op("2026-11-22T11:55:00Z", "dequeue", None));
+        lines.push(json!({ "type": "user", "timestamp": "2026-11-22T11:55:00Z", "message": { "role": "user", "content": "from local via konaito-pro\n\nこんにちは" } }).to_string());
+        write(&p, &(lines.join("\n") + "\n"));
+        let (next2, fresh, evs, _) = read_native(&p, next).unwrap();
+        c.absorb(next, next2, fresh, evs, None);
+        assert!(queued(&c).is_empty());
+        assert_eq!(users(&c), vec!["監査して", b, a, "こんにちは"]);
+        // 起動し直すと待ちは空になる（残った enqueue を待ちのまま出さない）
+        lines.push(op("2026-11-22T12:00:00Z", "enqueue", Some("消えるはず")));
+        lines.push(json!({ "type": "attachment", "timestamp": "2026-11-22T12:01:00Z", "attachment": { "type": "hook_success", "hookName": "SessionStart:resume", "hookEvent": "SessionStart" } }).to_string());
+        write(&p, &(lines.join("\n") + "\n"));
+        let (next3, fresh, evs, _) = read_native(&p, next2).unwrap();
+        c.absorb(next2, next3, fresh, evs, None);
+        assert!(queued(&c).is_empty());
     }
 }
