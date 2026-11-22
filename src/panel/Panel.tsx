@@ -60,7 +60,15 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
   // 下書きは宛先ごとに持つ。宛先を切り替えたとき、打ちかけの文が次の宛先に送られないようにする
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const text = agent ? drafts[agent.id] ?? "" : "";
-  const setText = (v: string) => { if (agent) setDrafts((d) => ({ ...d, [agent.id]: v })); };
+  // 関数を渡すと、その時点の下書きから次の下書きを作る（送った後に入力欄を空にするかを、待つ間に打った文で決める、#182）
+  const setText = (v: string | ((now: string) => string)) => {
+    if (!agent) return;
+    const id = agent.id;
+    setDrafts((d) => {
+      const next = typeof v === "function" ? v(d[id] ?? "") : v;
+      return d[id] === next ? d : { ...d, [id]: next };
+    });
+  };
   // モデルか権限モードを替えている間（#97）。pty は claude を起動し直すので、その間は送らない
   const [switching, setSwitching] = useState(false);
   useEffect(() => { setSwitching(false); }, [agent?.id]);
@@ -172,7 +180,7 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
   const canAnswer = canAnswerPermission(agent);
   // 同じ名前の人が町にいたら、送信先に ID の先頭8字を添える（#36）。見出しは幅が足りず ID が切れるので名前だけにする
   const target = targetLabel(agent, town);
-  quickSend.current = (to, body) => (to === agent.id ? send(body, true) : null);
+  quickSend.current = (to, body) => (to === agent.id ? send(body, "card") : null);
 
   const choices = mood !== "working" ? lastChoices : [];
 
@@ -250,7 +258,7 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
           )}
           {choices.length > 0 && (
             <div className="choices">
-              {choices.map((c) => <button key={c} className="choice" disabled={busy} onClick={() => send(c)}>{c}</button>)}
+              {choices.map((c) => <button key={c} className="choice" disabled={busy} onClick={() => send(c, "choice")}>{c}</button>)}
             </div>
           )}
         </ScrollEdgeGradient>
@@ -262,7 +270,7 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
         <div className="to"><span className="to-name">送信先: {target}</span>
           <SessionControls key={agent.id} agent={agent} support={support} onNoSupport={markNoSupport} onSwitching={setSwitching} onDone={onSent2} onError={onError} />
         </div>
-        <Composer key={agent.id} touch={mobile} agent={agent} text={text} setText={setText} busy={busy || switching} running={mood === "working"} booting={boot.booting} support={support} onSubmit={send} onError={onError} />
+        <Composer key={agent.id} touch={mobile} agent={agent} text={text} setText={setText} busy={busy || switching} running={mood === "working"} booting={boot.booting} support={support} onSubmit={(b) => send(b, "composer")} onError={onError} />
       </div>}
     </aside>
   );
