@@ -66,6 +66,9 @@ async function webCall<T>(cmd: string, a: Record<string, unknown> = {}): Promise
       const body: Record<string, unknown> = { terminal: true, cols: a.cols ?? 120, rows: a.rows ?? 40 };
       if (typeof a.cwd === "string" && a.cwd) body.cwd = a.cwd;
       if (typeof a.name === "string" && a.name.trim()) body.name = a.name;
+      // 設定の既定のモデルと権限モード（src/session/defaults.ts）。ccn は --model と --permission-mode で起動する
+      if (typeof a.model === "string" && a.model) body.model = a.model;
+      if (typeof a.permissionMode === "string" && a.permissionMode) body.permissionMode = a.permissionMode;
       return post("/sessions", body) as T;
     }
     case "term_input": return post(`/sessions/${a.sessionId}/terminal/input`, { text: a.text }) as T;
@@ -85,6 +88,10 @@ async function webCall<T>(cmd: string, a: Record<string, unknown> = {}): Promise
       await new Promise((r) => setTimeout(r, 150));
       return post(`/sessions/${a.sessionId}/terminal/input`, { text: "\r" }) as T;
     }
+    // ブラウザ版は ccn の端末の口へ直接送る（起動の見張りは ccn の send が持つ。ここでは預からない）
+    case "send_or_queue": return webCall<unknown>("send_direct", a).then(() => ({ queued: false }) as T);
+    case "boot_status": return { booted: true, rowSeen: true, startedAt: null, queued: [], done: [] } as T;
+    case "cancel_queued": return [] as T;
     case "interrupt_session": return post(`/sessions/${a.sessionId}/interrupt`, {}) as T;
     // モデルと権限モード（#97）。HTTP の応答を { status, body } で返す（断られた理由は画面が status と code で決める）
     case "session_controls": return raw(`/sessions/${a.sessionId}/command`, "POST", { text: "" }) as T;
@@ -131,6 +138,8 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   if (cmd === "place_repos") return devJson<T>("dev-place-repos.json", {} as T);
   // 見た目の確認用: public/dev-session-detail.json（承認待ちの中身。どのセッションにも同じものを返す）。無ければ承認待ちなし
   if (cmd === "session_detail") return devJson<T>("dev-session-detail.json", null as T);
+  // 見た目の確認用: ?boot を付けると、起動を待って1件預かっている様子を返す（信頼の確認の画面を疑う長さ）
+  if (cmd === "boot_status" && location.search.includes("boot")) return { booted: false, rowSeen: false, startedAt: LOADED_AT - 10_000, queued: [{ text: "起動前に送った文", at: LOADED_AT }], done: [] } as T;
   // ブラウザ表示では本物の会話を読めない。別のセッションの会話を見せて取り違えに見えないよう、仮の1件だけ返す
   // 見た目の確認用: ?longconv を付けると、スクロールが要る長さの仮の会話を返す
   // 見た目の確認用: ?conv を付けると public/dev-conversation.json（`--conversation <id>` の出力の Ok）を返す

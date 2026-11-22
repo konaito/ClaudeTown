@@ -2,14 +2,22 @@ import { useEffect, useState } from "react";
 import { call as invoke } from "../bridge";
 import { checkPlace, DEFAULT_PLACE_LABEL } from "../newHouse/placeSetting";
 import { placeLabel, recentPlaces, type PlacesInput, type RecentPlace } from "../newHouse/places";
+import { MODELS, MODES } from "../session/control";
+import type { SessionDefaults } from "../session/defaults";
 
 /**
- * 設定の画面（#92）。ヘッダーの右端の歯車から開くモーダル。いまの項目は「新しい世帯の場所」だけ。
+ * 設定の画面（#92）。ヘッダーの右端の歯車から開くモーダル。項目は「新しい世帯の場所」と「新しい世帯のモデルと権限モード」。
  * 項目を足すときは、<section className="set-sec"> を1つ足し、保存する値を onSave の引数に足す。
  */
-export function SettingsDialog({ place, onSave, onClose }: { place: string | null; onSave: (place: string | null) => void; onClose: () => void }) {
+export function SettingsDialog({ place, defaults, onSave, onClose }: {
+  place: string | null; defaults: SessionDefaults;
+  onSave: (place: string | null, defaults: SessionDefaults) => void; onClose: () => void;
+}) {
   // 入力欄の文字。空は「設定しない（既定）」
   const [text, setText] = useState(place ?? "");
+  // 新しい世帯を立てるときのモデルと権限モード。"" は「設定しない」（ノードの Claude Code の既定）
+  const [model, setModel] = useState(defaults.model ?? "");
+  const [mode, setMode] = useState(defaults.permissionMode ?? "");
   const [src, setSrc] = useState<{ roots: string[]; lobby: string | null; recent: RecentPlace[] } | "error" | null>(null);
   useEffect(() => {
     let live = true;
@@ -31,7 +39,7 @@ export function SettingsDialog({ place, onSave, onClose }: { place: string | nul
   const bad = check && !check.ok ? check.reason : null;
   const save = () => {
     if (bad) return;
-    onSave(check && check.ok ? check.path : null);
+    onSave(check && check.ok ? check.path : null, { model: model || null, permissionMode: mode || null });
     onClose();
   };
 
@@ -57,6 +65,26 @@ export function SettingsDialog({ place, onSave, onClose }: { place: string | nul
                 <span className="nh-path">{placeLabel(p.path)}</span>
               </button>
             ))}
+          </div>
+        </section>
+        <section className="set-sec">
+          <span className="set-label">新しい世帯のモデルと権限モード</span>
+          <p className="hint">世帯を立てたとき、まだチャットが無い段階で選ばれている値。送信先の行で選び直すと、その会話では選んだ値になる。「設定しない」はこの Mac の Claude Code の既定で立てる。</p>
+          <div className="set-row">
+            <label className="set-pair">
+              <span className="set-sub">モデル</span>
+              <select className="set-input" value={model} onChange={(e) => setModel(e.target.value)}>
+                <option value="">設定しない</option>
+                {MODELS.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+              </select>
+            </label>
+            <label className="set-pair">
+              <span className="set-sub">権限モード</span>
+              <select className="set-input" value={mode} onChange={(e) => setMode(e.target.value)} title={MODES.find((m) => m.value === mode)?.title}>
+                <option value="">設定しない</option>
+                {MODES.map((m) => <option key={m.value} value={m.value} title={m.title}>{m.label}</option>)}
+              </select>
+            </label>
           </div>
         </section>
         <div className="modal-btns">
