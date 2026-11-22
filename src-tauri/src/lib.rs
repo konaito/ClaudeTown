@@ -297,6 +297,8 @@ fn agents_from(rows: Vec<Value>) -> Vec<Value> {
             "pid": s["pid"],
             "startedAt": s["startedAt"],
             "lastActivityAt": s["lastActivityAt"],
+            // claude が入力を受け付けるところまで起動していない（town_rows が付ける）。起動していれば null
+            "booting": s["booting"].as_bool().filter(|b| *b),
             "canSend": s["capabilities"]["send"],
             "parent": parent,
             "capabilities": s["capabilities"],

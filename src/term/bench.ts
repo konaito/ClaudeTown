@@ -10,6 +10,9 @@
 //   会話の欄の吹き出しの並び（自分の文と、仮の吹き出しか）を記録する（#69、送った順と出る順が入れ替わらないか）
 // - drop: ?sid=<セッション> のチャットを開き、?file=<パス> を落としたときと同じドロップの出来事（tauri://drag-drop）を起こす。
 //   入力欄に入ったパスを記録し、?ask= を続けて送る（#69、一時の場所のファイルを写したパスが入り、子が読めるか）
+// - boot: ?cwd=<一時の場所> に新しい世帯を立て、claude の起動を待たずに入力欄から ?text= を送る（起動前に送った文を預かるか）。
+//   1秒ごとに、見出しの札、入力欄の案内、預かった文の吹き出し、出口の案内、届けたの吹き出し、トーストを outerHTML から記録する。
+//   ?answer=1 なら、10秒たっても預かったままのとき、信頼の確認の画面に Yes（↓と Enter）を答える。cwd が一時の場所（/var/folders）のときだけ答える
 // - scene: 軽さの計測（#2）。場面（scene=idle|hidden|minimized|terminal|talk|town）を用意して ready を書き、
 //   wait（ms）たったら post を書く。CPU とメモリは外から ps で測る。測っている間は、ここでは何も回さない。
 //   外から回していた scripts/bench.ts はモックの ccn で町を作っていたので、ccn を外したときに消した（作り直すまで、この場面は手で使う）
@@ -223,6 +226,50 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       await sleep(30000);
       on = false;
       await log({ cpu_end: true, ipcPerSec: +((perfCounters.ipc - a.ipc) / 30).toFixed(1), charsPerSec: Math.round((perfCounters.bytes - a.bytes) / 30), fps: +(frames / 30).toFixed(1), renderer: perfCounters.renderer || "dom" });
+      return;
+    }
+    if (mode === "boot") {
+      const cwd = params.get("cwd") ?? "";
+      const text = params.get("text") ?? "この文には「了解」とだけ返して";
+      const r = await call<{ id: string }>("create_session", { cwd, name: benchName(), cols: 120, rows: 40 });
+      mine.push(r.id);
+      const t0 = Date.now();
+      await log({ created: r.id, cwd });
+      const q = <T extends Element>(sel: string) => document.querySelector<T>(sel);
+      // 一覧に載るまで選び直す（載る前の select は外れる）
+      for (let i = 0; i < 20 && !q(".composer textarea"); i++) { h().select(r.id); await sleep(250); }
+      const look = (tag: string) => log({
+        tag, ms: Date.now() - t0,
+        head: q(".p-head .st")?.outerHTML ?? null,
+        card: [...document.querySelectorAll(".card .st-boot")].length,
+        placeholder: q<HTMLTextAreaElement>(".composer textarea")?.placeholder ?? null,
+        waitBoot: [...document.querySelectorAll(".msg.me.pending")].map((e) => e.querySelector(".meta")?.textContent + "｜" + e.querySelector(".b")?.textContent),
+        bootWait: q(".boot-wait .hint")?.textContent ?? null,
+        kid: [...document.querySelectorAll(".msg.kid .b")].map((e) => e.textContent).slice(-1),
+        toasts: [...document.querySelectorAll(".toast")].map((e) => e.textContent),
+      });
+      await look("before-send");
+      // 入力欄に打って Enter を押したのと同じ（React の制御された textarea なので、値は prototype の setter で入れる）
+      const ta = q<HTMLTextAreaElement>(".composer textarea");
+      if (!ta) throw new Error("入力欄が無い");
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(ta, text);
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      await sleep(200);
+      ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+      let answered = false;
+      for (let i = 0; i < 60; i++) {
+        await sleep(1000);
+        await look(`t${i + 1}`);
+        if (params.get("answer") && !answered && Date.now() - t0 > 10_000 && q(".boot-wait") && /^\/(private\/)?var\/folders\//.test(cwd)) {
+          await call("term_input", { sessionId: r.id, text: "\x1b[B" });
+          await sleep(300);
+          await call("term_input", { sessionId: r.id, text: "\r" });
+          answered = true;
+          await log({ answered: true, ms: Date.now() - t0 });
+        }
+        if ([...document.querySelectorAll(".msg.kid .b")].some((e) => e.textContent?.includes("了解"))) break;
+      }
+      await look("end");
       return;
     }
     let last: string | null = null;

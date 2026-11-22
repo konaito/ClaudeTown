@@ -396,7 +396,9 @@ fn gate(session_id: &str) -> Result<Gate, String> {
     let started = super::pty::started_at(session_id).ok_or("このセッションの端末はこのアプリに無い")?;
     let row = super::pty::pid_of_id(session_id).and_then(|pid| super::native::sessions::fresh_row(&super::native::claude_home(), pid));
     let hooked = hooked_since(&super::fc_path(super::Scope::Shared, &format!("state/{session_id}.json")), started);
-    Ok(gate_of(row.as_ref(), hooked, started, super::now_ms() as u64))
+    let now = super::now_ms() as u64;
+    let seen = if marked(row.as_ref(), hooked) { first_seen(session_id, started, now) } else { None };
+    Ok(gate_of(row.as_ref(), hooked, started, seen, now))
 }
 
 /// claude が入力を受け付けるところまで起動したか（アプリが立てた端末だけ。ほかは None）。町の一覧の booting に使う
@@ -416,24 +418,49 @@ pub fn hooked_since(path: &Path, started_at: u64) -> bool {
 
 /// 直接送ってよい状態か。row は Claude Code の記録（sessions/<pid>.json）から読んだ行（まだ無ければ None）。
 /// hooked は hook の状態ファイル（state/<id>.json）がこの起動の後に書かれたか（hooked_since）
-pub fn gate_of(row: Option<&Value>, hooked: bool, started_at: u64, now_ms: u64) -> Gate {
+pub fn gate_of(row: Option<&Value>, hooked: bool, started_at: u64, first_seen: Option<u64>, now_ms: u64) -> Gate {
     if let Some(r) = row
         && r.get("state").and_then(|s| s.as_str()) == Some("waiting_permission") {
             return Gate::Refused(WAITING.into());
         }
     // claude が起動し、信頼の確認を抜けたか。信頼の確認の画面で Enter を送ると、既定の「No, exit」が選ばれて claude が終わる
     // （2026-11-13 に画面で見た）。SessionStart の hook が届くと state/<id>.json が書かれ、sessions/<pid>.json の updatedAt が startedAt より進む。
-    // どちらかがあれば起動したとみる。入力の受け付けは SessionStart の 0.3〜1.4 秒後なので、起動から3秒は待つ
-    let active = row.map(|r| r["lastActivityAt"].as_u64().unwrap_or(0) > r["startedAt"].as_u64().unwrap_or(u64::MAX)).unwrap_or(false);
-    if !(hooked || active) || now_ms.saturating_sub(started_at) < 3000 {
+    // どちらかがあれば起動したとみる。入力の受け付けは SessionStart の 0.3〜1.4 秒後なので、起動からも、印を初めて見てからも3秒は待つ。
+    // 信頼の確認の画面で止まってから答えると、印は起動から何十秒も後に出るので、起動からだけ数えると早すぎる。
+    // first_seen は印を初めて見た時刻（None は、今が初めて）
+    if !marked(row, hooked) {
+        return Gate::Booting;
+    }
+    let from = started_at.max(first_seen.unwrap_or(now_ms));
+    if now_ms.saturating_sub(from) < 3000 {
         return Gate::Booting;
     }
     Gate::Ready
 }
 
-/// gate_of を文で返す形（switch.rs が使う）
+/// 起動の印があるか（hook の状態ファイルがこの起動の後に書かれたか、sessions/<pid>.json の updatedAt が startedAt より進んだか）
+fn marked(row: Option<&Value>, hooked: bool) -> bool {
+    hooked || row.map(|r| r["lastActivityAt"].as_u64().unwrap_or(0) > r["startedAt"].as_u64().unwrap_or(u64::MAX)).unwrap_or(false)
+}
+
+/// 起動の印を初めて見た時刻。セッションごとに、どの起動（started_at）で見たかと一緒に覚える
+static FIRST_SEEN: Mutex<Option<HashMap<String, (u64, u64)>>> = Mutex::new(None);
+
+fn first_seen(session_id: &str, started_at: u64, now_ms: u64) -> Option<u64> {
+    let mut g = FIRST_SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(HashMap::new);
+    match m.get(session_id) {
+        Some(&(s, at)) if s == started_at => Some(at),
+        _ => {
+            m.insert(session_id.to_string(), (started_at, now_ms));
+            None
+        }
+    }
+}
+
+/// gate_of を文で返す形（switch.rs が使う。印を見た時刻は覚えず、起動から3秒で数える今までの形）
 pub fn check_direct(row: Option<&Value>, hooked: bool, started_at: u64, now_ms: u64) -> Result<(), String> {
-    match gate_of(row, hooked, started_at, now_ms) {
+    match gate_of(row, hooked, started_at, Some(started_at), now_ms) {
         Gate::Ready => Ok(()),
         Gate::Booting => Err(NOT_BOOTED.into()),
         Gate::Refused(e) => Err(e),
@@ -717,10 +744,16 @@ mod tests {
         assert!(check_direct(Some(&json!({"state":"waiting_permission","startedAt":1000,"lastActivityAt":1800})), true, 1000, now).is_err());
         assert_eq!(paste_body("a\x1b[201~b"), "ab");
         // 起動待ちだけが「待てば送れる」。承認待ちは待たない理由として返す（預かって送る見張りが、起動待ちと見分ける）
-        assert_eq!(gate_of(None, false, 1000, now), Gate::Booting);
-        assert_eq!(gate_of(Some(&ok), true, 1000, 2000), Gate::Booting);
-        assert!(matches!(gate_of(Some(&json!({"state":"waiting_permission","startedAt":1000,"lastActivityAt":1800})), true, 1000, now), Gate::Refused(_)));
-        assert_eq!(gate_of(Some(&ok), false, 1000, now), Gate::Ready);
+        assert_eq!(gate_of(None, false, 1000, None, now), Gate::Booting);
+        assert_eq!(gate_of(Some(&ok), true, 1000, Some(1000), 2000), Gate::Booting);
+        assert!(matches!(gate_of(Some(&json!({"state":"waiting_permission","startedAt":1000,"lastActivityAt":1800})), true, 1000, Some(1000), now), Gate::Refused(_)));
+        assert_eq!(gate_of(Some(&ok), false, 1000, Some(1800), now), Gate::Ready);
+        // 信頼の確認の画面で長く止まってから答えると、起動の印は起動から何十秒も後に出る。印を初めて見てから3秒は待つ
+        assert_eq!(gate_of(Some(&ok), false, 1000, Some(60_000), 60_000), Gate::Booting);
+        assert_eq!(gate_of(Some(&ok), false, 1000, Some(60_000), 62_000), Gate::Booting);
+        assert_eq!(gate_of(Some(&ok), false, 1000, Some(60_000), 63_000), Gate::Ready);
+        // 印をまだ覚えていない（初めて見た回）は、今が初めて見た時刻
+        assert_eq!(gate_of(Some(&ok), false, 1000, None, 60_000), Gate::Booting);
     }
 
     #[test]

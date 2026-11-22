@@ -36,6 +36,8 @@ export function usePanelSend({ agent, hasTerm, items, switching, support, markNo
     // CLI のコマンドやシェルモードとして動かない（docs/research/cli-input.md）
     const plain = !(body.startsWith("!") || isSlashCommand(body));
     const direct = hasTerm && (!viaCcn(agent) || !plain);
+    // 起動前で Rust が預かったか。預かったときは「届けた」と言わない（会話の末尾に「起動したら送る」が出る）
+    let queued = false;
     try {
       if (route?.kind === "command") {
         const r = await invoke<unknown>("run_command", { sessionId: agent.id, text: route.text });
@@ -50,7 +52,8 @@ export function usePanelSend({ agent, hasTerm, items, switching, support, markNo
         // claude の起動前（信頼の確認の画面を含む）なら、Rust が預かって起動したら送る（composer.rs の send_or_queue）。
         // 預かった文は会話の末尾に「起動したら送る」として出す（Panel が boot_status から出す）
         const r = await invoke<{ queued?: boolean } | null>("send_or_queue", { sessionId: agent.id, text: body });
-        if (r?.queued) onQueued();
+        queued = !!r?.queued;
+        if (queued) onQueued();
         else {
           // 画面を開くコマンド（/model など）は、ターミナルで操作してもらう
           if (!plain && opensDialog(body, BUILTINS)) setTab("term");
@@ -67,7 +70,7 @@ export function usePanelSend({ agent, hasTerm, items, switching, support, markNo
       stick.current = true;
       // 返事が来るまでは間隔を縮めて取る（#5）
       convKick.current();
-      onSent(agent);
+      if (!queued) onSent(agent);
       return true;
     } catch (e) {
       onError(`${agent.name} に届かなかった: ${e}`);

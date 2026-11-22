@@ -20,6 +20,7 @@ import { StateTab } from "./StateTab";
 import { useConversation } from "./useConversation";
 import { usePanelSend } from "./usePanelSend";
 import { useBoot } from "./useBoot";
+import { isSlashCommand } from "../composer/edit";
 import { call as invoke } from "../bridge";
 import { canAnswerPermission, hasTerminal } from "../abilities";
 
@@ -90,7 +91,8 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
   // claude の起動の様子（アプリが立てた端末だけ）。起動前に送った文は Rust が預かり、起動したら送る（composer.rs の send_or_queue）。
   // 送れたら「届けた」の仮の吹き出しに替え、送れなかったら理由を出して入力欄に戻す
   const boot = useBoot(agent,
-    (t) => { setPending((p) => [...p, { role: "user", text: t, pending: true, at: new Date().toISOString(), after: items[items.length - 1]?.n ?? -1 }]); convKick.current(); },
+    // / と ! の文は会話に user として出ないことがあるので、すぐ送ったときと同じく仮の吹き出しを足さない（usePanelSend の plain）
+    (t) => { if (!(t.startsWith("!") || isSlashCommand(t))) setPending((p) => [...p, { role: "user", text: t, pending: true, at: new Date().toISOString(), after: items[items.length - 1]?.n ?? -1 }]); convKick.current(); },
     (t, e) => { onError(`${agent?.name ?? ""} に届かなかった: ${e}`); if (!text.trim()) setText(t); });
   const { busy, send } = usePanelSend({ agent, hasTerm, items, switching, support, markNoSupport, addNote, setTab, setPending, setText, stick, convKick, onSent, onError, onQueued: boot.kick });
   // 預かった文を取り消して、入力欄に戻す（打ちかけがあれば、その前に置く）
