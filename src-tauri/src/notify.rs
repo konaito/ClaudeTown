@@ -207,7 +207,10 @@ pub(crate) fn start(app: &tauri::AppHandle) {
     }
     let _ = STARTED_AT.set(now_ms() as u64);
     let h = app.clone();
-    let _ = app.notification().on_action(move |_| bring_front(&h));
+    let _ = app.notification().on_action(move |a| {
+        bring_front(&h);
+        perf_log(json!({ "notifyAction": a.action_id(), "at": now_ms() as u64 }).to_string());
+    });
     if APP.set(app.clone()).is_ok() {
         let _ = std::thread::Builder::new().name("mail-notify".into()).spawn(hidden_loop);
     }
