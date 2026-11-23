@@ -2,8 +2,10 @@
 // お便り（人の番の知らせ、src/mail.ts）とは別のもの。
 //
 // 記録は状態 hook（hooks/fc-report.py）が ~/.family-computing/letters.jsonl に書く:
-//   sent      送り手の PostToolUse。SendMessage、ccn の send_message、ccn の create_session。宛先は生のまま
-//   received  受け手の UserPromptSubmit。<cross-session-message from=… from-name=…> か、1行目が from agent:<ノード>/<sid8>/… の文
+//   sent      送り手の PostToolUse。SendMessage、ccn の send_message、ccn の create_session。宛先は生のまま。
+//             in-process のチームメイトと sub-agent が送ったものは、from が町の行の id（sub-<agent_id>@<sid8>）
+//   received  受け手の UserPromptSubmit。<cross-session-message from=… from-name=…> か、1行目が from agent:<ノード>/<sid8>/… の文。
+//             agent teams のチームメイトの文（<teammate-message>）では UserPromptSubmit が出ないので、received は無い（#271）
 // 宛先と送り手は、アプリが町の一覧からセッション ID に結び付ける（resolve）:
 //   1. uds:/tmp/cc-socks/<pid>.sock の pid（Claude Code のソケットの pid は ccn の pid と同じ。2026-11-12 に確かめた）
 //   2. セッション ID か、その先頭8字以上（"<ノード>/<ID>" の形も読む）
@@ -113,10 +115,12 @@ export function resolvePeer(raw: string | null | undefined, name: string | null 
 /** 記録の並びから、飛ばす封筒の一覧を作る（古い順） */
 export function flightsOf(recs: LetterRec[], agents: Agent[]): Flight[] {
   const live = new Set(agents.map((a) => a.id));
+  const byId = new Map(agents.map((a) => [a.id, a]));
   const sent: Flight[] = [];
   for (const r of recs) {
     if (r.ev !== "sent" || !r.from || !live.has(r.from)) continue;
-    const to = (r.to_id && live.has(r.to_id) ? r.to_id : null) ?? resolve(r.to_id, agents) ?? resolve(r.to, agents);
+    // 宛先の名前は送り手を起点に引く。agent teams の team-lead と main はリード、チームメイトの名前はそのチームの中から（#271）
+    const to = (r.to_id && live.has(r.to_id) ? r.to_id : null) ?? resolve(r.to_id, agents) ?? resolvePeer(r.to, null, byId.get(r.from)!, agents);
     if (!to || to === r.from) continue;
     sent.push({ id: r.id, from: r.from, to, at: r.at, summary: r.summary ?? "", readAt: null });
   }

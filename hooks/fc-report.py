@@ -20,8 +20,10 @@ ccn から取れる状態は running / waiting_permission / idle の3つだけ�
 /clear で id が変わっても pid は変わらないので、アプリはこれで前の id と今の id を結び、親子をつなぐ。
 
 in-process のチームメイトと sub-agent の入力は、session_id がリードのもので、agent_id が付いて届く。
-これはリードの様子ではないので、リードの状態ファイルにもお手紙にも書かない。例外は承認だけにする。
+これはリードの様子ではないので、リードの状態ファイルには書かない。例外は承認だけにする。
 チームメイトの承認の画面はリードの端末に出て、人はそこで答えるので、並び（perm_queue）には足して外す。
+送ったお手紙は、from を町のチームメイトの行の id（sub-<agent_id>@<session_id の先頭8字>）にして書く。
+チームメイトの文（<teammate-message>）を受けたときは UserPromptSubmit が出ないので、受けた記録は作れない（2026-11-23、#271）。
 tmux のチームメイトは自分の session_id で届き、agent_id は付かないので、ふつうのセッションと同じに書く。
 
 LLM は呼ばない。速さを優先し、どんな失敗でも何も出さずに 0 で終わる（本体の動きを止めない）。
@@ -363,9 +365,16 @@ def note_id(sid, ev, data):
 
 
 def from_agent(sid, ev, data):
-    """チームメイトか sub-agent の入力。承認の並びだけを触り、doing、tools、said、asked、お手紙には書かない。
+    """チームメイトか sub-agent の入力。承認の並びと送ったお手紙だけを書き、doing、tools、said、asked には書かない。
     2026-11-21 の実機（Claude Code 2.1.330、in-process）では、チームメイトの PermissionRequest と承認後の PostToolUse に
     agent_id が付き、承認の Notification には付かなかった。承認の画面はリードの端末に出た"""
+    if ev == "PostToolUse" and data.get("tool_name") in LETTER_TOOLS:
+        # 送り手は町のチームメイトの行の id（src-tauri/src/native/subagents.rs の sub_id）にする。
+        # リードの id で書くと、リードが送ったことになる（#271）
+        try:
+            letter_sent(f"sub-{data.get('agent_id')}@{sid[:8]}", data.get("tool_name"), data.get("tool_input"), data.get("tool_response"))
+        except Exception:
+            pass
     if ev == "PermissionRequest":
         keep_input(sid, data)
         q = read_queue(sid)

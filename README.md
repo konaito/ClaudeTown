@@ -155,7 +155,7 @@ hook の本体は `hooks/fc-report.py` に置く。2026-11-12 に本人に確か
 
 hook は本物の `claude -p` で試し、頼まれたこと、道具、最後の報告、次の一手が状態ファイルに入ることを確かめた。
 
-in-process のチームメイトと sub-agent の hook は、リードの session_id に `agent_id` が付いて届く。hook はこれをリードの状態ファイルにもお手紙にも書かない。例外は承認で、チームメイトの承認の画面はリードの端末に出るので、リードの承認の並びに足し、終われば外す（2026-11-21 に Claude Code 2.1.330 で確かめた）。チームメイトの様子は、hook ではなく `native/subagents.rs` が meta.json と jsonl から作る。tmux のチームメイトは自分の session_id で届くので、ふつうのセッションと同じに書く。
+in-process のチームメイトと sub-agent の hook は、リードの session_id に `agent_id` が付いて届く。hook はこれをリードの状態ファイルには書かない。例外は承認で、チームメイトの承認の画面はリードの端末に出るので、リードの承認の並びに足し、終われば外す（2026-11-21 に Claude Code 2.1.330 で確かめた）。送ったお手紙は、from を町のチームメイトの行の id（`sub-<agent_id>@<session_id の先頭8字>`）にして書く（#271）。チームメイトの文（`<teammate-message>`）を受けたときは UserPromptSubmit が出ないので、受けた記録は作らない（2026-11-23 に Claude Code 2.1.330 の in-process と tmux で確かめた）。チームメイトの様子は、hook ではなく `native/subagents.rs` が meta.json と jsonl から作る。tmux のチームメイトは自分の session_id で届くので、ふつうのセッションと同じに書く。
 
 ## 決まったこと
 
@@ -281,7 +281,7 @@ Claude Town は、ブラウザから開けるインストール可能な PWA と
 - 中継は Origin と Sec-Fetch-* を ccn へ渡さないので、ccn の CSRF の確認はブラウザ版では働かない。代わりに `web/middleware/01.access.ts` が、GET と HEAD 以外の要求で Origin の host か Sec-Fetch-Site が同じオリジンでなければ 403 を返す（`web/lib/origin.ts`、#167）。
 - 中継は、受け取った Access の JWT を `Cf-Access-Token` で渡す（Linked App Token）。ccn の Access アプリ `ccn` に、`claude-town` からの Linked App Token を通すポリシー `town-linked` を足してある。ccn には人（email）の呼び手として届き、サービストークンの秘密は持たない。
 - Service Worker（`public/sw.js`）は何もキャッシュしない。ホーム画面に追加するためだけに置いた。manifest は `public/manifest.webmanifest`、アイコンは `public/app-icon.svg` から `bun run pwa:icons` で作る。
-- デプロイは、既定ブランチへのマージで `.github/workflows/void-deploy.yml` が行う。
+- デプロイは、既定ブランチ（`main`）へのマージで `.github/workflows/void-deploy.yml` が行う。
 - 手元の開発サーバー（`web/` で `bun run dev`）は、`web/.env` に `DEV_NO_AUTH=1` を書くと Access の確認を飛ばす。このときは localhost だけで受け、`--host` を付けると起動しない（`web/dev-host.ts`、#244）。macOS では `[::1]` で受けるので、`http://localhost:5174/` で開く（`127.0.0.1` では開けない）。Worker から見える Host と接続元の IP は LAN の別の機械でも偽れるので、受ける口を絞る。`DEV_NO_AUTH` が無いときは今までどおり全部のインターフェースで受けるが、Access の JWT が無い要求は 403 になる。
 
 会話の表示は、Rust の `conversation` と同じ処理を TS に移してある（`src/webConv.ts`）。承認への返事は、ccn を使っていたころの Rust の `answer_permission` を TS に移したもので、今の Rust には無い（`src/webPerm.ts`）。承認への返事は、`src/webPerm.ts` だけが確認（まだ承認待ちか、許可でも拒否でも requestId が見せた中身と同じか、質問には全部の答えがあるか）をしてから送る。ただし送信の非常停止（`~/.family-computing/send-disabled`）は手元のファイルなので、ブラウザ版では効かない。会話の「今の動き」の行（`live`）と、保存した会話は移していない。
@@ -307,6 +307,7 @@ Void アプリの確認は `web/` で行う。`web/src` は `../src` へのリ�
 ```sh
 bun install --frozen-lockfile   # リポジトリ直下
 cd web && bun install --frozen-lockfile
+bun run check   # Worker（tsconfig.server.json）と設定のファイル（tsconfig.node.json）の型を確かめる
 bun run build   # .cloudflare/ に Worker と画面が出る
 bun test        # web/test の試験。ルートの bun test は src だけを走らせる（bunfig.toml）
 ```
@@ -329,7 +330,12 @@ FC_CLAUDE_BIN=/tmp/<代わりのスクリプト> bun run tauri dev
 
 # 配置計算だけの検証（世帯の中の8ケースと、世帯の並べ方の5条件）
 bun test src/layout
+
+# 型の確認。画面（tsconfig.json）、試験を含めた src（tsconfig.test.json）、設定のファイル（tsconfig.node.json）の3つを流す
+bun run typecheck
 ```
+
+`bun test` は型を見ずに試験を走らせる。`tsconfig.json` は試験を外しているので、試験の型は `bun run typecheck` でだけ確かめられる。
 
 `public/dev-*.json` には本物のセッションの中身が入るので、コミットしない（.gitignore に入れてある）。
 

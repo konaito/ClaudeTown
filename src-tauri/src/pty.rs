@@ -428,7 +428,8 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
     let bin = claude_bin(path.as_deref())?;
     // どのアカウントで起動するか（cam usage の best。account.rs）。resume も同じ選び方にする（会話の記録 projects と sessions は、cam が全プロファイルで ~/.claude のものを共有している）。
     // 全部のアカウントが上限のとき起動をやめるのは、新しく立てるときだけ（resume を断ると、アプリを開いたときの立て直しで端末が黙って戻らない）
-    let config_dir = crate::account::prepare(path.as_deref(), resume.is_none())?;
+    let prepared = crate::account::prepare(path.as_deref(), resume.is_none())?;
+    let config_dir = prepared.dir;
     let id = resume.map(String::from).unwrap_or_else(new_uuid);
     let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
     let pair = native_pty_system().openpty(size).map_err(|e| format!("端末を開けなかった: {e}"))?;
@@ -489,7 +490,8 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
         notice();
     });
     // pathFallback は、ログインシェルの PATH を取れず、アプリの PATH で立てた印。画面がトーストで知らせる（#175）
-    Ok(json!({ "id": id, "pid": pid, "cwd": cwd, "pathFallback": path.is_none() }))
+    // accountFallback は、cam usage が上限で返らず、アカウントを選ばずに既定のまま立てたときの一言。画面がトーストで知らせる（#249）
+    Ok(json!({ "id": id, "pid": pid, "cwd": cwd, "pathFallback": path.is_none(), "accountFallback": prepared.fallback }))
 }
 
 fn read_loop(pid: u32, mut reader: Box<dyn Read + Send>) {
@@ -997,13 +999,18 @@ mod tests {
     /// 偽の cam と偽の claude を置いた試験用のディレクトリ。cam usage --json は usage を返し、sync は呼ばれた名前を sync.log に足す。
     /// claude は自分の環境を env.txt に書いてから寝る
     fn fake_cam_dir(tag: &str, usage: &str) -> PathBuf {
+        fake_cam_dir_after(tag, usage, "0")
+    }
+
+    /// fake_cam_dir の cam usage が、delay 秒（sleep の引数）待ってから usage を返すもの
+    fn fake_cam_dir_after(tag: &str, usage: &str, delay: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("fc-pty-cam-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("profiles/acct")).unwrap();
         std::fs::write(dir.join("usage.json"), usage).unwrap();
         let cam = format!(
-            "#!/bin/sh\ncase \"$1\" in\n  usage) cat '{d}/usage.json' ;;\n  sync) echo \"$2\" >> '{d}/sync.log' ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n  usage) sleep {delay}; cat '{d}/usage.json' ;;\n  sync) echo \"$2\" >> '{d}/sync.log' ;;\nesac\n",
             d = dir.display()
         );
         let claude = format!("#!/bin/sh\nenv > '{d}/env.txt.tmp' && mv '{d}/env.txt.tmp' '{d}/env.txt'\nexec sleep 30\n", d = dir.display());
@@ -1022,6 +1029,11 @@ mod tests {
 
     /// resume が Some なら、その id で resume として起動する
     fn launched_config_dir_as(dir: &std::path::Path, resume_id: Option<&str>) -> Result<Option<String>, String> {
+        launched(dir, resume_id).map(|(c, _)| c)
+    }
+
+    /// launched_config_dir_as の中身。起動の応答も返す
+    fn launched(dir: &std::path::Path, resume_id: Option<&str>) -> Result<(Option<String>, Value), String> {
         // 町の一覧を数える試験（lib.rs）に、この端末が混ざらないようにする。錠は端末が台帳から消えるまで持つ。
         // 取る順は lib.rs と composer.rs と同じ NATIVE_TEST_LOCK、BIN_LOCK（逆に取ると互いに待って止まる）
         let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1043,7 +1055,8 @@ mod tests {
             std::env::remove_var("FC_CAM_PROFILES");
             match &prev { Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v), None => std::env::remove_var("CLAUDE_CONFIG_DIR") }
         }
-        let id = r?["id"].as_str().unwrap().to_string();
+        let r = r?;
+        let id = r["id"].as_str().unwrap().to_string();
         let t0 = Instant::now();
         let env = loop {
             if let Ok(s) = std::fs::read_to_string(dir.join("env.txt")) { break s; }
@@ -1055,7 +1068,7 @@ mod tests {
             assert!(t0.elapsed() < Duration::from_secs(10), "止めた端末が台帳から消えない");
             std::thread::sleep(Duration::from_millis(20));
         }
-        Ok(env.lines().find_map(|l| l.strip_prefix("CLAUDE_CONFIG_DIR=")).map(String::from))
+        Ok((env.lines().find_map(|l| l.strip_prefix("CLAUDE_CONFIG_DIR=")).map(String::from), r))
     }
 
     /// cam usage の best のプロファイルで起動する。パスは launcher（~/.cam/bin/<名前>）と同じ <profiles>/<名前> の文字列のまま。
@@ -1068,11 +1081,36 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("sync.log")).unwrap_or_default(), "acct\n", "起動の前に cam sync <名前> を掛ける");
     }
 
+    /// #249。本物の cam は各アカウントの使用量を curl -m 5 で取り、取れなければ控え（usage-cache）の値で選ぶ。
+    /// curl の上限を過ぎてから best を返す cam（5.3秒）でも、待って best のプロファイルで起動する
+    #[test]
+    fn launch_waits_for_a_cam_that_answers_after_its_curl_limit() {
+        let dir = fake_cam_dir_after("late", r#"{"best":"acct","choice":"normal","next_available":null,"accounts":[]}"#, "5.3");
+        let want = format!("{}/acct", dir.join("profiles").display());
+        let (got, r) = launched(&dir, None).unwrap();
+        assert_eq!(got.as_deref(), Some(want.as_str()));
+        assert_eq!(r["accountFallback"], Value::Null, "選べたときは知らせない");
+    }
+
+    /// #249。cam usage が上限（8秒）を過ぎても返らなければ、env を触らずに起動し、応答に知らせる一言を付ける（画面がトーストで出す）
+    #[test]
+    fn launch_tells_the_screen_when_cam_usage_times_out() {
+        let dir = fake_cam_dir_after("hang", r#"{"best":"acct","choice":"normal","next_available":null,"accounts":[]}"#, "30");
+        let (got, r) = launched(&dir, None).unwrap();
+        assert_eq!(got.as_deref(), Some("/nowhere/inherited"));
+        let note = r["accountFallback"].as_str().unwrap_or_default();
+        assert!(note.contains("既定のアカウント"), "{r}");
+        assert!(!dir.join("sync.log").exists());
+    }
+
     /// 選べないとき（choice: unknown）は env を触らない。アプリの環境の値のまま起動する
     #[test]
     fn launch_keeps_the_env_when_cam_cannot_choose() {
         let dir = fake_cam_dir("unknown", r#"{"best":null,"choice":"unknown","next_available":null,"accounts":[]}"#);
-        assert_eq!(launched_config_dir(&dir).unwrap().as_deref(), Some("/nowhere/inherited"));
+        let (got, r) = launched(&dir, None).unwrap();
+        assert_eq!(got.as_deref(), Some("/nowhere/inherited"));
+        // cam が答えて選ばなかったときは知らせない（cam の無い機械や --default のコマンドで毎回トーストを出さない）
+        assert_eq!(r["accountFallback"], Value::Null);
         assert!(!dir.join("sync.log").exists());
     }
 

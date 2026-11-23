@@ -4,6 +4,7 @@
 // - create_session / stop_session / restart_session: 新しい世帯の claude をこのアプリの中の端末で起動する、止める、止めて枠の残るアカウントで立て直す（pty.rs）
 // - term_open / term_close / term_input / term_resize: このアプリが立てた端末を読み書きし、開いた画面の Channel へ流す
 // - house_places: 新しい世帯のペインの「最近の場所」の材料（places.rs）
+// - restore_report: 起動のときの端末の立て直しで、戻らなかった端末の一覧（session_ops.rs、#262）
 // - prompt_history / slash_commands / file_suggestions / send_direct / interrupt_session: チャットの入力欄を CLI と同じ動きにする（composer.rs）
 // - session_settings / switch_session / cancel_switch: モデルと権限モードを読む、替える、予約を取り消す（switch.rs）
 // ファイルを読む命令は spawn_blocking で動かし、メインスレッドを止めない（下の「画面から呼ぶ命令」）。
@@ -597,6 +598,9 @@ pub fn run() {
             // 前回開いていた端末を立て直す（#152）。ログインシェルに PATH を聞くので（最大5秒）、別のスレッドで
             if std::env::var("FC_NO_RESTORE").is_err() {
                 std::thread::spawn(session_ops::restore_terminals);
+            } else {
+                // 立て直さないときも、画面の restore_report が待ち続けないよう、空で済ませる（#262）
+                session_ops::finish_restore(vec![]);
             }
             // 開発の計測用（src/term/bench.ts。scripts/bench.ts は #131 で消えた）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、
             // 最前面に出し、どのデスクトップにも出す（本人が別のデスクトップに移っても隠れないように）。
@@ -615,7 +619,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             cmd::snapshot, conversation::cmd::conversation,
-            session_ops::cmd::create_session, session_ops::cmd::resume_session, session_ops::cmd::stop_session, session_ops::cmd::restart_session, session_ops::cmd::house_places, repo::cmd::place_repos,
+            session_ops::cmd::create_session, session_ops::cmd::resume_session, session_ops::cmd::stop_session, session_ops::cmd::restart_session, session_ops::cmd::house_places, session_ops::cmd::restore_report, repo::cmd::place_repos,
             term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
             composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::send_or_queue, composer::cmd::cancel_queued, composer::cmd::boot_status, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files,
