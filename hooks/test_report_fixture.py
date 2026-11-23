@@ -41,6 +41,12 @@ SCENARIOS = [
     ("休んだリードは、チームメイトが道具を使っても休んだまま", [prompt("a"), STOP, {"hook_event_name": "PreToolUse", **MATE_TOOL}, {"hook_event_name": "PostToolUse", **MATE_TOOL}]),
     ("チームメイトの承認待ちはリードの承認待ちになる（画面はリードの端末に出る）", [prompt("a"), STOP, {**ASK, **MATE_TOOL}]),
     ("チームメイトの承認が済むと、休んだリードは休みに戻る", [prompt("a"), STOP, {**ASK, **MATE_TOOL}, {"hook_event_name": "PostToolUse", **MATE_TOOL}]),
+    # 承認の画面で理由なしの No か Esc を押したときに届いた並び（#180、2026-11-23 に Claude Code 2.1.330 で実測）。
+    # この後は PostToolUse も PostToolUseFailure も Stop も来ず、phase は needs_you のまま残る。画面側（src/model.ts の moodOf）が見分ける
+    ("承認の画面を No か Esc で閉じた（この後に hook は来ない）", [
+        prompt("a"), {"hook_event_name": "PreToolUse", **WRITE}, {**ASK, **WRITE},
+        {"hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs your permission"},
+    ]),
 ]
 
 

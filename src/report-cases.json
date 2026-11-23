@@ -419,5 +419,61 @@
       "said": "beta を呼んだ",
       "next": null
     }
+  },
+  {
+    "name": "承認の画面を No か Esc で閉じた（この後に hook は来ない）",
+    "events": [
+      {
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "a",
+        "cwd": "/tmp/x"
+      },
+      {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {
+          "file_path": "/a/b.txt"
+        }
+      },
+      {
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Write",
+        "tool_input": {
+          "file_path": "/a/b.txt"
+        }
+      },
+      {
+        "hook_event_name": "Notification",
+        "notification_type": "permission_prompt",
+        "message": "Claude needs your permission"
+      }
+    ],
+    "state": {
+      "phase": "needs_you",
+      "doing": "書く: a/b.txt",
+      "needs": "Claude needs your permission",
+      "tools": 1,
+      "turn_started_at": 0,
+      "perm_queue": [
+        {
+          "tool": "Write",
+          "summary": "書く: a/b.txt",
+          "detail": "/a/b.txt",
+          "id": "h:18775189486aa041"
+        }
+      ],
+      "pending": {
+        "tool": "Write",
+        "summary": "書く: a/b.txt",
+        "detail": "/a/b.txt",
+        "id": "h:18775189486aa041"
+      },
+      "pending_count": 1,
+      "asked": "a",
+      "asked_by": "human",
+      "session_id": "0123abcd-0000-0000-0000-000000000001",
+      "cwd": "/tmp/x",
+      "updated_at": 0
+    }
   }
 ]

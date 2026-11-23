@@ -147,6 +147,23 @@ class StateShape(HookCase):
         self.assertEqual(st["phase"], "needs_you")
         self.assertEqual(st["needs"], "Bash を許可しますか")
 
+    def test_denied_permission_leaves_marks_for_the_screen(self):
+        """承認の画面を理由なしの No か Esc で閉じたときに届いた並び（#180、2026-11-23 に Claude Code 2.1.330 で実測。
+        No と Esc で同じだった）。この後は PostToolUse も PostToolUseFailure も Stop も来ないので、hook では needs_you を解けない。
+        画面（src/model.ts の moodOf）は、承認が元の needs_you（pending_count が1以上）と、その後に sessions の status が
+        idle に変わったことで見分ける。ここでは、画面が頼る印が残ることを固定する"""
+        write = dict(tool_name="Write", tool_input={"file_path": "/tmp/x/out.txt", "content": "hello"})
+        self.run_hook("UserPromptSubmit", prompt="Write で /tmp/x/out.txt を作って")
+        self.run_hook("PreToolUse", **write)
+        self.run_hook("PermissionRequest", **write)
+        self.run_hook("Notification", notification_type="permission_prompt", message="Claude needs your permission")
+        st = self.read()
+        self.check_report(st)
+        self.assertEqual(st["phase"], "needs_you")
+        self.assertEqual(st["pending_count"], 1)
+        self.assertEqual(st["perm_queue"][0]["tool"], "Write")
+        self.assertIsInstance(st["updated_at"], int)
+
     def test_stop_resting_with_next(self):
         self.run_hook("UserPromptSubmit", prompt="a")
         self.run_hook("PreToolUse", tool_name="Bash", tool_input={"command": "ls"})
