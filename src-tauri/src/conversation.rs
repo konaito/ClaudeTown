@@ -211,6 +211,15 @@ pub(crate) fn slash_command(text: &str) -> Option<String> {
     Some(if args.is_empty() { name } else { format!("{name} {args}") })
 }
 
+/// ! のシェルの入力を、打った形の「!コマンド」の文に直す（#254）。シェルの入力の行でなければ None。
+/// jsonl には <bash-input>コマンド</bash-input> の形で残る。! の後ろの空白はそのまま残っているので、頭は削らない。
+/// コマンドには `<` も入るので、終わりは最後の </bash-input> で決める
+pub(crate) fn bash_input(text: &str) -> Option<String> {
+    let r = text.trim_start().strip_prefix("<bash-input>")?;
+    let body = r[..r.rfind("</bash-input>")?].trim_end();
+    (!body.trim_start().is_empty()).then(|| format!("!{body}"))
+}
+
 /// 会話の1行から、今の動きに効く出来事を取り出す。simplify と同じく、jsonl の行と data で包んだ形の両方を読む
 pub(crate) fn live_events(m: &Value) -> Vec<LiveEv> {
     let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
@@ -239,6 +248,8 @@ pub(crate) fn live_events(m: &Value) -> Vec<LiveEv> {
                 out.push(LiveEv::Result(ids, at));
             } else {
                 let text = user_text(content);
+                // ! のシェルの入力は「!コマンド」の文にしてから見る。`<` で始まらなくなるので、ターンの始まりとして数える（#254）
+                let text = bash_input(&text).unwrap_or(text);
                 if !text.is_empty() {
                     out.push(LiveEv::Queue(QEv::Delivered(text.clone())));
                 }
@@ -555,8 +566,9 @@ pub(crate) fn simplify(m: &Value) -> Vec<Value> {
                 out.push(json!({ "role": "event", "kind": "interrupted", "text": "ここで止めた", "at": at }));
                 return out;
             }
-            // スラッシュコマンドの入力は「/名前 引数」の文にしてから見る。そのままだと `<` で始まり、下の除外で落ちる（#157）
-            let command = slash_command(text);
+            // スラッシュコマンドの入力は「/名前 引数」の文に、! のシェルの入力は「!コマンド」の文にしてから見る。
+            // そのままだと `<` で始まり、下の除外で落ちる（#157、#254）。シェルの出力（<bash-stdout>、<bash-stderr>）は下の除外で落とす
+            let command = slash_command(text).or_else(|| bash_input(text));
             let text = command.as_deref().unwrap_or(text);
             // 道具の結果だけの user、hook やシステムの差し込み（<...> で始まる）は出さない
             if text.is_empty() || text.starts_with('<') || text.starts_with("Caveat:") {
@@ -1033,6 +1045,30 @@ mod tests {
         // 本文の配列で来ても同じ
         let arr = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": [{"type": "text", "text": "<command-name>/clear</command-name>"}]}});
         assert_eq!(simplify(&arr)[0]["text"], "/clear");
+    }
+
+    // ! のシェルの入力（#254）。jsonl には <bash-input> の user の行が残り（isMeta ではない）、出力は次の user の行の
+    // <bash-stdout> と <bash-stderr> に入る（2.1.74〜2.1.323 の jsonl で見た形。中身は作った）
+    #[test]
+    fn bash_input_shows_as_user_text() {
+        let line = |c: &str| json!({"type": "user", "timestamp": "2026-11-23T01:02:03.000Z", "message": {"role": "user", "content": c}});
+        let ls = line("<bash-input>ls</bash-input>");
+        let out = simplify(&ls);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[0]["text"], "!ls");
+        // 手元の jsonl の129行のうち92行は、出力の行の直後に assistant の返事が来る。ターンの始まりとして数える（#157 の / と同じ）
+        assert!(live_events(&ls).iter().any(|e| matches!(e, LiveEv::User(_))));
+        // 順番待ちと突き合わせる文も、打った形にそろえる
+        assert!(live_events(&ls).iter().any(|e| matches!(e, LiveEv::Queue(QEv::Delivered(t)) if t == "!ls")));
+        // 「! git status」と打つと、! の後ろの空白も残る。端末と同じに出す
+        assert_eq!(simplify(&line("<bash-input> git status</bash-input>"))[0]["text"], "! git status");
+        // 中に < を含むコマンド
+        assert_eq!(simplify(&line("<bash-input>echo '<b>' | cat</bash-input>"))[0]["text"], "!echo '<b>' | cat");
+        // 空の入力と、出力の行は出さない
+        assert!(simplify(&line("<bash-input>  </bash-input>")).is_empty());
+        assert!(simplify(&line("<bash-stdout>a\nb</bash-stdout><bash-stderr></bash-stderr>")).is_empty());
+        assert!(simplify(&line("<bash-stderr>x</bash-stderr>")).is_empty());
     }
 
     // 2026-11-14、写した画像のパスを入れて送った文を、CLI が画像の添付にした形（当時の会話の形のまま、#69）
