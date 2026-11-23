@@ -256,14 +256,47 @@ fn app_caps() -> Value {
     json!({ "send": true, "permissions": true, "interrupt": true, "stop": true, "terminal": true, "events": false })
 }
 
+/// from 行の呼び手 "agent:<ノード>/<sid8>/<役割>" の sid8。claude-code-nodes の identity/agent-name.ts の parseAgent と同じ規則で、
+/// 2つ目の区切りが16進の8文字で、後ろに役割があるときだけ返す。ccn は session id が分からないと "agent:<ノード>/<役割>" を付けるので、
+/// 役割や空の文字列を sid8 として読むと、たまたま前が合う id（空ならどの id でも）を親にしてしまう
+fn agent_sid8(caller: &str) -> Option<&str> {
+    let (node, rest) = caller.strip_prefix("agent:")?.split_once('/')?;
+    let (sid, role) = rest.split_once('/')?;
+    let hex8 = sid.len() == 8 && sid.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    (!node.is_empty() && hex8 && !role.is_empty()).then_some(sid)
+}
+
+/// 親をたどって自分に戻る輪を切る。輪の中で最も早く始まったセッション（同じなら id の小さいほう）を根にする。
+/// 画面（src/model.ts の buildTree）は根から世帯を作るので、輪のままだと輪の中のセッションが町から消え、lineage も止まらない。
+/// 親が /clear した後に子から届いた文が、親の新しい記録の最初の from 行になると、前の id から親を引き直したとき（#248）に輪ができる
+fn break_cycles(rows: &[Value], parents: &mut [Option<String>]) {
+    let index: HashMap<&str, usize> = rows.iter().enumerate().filter_map(|(i, s)| Some((s["id"].as_str()?, i))).collect();
+    let key = |i: usize| (rows[i]["startedAt"].as_u64().unwrap_or(u64::MAX), rows[i]["id"].as_str().unwrap_or_default());
+    for start in 0..rows.len() {
+        let mut path = vec![start];
+        while let Some(next) = parents[*path.last().expect("空にしない")].as_deref().and_then(|p| index.get(p)).copied() {
+            if let Some(pos) = path.iter().position(|&i| i == next) {
+                if let Some(root) = path[pos..].iter().copied().min_by_key(|&i| key(i)) {
+                    parents[root] = None;
+                }
+                break;
+            }
+            path.push(next);
+        }
+    }
+}
+
 /// 一覧の行を、画面に渡すセッションの形に直す。hook の報告と close-check の判定を足す。キャラの割り当ては足さない
 fn agents_from(rows: Vec<Value>) -> Vec<Value> {
     let live_ids: HashSet<String> = rows.iter().filter_map(|s| s["id"].as_str().map(String::from)).collect();
+    // 親が /clear や計画の承認で id を変えると、前に立てた子の from 行は前の id を指したまま残る（#248）。
+    // このアプリが立てた端末は、同じ pid の前の id を台帳の ids に持つので、それに当たれば端末の今の id を親にする
+    let earlier: Vec<(Vec<String>, String)> = pty::list().into_iter().filter(|p| live_ids.contains(&p.cur)).map(|p| (p.ids, p.cur)).collect();
     // 別のプロダクト（ccn など）が子に付ける from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）から親を引く。Claude Code の記録の1行目にある
     let parent_from_line = |s: &Value| -> Option<String> {
-        let p = s["parent"].as_str()?;
-        let sid8 = p.strip_prefix("agent:")?.split('/').nth(1)?;
+        let sid8 = agent_sid8(s["parent"].as_str()?)?;
         live_ids.iter().find(|id| id.starts_with(sid8)).cloned()
+            .or_else(|| earlier.iter().find(|(ids, _)| ids.iter().any(|i| i.starts_with(sid8))).map(|(_, cur)| cur.clone()))
     };
 
     // 名前は、そのセッションが作業しているプロジェクトの名前（src-tauri/src/naming.rs）
@@ -279,12 +312,16 @@ fn agents_from(rows: Vec<Value>) -> Vec<Value> {
     }).collect();
     let name_of = naming::card_names(&whos);
     let project_of: HashMap<&str, Option<&String>> = whos.iter().map(|w| (w.id.as_str(), w.project.as_ref())).collect();
-    let mut agents = vec![];
-    for s in &rows {
-        let id = s["id"].as_str().unwrap_or_default().to_string();
-        // sub-agent とチームメイトは置き場所で決めた親（#96）。ほかは from 行の呼び手。親が生きていなければ根として扱う
+    // sub-agent とチームメイトは置き場所で決めた親（#96）。ほかは from 行の呼び手。親が生きていなければ根として扱う
+    let mut parents: Vec<Option<String>> = rows.iter().map(|s| {
+        let id = s["id"].as_str().unwrap_or_default();
         let native_parent = s["native"]["parentId"].as_str().filter(|p| live_ids.contains(*p)).map(String::from);
-        let parent = native_parent.or_else(|| parent_from_line(s)).filter(|p| *p != id);
+        native_parent.or_else(|| parent_from_line(s)).filter(|p| p != id)
+    }).collect();
+    break_cycles(&rows, &mut parents);
+    let mut agents = vec![];
+    for (s, parent) in rows.iter().zip(parents) {
+        let id = s["id"].as_str().unwrap_or_default().to_string();
         // sub-agent と in-process のチームメイトは、リードと同じ session id で hook が届くので、hook の報告を使わない。
         // 様子は meta.json の説明と jsonl の末尾から作る。tmux のチームメイトは自分の session id を持つので hook の報告を読む
         let from_meta = s["native"]["report"].is_object();
@@ -802,6 +839,36 @@ mod tests {
         assert_eq!(d.items.len(), 1);
         assert_eq!(LAST_SOURCES.lock().unwrap().as_ref().unwrap()["app"], 0);
         native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+    }
+
+    #[test]
+    fn break_cycles_makes_the_earliest_the_root() {
+        let rows = vec![
+            json!({ "id": "x", "startedAt": 1 }), json!({ "id": "a", "startedAt": 2 }), json!({ "id": "k", "startedAt": 3 }),
+            json!({ "id": "s", "startedAt": 9 }), json!({ "id": "t" }),
+        ];
+        // x と a は輪。k は輪にぶら下がる。s は自分を指す（agents_from は先に外すが、ここでも止まる）。t は根
+        let mut p = vec![Some("a".to_string()), Some("x".to_string()), Some("a".to_string()), Some("s".to_string()), None];
+        break_cycles(&rows, &mut p);
+        assert_eq!(p, vec![None, Some("x".to_string()), Some("a".to_string()), None, None]);
+        // 親が一覧に無い（生きていない）ものは、そのまま残す
+        let mut q = vec![Some("gone".to_string()), None, None, None, None];
+        break_cycles(&rows, &mut q);
+        assert_eq!(q[0].as_deref(), Some("gone"));
+    }
+
+    #[test]
+    fn agent_sid8_follows_ccn_parse_agent() {
+        // claude-code-nodes の test/identity/agent-name.test.ts と同じ形
+        assert_eq!(agent_sid8("agent:vm/0123abcd/lead"), Some("0123abcd"));
+        assert_eq!(agent_sid8("agent:vm/0123abcd/a/b"), Some("0123abcd"));
+        assert_eq!(agent_sid8("agent:vm/lead"), None);
+        assert_eq!(agent_sid8("agent:vm/a2a2/r"), None);
+        assert_eq!(agent_sid8("agent:n//r"), None);
+        assert_eq!(agent_sid8("agent:vm/0123abcd/"), None);
+        assert_eq!(agent_sid8("agent:/0123abcd/r"), None);
+        assert_eq!(agent_sid8("agent:vm/0123ABCD/r"), None);
+        assert_eq!(agent_sid8("someone@example.com"), None);
     }
 
     #[test]

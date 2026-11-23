@@ -110,6 +110,8 @@ pub fn note_ids(rows: &[(String, u32)]) {
 pub struct Info {
     pub id: String,
     pub ids: Vec<String>,
+    /// 今の id（sessions/<pid>.json に今出ている id）
+    pub cur: String,
     pub pid: u32,
     pub cwd: String,
     pub started_at: u64,
@@ -117,7 +119,7 @@ pub struct Info {
 
 pub fn list() -> Vec<Info> {
     with(|m| {
-        let mut v: Vec<Info> = m.values().map(|p| Info { id: p.ids[0].clone(), ids: p.ids.clone(), pid: p.pid, cwd: p.cwd.clone(), started_at: p.started_at }).collect();
+        let mut v: Vec<Info> = m.values().map(|p| Info { id: p.ids[0].clone(), ids: p.ids.clone(), cur: p.cur.clone(), pid: p.pid, cwd: p.cwd.clone(), started_at: p.started_at }).collect();
         v.sort_by_key(|i| i.started_at);
         v
     })
@@ -771,6 +773,65 @@ mod tests {
         assert_eq!(&u[14..15], "4");
         assert!(matches!(&u[19..20], "8" | "9" | "a" | "b"));
         assert_ne!(u, new_uuid());
+    }
+
+    /// 親がアプリの端末で、/clear や計画の承認で id が変わっても、前の id を指す from 行の子は親から外れない（#248）。
+    /// from 行の sid8 は ccn の形（agent:<ノード>/<16進8文字>/<役割>）のときだけ読む。sid8 が無い形は親を引かない
+    #[test]
+    fn a_child_keeps_its_parent_after_the_parent_id_changes() {
+        use crate::native::testtree::*;
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fc-pty-parent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        std::fs::write(&bin, "#!/bin/sh\nexec cat\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
+        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {}).unwrap();
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+        // 親 A: 起動のときの id は a_old。/clear の後、sessions/<pid>.json には a_new が出ている
+        let a_old = r["id"].as_str().unwrap().to_string();
+        let pa = r["pid"].as_u64().unwrap();
+        let a_new = "a2a2a2a2-0000-4000-8000-0000000000a2";
+        // 子 B は A の前の id を from 行に持つ。C と D は sid8 の無い from 行（ccn の agent:<ノード>/<役割> と、空の sid8）
+        let b = "b2b2b2b2-0000-4000-8000-0000000000b2";
+        let c = "c2c2c2c2-0000-4000-8000-0000000000c2";
+        let d = "d2d2d2d2-0000-4000-8000-0000000000d2";
+        let root = tmp("parent-id-change");
+        let sess = |pid: u64, sid: &str, cwd: &str| {
+            write(&root.join(format!("sessions/{pid}.json")), &json!({ "pid": pid, "sessionId": sid, "cwd": cwd, "startedAt": 5,
+                "kind": "interactive", "status": "idle" }).to_string());
+        };
+        let from = |sid: &str, cwd: &str, caller: &str| {
+            write(&root.join(format!("projects/{}/{sid}.jsonl", enc(cwd))), &format!("{{\"type\":\"user\",\"message\":{{\"content\":\"from {caller} via n\\n\\nやって\"}}}}\n"));
+        };
+        sess(pa, a_new, "/tmp/合成/a");
+        // A の /clear の後の最初の文が B からの文だと、A の親は B になる。B の親を A の今の id に引き直すと輪になるので、早く始まった A を根にする
+        from(a_new, "/tmp/合成/a", &format!("agent:n/{}/r", &b[..8]));
+        // 生きている pid を3つ使う（launchd、この試験のプロセス、cargo）
+        sess(1, b, "/tmp/合成/b");
+        from(b, "/tmp/合成/b", &format!("agent:n/{}/r", &a_old[..8]));
+        sess(std::process::id() as u64, c, "/tmp/合成/c");
+        from(c, "/tmp/合成/c", "agent:n/a2a2/r");
+        sess(std::os::unix::process::parent_id() as u64, d, "/tmp/合成/d");
+        from(d, "/tmp/合成/d", "agent:n//r");
+        crate::native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        let agents = crate::agents_from(crate::town_rows());
+        crate::native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        let by = |id: &str| agents.iter().find(|x| x["id"] == id).cloned().unwrap_or(Value::Null);
+        kill(&a_old).unwrap();
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(3) && owns(&a_old) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!owns(&a_old), "代役の端末が台帳に残っている");
+        assert_eq!(by(a_new)["source"], "app", "A は台帳で a_old と同じ端末");
+        assert_eq!(by(b)["parent"], a_new, "前の id を指す from 行から、親の今の id を引けていない");
+        assert_eq!(by(a_new)["parent"], Value::Null, "親子が輪になっている");
+        assert_eq!(by(c)["parent"], Value::Null, "役割を sid8 として読んでいる");
+        assert_eq!(by(d)["parent"], Value::Null, "空の sid8 がどの id にも当たっている");
     }
 
     #[test]
