@@ -647,9 +647,9 @@ fn transcript_tail(id: &str) -> Option<String> {
     Some(if from > 0 { s.split_once('\n').map(|x| x.1.to_string()).unwrap_or_default() } else { s })
 }
 
-/// hook が道具の input を残す置き場。試験では FC_PERM_DIR で差し替える（hook と同じ変数）
+/// hook が道具の input を残す置き場。試験では FC_PERM_DIR で差し替える（hook と同じ変数。fc_path が読む）
 fn perm_dir() -> std::path::PathBuf {
-    std::env::var("FC_PERM_DIR").ok().filter(|s| !s.is_empty()).map(Into::into).unwrap_or_else(|| super::fc_path(super::Scope::Shared, "perm"))
+    super::fc_path(super::Scope::Shared, "perm")
 }
 
 fn waiting(id: &str) -> bool {

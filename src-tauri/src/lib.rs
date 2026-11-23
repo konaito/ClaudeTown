@@ -67,16 +67,38 @@ enum Scope {
     App,
 }
 
-/// ~/.family-computing の下のファイルの置き場所を決める。Rust で置き場所を組み立てるのはここだけにする
+/// ~/.family-computing の下のファイルの置き場所を決める。Rust で置き場所を組み立てるのはここだけにする。
+/// hook（hooks/fc-report.py）と同じ FC_STATE_DIR、FC_LETTERS、FC_PERM_DIR で、hook が書くものの置き場所を差し替えられる
+/// （軽さの計測 scripts/bench.ts が、本物の state/ と letters.jsonl を読まないために使う、#187）
 fn fc_path(scope: Scope, name: &str) -> PathBuf {
-    place(&home(), APP_ID.get().map(String::as_str), std::env::var("FC_APP_HOME").ok().filter(|s| !s.is_empty()), scope, name)
+    let env = |k: &str| std::env::var(k).ok().filter(|s| !s.is_empty());
+    let hook = HookDirs { state: env("FC_STATE_DIR"), letters: env("FC_LETTERS"), perm: env("FC_PERM_DIR") };
+    place(&home(), &hook, APP_ID.get().map(String::as_str), env("FC_APP_HOME"), scope, name)
+}
+
+/// hook と同じ差し替えの変数の値。state と perm はディレクトリ、letters はファイル（hooks/fc-report.py の STATE_DIR、PERM_DIR、LETTERS と同じ意味）
+#[derive(Default)]
+struct HookDirs {
+    state: Option<String>,
+    letters: Option<String>,
+    perm: Option<String>,
 }
 
 /// fc_path の中身（試験のために環境から切り離してある）。
 /// App は、FC_APP_HOME があればそこ、identifier が安定版の値か分からないときは ~/.family-computing、それ以外（開発版）は ~/.family-computing/dev。
-/// 分からないときに安定版と同じ場所へ落とすのは、逆にすると安定版が割り当てと世帯の名前を見失うため
-fn place(home: &std::path::Path, app_id: Option<&str>, app_home: Option<String>, scope: Scope, name: &str) -> PathBuf {
+/// 分からないときに安定版と同じ場所へ落とすのは、逆にすると安定版が割り当てと世帯の名前を見失うため。
+/// Shared の state/、letters.jsonl、perm/ は、hook の差し替えの変数があればそちらにする。send-disabled は差し替えない
+fn place(home: &std::path::Path, hook: &HookDirs, app_id: Option<&str>, app_home: Option<String>, scope: Scope, name: &str) -> PathBuf {
     let shared = home.join(".family-computing");
+    if scope == Scope::Shared {
+        let under = |dir: &Option<String>, sub: &str| dir.as_ref().and_then(|d| (name == sub).then(|| PathBuf::from(d)).or_else(|| name.strip_prefix(&format!("{sub}/")).map(|r| PathBuf::from(d).join(r))));
+        if let Some(p) = under(&hook.state, "state").or_else(|| under(&hook.perm, "perm")) {
+            return p;
+        }
+        if let (Some(f), "letters.jsonl") = (&hook.letters, name) {
+            return PathBuf::from(f);
+        }
+    }
     let dir = match scope {
         Scope::Shared => shared,
         Scope::App => match (app_home, app_id) {
@@ -398,7 +420,7 @@ fn agents_from(rows: Vec<Value>) -> Vec<Value> {
         } else {
             (
                 read_json_cached(&fc_path(Scope::Shared, &format!("state/{id}.json"))),
-                read_json_cached(&home().join(format!(".claude/close-check/{id}.json"))),
+                read_json_cached(&native::claude_home().join(format!("close-check/{id}.json"))),
             )
         };
         let named = matches!(s["kind"].as_str(), Some("subagent") | Some("teammate"));
@@ -515,6 +537,9 @@ fn print_paths() {
     println!("{}", serde_json::to_string_pretty(&json!({
         "identifier": APP_ID.get(),
         "shared": fc_path(Scope::Shared, ""),
+        "state": fc_path(Scope::Shared, "state"),
+        "letters": fc_path(Scope::Shared, "letters.jsonl"),
+        "perm": fc_path(Scope::Shared, "perm"),
         "app": fc_path(Scope::App, ""),
         "avatars": avatars_path(),
         "avatarsRecent": avatars::recent_path(&avatars_path()),
@@ -555,8 +580,8 @@ pub fn run() {
     //   family-computing --conversation <id>    会話
     // identifier はビルド時の設定（開発版は tauri.conf.json、安定版は tauri.stable.conf.json を重ねたもの）から取る。
     // 下の開発用の引数も、画面と同じ置き場所を使う
-    // 軽さの計測（src/term/bench.ts の scene）: プロセスが始まった時刻を書く。画面が町を描いた時刻との差を、起動の時間にする。
-    // 場面ごとに起動して測る scripts/bench.ts は #131 で消えた（#187）
+    // 軽さの計測（場面ごとに起動して測る scripts/bench.ts、#187）: プロセスが始まった時刻を書く。
+    // 画面（src/term/bench.ts の scene）が町を描いた時刻との差を、起動の時間にする
     if std::env::var("FC_PERF_LOG").map(|p| !p.is_empty()).unwrap_or(false) {
         perf_log(json!({ "bench": "proc", "procStartMs": now_ms() as u64 }).to_string());
     }
@@ -615,7 +640,7 @@ pub fn run() {
                 // 立て直さないときも、画面の restore_report が待ち続けないよう、空で済ませる（#262）
                 session_ops::finish_restore(vec![]);
             }
-            // 開発の計測用（src/term/bench.ts。scripts/bench.ts は #131 で消えた）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、
+            // 開発の計測用（src/term/bench.ts、scripts/bench.ts）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、
             // 最前面に出し、どのデスクトップにも出す（本人が別のデスクトップに移っても隠れないように）。
             // 前面は奪わない（FC_BENCH_FOCUS=1 のときだけ奪う）。起動のたびに前面を奪うと、本人の作業の邪魔になる
             if std::env::var("FC_BENCH_TOP").is_ok() {
@@ -824,7 +849,8 @@ mod tests {
     #[test]
     fn dev_keeps_app_files_apart_from_stable() {
         let h = std::path::Path::new("/h");
-        let p = |id: Option<&str>, over: Option<&str>, scope, name| place(h, id, over.map(String::from), scope, name);
+        let none = HookDirs::default();
+        let p = |id: Option<&str>, over: Option<&str>, scope, name| place(h, &none, id, over.map(String::from), scope, name);
         // 安定版と、identifier が分からないときは、今までの場所
         assert_eq!(p(Some(STABLE_ID), None, Scope::App, "avatars.json"), PathBuf::from("/h/.family-computing/avatars.json"));
         assert_eq!(p(None, None, Scope::App, "houses.json"), PathBuf::from("/h/.family-computing/houses.json"));
@@ -839,6 +865,18 @@ mod tests {
         // FC_APP_HOME はアプリの分だけを差し替える
         assert_eq!(p(Some(STABLE_ID), Some("/t"), Scope::App, "avatars.json"), PathBuf::from("/t/avatars.json"));
         assert_eq!(p(dev, Some("/t"), Scope::Shared, "letters.jsonl"), PathBuf::from("/h/.family-computing/letters.jsonl"));
+        // FC_STATE_DIR、FC_LETTERS、FC_PERM_DIR は hook と同じ意味で、hook が書くものだけを差し替える（#187）。
+        // 非常停止とアプリの分は動かない
+        let hook = HookDirs { state: Some("/st".into()), letters: Some("/l/letters-x.jsonl".into()), perm: Some("/pm".into()) };
+        let s = |id: Option<&str>, over: Option<&str>, scope, name| place(h, &hook, id, over.map(String::from), scope, name);
+        assert_eq!(s(dev, None, Scope::Shared, "state/x.json"), PathBuf::from("/st/x.json"));
+        assert_eq!(s(dev, None, Scope::Shared, "letters.jsonl"), PathBuf::from("/l/letters-x.jsonl"));
+        assert_eq!(s(dev, None, Scope::Shared, "perm"), PathBuf::from("/pm"));
+        assert_eq!(s(dev, None, Scope::Shared, "perm/a.json"), PathBuf::from("/pm/a.json"));
+        assert_eq!(s(dev, None, Scope::Shared, "send-disabled"), PathBuf::from("/h/.family-computing/send-disabled"));
+        assert_eq!(s(dev, None, Scope::Shared, "statefile"), PathBuf::from("/h/.family-computing/statefile"));
+        assert_eq!(s(dev, None, Scope::App, "avatars.json"), PathBuf::from("/h/.family-computing/dev/avatars.json"));
+        assert_eq!(s(Some(STABLE_ID), None, Scope::App, "state/x.json"), PathBuf::from("/h/.family-computing/state/x.json"));
     }
 
     #[test]
