@@ -127,7 +127,7 @@ export function planOf(a: Pick<Agent, "kind" | "state" | "source" | "capabilitie
 /** ccn の行で effort を選んだときの文言 */
 export const CCN_NO_EFFORT = "ccn には effort を替える口が無い（端末のセッションの /effort は設定ファイルに保存されるので ccn が断る）。そのターミナルで /effort を開き、s で選ぶ";
 
-/** 外から届ける口が無いセッションで、代わりにできること。Claude Code に外から入力やモデルを渡す口は無い（README の「モデルと権限モード」） */
+/** 外から届ける口が無いセッションで、代わりにできること。Claude Code に外から入力やモデルを渡す口は無い（README の「モデルと権限モードと effort」） */
 export function noRouteWhy(a: Pick<Agent, "kind" | "source">, what: What, value: string | null): string {
   const v = value ?? (what === "model" ? "<モデル>" : what === "effort" ? "<effort>" : "<モード>");
   // /effort に値を付けて打つと、会話があると新しいセッションの既定まで替わる（2026-11-23、v2.1.330 で確かめた）。ピッカーの s はこのセッションだけ
