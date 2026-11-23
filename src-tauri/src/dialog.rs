@@ -34,7 +34,7 @@ pub struct Row {
 pub enum Dialog {
     /// 質問の1問。submit は複数選択の「Submit」の行があるときに Some（中身はカーソルがそこにあるか）
     Ask { question: String, rows: Vec<Row>, submit: Option<bool> },
-    /// 全部の質問に答えた後の確かめ。answers は「→ 」の後ろ
+    /// 全部の質問に答えた後の確かめ。answers は「→ 」の後ろと、折り返した続きの行をつないだもの
     Review { answers: Vec<String>, rows: Vec<Row> },
     /// 道具の承認と計画の確認。prompt は番号の行のすぐ上の行、body はその上の区切り線から prompt の前まで
     Choice { prompt: String, body: String, rows: Vec<Row> },
@@ -81,6 +81,30 @@ fn is_tabs(line: &str) -> bool {
     (t.starts_with('←') || t.starts_with('☐') || t.starts_with('☒')) && (t.contains('☐') || t.contains('☒'))
 }
 
+/// 確かめの画面の答え（「→ 」の後ろ）。1行に入らない答えは折り返され、続きの行は「→」と同じ桁に字下げされて出る
+/// （2026-11-23、v2.1.330 の tmux 100 桁で見た。#256）。「→」の行のすぐ下で、字下げが「→」の桁以上あり、
+/// 質問の行（「●」）でも引用の罫線（「│」）でも次の答えでもない行を、続きとしてつなぐ
+fn review_answers(lines: &[&str]) -> Vec<String> {
+    let indent = |l: &str| l.chars().take_while(|c| *c == ' ').count();
+    let mut answers: Vec<String> = Vec::new();
+    let mut arrow: Option<usize> = None;
+    for l in lines {
+        let t = l.trim();
+        if let Some(a) = t.strip_prefix("→ ") {
+            answers.push(a.trim().to_string());
+            arrow = Some(indent(l));
+        } else if let (Some(i), Some(last)) = (arrow, answers.last_mut()) {
+            if !t.is_empty() && indent(l) >= i && !t.starts_with(['●', '│', '→']) {
+                last.push(' ');
+                last.push_str(t);
+            } else {
+                arrow = None;
+            }
+        }
+    }
+    answers
+}
+
 /// 今の画面（vt100 で解いた文字）から、承認の画面を読む。無ければ None
 pub fn parse(screen: &str) -> Option<Dialog> {
     let lines: Vec<&str> = screen.lines().collect();
@@ -88,8 +112,7 @@ pub fn parse(screen: &str) -> Option<Dialog> {
     if let Some(r) = lines.iter().rposition(|l| l.trim() == "Review your answers") {
         let rows: Vec<Row> = lines[r + 1..].iter().filter_map(|l| row_of(l).map(|x| x.1)).collect();
         if rows.iter().any(|x| x.label.starts_with("Submit answers")) {
-            let answers = lines[r + 1..].iter().filter_map(|l| l.trim().strip_prefix("→ ").map(|a| a.trim().to_string())).collect();
-            return Some(Dialog::Review { answers, rows });
+            return Some(Dialog::Review { answers: review_answers(&lines[r + 1..]), rows });
         }
     }
     // 質問
@@ -271,6 +294,17 @@ pub fn answer_text(q: &Q, p: &Pick) -> String {
         return if other.is_empty() { picked.first().cloned().unwrap_or_default() } else { other };
     }
     picked.into_iter().chain((!other.is_empty()).then_some(other)).collect::<Vec<_>>().join(", ")
+}
+
+/// answer が画面を読み直してキーを書く回数の上限の下限。道具の承認と計画の確認は、これで足りる
+const MIN_KEYS: usize = 40;
+
+/// answer が画面を読み直してキーを書く回数の上限。質問は、問いごとに要る回数の和に半分の余裕を足す（#256）。
+/// 単一選択は多くて3回（「その他」の番号、貼る、Enter）。複数選択は選択肢 n 個で多くて 2n+4 回
+/// （印を n+1 個、「その他」の行まで ↓ を n 回、貼る、Tab、Enter）。確かめの画面で1回
+pub fn key_limit(qs: &[Q]) -> usize {
+    let need = 1 + qs.iter().map(|q| if q.multi { 2 * q.labels.len() + 4 } else { 3 }).sum::<usize>();
+    MIN_KEYS.max(need + need / 2)
 }
 
 /// 画面と答えから、次に書くものを決める。画面だけから決めるので、途中で止まっても読み直せば続きから決まる
@@ -707,7 +741,9 @@ fn answer_locked(id: &str, expect_id: &str, act: &Act) -> Result<String, String>
     // 承認の画面が出た直後に書いたキーは、受け付けられないことがあった（2026-11-22、直した計画の画面が出てすぐ押した「2」で画面が変わらなかった）。
     // 最初のキーの前に、画面が 400ms 変わらなくなるのを待つ（長くて3秒）
     settle(id, 400, 3000);
-    for _ in 0..40 {
+    let mut tries = 0;
+    while tries < key_limit(&qs) {
+        tries += 1;
         let screen = super::pty::screen_text(id).ok_or("このセッションの端末はこのアプリに無い")?;
         let d = parse(&screen);
         if d.is_none() && wrote {
@@ -949,6 +985,127 @@ mod tests {
         assert_eq!(step(REVIEW, &act, &qs2()), Step::Final("1".into()));
         let other = Act::Ask { picks: vec![pk(&[0], ""), pk(&[0, 2], "")] };
         assert!(matches!(step(REVIEW, &other, &qs2()), Step::Fail(_)));
+    }
+
+    // 2026-11-23 に v2.1.330 の claude（haiku）を tmux（100x50）で動かして撮った確かめの画面。
+    // 長い自由入力と、4つ選んだ複数選択の答えが、どちらも2行に折り返されている。続きの行は「→」と同じ桁に字下げされる（#256）
+    const WRAPPED_REVIEW: &str = include_str!("dialog_fixtures/ask_wrapped_review.txt");
+
+    #[test]
+    fn review_reads_wrapped_answers() {
+        let qs = vec![
+            Q { question: "このメモに何と書く？".into(), labels: vec!["短い".into(), "長い".into()], multi: false },
+            Q {
+                question: "今週の献立に入れるものは？".into(),
+                labels: vec!["鶏の照り焼きと季節の野菜の炒め物".into(), "鮭の塩焼きと具だくさんの豚汁".into(), "牛肉とごぼうのしぐれ煮".into(), "麻婆豆腐と卵のスープ".into()],
+                multi: true,
+            },
+        ];
+        let memo = "会議の要点と次の打ち合わせまでに各自が調べておくことを、日付と担当者の名前を添えて箇条書きで残しておく";
+        let act = Act::Ask { picks: vec![pk(&[], memo), pk(&[0, 1, 2, 3], "")] };
+        let d = parse(WRAPPED_REVIEW).expect("確かめの画面");
+        let Dialog::Review { answers, .. } = &d else { panic!("Review ではない: {d:?}") };
+        assert_eq!(answers.len(), 2, "{answers:?}");
+        assert_eq!(next_step(Some(&d), &act, &qs), Step::Final("1".into()));
+        // 続きの行まで比べるので、1行目が同じで続きだけが違う答えは送らない
+        let tail = Act::Ask { picks: vec![pk(&[], &memo.replace("しておく", "さない")), pk(&[0, 1, 2, 3], "")] };
+        assert!(matches!(next_step(Some(&d), &tail, &qs), Step::Fail(_)));
+        let other = Act::Ask { picks: vec![pk(&[], memo), pk(&[0, 1, 2], "")] };
+        assert!(matches!(next_step(Some(&d), &other, &qs), Step::Fail(_)));
+        // 質問の文の続き（引用の罫線「│」付き）は答えに混ぜない
+        let Some(Dialog::Review { answers, .. }) = parse(QUOTE_REVIEW) else { panic!() };
+        assert_eq!(answers, vec!["Release の v0.2.0".to_string(), "キーチェーン以外を消す".to_string()]);
+    }
+
+    /// 複数選択の質問の画面を、書いたキーに合わせて動かす見本。動きは 2026-11-23 に v2.1.330 の tmux で見たもの
+    /// （番号で印を付け外しし、カーソルは動かない。↓ で「Type something」の次は「Submit」。Submit で Enter を押すと次の質問）
+    struct MultiSim {
+        qs: Vec<Q>,
+        at: usize,
+        checked: Vec<Vec<bool>>,
+        /// 1..=n+1 は番号の行、n+2 は Submit
+        cur: usize,
+        /// 確かめの画面で送った
+        sent: bool,
+    }
+
+    impl MultiSim {
+        fn new(qs: Vec<Q>) -> Self {
+            let checked = qs.iter().map(|q| vec![false; q.labels.len() + 1]).collect();
+            MultiSim { qs, at: 0, checked, cur: 1, sent: false }
+        }
+        fn screen(&self) -> String {
+            let tabs = format!("←  {}  ✔ Submit  →", (0..self.qs.len()).map(|i| format!("{} Q{i}", if i < self.at { '☒' } else { '☐' })).collect::<Vec<_>>().join("  "));
+            let c = |on: bool| if on { "❯ " } else { "  " };
+            if self.sent {
+                return String::new();
+            }
+            if self.at == self.qs.len() {
+                let mut s = format!("{tabs}\n\nReview your answers\n\n");
+                for (i, q) in self.qs.iter().enumerate() {
+                    let picked: Vec<usize> = (0..q.labels.len()).filter(|&j| self.checked[i][j]).collect();
+                    s += &format!(" ● {}\n   → {}\n", q.question, answer_text(q, &pk(&picked, "")));
+                }
+                return s + "\n❯ 1. Submit answers\n  2. Cancel\n";
+            }
+            let q = &self.qs[self.at];
+            let n = q.labels.len();
+            let mut s = format!("{tabs}\n{}\n", q.question);
+            for (j, l) in q.labels.iter().chain(std::iter::once(&"Type something".to_string())).enumerate() {
+                let mark = if self.checked[self.at][j] { "✔" } else { " " };
+                s += &format!("{}{}. [{mark}] {l}\n", c(self.cur == j + 1), j + 1);
+            }
+            s += &format!("{}   Submit\n{}\n  {}. Chat about this\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n", c(self.cur == n + 2), "─".repeat(40), n + 2);
+            s
+        }
+        fn key(&mut self, k: &str) {
+            if self.at == self.qs.len() {
+                assert_eq!(k, "1", "確かめの画面で Submit answers 以外を押した");
+                self.sent = true;
+                return;
+            }
+            let n = self.qs[self.at].labels.len();
+            match k {
+                "\x1b[B" => self.cur = (self.cur + 1).min(n + 2),
+                "\x1b[A" => self.cur = self.cur.saturating_sub(1).max(1),
+                "\t" if self.cur == n + 1 => self.cur = n + 2,
+                "\r" if self.cur == n + 2 => {
+                    self.at += 1;
+                    self.cur = 1;
+                }
+                d => {
+                    let d: usize = d.parse().unwrap_or_else(|_| panic!("見本が知らないキー {d:?}"));
+                    assert!((1..=n + 1).contains(&d), "番号 {d} は行に無い");
+                    self.checked[self.at][d - 1] ^= true;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn many_multi_select_questions_reach_the_submit() {
+        // 選択肢4つの複数選択を4問。全部の印を付けると、1問に10回（印4つ、↓4回、Tab、Enter）押し、確かめの画面で1回押す
+        let q = |i: usize| Q { question: format!("Which items {i}?"), labels: ["One", "Two", "Three", "Four"].iter().map(|s| s.to_string()).collect(), multi: true };
+        let qs: Vec<Q> = (0..4).map(q).collect();
+        let act = Act::Ask { picks: vec![pk(&[0, 1, 2, 3], ""); 4] };
+        let mut sim = MultiSim::new(qs.clone());
+        // answer と同じく、1回に画面を読み直して1つ書く
+        let mut tries = 0;
+        let fin = loop {
+            assert!(tries < key_limit(&qs), "上限 {} 回で送るところまで届かない。止まった画面:\n{}", key_limit(&qs), sim.screen());
+            tries += 1;
+            match next_step(parse(&sim.screen()).as_ref(), &act, &qs) {
+                Step::Key(k) => sim.key(&k),
+                Step::Final(k) => break k,
+                s => panic!("{s:?}\n{}", sim.screen()),
+            }
+        };
+        assert_eq!((fin.as_str(), tries), ("1", 41));
+        // 送ると承認の画面が閉じる
+        sim.key(&fin);
+        assert_eq!(next_step(parse(&sim.screen()).as_ref(), &act, &qs), Step::Done);
+        // 質問の無い承認（道具の承認、計画の確認）は今までと同じ上限
+        assert_eq!(key_limit(&[]), 40);
     }
 
     #[test]
