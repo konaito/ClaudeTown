@@ -127,6 +127,8 @@ export default function App() {
   // 作ったらチャットを開いて入力欄にフォーカスする（本人の指定）。端末は右クリックや「端末へ」で開く
   const newHousehold = useCallback((r: CreatedSession | null) => {
     if (!r?.id) return;
+    // ログインシェルが PATH を返さず、アプリの PATH（/usr/bin:/bin:/usr/sbin:/sbin）で立てた（#175）。次に立てるときは聞き直す
+    if (r.pathFallback) toast("ログインシェルの PATH を取れなかったので、この claude は最小の PATH で動いている。bun や gh が見つからないときは立て直す", true);
     setFresh({
       // 名前は一覧と同じ決め方（cardNames）。一覧に載ったときに名前が変わって見えないようにする
       id: r.id, name: cardNames([{ id: r.id, cwd: r.cwd ?? "" }]).get(r.id) ?? r.id.slice(0, 8), kind: "terminal", state: "running", cwd: r.cwd ?? "", canSend: true, parent: null,
@@ -135,7 +137,7 @@ export default function App() {
     setSelected(r.id);
     setComposeReq((n) => n + 1);
     reload.current();
-  }, []);
+  }, [toast]);
 
   const sel = selected ? tree.byId.get(selected) ?? (fresh?.id === selected ? fresh : null) : null;
   // 一覧に載ったら仮の姿を捨てる

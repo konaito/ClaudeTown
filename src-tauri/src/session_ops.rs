@@ -108,6 +108,12 @@ pub(crate) fn restore_terminals() {
     let prev = pty::open_ledger(path.clone());
     let root = native::claude_home();
     let mut log = vec![format!("{} 台帳 {} の {} 件", now_ms(), path.display(), prev.len())];
+    // 立てる前にログインシェルの PATH を取っておく（#175。取れなければ、立て直した端末はアプリの PATH で動く）
+    if !prev.is_empty() {
+        let t0 = std::time::Instant::now();
+        let ok = pty::wait_login_path();
+        log.push(format!("ログインシェルの PATH {:.1}s → {}", t0.elapsed().as_secs_f32(), if ok { "取れた" } else { "取れなかった" }));
+    }
     for e in prev {
         // 前のアプリの claude がまだ終わりきっていなければ、消えるまで待つ（上限 RESTORE_WAIT）。待っても生きていれば、よそで動いているとして外す
         if native::sessions::live_pid_of(&root, &e.id).is_some() && pty::pid_of_id(&e.id).is_none() {
@@ -123,7 +129,9 @@ pub(crate) fn restore_terminals() {
             Plan::Resume => match pty::resume(&e.id, &e.cwd, e.name.as_deref(), e.cols, e.rows, town_kick) {
                 Ok(r) => {
                     pty::settle(&e.id);
-                    format!("resume {} {} → pid {}", e.id, e.cwd, r["pid"])
+                    // ログインシェルの PATH を取れずに立てたら、そう書く（#175。画面には出していない）
+                    let fallback = if r["pathFallback"] == true { "（ログインシェルの PATH を取れず、アプリの PATH で起動）" } else { "" };
+                    format!("resume {} {} → pid {}{fallback}", e.id, e.cwd, r["pid"])
                 }
                 Err(err) => format!("fail {} {} → {err}（台帳に残す）", e.id, e.cwd),
             },
