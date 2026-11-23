@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { collectMail, orderMail, type Mail } from "./mail";
-import type { Agent } from "./model";
+import { moodOf, type Agent } from "./model";
+import notifyCases from "./notify-cases.json";
 
 const ag = (id: string, o: Partial<Agent> = {}): Agent => ({
   id, name: id, kind: "node", state: "idle", cwd: "/", canSend: true, parent: null, ...o,
@@ -70,4 +71,18 @@ describe("お便りの並び", () => {
     const m = collectMail([{ town: "pro", agents: [ag("w", { state: "running" }), ag("i")] }]);
     expect(m).toEqual([]);
   });
+});
+
+// お便りの通知（#292）は Rust（src-tauri/src/notify.rs の wait_of）が決める。同じ事例を moodOf に当て、承認待ちと返事待ちの規則がずれないようにする
+describe("通知の待ちの規則が moodOf と同じ（src/notify-cases.json を notify.rs と同じに読む）", () => {
+  type Case = { name: string; agent: Partial<Agent>; wait: "approval" | "reply" | null };
+  for (const c of notifyCases as Case[]) {
+    test(c.name, () => {
+      const m = moodOf(ag(c.agent.id ?? "a", c.agent));
+      expect(m === "approval" || m === "reply" ? m : null).toBe(c.wait);
+      // お便りに出るかも同じ（報告 done は通知しないので、wait が null のときは承認待ちと返事待ちのお便りが無い）
+      const kinds = collectMail([{ town: "", agents: [ag(c.agent.id ?? "a", c.agent)] }]).map((x) => x.kind).filter((k) => k !== "done");
+      expect(kinds).toEqual(c.wait ? [c.wait] : []);
+    });
+  }
 });

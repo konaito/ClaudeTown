@@ -126,6 +126,18 @@ export default function App() {
   );
 
   const mails = useMemo(() => collectMail([{ town: "", agents }]), [agents]);
+  // お便りの通知を押したら、その子のチャットを開く（src-tauri/src/notify.rs の OPEN_EVENT、#292）。窓を前に出すのは Rust がする
+  useEffect(() => {
+    if (IS_WEB) return;
+    let off: (() => void) | null = null;
+    let live = true;
+    void import("@tauri-apps/api/event").then(({ listen }) => listen<string>("notify-open", (e) => {
+      if (typeof e.payload !== "string" || !e.payload) return;
+      setSelected(e.payload);
+      setChatReq((n) => n + 1);
+    })).then((u) => { if (live) off = u; else u(); });
+    return () => { live = false; off?.(); };
+  }, []);
   const openMail = useCallback((m: Mail, chat = false) => {
     setSelected(m.agent.id);
     if (chat) setChatReq((n) => n + 1);

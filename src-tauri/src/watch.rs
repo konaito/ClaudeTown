@@ -42,6 +42,8 @@ pub(crate) fn watch_loop(rx: std::sync::mpsc::Receiver<WatchCmd>, mut send: impl
     let mut wait = WATCH_MIN;
     loop {
         let s = snapshot();
+        // お便りの通知（notify.rs、#292）。見張りが動いている間は、ここで作った一覧で決める
+        notify::from_watch(&s.agents);
         let key = snapshot_key(&s);
         let changed = last.as_deref() != Some(key.as_str());
         if changed && !send(serde_json::to_value(&s).unwrap_or(Value::Null)) {

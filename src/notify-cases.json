@@ -1,0 +1,62 @@
+[
+  {
+    "name": "承認の画面が出ている",
+    "agent": { "id": "a", "kind": "terminal", "state": "waiting_permission", "lastActivityAt": 2000 },
+    "wait": "approval"
+  },
+  {
+    "name": "承認の画面が出ている（報告はまだ作業中）",
+    "agent": { "id": "a", "kind": "terminal", "state": "waiting_permission", "report": { "phase": "working", "updated_at": 1000 } },
+    "wait": "approval"
+  },
+  {
+    "name": "作業中なら、古い needs_you が残っていても待っていない",
+    "agent": { "id": "a", "kind": "terminal", "state": "running", "report": { "phase": "needs_you", "updated_at": 1000 } },
+    "wait": null
+  },
+  {
+    "name": "返事を待っている",
+    "agent": { "id": "a", "kind": "terminal", "state": "idle", "lastActivityAt": 1000, "report": { "phase": "needs_you", "updated_at": 1000 } },
+    "wait": "reply"
+  },
+  {
+    "name": "承認の画面を hook に知らせずに閉じた（#180。並びが1件あり、status がその後に変わった）",
+    "agent": { "id": "a", "kind": "terminal", "state": "idle", "lastActivityAt": 3000, "report": { "phase": "needs_you", "updated_at": 1000, "pending_count": 1 } },
+    "wait": null
+  },
+  {
+    "name": "承認の並びが1件あっても、status がその後に変わっていなければ返事待ち",
+    "agent": { "id": "a", "kind": "terminal", "state": "idle", "lastActivityAt": 1000, "report": { "phase": "needs_you", "updated_at": 1000, "pending_count": 1 } },
+    "wait": "reply"
+  },
+  {
+    "name": "承認の並びが1件あっても、最後の動きが分からなければ返事待ち",
+    "agent": { "id": "a", "kind": "terminal", "state": "idle", "report": { "phase": "needs_you", "updated_at": 1000, "pending_count": 1 } },
+    "wait": "reply"
+  },
+  {
+    "name": "Stop の問いかけ（並びが空）は、後に動きがあっても返事待ち",
+    "agent": { "id": "a", "kind": "terminal", "state": "idle", "lastActivityAt": 3000, "report": { "phase": "needs_you", "updated_at": 1000, "pending_count": 0 } },
+    "wait": "reply"
+  },
+  {
+    "name": "tmux のチームメイトには #180 の読み替えを当てない",
+    "agent": { "id": "a", "kind": "teammate", "state": "idle", "lastActivityAt": 3000, "report": { "phase": "needs_you", "updated_at": 1000, "pending_count": 1 } },
+    "wait": "reply"
+  },
+  {
+    "name": "報告（close-check が ok）は出さない",
+    "agent": { "id": "a", "kind": "terminal", "state": "idle", "report": { "phase": "resting", "updated_at": 1000 }, "closeCheck": { "status": "ok" } },
+    "wait": null
+  },
+  {
+    "name": "休んでいる",
+    "agent": { "id": "a", "kind": "terminal", "state": "idle", "report": { "phase": "resting", "updated_at": 1000 } },
+    "wait": null
+  },
+  {
+    "name": "報告が無い",
+    "agent": { "id": "a", "kind": "subagent", "state": "idle", "report": null },
+    "wait": null
+  }
+]

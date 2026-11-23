@@ -27,6 +27,8 @@ fastrand = "2"
 tauri-plugin-clipboard-manager = "2"
 # 2つ目の起動を止める（#176）。2.5 は tauri 2.12 以上が要る
 tauri-plugin-single-instance = "2.5"
+# お便りの通知（#292）。2.6 から macOS の desktop でも押した知らせ（on_action の tap）を受けられる
+tauri-plugin-notification = "2.8"
 libc = "0.2"
 portable-pty = "0.9.0"
 vt100 = "0.18"
