@@ -307,6 +307,7 @@ Void アプリの確認は `web/` で行う。`web/src` は `../src` へのリ�
 ```sh
 bun install --frozen-lockfile   # リポジトリ直下
 cd web && bun install --frozen-lockfile
+bun run check   # Worker（tsconfig.server.json）と設定のファイル（tsconfig.node.json）の型を確かめる
 bun run build   # .cloudflare/ に Worker と画面が出る
 bun test        # web/test の試験。ルートの bun test は src だけを走らせる（bunfig.toml）
 ```
@@ -329,7 +330,12 @@ FC_CLAUDE_BIN=/tmp/<代わりのスクリプト> bun run tauri dev
 
 # 配置計算だけの検証（世帯の中の8ケースと、世帯の並べ方の5条件）
 bun test src/layout
+
+# 型の確認。画面（tsconfig.json）、試験を含めた src（tsconfig.test.json）、設定のファイル（tsconfig.node.json）の3つを流す
+bun run typecheck
 ```
+
+`bun test` は型を見ずに試験を走らせる。`tsconfig.json` は試験を外しているので、試験の型は `bun run typecheck` でだけ確かめられる。
 
 `public/dev-*.json` には本物のセッションの中身が入るので、コミットしない（.gitignore に入れてある）。
 

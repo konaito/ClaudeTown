@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json && tsc --noEmit -p tsconfig.node.json --composite false",
     "preview": "vite preview",
     "tauri": "tauri",
     "pwa:icons": "pwa-assets-generator --config pwa-assets.config.ts && mv public/icon-192.png public/icon-512.png public/maskable-512.png public/apple-touch-icon-180.png public/pwa/"
@@ -27,6 +28,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
+    "@types/bun": "1.4.4",
     "@types/omggif": "1.0.5",
     "@types/pngjs": "^6.0.5",
     "@types/react": "^19.1.8",
