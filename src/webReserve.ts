@@ -6,7 +6,7 @@ import { call as invoke, IS_WEB } from "./bridge";
 import type { Agent } from "./model";
 import { bodyObj, configureError, isHttp, noRoute, planOf, type Support, type What } from "./session/control";
 
-export type Pend = { model?: string; mode?: string };
+export type Pend = { model?: string; mode?: string; effort?: string };
 
 const book = new Map<string, Pend>();
 const subs = new Set<() => void>();
@@ -25,7 +25,7 @@ export function reserve(id: string, what: What, value: string) {
 export function cancel(id: string, what: What) {
   const p = { ...pendingOf(id) };
   delete p[what];
-  if (p.model || p.mode) book.set(id, p); else book.delete(id);
+  if (p.model || p.mode || p.effort) book.set(id, p); else book.delete(id);
   bump();
 }
 

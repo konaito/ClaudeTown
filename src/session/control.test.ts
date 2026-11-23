@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { configureError, modelOptions, modeOptions, NO_SUPPORT, planOf, routeOf, supportOf } from "./control";
+import { CCN_NO_EFFORT, configureError, modelOptions, modeOptions, NO_SUPPORT, planOf, routeOf, supportOf } from "./control";
 import { cancel, pendingOf, reserve } from "../webReserve";
 
 describe("supportOf", () => {
@@ -75,6 +75,21 @@ describe("planOf（いつ当てるか）", () => {
     expect(mate.kind === "none" && mate.why).toContain("起動のときに決まり");
     const sub = planOf({ kind: "subagent", state: "idle", name: "x" }, "mode", "plan", "no", false);
     expect(sub.kind === "none" && sub.why).toContain("sub-agent");
+  });
+  test("effort: アプリの端末は作業中でもすぐ替え、承認待ちは予約する（/effort のピッカーは作業中も開いた、2026-11-23）", () => {
+    expect(planOf(app("running"), "effort", "high", "no", false)).toEqual({ kind: "now" });
+    expect(planOf(app("idle"), "effort", "low", "no", false)).toEqual({ kind: "now" });
+    expect(planOf(app("waiting_permission"), "effort", "max", "no", false).kind).toBe("wait");
+  });
+  test("effort: ccn の行には替える口が無い", () => {
+    for (const kind of ["node", "pty"] as const) expect(planOf(ccn(kind, "idle"), "effort", "high", "yes", false)).toEqual({ kind: "none", why: CCN_NO_EFFORT });
+  });
+  test("effort: 外のセッションには、値を付けずにピッカーで s を押す手を出す（値を付けると既定まで替わる）", () => {
+    const native: A = { kind: "terminal", source: "native", state: "idle", name: "x" };
+    const p = planOf(native, "effort", "xhigh", "no", false);
+    expect(p.kind === "none" && p.why).toContain("/effort を開き、xhigh に動かして s を押す");
+    const mate = planOf({ kind: "teammate", source: "native", state: "idle", name: "x" }, "effort", "low", "no", false);
+    expect(mate.kind === "none" && mate.why).toContain("effort");
   });
   test("アプリの行でも端末が無ければ（capabilities.terminal が無い）口が無い", () => {
     expect(routeOf({ kind: "terminal", source: "app", capabilities: null })).toBe("none");

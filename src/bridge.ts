@@ -67,6 +67,7 @@ async function webCall<T>(cmd: string, a: Record<string, unknown> = {}): Promise
       // 設定の既定のモデルと権限モード（src/session/defaults.ts）。ccn は --model と --permission-mode で起動する
       if (typeof a.model === "string" && a.model) body.model = a.model;
       if (typeof a.permissionMode === "string" && a.permissionMode) body.permissionMode = a.permissionMode;
+      // effort は ccn の POST /sessions が受けないので渡さない（アプリでは --effort で起動する）
       return post("/sessions", body) as T;
     }
     case "term_input": return post(`/sessions/${a.sessionId}/terminal/input`, { text: a.text }) as T;

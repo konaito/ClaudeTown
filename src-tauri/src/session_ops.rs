@@ -616,3 +616,79 @@ mod stuck {
         assert!(matches!(old_write, Ok(Err(_))), "詰まっていた書き込みが戻らなかった: {old_write:?}");
     }
 }
+
+#[cfg(test)]
+mod real_effort {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn wait_for(sec: u64, f: impl Fn() -> bool) -> bool {
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(sec) {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        false
+    }
+
+    /// 本物の claude（haiku）を --effort high で立て、送信先の行と同じ口（switch::request）で effort を替える。
+    /// 1往復した後（会話があると `/effort <値>` は既定を書き換える）と作業中に替えて、今の値が替わり、settings.json が変わらないことを確かめる。
+    /// FC_EFFORT_CWD に信頼済みの捨てのディレクトリを渡す。2往復分の API を使う。
+    /// env -u CLAUDE_CONFIG_DIR FC_CAM_BIN=$HOME/.cam/bin/cam FC_EFFORT_CWD=<dir> cargo test --lib real_effort -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_effort_switches_for_this_session_only() {
+        let cwd = std::env::var("FC_EFFORT_CWD").expect("FC_EFFORT_CWD");
+        let settings = home().join(".claude/settings.json");
+        let before = std::fs::read_to_string(&settings).unwrap();
+        assert!(!before.trim().is_empty(), "settings.json が空で読めた。戻せないので試さない");
+        let effort_of = |id: &str| switch::status(id)["effort"].as_str().map(str::to_string);
+        let start = pty::start_args(Some("haiku"), None, Some("high")).unwrap();
+        let r = pty::spawn(&cwd, Some("ct-probe-effort"), &start, 120, 40, || {}).unwrap();
+        let id = r["id"].as_str().unwrap().to_string();
+        switch::launched_with(&id, "high");
+        let done = |id: &str, v: &str| {
+            let s = switch::status(id);
+            s["pending"]["effort"].is_null() && s["last"]["what"] == "effort" && s["last"]["value"] == v
+        };
+        let result = (|| -> Result<(), String> {
+            std::thread::sleep(Duration::from_secs(6));
+            println!("起動の後: {:?}", effort_of(&id));
+            if effort_of(&id).as_deref() != Some("high") { return Err("起動に渡した high が今の値に出ない".into()); }
+            pty::write(&id, "ok とだけ返して\r")?;
+            let root = native::claude_home();
+            if !wait_for(90, || native::sessions::find_jsonl(&root, &id).is_some()) { return Err("jsonl が出来ない".into()); }
+            std::thread::sleep(Duration::from_secs(8));
+            // 待機中に替える
+            switch::request(&id, None, None, Some("low".into()))?;
+            if !wait_for(20, || done(&id, "low")) { return Err(format!("low に替わらない: {}", switch::status(&id))); }
+            println!("待機中に low: last {} / 今 {:?}", switch::status(&id)["last"], effort_of(&id));
+            if switch::status(&id)["last"]["ok"] != true { return Err(format!("失敗: {}", switch::status(&id)["last"])); }
+            if effort_of(&id).as_deref() != Some("low") { return Err("今の値が low にならない".into()); }
+            // 作業中に替える
+            pty::write(&id, "\x1b[200~Bash で sleep 8 を実行してから done とだけ返して\x1b[201~")?;
+            std::thread::sleep(Duration::from_millis(200));
+            pty::write(&id, "\r")?;
+            std::thread::sleep(Duration::from_secs(4));
+            println!("作業中に max を頼む時の状態: {}", switch::status(&id)["status"]);
+            switch::request(&id, None, None, Some("max".into()))?;
+            if !wait_for(40, || done(&id, "max")) { return Err(format!("max に替わらない: {}", switch::status(&id))); }
+            println!("作業中に max: last {} / 今 {:?}", switch::status(&id)["last"], effort_of(&id));
+            if switch::status(&id)["last"]["ok"] != true { return Err(format!("失敗: {}", switch::status(&id)["last"])); }
+            if effort_of(&id).as_deref() != Some("max") { return Err("今の値が max にならない".into()); }
+            Ok(())
+        })();
+        println!("画面: {}", pty::screen_text(&id).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).rev().take(10).collect::<Vec<_>>().join(" / "));
+        let _ = pty::kill(&id);
+        let after = std::fs::read_to_string(&settings).unwrap();
+        if before != after {
+            // 書き換えられていたら元に戻してから落とす
+            std::fs::write(&settings, &before).unwrap();
+            panic!("settings.json が書き換えられた（元に戻した）");
+        }
+        println!("settings.json は変わらなかった");
+        result.unwrap();
+    }
+}
