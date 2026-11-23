@@ -464,7 +464,8 @@ struct Timed {
     since: Arc<std::sync::atomic::AtomicU64>,
 }
 
-static STALL_BASE: OnceLock<Instant> = OnceLock::new();
+// OnceLock は完全な名前で書く。#202（#175）が login_path の OnceLock を外すと、use から OnceLock が消えるため
+static STALL_BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 fn stall_clock() -> u64 {
     STALL_BASE.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
