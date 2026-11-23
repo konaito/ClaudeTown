@@ -678,6 +678,40 @@ mod real_effort {
             println!("作業中に max: last {} / 今 {:?}", switch::status(&id)["last"], effort_of(&id));
             if switch::status(&id)["last"]["ok"] != true { return Err(format!("失敗: {}", switch::status(&id)["last"])); }
             if effort_of(&id).as_deref() != Some("max") { return Err("今の値が max にならない".into()); }
+            // モデルを替えた後の effort（settings.json は effortLevel をモデルごとに持つので、替わるかもしれない）。
+            // 作業が終わってから替え、/effort のピッカーが開いたときの段と、今の値を比べる
+            if !wait_for(60, || switch::status(&id)["status"] == "idle") { return Err("作業が終わらない".into()); }
+            switch::request(&id, Some("sonnet".into()), None, None)?;
+            if !wait_for(30, || { let s = switch::status(&id); s["pending"]["model"].is_null() && s["last"]["what"] == "model" }) { return Err(format!("モデルが替わらない: {}", switch::status(&id))); }
+            println!("モデルを替えた: last {}", switch::status(&id)["last"]);
+            std::thread::sleep(Duration::from_secs(1));
+            let shown = effort_of(&id);
+            let opened = pty::serial(&id, || {
+                pty::write(&id, "\x1b[200~/effort\x1b[201~")?;
+                std::thread::sleep(Duration::from_millis(150));
+                pty::write(&id, "\r")?;
+                let t0 = Instant::now();
+                let mut cur = None;
+                while t0.elapsed() < Duration::from_secs(4) && cur.is_none() {
+                    cur = pty::screen_text(&id).as_deref().filter(|s| s.contains(switch::EFFORT_PICKER)).and_then(switch::effort_cursor);
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                if cur.is_none() {
+                    println!("読めなかった画面:\n{}", pty::screen_text(&id).unwrap_or_default());
+                }
+                pty::write(&id, "\x1b")?;
+                std::thread::sleep(Duration::from_millis(800));
+                Ok::<_, String>(cur)
+            })?;
+            println!("モデルを替えた後: 今の値 {shown:?} / ピッカーの段 {opened:?}");
+            if opened.is_none() { return Err("ピッカーの段が読めない".into()); }
+            if shown.as_deref() != opened { return Err(format!("モデルを替えた後の今の値 {shown:?} がピッカーの段 {opened:?} と違う")); }
+            // モデルを替えた後はピッカーの案内が「Enter to use this session only」の形になる。その形でも替えられて、既定は変わらない
+            switch::request(&id, None, None, Some("medium".into()))?;
+            if !wait_for(20, || done(&id, "medium")) { return Err(format!("medium に替わらない: {}", switch::status(&id))); }
+            println!("モデルを替えた後に medium: last {} / 今 {:?}", switch::status(&id)["last"], effort_of(&id));
+            if switch::status(&id)["last"]["ok"] != true { return Err(format!("失敗: {}", switch::status(&id)["last"])); }
+            if effort_of(&id).as_deref() != Some("medium") { return Err("今の値が medium にならない".into()); }
             Ok(())
         })();
         println!("画面: {}", pty::screen_text(&id).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).rev().take(10).collect::<Vec<_>>().join(" / "));

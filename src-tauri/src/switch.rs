@@ -11,7 +11,9 @@
 // - effort は `/effort` のピッカーで替える（2026-11-23、v2.1.330 で確かめた）。ピッカーは ←/→ で low〜max を動かし、s で「this session only」になる。
 //   s では settings.json は変わらなかった。`/effort <値>` と Enter は、会話があると「saved as your default for new sessions」になり、
 //   settings.json の modelSettings.<モデル>.effortLevel を書き換えた（会話が無いうちは this session only だった）。だから引数では打たない。
-//   ピッカーは作業中（シェルが動いている間）にも開いて効いた。結果は transcript に `<local-command-stdout>Set effort level to <値> (this session only)` で残る
+//   ピッカーは作業中（シェルが動いている間）にも開いて効いた。結果は transcript に `<local-command-stdout>Set effort level to <値> (this session only)` で残る。
+//   セッションだけのモデルの切り替え（/model のピッカーで s）をした後は、ピッカーの案内が「Enter to use this session only · Esc to cancel」に変わり、
+//   s が無くなる（Enter がこのセッションだけになる）。だから押すキーは案内の文で決める。モデルを替えても effort はそのまま残った
 //
 // 予約: 今は替えられないときは、選んだ値をここで持ち、替えられるようになったら替える。見張りは予約がある間だけ動く。
 // 状態は ~/.claude/sessions/<pid>.json の status を直接読む（町の一覧の見張りは、窓が隠れると止まるので頼らない）。
@@ -88,13 +90,14 @@ impl Pending {
     }
 }
 
-/// 替えたモデル、モード、effort と、替えたときの jsonl の長さ
+/// 替えたモデル、モード、effort。値ごとに、替えたときの jsonl の長さを持つ（ほかの種類を替えても、前に替えた値の位置は動かさない）。
+/// started は替えたときの claude の起動の時刻。再起動や resume の後（時刻が違う）は使わない
 #[derive(Clone, Default)]
 struct Applied {
-    model: Option<String>,
-    mode: Option<String>,
-    effort: Option<String>,
-    len: u64,
+    model: Option<(String, u64)>,
+    mode: Option<(String, u64)>,
+    effort: Option<(String, u64)>,
+    started: Option<u64>,
 }
 
 /// 予約と、最後に替えた結果（画面に出す）
@@ -253,13 +256,17 @@ fn watch() {
                     match &r {
                         Ok(_) => {
                             let len = jsonl_len(&id);
+                            let started = super::pty::started_at(&id);
                             let e = b.applied.entry(id.clone()).or_default();
-                            match what {
-                                "model" => e.model = Some(val.clone()),
-                                "effort" => e.effort = Some(val.clone()),
-                                _ => e.mode = Some(val.clone()),
+                            if e.started != started {
+                                *e = Applied { started, ..Applied::default() };
                             }
-                            e.len = len;
+                            let v = Some((val.clone(), len));
+                            match what {
+                                "model" => e.model = v,
+                                "effort" => e.effort = v,
+                                _ => e.mode = v,
+                            }
                             b.last.insert(id.clone(), json!({ "what": what, "value": val, "ok": true, "at": at }));
                         }
                         Err(e) => {
@@ -374,8 +381,20 @@ fn set_model_locked(id: &str, model: &str) -> Result<(), String> {
 
 const LEFT: &str = "\x1b[D";
 const RIGHT: &str = "\x1b[C";
-/// /effort のピッカーの下の案内。開いているかの印にする
-pub(crate) const EFFORT_PICKER: &str = "s to use this session only";
+/// /effort のピッカーの下の案内。開いているかの印にする（案内の2つの形のどちらにもある）
+pub(crate) const EFFORT_PICKER: &str = "←/→ to adjust";
+
+/// ピッカーで「このセッションだけ」にするキー。案内に「s to use this session only」があれば s（このとき Enter は既定に保存）、
+/// 「Enter to use this session only」があれば Enter（セッションだけのモデルの切り替えの後の形）。どちらも無ければ None
+pub fn session_only_key(screen: &str) -> Option<&'static str> {
+    if screen.contains("s to use this session only") {
+        Some("s")
+    } else if screen.contains("Enter to use this session only") {
+        Some("\r")
+    } else {
+        None
+    }
+}
 
 /// /effort のピッカーで、今の印（▲）がある段（low〜max）。▲ の行のすぐ下の、段の名前が並ぶ行で、▲ にいちばん近い名前を選ぶ。
 /// 2026-11-23 に v2.1.330 を tmux で撮った画面の形（switch_fixtures/effort_picker_high.txt）
@@ -440,11 +459,20 @@ fn set_effort_locked(id: &str, effort: &str) -> Result<(), String> {
         }
     }
     if cur != Some(effort) {
+        // ピッカーがまだ出ているときだけ Esc を送る。承認の画面に替わっていたら、Esc は承認を断る操作になる
+        if !super::pty::screen_text(id).is_some_and(|s| s.contains(EFFORT_PICKER)) {
+            return Err(format!("/effort のピッカーで {effort} に動かす途中で、ピッカーが消えた。ターミナルで様子を見る"));
+        }
         super::pty::write(id, "\x1b")?;
         wait_screen(id, 1.5, |s| !s.contains(EFFORT_PICKER)).ok_or("effort のピッカーに Esc を送ったが、閉じなかった。ターミナルで様子を見る")?;
         return Err(format!("/effort のピッカーで {effort} に動かせなかったので、閉じた"));
     }
-    super::pty::write(id, "s")?;
+    let Some(key) = super::pty::screen_text(id).as_deref().and_then(session_only_key) else {
+        super::pty::write(id, "\x1b")?;
+        wait_screen(id, 1.5, |s| !s.contains(EFFORT_PICKER)).ok_or("effort のピッカーに Esc を送ったが、閉じなかった。ターミナルで様子を見る")?;
+        return Err("/effort のピッカーに「このセッションだけ」の案内が無かったので、既定を書き換えないよう閉じた".into());
+    };
+    super::pty::write(id, key)?;
     let want = format!("Set effort level to {effort}");
     let s = wait_screen(id, 4.0, |s| !s.contains(EFFORT_PICKER) && s.contains(&want)).ok_or(format!("ピッカーで s を押したが、4秒たっても「{want}」が出なかった。ターミナルで様子を見る"))?;
     if s.contains("saved as your default") {
@@ -453,15 +481,20 @@ fn set_effort_locked(id: &str, effort: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 画面に出ている今の effort。入力欄の右上の「● high · /effort」か、起動の見出しの「Opus 5.5 with xhigh effort」。下にあるほうを使う
+/// 画面に出ている今の effort。入力欄の右上の「● high · /effort」の行か、起動の見出し（ロゴの █ がある行）の「Opus 5.5 with xhigh effort」。下にあるほうを使う。
+/// 会話の本文に同じ言葉があっても読まないよう、印だけの行（4語で /effort で終わる）とロゴの行に限る
 pub fn effort_on_screen(screen: &str) -> Option<&'static str> {
     let names = super::pty::EFFORTS;
     screen.lines().rev().find_map(|line| {
         let w: Vec<&str> = line.split_whitespace().collect();
-        w.windows(3).rev().find_map(|t| {
-            let hit = (t[1] == "·" && t[2] == "/effort").then_some(t[0]).or_else(|| (t[0] == "with" && t[2] == "effort").then_some(t[1]))?;
-            names.iter().find(|n| **n == hit).copied()
-        })
+        let hit = if w.len() == 4 && w[2] == "·" && w[3] == "/effort" {
+            w[1]
+        } else if line.contains('█') {
+            w.windows(3).find(|t| t[0] == "with" && t[2] == "effort").map(|t| t[1])?
+        } else {
+            return None;
+        };
+        names.iter().find(|n| **n == hit).copied()
     })
 }
 
@@ -570,16 +603,22 @@ pub fn status(id: &str) -> Value {
     let started = super::pty::started_at(id);
     let Seen { mut model, mut mode, mut effort } = jsonl.as_deref().map(|p| from_transcript(p, 0, started)).unwrap_or_default();
     // 替えた値は、替えた後に transcript に同じ種類の行が書かれるまで、そちらを今の値とする
-    if let Some(a) = applied {
-        let n = jsonl.as_deref().map(|p| from_transcript(p, a.len, started)).unwrap_or_default();
-        if a.model.is_some() && n.model.is_none() {
-            model = a.model;
+    if let Some(a) = applied.filter(|a| a.started == started) {
+        let newer = |len: u64| jsonl.as_deref().map(|p| from_transcript(p, len, started)).unwrap_or_default();
+        if let Some((v, len)) = a.model
+            && newer(len).model.is_none()
+        {
+            model = Some(v);
         }
-        if a.mode.is_some() && n.mode.is_none() {
-            mode = a.mode;
+        if let Some((v, len)) = a.mode
+            && newer(len).mode.is_none()
+        {
+            mode = Some(v);
         }
-        if a.effort.is_some() && n.effort.is_none() {
-            effort = a.effort;
+        if let Some((v, len)) = a.effort
+            && newer(len).effort.is_none()
+        {
+            effort = Some(v);
         }
     }
     let screen = super::pty::screen_text(id);
@@ -714,13 +753,20 @@ mod tests {
     const EFFORT_HIGH: &str = include_str!("switch_fixtures/effort_picker_high.txt");
     const EFFORT_XHIGH: &str = include_str!("switch_fixtures/effort_picker_xhigh.txt");
     const EFFORT_LOW: &str = include_str!("switch_fixtures/effort_picker_low.txt");
+    /// 同じ日、/model のピッカーで s（セッションだけ）を押した後に開いた /effort のピッカー。案内に s が無く、Enter がこのセッションだけになる
+    const EFFORT_AFTER_MODEL: &str = include_str!("switch_fixtures/effort_picker_after_model.txt");
 
     #[test]
     fn effort_cursor_reads_the_mark_above_the_names() {
         assert_eq!(effort_cursor(EFFORT_HIGH), Some("high"));
         assert_eq!(effort_cursor(EFFORT_XHIGH), Some("xhigh"));
         assert_eq!(effort_cursor(EFFORT_LOW), Some("low"));
-        assert!(EFFORT_HIGH.contains(EFFORT_PICKER));
+        assert_eq!(effort_cursor(EFFORT_AFTER_MODEL), Some("max"));
+        assert!(EFFORT_HIGH.contains(EFFORT_PICKER) && EFFORT_AFTER_MODEL.contains(EFFORT_PICKER));
+        // 押すキー。ふつうの形の Enter は既定に保存なので、s を押す
+        assert_eq!(session_only_key(EFFORT_HIGH), Some("s"));
+        assert_eq!(session_only_key(EFFORT_AFTER_MODEL), Some("\r"));
+        assert_eq!(session_only_key(REAL_IDLE), None);
         // ピッカーが閉じた画面では読まない
         assert_eq!(effort_cursor(REAL_IDLE), None);
         assert_eq!(effort_cursor("❯ /effort\n  ⎿  Set effort level to xhigh (this session only)"), None);
@@ -731,8 +777,12 @@ mod tests {
         assert_eq!(effort_on_screen("     ◈ max · /effort\n────\n❯ \n────"), Some("max"));
         assert_eq!(effort_on_screen(" ▝▜██████▀  Opus 5.5 with xhigh effort · Claude Team\n❯ "), Some("xhigh"));
         // 下にあるほう（新しいほう）を使う
-        assert_eq!(effort_on_screen("Opus 5.5 with xhigh effort\n● high · /effort"), Some("high"));
+        assert_eq!(effort_on_screen("▝▜██████▀  Opus 5.5 with xhigh effort\n● high · /effort"), Some("high"));
+        assert_eq!(effort_on_screen(EFFORT_AFTER_MODEL), Some("max"));
         assert_eq!(effort_on_screen("/effort を打つ"), None);
+        // 会話の本文の文は読まない
+        assert_eq!(effort_on_screen("⏺ Opus 5.5 with high effort で動いている\n  あとで low · /effort を試す"), None);
+        assert_eq!(effort_on_screen("⏺ 下の行は ● high · /effort になる"), None);
         assert_eq!(effort_on_screen(REAL_IDLE), None);
     }
 
@@ -768,6 +818,17 @@ mod tests {
         assert_eq!(from_transcript(&p, 0, Some(ms("2026-11-23T07:47:00Z"))).effort, None);
         std::fs::write(&p, effort[..2].join("\n") + "\n").unwrap();
         assert_eq!(from_transcript(&p, 0, None).effort.as_deref(), Some("xhigh"));
+    }
+
+    #[test]
+    fn applied_values_are_dropped_after_a_restart() {
+        // 替えた値は、替えたときの起動の時刻と今の起動の時刻が同じときだけ使う。このアプリに端末の無い id は、今の起動の時刻が None
+        let id = format!("fc-test-applied-{}", fastrand::u64(..));
+        with(|b| b.applied.insert(id.clone(), Applied { effort: Some(("low".into(), 0)), started: Some(1), ..Applied::default() }));
+        assert_eq!(status(&id)["effort"], Value::Null, "前の起動で替えた effort を使った");
+        with(|b| b.applied.insert(id.clone(), Applied { effort: Some(("low".into(), 0)), started: None, ..Applied::default() }));
+        assert_eq!(status(&id)["effort"], "low");
+        with(|b| b.applied.remove(&id));
     }
 
     #[test]
