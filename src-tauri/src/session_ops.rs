@@ -36,6 +36,41 @@ pub(crate) fn stop_session(session_id: String) -> Result<(), String> {
     Ok(())
 }
 
+// ---------- 再起動（カードの「再起動」） ----------
+
+/// 再起動で、前任の claude が消えるのを待つ上限（SIGHUP で2秒、効かなければ SIGKILL）
+const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// このアプリが立てたセッションを止め、同じ id を `claude --resume` で立て直す。
+/// アカウントは resume のときも cam usage の best で選び直す（account.rs）ので、利用上限で止まったアカウントから枠の残るアカウントへ替わる。
+/// id と会話の jsonl は変わらないので、親（最初の文の from 行）と名前は継がれる。モデルと権限モードは resume では渡さず、会話の記録のまま。
+/// ccn の引き継ぎ（succeed）は使わない。ccn は 2026-11-21 にアプリから外した
+pub(crate) fn restart_session(session_id: String) -> Result<Value, String> {
+    app_guard(&session_id)?;
+    refuse_if_disabled()?;
+    let root = native::claude_home();
+    // 止める前に、立て直せるかを確かめる（止めてから立て直せないと、会話が閉じたままになる）
+    let jsonl = native::sessions::find_jsonl(&root, &session_id).ok_or("会話の記録（jsonl）が無いので再起動できない（1通目の前に止まったセッション）")?;
+    let cwd = native::sessions::resume_cwd(&jsonl).ok_or("会話の記録から場所（cwd）が読めなかった")?;
+    if !std::path::Path::new(&cwd).is_dir() {
+        return Err(format!("場所が無いか、ディレクトリではない: {cwd}"));
+    }
+    let (cols, rows) = pty::size_of(&session_id).unwrap_or((120, 40));
+    pty::kill(&session_id)?;
+    let t0 = std::time::Instant::now();
+    // このアプリの台帳から消え、claude の sessions/<pid>.json の pid も終わるまで待つ
+    while pty::pid_of_id(&session_id).is_some() || native::sessions::live_pid_of(&root, &session_id).is_some() {
+        if t0.elapsed() >= RESTART_WAIT {
+            town_kick();
+            return Err("前任が終わらなかったので、立て直さなかった".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let r = pty::resume(&session_id, &cwd, None, cols, rows, town_kick)?;
+    town_kick();
+    Ok(r)
+}
+
 // ---------- 立て直す（#152） ----------
 
 /// 前回の台帳の1件をどうするか
@@ -139,6 +174,10 @@ pub(crate) mod cmd {
         crate::blocking(move || super::resume_session(session_id, cols, rows)).await
     }
     #[tauri::command]
+    pub async fn restart_session(session_id: String) -> Result<Value, String> {
+        crate::blocking(move || super::restart_session(session_id)).await
+    }
+    #[tauri::command]
     pub async fn house_places() -> Result<Value, String> { crate::blocking(super::house_places).await }
     #[tauri::command]
     pub async fn stop_session(session_id: String) -> Result<(), String> {
@@ -149,6 +188,13 @@ pub(crate) mod cmd {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// このアプリが立てていないセッションは、止める前に断る（外で動いている claude を止めない）
+    #[test]
+    fn restart_refuses_sessions_the_app_did_not_start() {
+        let e = restart_session("55555555-5555-4555-8555-555555555555".into()).unwrap_err();
+        assert_eq!(e, native::READ_ONLY);
+    }
 
     /// 立て直す前の確かめ（#152）。jsonl が無いもの、よそで同じ id が動いているもの、場所が無いものは飛ばす
     #[test]
@@ -202,5 +248,52 @@ mod tests {
         assert!(t0.elapsed() < Duration::from_secs(3));
         reaper.join().unwrap();
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod real_restart {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn config_dir_of(pid: u32) -> String {
+        let ps = std::process::Command::new("/bin/ps").args(["eww", "-o", "command=", "-p", &pid.to_string()]).output().unwrap();
+        String::from_utf8_lossy(&ps.stdout).split_whitespace().find(|w| w.starts_with("CLAUDE_CONFIG_DIR=")).unwrap_or("CLAUDE_CONFIG_DIR なし").to_string()
+    }
+
+    /// 本物の claude（haiku）で、立てる → 1往復 → 再起動 を通し、前後の pid・id・アカウント・会話の記録を出す。
+    /// FC_RESTART_CWD に信頼済みの捨てのディレクトリを渡す。1往復分の API を使う。
+    /// env -u CLAUDE_CONFIG_DIR FC_CAM_BIN=$HOME/.cam/bin/cam FC_RESTART_CWD=<dir> cargo test --lib real_restart -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_restart_keeps_the_id_and_replaces_the_process() {
+        let cwd = std::env::var("FC_RESTART_CWD").expect("FC_RESTART_CWD");
+        let start = pty::start_args(Some("haiku"), None).unwrap();
+        let r = pty::spawn(&cwd, Some("ct-probe-restart"), &start, 120, 40, || {}).unwrap();
+        let (id, pid1) = (r["id"].as_str().unwrap().to_string(), r["pid"].as_u64().unwrap() as u32);
+        std::thread::sleep(Duration::from_secs(6));
+        pty::write(&id, "ok とだけ返して\r").unwrap();
+        let root = native::claude_home();
+        let t0 = Instant::now();
+        while native::sessions::find_jsonl(&root, &id).is_none() && t0.elapsed() < Duration::from_secs(90) {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let jsonl = native::sessions::find_jsonl(&root, &id).expect("1往復の後に jsonl が出来る");
+        std::thread::sleep(Duration::from_secs(8));
+        let lines_before = std::fs::read_to_string(&jsonl).unwrap().lines().count();
+        println!("前: id {id} pid {pid1} {} jsonl {lines_before} 行", config_dir_of(pid1));
+        println!("前の画面: {}", pty::screen_text(&id).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).take(8).collect::<Vec<_>>().join(" / "));
+        let t1 = Instant::now();
+        let r2 = restart_session(id.clone()).unwrap();
+        let pid2 = r2["pid"].as_u64().unwrap() as u32;
+        println!("後: id {} pid {pid2} {} 所要 {:.1}s", r2["id"], config_dir_of(pid2), t1.elapsed().as_secs_f32());
+        std::thread::sleep(Duration::from_secs(6));
+        println!("後の画面: {}", pty::screen_text(&id).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).take(8).collect::<Vec<_>>().join(" / "));
+        let alive1 = unsafe { libc::kill(pid1 as i32, 0) } == 0;
+        println!("前任の pid {pid1} 生存: {alive1}、jsonl {} 行", std::fs::read_to_string(&jsonl).unwrap().lines().count());
+        pty::kill(&id).unwrap();
+        assert_eq!(r2["id"].as_str(), Some(id.as_str()));
+        assert_ne!(pid1, pid2);
+        assert!(!alive1);
     }
 }

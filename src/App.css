@@ -468,6 +468,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 }
 .card-act:hover { border-color: #8f8a96; transform: translateY(-1px); }
 .card-act.ca-kill:hover { border-color: #e5b4ad; background: #fff5f3; color: #c4493b; }
+.card-act.ca-restart:hover { border-color: #a9c4e8; background: #f2f7fe; color: #3b6db4; }
 .card-act.off { opacity: 0.4; filter: grayscale(1); cursor: not-allowed; }
 .card-act.off:hover { border-color: #cfcac2; transform: none; background: #fff; }
 .card-act.sending { opacity: 0.6; }

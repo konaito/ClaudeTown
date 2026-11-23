@@ -1,7 +1,7 @@
 // family-computing の裏側。画面から呼ばれる命令:
 // - snapshot: この機械の Claude Code の記録（native/）、このアプリが立てた端末（pty.rs）、hook の報告、close-check の判定を1つにまとめる
 // - conversation(session_id, since): セッションの jsonl を差分で読み、画面に出す形（発言と道具の1行）に縮め、画面がまだ持っていない分だけ返す
-// - create_session / stop_session: 新しい世帯の claude をこのアプリの中の端末で起動する、止める（pty.rs）
+// - create_session / stop_session / restart_session: 新しい世帯の claude をこのアプリの中の端末で起動する、止める、止めて枠の残るアカウントで立て直す（pty.rs）
 // - term_open / term_close / term_input / term_resize: このアプリが立てた端末を読み書きし、開いた画面の Channel へ流す
 // - house_places: 新しい世帯のペインの「最近の場所」の材料（places.rs）
 // - prompt_history / slash_commands / file_suggestions / send_direct / interrupt_session: チャットの入力欄を CLI と同じ動きにする（composer.rs）
@@ -482,7 +482,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             cmd::snapshot, conversation::cmd::conversation,
-            session_ops::cmd::create_session, session_ops::cmd::resume_session, session_ops::cmd::stop_session, session_ops::cmd::house_places, repo::cmd::place_repos,
+            session_ops::cmd::create_session, session_ops::cmd::resume_session, session_ops::cmd::stop_session, session_ops::cmd::restart_session, session_ops::cmd::house_places, repo::cmd::place_repos,
             term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
             composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::send_or_queue, composer::cmd::cancel_queued, composer::cmd::boot_status, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files,

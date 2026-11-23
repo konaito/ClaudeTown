@@ -505,6 +505,11 @@ pub fn pid_of_id(id: &str) -> Option<u32> {
     with(|m| pid_of(m, id))
 }
 
+/// このアプリが立てたセッションの端末の大きさ（cols, rows）。立て直すときに同じ大きさで起動する
+pub fn size_of(id: &str) -> Option<(u16, u16)> {
+    with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| p.size))
+}
+
 /// 同じ端末が名乗ったことのある session id の全部（/clear や計画の承認で id が変わっても、pid は同じ）。台帳に無ければ id だけ
 pub fn ids_of(id: &str) -> Vec<String> {
     with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| p.ids.clone())).unwrap_or_else(|| vec![id.to_string()])
