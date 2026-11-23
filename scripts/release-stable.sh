@@ -31,7 +31,8 @@
 # 署名（#188）:
 #   CT_SIGN_IDENTITY  コード署名に使う証明書の名前（security find-identity -p codesigning に出る名前）。
 #                     入っていれば、Tauri の公式の口 APPLE_SIGNING_IDENTITY に渡して、その証明書で署名する。
-#                     空なら今までどおり何も渡さず、ad-hoc 署名のままになる。
+#                     空なら、置き場（CT_STABLE_HOME）の sign-identity の1行目を使う（設定の「更新して再起動」は
+#                     環境変数を渡さないので、こちらで決める。#297）。どちらも無ければ今までどおり ad-hoc 署名になる。
 #   入れた後に codesign -d -r- で指定要件を読み、cdhash だけなら警告する（止めはしない）。
 set -euo pipefail
 
@@ -43,6 +44,9 @@ DEST="$DEST_DIR/$APP_NAME.app"
 PREV="$STATE/previous/$APP_NAME.app"
 TARGET_DIR="${CT_TARGET_DIR:-$HOME/.cache/claude-town/stable-target}"
 SIGN_IDENTITY="${CT_SIGN_IDENTITY:-}"
+if [ -z "$SIGN_IDENTITY" ] && [ -f "$STATE/sign-identity" ]; then
+  SIGN_IDENTITY="$(head -n 1 "$STATE/sign-identity" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STABLE_CONF_PATH="src-tauri/tauri.stable.conf.json"

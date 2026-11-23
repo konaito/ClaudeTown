@@ -20,7 +20,7 @@ warn_cdhash_only() {
   fi
   echo "指定要件: $dr"
   if printf '%s\n' "$dr" | grep -Eq '^cdhash H"[0-9a-f]+"( or cdhash H"[0-9a-f]+")*$'; then
-    echo "警告: 指定要件が cdhash だけ（ad-hoc 署名）。上げ直すたびに、画面収録などの macOS の許可が新しい版に当たらなくなる。CT_SIGN_IDENTITY で証明書を指定する（README の「署名と macOS の許可」）" >&2
+    echo "警告: 指定要件が cdhash だけ（ad-hoc 署名）。上げ直すたびに、画面収録などの macOS の許可が新しい版に当たらなくなる。CT_SIGN_IDENTITY か置き場の sign-identity で証明書を指定する（README の「署名と macOS の許可」）" >&2
   fi
   return 0
 }

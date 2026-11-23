@@ -287,7 +287,7 @@ macOS の画面収録などの許可は、アプリの指定要件（designated 
 CT_SIGN_IDENTITY="Claude Town Local Signing" scripts/release-stable.sh <ref>
 ```
 
-`CT_SIGN_IDENTITY` が空なら、今までどおり ad-hoc 署名になる。どちらの場合も、スクリプトは入れた後に `codesign -d -r-` で指定要件を読んで出す。指定要件が cdhash だけなら警告を出すが、止めはしない。スクリプトを直したら `scripts/test-stable-sign.sh` を流す（一時のリポジトリと偽の bunx だけを使う）。
+`CT_SIGN_IDENTITY` が空なら、置き場（`~/.family-computing/stable`）の `sign-identity` の1行目を証明書の名前として使う。設定の「更新して再起動」は環境変数を渡さないので、このファイルで証明書を決める（#297）。2026-11-23 に本人が Apple Development の証明書を使うと決め、この Mac の `sign-identity` に名前を書いた。どちらも無ければ、今までどおり ad-hoc 署名になる。どちらの場合も、スクリプトは入れた後に `codesign -d -r-` で指定要件を読んで出す。指定要件が cdhash だけなら警告を出すが、止めはしない。スクリプトを直したら `scripts/test-stable-sign.sh` を流す（一時のリポジトリと偽の bunx だけを使う）。
 
 自己署名の証明書と Apple Developer の証明書のどちらを使うかは、まだ決めていない（#188）。開発版（`bun tauri dev`）の署名は変えていない。
 
