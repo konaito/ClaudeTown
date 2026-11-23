@@ -1,5 +1,5 @@
-// ブラウザ版（PWA）の承認への返事。Rust の answer_permission と permission_body（src-tauri/src/lib.rs）と同じ確認をしてから、ccn の permissions の口で答える。
-// Rust との違い: 送信の非常停止（~/.family-computing/send-disabled）は、手元のファイルなのでブラウザからは見えず、効かない。
+// ブラウザ版（PWA）の承認への返事。確認はこのファイルだけで行い（Rust 側の同じ処理は消えた）、事例は src/perm-cases.json に置く。
+// 確認してから ccn の permissions の口で答える。送信の非常停止（~/.family-computing/send-disabled）は、手元のファイルなのでブラウザからは見えず、効かない。
 
 /** ccn の GET /sessions/<id> の応答のうち、承認への返事が読む部分 */
 import { canAnswerPermission } from "./abilities";
@@ -8,18 +8,19 @@ type Detail = { state?: unknown; capabilities?: { permissions?: unknown }; pendi
 type Get = (path: string) => Promise<Detail>;
 type Post = (path: string, body: unknown) => Promise<unknown>;
 
-/** 拒否の理由が空のときに送る文。Rust の DENY_DEFAULT と同じ */
+/** 拒否の理由が空のときに送る文 */
 export const DENY_DEFAULT = "Claude Town から拒否した";
-/** 計画の見直しを頼むときに、理由が空なら送る文。Rust の PLAN_DENY_DEFAULT と同じ */
+/** 計画の見直しを頼むときに、理由が空なら送る文 */
 export const PLAN_DENY_DEFAULT = "計画を承認しなかった。計画を見直して、もう一度確認して";
 
 export type Pending = { requestId?: unknown; toolName?: unknown; input?: Record<string, unknown>; suggestions?: unknown };
 
-/** 「常に許可」として返してよい提案か。Rust の allowed_suggestion と同じ（addDirectories は端末の承認の画面が残ったので返さない） */
+/** 「常に許可」として返してよい提案か（addDirectories は端末の承認の画面が残ったので返さない） */
 export const allowedSuggestion = (s: { type?: unknown } | null | undefined) => s?.type === "addRules" || s?.type === "setMode";
 
 /**
- * ccn に送る中身と、終わったときに画面に出す文。Rust の permission_body と同じ決まり。
+ * ccn に送る中身と、終わったときに画面に出す文。
+ * 許可でも拒否でも、見せた承認の requestId（expectId）が今の待ちの先頭と同じときだけ送る。画面はいつも見せた承認の requestId を渡すので、null は断る。
  * AskUserQuestion の許可は全部の質問に答えがあるときだけ、元の input に answers を足して返す。
  * ExitPlanMode の許可は素の allow、拒否は計画の見直しを頼む。
  */
@@ -27,6 +28,8 @@ export function permissionBody(first: Pending, choice: string, expectId: string 
   const req = first.requestId;
   if (typeof req !== "string") throw new Error("承認の要求に requestId が無い");
   const tool = String(first.toolName ?? "");
+  if (choice !== "allow" && choice !== "deny") throw new Error("choice は allow か deny");
+  if (expectId !== req) throw new Error("承認を求めている中身が変わった。もう一度見てから答えて");
   if (choice === "deny") {
     if (suggestion != null) throw new Error("拒否に「常に許可」は付けない");
     const msg = message?.trim() || null;
@@ -34,8 +37,6 @@ export function permissionBody(first: Pending, choice: string, expectId: string 
     if (tool === "AskUserQuestion") return { body: { behavior: "deny", message: msg ?? DENY_DEFAULT }, done: "質問に答えずに断った" };
     return { body: { behavior: "deny", message: msg ?? DENY_DEFAULT }, done: `拒否した（${tool}）` };
   }
-  if (choice !== "allow") throw new Error("choice は allow か deny");
-  if (expectId !== req) throw new Error("承認を求めている中身が変わった。もう一度見てから答えて");
   if (tool === "AskUserQuestion") {
     if (!answers) throw new Error("質問への答えが無い");
     const qs: ({ question?: unknown } | null)[] = Array.isArray(first.input?.questions) ? first.input.questions : [];
