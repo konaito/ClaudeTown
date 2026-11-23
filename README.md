@@ -246,7 +246,7 @@ git fetch origin && scripts/release-stable.sh origin/main
 - 「更新して再起動」を押すと、本体の checkout の `scripts/release-stable.sh origin/main` を、`git fetch origin` の後に走らせる。PATH はログインシェルのもので、無ければ `~/.cargo/bin`、`~/.bun/bin`、`/usr/sbin` を足す。
 - スクリプトはアプリから切り離して走らせる。新しいセッション（setsid）にし、標準入力は `/dev/null`、出力は `$HOME/.family-computing/stable/update-run.log` に書く。0〜2 以外のファイル記述子は exec で閉じる。スクリプトが途中で安定版を終わらせても、スクリプトは最後まで進む。
 - 終わったときの時刻と終了コードは、同じ場所の `update-run.exit` に書く。失敗したら、設定の画面に終了コードと出力の末尾を出す。2つのファイルは足しただけで、古い安定版は読まない。
-- 開発版は欄も点も出さない。確かめるときは `FC_UPDATE=1` を付ける。開発版で「更新して再起動」が走るのは、`CT_DEST_DIR` と `CT_STABLE_HOME` の両方を付けたときだけである。比べる相手は `FC_UPDATE_REPO`、スクリプトに渡す PATH は `FC_UPDATE_PATH` で差し替えられる。
+- 開発版は欄も点も出さない。確かめるときは `FC_UPDATE=1` を付ける。開発版で「更新して再起動」が走るのは、`CT_DEST_DIR`、`CT_STABLE_HOME`、`FC_UPDATE_REPO`（比べる相手と走らせるスクリプトのリポジトリ）の3つを付けたときだけである。`--update-run` は安定版の実行ファイルでは断る。スクリプトに渡す PATH は `FC_UPDATE_PATH` で差し替えられる。
 
 安定版の中の端末（Claude Code）から `release-stable.sh` を走らせない。スクリプトが安定版を終わらせると、端末の claude と一緒にスクリプトも止まる。2026-11-23 には、.app だけ入れ替わり、`current.ref`、hook の写し、`releases.log`、起動が抜けた。安定版から上げるときは「更新して再起動」を使う。
 

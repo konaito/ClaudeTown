@@ -10,8 +10,8 @@
 //   0〜2 以外のファイル記述子は exec で閉じる。アプリが終わっても、スクリプトに SIGHUP も SIGPIPE も届かない
 //
 // 開発版（identifier が jp.fybe.family-computing.dev）では、FC_UPDATE=1 のときだけ動く。
-// 開発版で「更新して再起動」を走らせるのは、CT_DEST_DIR と CT_STABLE_HOME の両方を一時の場所に向けたときだけにする
-// （本物の /Applications と ~/.family-computing/stable に向けて走らせない）。
+// 開発版で「更新して再起動」を走らせるのは、CT_DEST_DIR、CT_STABLE_HOME、FC_UPDATE_REPO の3つを一時の場所に向けたときだけにする
+// （本物の /Applications、~/.family-computing/stable、本体の checkout のタグとビルド用の worktree に触らない）。
 //
 // 差し替えの口（確かめる用）:
 //   FC_UPDATE=1        開発版でも欄と点を出す
@@ -49,14 +49,16 @@ pub(crate) fn wanted(app_id: &str, flag: Option<&str>) -> bool {
     app_id == STABLE_ID || flag == Some("1")
 }
 
-/// 更新を走らせてよいか。開発版は、入れ先（CT_DEST_DIR）と置き場（CT_STABLE_HOME）の両方を差し替えたときだけ走らせる
-pub(crate) fn run_allowed(app_id: &str, dest_dir: Option<&str>, stable_home: Option<&str>) -> Result<(), String> {
+/// 更新を走らせてよいか。開発版は、入れ先（CT_DEST_DIR）、置き場（CT_STABLE_HOME）、リポジトリ（FC_UPDATE_REPO）の3つを差し替えたときだけ走らせる
+pub(crate) fn run_allowed(app_id: &str, dest_dir: Option<&str>, stable_home: Option<&str>, repo: Option<&str>) -> Result<(), String> {
     if app_id == STABLE_ID {
         return Ok(());
     }
-    match (dest_dir.filter(|s| !s.is_empty()), stable_home.filter(|s| !s.is_empty())) {
-        (Some(_), Some(_)) => Ok(()),
-        _ => Err("開発版では、CT_DEST_DIR と CT_STABLE_HOME を一時の場所に向けたときだけ更新を走らせる".into()),
+    let set = |v: Option<&str>| v.is_some_and(|s| !s.is_empty());
+    if set(dest_dir) && set(stable_home) && set(repo) {
+        Ok(())
+    } else {
+        Err("開発版では、CT_DEST_DIR、CT_STABLE_HOME、FC_UPDATE_REPO を一時の場所に向けたときだけ更新を走らせる".into())
     }
 }
 
@@ -323,7 +325,7 @@ pub(crate) fn begin() -> Result<(), String> {
     if !wanted(app_id(), env("FC_UPDATE").as_deref()) {
         return Err("この版では更新を走らせない".into());
     }
-    run_allowed(app_id(), env("CT_DEST_DIR").as_deref(), env("CT_STABLE_HOME").as_deref())?;
+    run_allowed(app_id(), env("CT_DEST_DIR").as_deref(), env("CT_STABLE_HOME").as_deref(), env("FC_UPDATE_REPO").as_deref())?;
     let repo = repo();
     let script = repo.join("scripts/release-stable.sh");
     if !script.is_file() {
@@ -447,8 +449,13 @@ pub(crate) fn update_run() -> Result<Status, String> {
 }
 
 /// 開発用の引数 --update-run（scripts/test-update-detach.sh が使う）。画面を作らずに更新を走らせ、終わるまで待つ。
-/// スクリプトがこのプロセスを終わらせても、スクリプトが最後まで進むかを確かめるのに使う
+/// スクリプトがこのプロセスを終わらせても、スクリプトが最後まで進むかを確かめるのに使う。
+/// 安定版の実行ファイルでは断る（ボタンを押さずに本物の更新が走らないように）
 pub(crate) fn run_cli() -> i32 {
+    if app_id() == STABLE_ID {
+        eprintln!("--update-run は開発版の実行ファイルでだけ使う");
+        return 2;
+    }
     if let Err(e) = begin() {
         eprintln!("{e}");
         return 2;
@@ -482,14 +489,15 @@ mod tests {
     }
 
     #[test]
-    fn dev_runs_only_with_both_overrides() {
+    fn dev_runs_only_with_all_overrides() {
         let dev = "jp.fybe.family-computing.dev";
-        assert!(run_allowed(STABLE_ID, None, None).is_ok());
-        assert!(run_allowed(dev, None, None).is_err());
-        assert!(run_allowed(dev, Some("/tmp/a"), None).is_err());
-        assert!(run_allowed(dev, None, Some("/tmp/b")).is_err());
-        assert!(run_allowed(dev, Some(""), Some("/tmp/b")).is_err());
-        assert!(run_allowed(dev, Some("/tmp/a"), Some("/tmp/b")).is_ok());
+        assert!(run_allowed(STABLE_ID, None, None, None).is_ok());
+        assert!(run_allowed(dev, None, None, None).is_err());
+        assert!(run_allowed(dev, Some("/tmp/a"), None, None).is_err());
+        assert!(run_allowed(dev, None, Some("/tmp/b"), Some("/tmp/c")).is_err());
+        assert!(run_allowed(dev, Some("/tmp/a"), Some("/tmp/b"), None).is_err());
+        assert!(run_allowed(dev, Some(""), Some("/tmp/b"), Some("/tmp/c")).is_err());
+        assert!(run_allowed(dev, Some("/tmp/a"), Some("/tmp/b"), Some("/tmp/c")).is_ok());
     }
 
     #[test]
@@ -609,14 +617,11 @@ mod tests {
         let log = d.join("out.log");
         let fds = d.join("fds");
         // 印の無い記述子を1つ開けておく（端末の PTY の master の代わり）
-        // 番号は ls が自分で開く 3 番などと重ならない値にする
+        // 番号は ls が自分で開く 3 番などと重ならないよう、100 番以上の空いている番号をもらう（F_DUPFD の写しには印が付かない）
         let leak = fs::File::open("/dev/null").unwrap();
-        let leak_fd = 77;
-        unsafe {
-            assert_eq!(libc::dup2(std::os::fd::AsRawFd::as_raw_fd(&leak), leak_fd), leak_fd);
-            let f = libc::fcntl(leak_fd, libc::F_GETFD);
-            assert_eq!(f & libc::FD_CLOEXEC, 0, "dup2 の先に印が付いている");
-        }
+        let leak_fd = unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&leak), libc::F_DUPFD, 100) };
+        assert!(leak_fd >= 100, "記述子を写せない");
+        assert_eq!(unsafe { libc::fcntl(leak_fd, libc::F_GETFD) } & libc::FD_CLOEXEC, 0, "写した記述子に印が付いている");
         let mut cmd = Command::new("/bin/bash");
         cmd.arg("-c")
             .arg(r#"sleep 0.5; echo 途中; ls /dev/fd > "$2"; echo ok > "$1""#)
