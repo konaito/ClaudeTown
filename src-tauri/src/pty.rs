@@ -706,30 +706,51 @@ mod tests {
         assert!(!drop_env("HOME"));
     }
 
-    /// 書き込みが詰まっても台帳の錠を持たない（読まない子に大きく書いている間も、owns と list が返る）
+    /// 書き込みが詰まっても台帳の錠を持たない（読まない子に大きく書いている間も、owns と list が返る）。
+    /// 代役は claude と同じく raw にしてから寝る。行の編集のモードのままだと、macOS は行の上限を超えた分を捨て、書き込みは詰まらない（#240）
     #[test]
     fn a_stuck_write_does_not_hold_the_table() {
+        use std::os::unix::fs::PermissionsExt;
+        // 町の一覧を数える試験（lib.rs）にこの端末が混ざらないよう、台帳から消えるまで持つ。取る順は launched_config_dir_as と同じ
+        let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("fc-pty-stuck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("claude");
-        // 入力を読まない子
-        std::fs::write(&bin, "#!/bin/sh\nexec sleep 30\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
+        // 入力を読まない子。raw にしたら ready を書く
+        std::fs::write(&bin, format!("#!/bin/sh\nstty raw -echo\n: > '{}'\nexec sleep 30\n", dir.join("ready").display())).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
-        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {}).unwrap();
+        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {});
         unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
-        let id = r["id"].as_str().unwrap().to_string();
+        let id = r.unwrap()["id"].as_str().unwrap().to_string();
+        let t0 = Instant::now();
+        while !dir.join("ready").exists() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let ready = dir.join("ready").exists();
         let id2 = id.clone();
         // PTY の入力の欄（数KB）を超えて書く。子が読まないので、この書き込みは戻らない
-        std::thread::spawn(move || { let _ = write(&id2, &"x".repeat(1 << 20)); });
-        std::thread::sleep(Duration::from_millis(300));
+        let (tx, rx) = std::sync::mpsc::channel();
+        if ready {
+            std::thread::spawn(move || { let _ = tx.send(write(&id2, &"x".repeat(1 << 20))); });
+        }
+        let stuck = rx.recv_timeout(Duration::from_millis(300));
         let t0 = Instant::now();
-        assert!(owns(&id));
-        assert!(!list().is_empty());
-        assert!(t0.elapsed() < Duration::from_millis(200), "台帳の錠が書き込みに取られている");
+        let owned = owns(&id);
+        let listed = !list().is_empty();
+        let took = t0.elapsed();
+        // 確かめる前に止める（落ちても代役を残さない）
         kill(&id).unwrap();
+        let t1 = Instant::now();
+        while t1.elapsed() < Duration::from_secs(5) && owns(&id) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(ready, "代役が raw にならない");
+        assert!(stuck.is_err(), "書き込みが戻った（PTY が詰まっていない）: {stuck:?}");
+        assert!(owned && listed);
+        assert!(took < Duration::from_millis(200), "台帳の錠が書き込みに取られている: {took:?}");
     }
 
     /// 偽の cam と偽の claude を置いた試験用のディレクトリ。cam usage --json は usage を返し、sync は呼ばれた名前を sync.log に足す。
