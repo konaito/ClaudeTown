@@ -5,7 +5,8 @@ src-tauri/src の .rs を読み、各ファイルの `mod cmd { ... }` に手で
 同じファイルの `mod cmd` の外にある同名の関数（中身）の対を出す。対は2つに分ける。
 
 - 素通し: 包みの引数（名前と型）と戻り値が中身と同じで、本文が blocking で中身を呼ぶだけ。署名を二重に書いている
-- 変換: 名前は同じだが、引数の型、戻り値、前処理のどれかが違う
+- 前処理: 引数（名前と型）と戻り値は中身と同じだが、包みの本文が中身を呼ぶ前後に別のこと（app_guard、分岐など）をする
+- 型違い: 名前は同じだが、引数の型か戻り値が違う
 
     python3 scripts/count-cmd-signatures.py            # 対と件数
     python3 scripts/count-cmd-signatures.py --names    # generate_handler! の命令を「名前(引数名, ...)」で整列して出す
@@ -68,7 +69,7 @@ def body_of(text: str, sig_end: int) -> str:
 
 
 def main() -> int:
-    pure, adapt, wrappers_only = [], [], []
+    pure, prep, adapt, wrappers_only = [], [], [], []
     defined: dict[str, list[str]] = {}
     for path in sorted(SRC.rglob("*.rs")):
         text = path.read_text()
@@ -101,17 +102,19 @@ def main() -> int:
                 f"crate::blocking(super::{name}).await",
             )
             row = f"{rel}: {name}({call})"
-            (pure if same_sig and forward else adapt).append(row)
+            (pure if same_sig and forward else prep if same_sig else adapt).append(row)
 
     names_only = "--names" in sys.argv
     out = sys.stderr if names_only else sys.stdout
     print("素通しの対（署名を二重に書いている）:", file=out)
     print("".join(f"  {r}\n" for r in pure), end="", file=out)
-    print("変換の対（名前は同じで、型か戻り値か前処理が違う）:", file=out)
+    print("前処理の対（署名は同じで、包みに前処理がある）:", file=out)
+    print("".join(f"  {r}\n" for r in prep), end="", file=out)
+    print("型違いの対（名前は同じで、引数の型か戻り値が違う）:", file=out)
     print("".join(f"  {r}\n" for r in adapt), end="", file=out)
     print("包みだけ（中身の名前が違う）:", file=out)
     print("".join(f"  {r}\n" for r in wrappers_only), end="", file=out)
-    print(f"素通し {len(pure)}、変換 {len(adapt)}、包みだけ {len(wrappers_only)}", file=out)
+    print(f"素通し {len(pure)}、前処理 {len(prep)}、型違い {len(adapt)}、包みだけ {len(wrappers_only)}", file=out)
 
     lib = (SRC / "lib.rs").read_text()
     h = re.search(r"generate_handler!\[(.*?)\]", lib, re.S)
