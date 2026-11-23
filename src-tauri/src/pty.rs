@@ -454,52 +454,6 @@ fn replay_text(out: &[u8]) -> String {
     String::from_utf8_lossy(&out[start..]).into_owned()
 }
 
-// ---------- 画面からの操作 ----------
-
-/// 端末を開いた画面を登録し、size と replay を送る。前に開いていた画面は外す
-pub fn subscribe(id: &str, generation: u64, tx: Sender<TermOut>) -> Result<(), String> {
-    with(|m| {
-        let pid = pid_of(m, id).ok_or("このセッションの端末はこのアプリに無い（アプリの外で起動したセッション）")?;
-        let p = m.get_mut(&pid).expect("上で見つけた");
-        let _ = tx.send(TermOut::Event("size".into(), json!({ "cols": p.size.0, "rows": p.size.1 })));
-        let _ = tx.send(TermOut::Event("replay".into(), json!({ "s": replay_text(&p.out) })));
-        p.carry.clear();
-        p.sub = Some((generation, tx));
-        Ok(())
-    })
-}
-
-/// 開いた画面を外す。generation を渡したら、その世代のときだけ外す
-pub fn unsubscribe(id: &str, generation: Option<u64>) {
-    with(|m| {
-        if let Some(p) = pid_of(m, id).and_then(|pid| m.get_mut(&pid))
-            && (generation.is_none() || p.sub.as_ref().map(|s| s.0) == generation) {
-                p.sub = None;
-            }
-    });
-}
-
-fn new_screen(cols: u16, rows: u16) -> vt100::Parser {
-    let nz = |v: u16, d: u16| std::num::NonZeroU16::new(v).unwrap_or(std::num::NonZeroU16::new(d).expect("0 ではない"));
-    vt100::Parser::new(nz(rows, 24), nz(cols, 80), 0)
-}
-
-/// 今の画面の文字（行ごとに改行で区切る）。台帳に無ければ None
-pub fn screen_text(id: &str) -> Option<String> {
-    with(|m| {
-        let p = m.get(&pid_of(m, id)?)?;
-        let sc = p.screen.screen();
-        let cols = sc.size().1.get();
-        Some(sc.rows(0, cols).collect::<Vec<_>>().join("\n"))
-    })
-}
-
-pub fn write(id: &str, text: &str) -> Result<(), String> {
-    let w = with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| p.writer.clone())).ok_or("このセッションの端末はこのアプリに無い")?;
-    let mut w = w.lock().unwrap_or_else(|e| e.into_inner());
-    w.write_all(text.as_bytes()).and_then(|_| w.flush()).map_err(|e| format!("ターミナルに書けなかった: {e}"))
-}
-
 // ---------- 書き込みの詰まり（#240 の 2） ----------
 
 /// 書き口の包み。今の write（または flush）が戻らないまま何ミリ秒たったかを、書き口の錠の外から読めるようにする。
@@ -594,6 +548,52 @@ pub fn write_unless_stuck(id: &str, text: &str, stuck_after: Duration) -> Result
             };
         }
     }
+}
+
+// ---------- 画面からの操作 ----------
+
+/// 端末を開いた画面を登録し、size と replay を送る。前に開いていた画面は外す
+pub fn subscribe(id: &str, generation: u64, tx: Sender<TermOut>) -> Result<(), String> {
+    with(|m| {
+        let pid = pid_of(m, id).ok_or("このセッションの端末はこのアプリに無い（アプリの外で起動したセッション）")?;
+        let p = m.get_mut(&pid).expect("上で見つけた");
+        let _ = tx.send(TermOut::Event("size".into(), json!({ "cols": p.size.0, "rows": p.size.1 })));
+        let _ = tx.send(TermOut::Event("replay".into(), json!({ "s": replay_text(&p.out) })));
+        p.carry.clear();
+        p.sub = Some((generation, tx));
+        Ok(())
+    })
+}
+
+/// 開いた画面を外す。generation を渡したら、その世代のときだけ外す
+pub fn unsubscribe(id: &str, generation: Option<u64>) {
+    with(|m| {
+        if let Some(p) = pid_of(m, id).and_then(|pid| m.get_mut(&pid))
+            && (generation.is_none() || p.sub.as_ref().map(|s| s.0) == generation) {
+                p.sub = None;
+            }
+    });
+}
+
+fn new_screen(cols: u16, rows: u16) -> vt100::Parser {
+    let nz = |v: u16, d: u16| std::num::NonZeroU16::new(v).unwrap_or(std::num::NonZeroU16::new(d).expect("0 ではない"));
+    vt100::Parser::new(nz(rows, 24), nz(cols, 80), 0)
+}
+
+/// 今の画面の文字（行ごとに改行で区切る）。台帳に無ければ None
+pub fn screen_text(id: &str) -> Option<String> {
+    with(|m| {
+        let p = m.get(&pid_of(m, id)?)?;
+        let sc = p.screen.screen();
+        let cols = sc.size().1.get();
+        Some(sc.rows(0, cols).collect::<Vec<_>>().join("\n"))
+    })
+}
+
+pub fn write(id: &str, text: &str) -> Result<(), String> {
+    let w = with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| p.writer.clone())).ok_or("このセッションの端末はこのアプリに無い")?;
+    let mut w = w.lock().unwrap_or_else(|e| e.into_inner());
+    w.write_all(text.as_bytes()).and_then(|_| w.flush()).map_err(|e| format!("ターミナルに書けなかった: {e}"))
 }
 
 /// このアプリが立てたセッションの pid
