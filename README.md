@@ -257,6 +257,51 @@ hook が書く状態ファイルとお手紙の形は、`python3 -m unittest dis
 
 開発版のアイコンは、安定版のアイコンに帯を重ねて作る。`src-tauri/icons/` を作り直したら `scripts/make-dev-icon.sh` も回してコミットする（ImageMagick が要る）。
 
+### 署名と macOS の許可
+
+macOS の画面収録などの許可は、アプリの指定要件（designated requirement）に結びつく。安定版は ad-hoc 署名なので、指定要件はビルドの cdhash になる。cdhash はビルドのたびに変わる。そのため上げ直すと、前の版に出した許可が新しい版に当たらない。設定の一覧には「Claude Town」がオンのまま残る（#188）。
+
+`scripts/release-stable.sh` は、環境変数 `CT_SIGN_IDENTITY` に証明書の名前が入っていれば、その証明書で署名する。スクリプトはこの名前を Tauri の `APPLE_SIGNING_IDENTITY` に渡す。Tauri はこの変数を、設定の `bundle.macOS.signingIdentity` より先に見る。証明書で署名すると、指定要件は identifier と証明書の組になり、ビルドが変わっても同じになる見込みである。
+
+```bash
+CT_SIGN_IDENTITY="Claude Town Local Signing" scripts/release-stable.sh <ref>
+```
+
+`CT_SIGN_IDENTITY` が空なら、今までどおり ad-hoc 署名になる。どちらの場合も、スクリプトは入れた後に `codesign -d -r-` で指定要件を読んで出す。指定要件が cdhash だけなら警告を出すが、止めはしない。スクリプトを直したら `scripts/test-stable-sign.sh` を流す（一時のリポジトリと偽の bunx だけを使う）。
+
+自己署名の証明書と Apple Developer の証明書のどちらを使うかは、まだ決めていない（#188）。開発版（`bun tauri dev`）の署名は変えていない。
+
+自己署名の証明書は次の手順で作る。ログインキーチェーンに証明書と鍵を足すので、使うと決めてから本人が行う。
+
+```bash
+d="$(mktemp -d)"
+cat > "$d/codesign.cnf" <<'EOF'
+[req]
+distinguished_name = dn
+x509_extensions = ext
+prompt = no
+[dn]
+CN = Claude Town Local Signing
+[ext]
+basicConstraints = critical,CA:false
+keyUsage = critical,digitalSignature
+extendedKeyUsage = critical,codeSigning
+EOF
+/usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -config "$d/codesign.cnf" \
+  -keyout "$d/key.pem" -out "$d/cert.pem"
+/usr/bin/openssl pkcs12 -export -inkey "$d/key.pem" -in "$d/cert.pem" \
+  -name "Claude Town Local Signing" -out "$d/codesign.p12" -passout pass:ct-local
+security import "$d/codesign.p12" -k ~/Library/Keychains/login.keychain-db -P ct-local -T /usr/bin/codesign
+security find-identity -p codesigning    # "Claude Town Local Signing" が出れば CT_SIGN_IDENTITY に使える
+rm -rf "$d"
+```
+
+- `openssl` は macOS 付属の `/usr/bin/openssl`（LibreSSL）を使う。付属のものは旧形式の .p12 を作る。Homebrew の OpenSSL 3 以降が作る .p12 を `security import` で読めるかは確かめていない。
+- `-T /usr/bin/codesign` は、codesign にこの鍵を使わせる指定である。それでも初回に確認の窓が出たら「常に許可」を押す。
+- 自己署名の証明書は信頼されていないので、`security find-identity -v` には出ない。信頼の設定なしで codesign が署名できるかは、まだ確かめていない。
+- Tauri は証明書で署名するとき、`codesign --options runtime`（hardened runtime）を付ける。`bundle.macOS.hardenedRuntime` の既定が true のためである。Claude Town が hardened runtime で今までどおり動くかは、まだ確かめていない。
+- 証明書で署名した最初の版は、ad-hoc の版と指定要件が違う。そのため最初の1回は、画面収録の許可を足し直す見込みである。
+
 両版で共有しているもの:
 
 - 状態 hook は1つだけ登録してあり、両版が同じ状態ファイルを読む。登録先は安定版のタグから写した `~/.family-computing/stable/hooks/fc-report.py` なので、作業ツリーの hook を書き換えても、安定版を上げ直すまで両版に出る内容は変わらない。

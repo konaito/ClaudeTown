@@ -1,5 +1,30 @@
 # release-stable.sh と rollback-stable.sh が読む共通の関数。単体では動かさない。
 
+# .app の指定要件（designated requirement）を出す。読めなければ 1 を返す。
+# codesign は、署名に埋め込まれていない（ad-hoc の）指定要件の行の先頭に "# " を付けて出す。
+designated_requirement() {
+  local out
+  out="$(codesign -d -r- "$1" 2>/dev/null)" || return 1
+  out="$(printf '%s\n' "$out" | sed -n -e 's/^# designated => //p' -e 's/^designated => //p' | head -n 1)"
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# 指定要件を出し、cdhash だけなら警告する（#188）。止めはしないので、いつも 0 を返す。
+# cdhash はビルドごとに変わるので、前のビルドに出した画面収録などの macOS の許可が、新しいビルドに当たらない。
+warn_cdhash_only() {
+  local dr
+  if ! dr="$(designated_requirement "$1")"; then
+    echo "警告: 指定要件を読めない: ${1}（codesign -d -r- で確かめる）" >&2
+    return 0
+  fi
+  echo "指定要件: $dr"
+  if printf '%s\n' "$dr" | grep -Eq '^cdhash H"[0-9a-f]+"( or cdhash H"[0-9a-f]+")*$'; then
+    echo "警告: 指定要件が cdhash だけ（ad-hoc 署名）。上げ直すたびに、画面収録などの macOS の許可が新しい版に当たらなくなる。CT_SIGN_IDENTITY で証明書を指定する（README の「署名と macOS の許可」）" >&2
+  fi
+  return 0
+}
+
 # 入れ先の .app の実行ファイルを、絶対パスの完全一致で探して pid を出す。
 # 名前（"Claude Town" や family-computing）では探さない。開発版のバイナリや、claude のセッションの引数にも同じ文字列が入るため。
 stable_pids() {
