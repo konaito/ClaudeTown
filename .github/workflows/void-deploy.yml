@@ -1,7 +1,7 @@
 name: Deploy Claude Town (PWA) to Cloudflare
 on:
   push:
-    branches: [feat/app-v1] # このリポジトリの既定ブランチ
+    branches: [main] # このリポジトリの既定ブランチ
     paths: ['web/**', 'src/**', 'public/**', 'index.html', 'package.json', 'bun.lock', '.github/workflows/void-deploy.yml']
 
 concurrency:
