@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "check": "tsc --noEmit -p tsconfig.server.json",
+    "check": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.node.json",
     "postinstall": "void prepare"
   },
   "dependencies": {
