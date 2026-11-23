@@ -16,6 +16,7 @@ mod avatars;
 mod composer;
 mod dialog;
 mod naming;
+mod notify;
 mod places;
 mod pty;
 mod repo;
@@ -655,7 +656,10 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
+            // お便りの承認待ちと返事待ちを macOS の通知で知らせる（#292）。窓が隠れている間も動く
+            notify::start(app.handle());
             // 前回開いていた端末を立て直す（#152）。ログインシェルに PATH を聞くので（最大5秒）、別のスレッドで
             if std::env::var("FC_NO_RESTORE").is_err() {
                 std::thread::spawn(session_ops::restore_terminals);
