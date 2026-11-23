@@ -16,8 +16,8 @@
 
 ## このディレクトリの中身
 
-- characters/: パックの Actor/Character から、人に見える55体（大人22、子供33）の SeparateAnim/Idle.png、Walk.png、Dead.png と Faceset.png を、改変せずに複製した。
-- 2026-11-13（#16）に、アプリで使っていない Faceset.png を消した。残りの PNG から色のプロファイル（sRGB）などの描画に使わない部分を外した（`scripts/strip-sprites.sh`）。画素は変えていない。年齢の印象を付けたときに見た顔は、パックの元のファイルにある。
-- characters-animated/: パックの Actor/CharacterAnimated をそのまま複製した。
-- emote/: パックの Ui/Emote（emote1.png から emote30.png、14x13px）を複製した。
-- 改変は加えていない。
+- LICENSE.md、LICENSE-CC0.txt、README-original.md: この文書と、パックに同梱のライセンスと README の原本。
+- characters/: パックの Actor/Character から、人に見える55体（大人22、子供33）の SeparateAnim/Idle.png、Walk.png、Dead.png と Faceset.png を複製した。MaskFrog の Dead.png と ManGreen の Faceset.png は、このリポジトリに入れた時点から無い。
+- 2026-11-13（#16）に、アプリで使っていない Faceset.png（54枚）を消した。残りの PNG から色のプロファイル（sRGB）などの描画に使わない部分を外した（`scripts/strip-sprites.sh`）。画素は変えていない。年齢の印象を付けたときに見た顔は、パックの元のファイルにある。
+- 今の characters/ には、`<キャラ名>/SeparateAnim/` の下に Idle.png と Walk.png が55枚ずつ、Dead.png が54枚ある。このディレクトリのファイルは、上の3つの文書と合わせて167個になる。
+- 色のプロファイルを外したことのほかに、画像への改変は加えていない。

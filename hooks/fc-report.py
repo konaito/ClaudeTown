@@ -394,14 +394,11 @@ def main():
         done_id = perm_item(data.get("tool_name", ""), data.get("tool_input"))["id"]
         q = [x for x in read_queue(sid) if x["id"] != done_id]
         write_queue(sid, q, data, phase="working", needs=None)
-        # 初めて子を作った直後にも促す（その会話の中で名前を付けられるように）
         if ev == "PostToolUse" and data.get("tool_name") in LETTER_TOOLS:
             try:
                 letter_sent(sid, data.get("tool_name"), data.get("tool_input"), data.get("tool_response"))
             except Exception:
                 pass
-        if ev == "PostToolUse" and data.get("tool_name") in MAKE_CHILD:
-            write(sid, {"made_child": True}, data)
     elif ev == "Notification":
         kind = data.get("notification_type") or ""
         msg = data.get("message") or ""

@@ -1,7 +1,7 @@
 // family-computing の裏側。画面から呼ばれる命令:
 // - snapshot: この機械の Claude Code の記録（native/）、このアプリが立てた端末（pty.rs）、hook の報告、close-check の判定を1つにまとめる
 // - conversation(session_id, since): セッションの jsonl を差分で読み、画面に出す形（発言と道具の1行）に縮め、画面がまだ持っていない分だけ返す
-// - create_session / stop_session: 新しい世帯の claude をこのアプリの中の端末で起動する、止める（pty.rs）
+// - create_session / stop_session / restart_session: 新しい世帯の claude をこのアプリの中の端末で起動する、止める、止めて枠の残るアカウントで立て直す（pty.rs）
 // - term_open / term_close / term_input / term_resize: このアプリが立てた端末を読み書きし、開いた画面の Channel へ流す
 // - house_places: 新しい世帯のペインの「最近の場所」の材料（places.rs）
 // - prompt_history / slash_commands / file_suggestions / send_direct / interrupt_session: チャットの入力欄を CLI と同じ動きにする（composer.rs）
@@ -85,6 +85,14 @@ fn place(home: &std::path::Path, app_id: Option<&str>, app_home: Option<String>,
         },
     };
     dir.join(name)
+}
+
+/// 2つ目の起動を止めるか（#176）。止めるときは tauri-plugin-single-instance を使う。
+/// プラグインは identifier だけで1つ目を見分ける（macOS では /tmp/<identifier>_si.sock）。安定版と開発版は identifier が違うので止め合わない。
+/// 開発版は、子が別のポートと別の FC_APP_HOME で並列に起動するので、既定では止めない（止めると2体目の子の開発版が黙って終わる）。
+/// 開発版で止める動きを確かめるときだけ FC_SINGLE_INSTANCE=1 を付ける
+fn single_instance_wanted(app_id: &str, force: Option<&str>) -> bool {
+    app_id == STABLE_ID || force == Some("1")
 }
 
 fn read_json(p: &PathBuf) -> Option<Value> {
@@ -441,7 +449,8 @@ pub fn run() {
     //   family-computing --conversation <id>    会話
     // identifier はビルド時の設定（開発版は tauri.conf.json、安定版は tauri.stable.conf.json を重ねたもの）から取る。
     // 下の開発用の引数も、画面と同じ置き場所を使う
-    // 軽さの計測（scripts/bench.ts）: プロセスが始まった時刻を書く。画面が町を描いた時刻との差を、起動の時間にする
+    // 軽さの計測（src/term/bench.ts の scene）: プロセスが始まった時刻を書く。画面が町を描いた時刻との差を、起動の時間にする。
+    // 場面ごとに起動して測る scripts/bench.ts は #131 で消えた（#187）
     if std::env::var("FC_PERF_LOG").map(|p| !p.is_empty()).unwrap_or(false) {
         perf_log(json!({ "bench": "proc", "procStartMs": now_ms() as u64 }).to_string());
     }
@@ -470,7 +479,26 @@ pub fn run() {
         println!("{}", serde_json::to_string_pretty(&conversation(id, None).map(|d| d.items)).unwrap_or_default());
         return;
     }
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // 2つ目の起動は、窓を作る前（build の中のプラグインの初期化）に終わる。台帳（terminals.json）を空で書き直さない（#176）。
+    // プラグインの決まりで、ほかのプラグインより先に入れる
+    let app_id = context.config().identifier.clone();
+    if single_instance_wanted(&app_id, std::env::var("FC_SINGLE_INSTANCE").ok().as_deref()) {
+        let stable = app_id == STABLE_ID;
+        builder = builder.plugin(tauri_plugin_single_instance::init(move |app, _args, _cwd| {
+            eprintln!("[single-instance] 2つ目の起動を断った");
+            // 安定版は1つ目の窓を前に出す。開発版は前面を奪わない（本人が別のアプリを使っている間に子が確かめるため）
+            if stable {
+                use tauri::Manager;
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.unminimize();
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+        }));
+    }
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
@@ -478,7 +506,7 @@ pub fn run() {
             if std::env::var("FC_NO_RESTORE").is_err() {
                 std::thread::spawn(session_ops::restore_terminals);
             }
-            // 開発の計測用（src/term/bench.ts、scripts/bench.ts）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、
+            // 開発の計測用（src/term/bench.ts。scripts/bench.ts は #131 で消えた）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、
             // 最前面に出し、どのデスクトップにも出す（本人が別のデスクトップに移っても隠れないように）。
             // 前面は奪わない（FC_BENCH_FOCUS=1 のときだけ奪う）。起動のたびに前面を奪うと、本人の作業の邪魔になる
             if std::env::var("FC_BENCH_TOP").is_ok() {
@@ -495,7 +523,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             cmd::snapshot, conversation::cmd::conversation,
-            session_ops::cmd::create_session, session_ops::cmd::resume_session, session_ops::cmd::stop_session, session_ops::cmd::house_places, repo::cmd::place_repos,
+            session_ops::cmd::create_session, session_ops::cmd::resume_session, session_ops::cmd::stop_session, session_ops::cmd::restart_session, session_ops::cmd::house_places, repo::cmd::place_repos,
             term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
             composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::send_or_queue, composer::cmd::cancel_queued, composer::cmd::boot_status, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files,
@@ -705,6 +733,22 @@ mod tests {
     }
 
     #[test]
+    fn single_instance_only_for_stable_unless_forced() {
+        // 安定版はいつも2つ目を止める。開発版は子が並列で起動するので、FC_SINGLE_INSTANCE=1 のときだけ止める（#176）
+        let dev = "jp.fybe.family-computing.dev";
+        assert!(single_instance_wanted(STABLE_ID, None));
+        assert!(single_instance_wanted(STABLE_ID, Some("0")));
+        assert!(!single_instance_wanted(dev, None));
+        assert!(!single_instance_wanted(dev, Some("")));
+        assert!(!single_instance_wanted(dev, Some("0")));
+        assert!(single_instance_wanted(dev, Some("1")));
+        // 設定ファイルの identifier が、この判定の前提（安定版の値と開発版の値）のままか
+        let conf: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["identifier"], dev);
+        assert!(!single_instance_wanted(conf["identifier"].as_str().unwrap(), None));
+    }
+
+    #[test]
     fn town_lets_send_to_native_session_with_socket() {
         // 受信ソケットのあるセッションは、Town が立てていなくても画面で送れる（#156）。割り込みと端末はできない
         let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -729,8 +773,15 @@ mod tests {
 
     #[test]
     fn town_reads_native_sessions_and_subagents() {
+        // 代役の端末を立てる試験（pty.rs、composer.rs）の端末も町の一覧に出て、数がずれる。立てる錠も取り（順は NATIVE_TEST_LOCK、BIN_LOCK）、
+        // 前の試験の端末が終わるのを待つ
         // 会話を読む先の登録（native::register）はプロセスで1つなので、使う試験を1本ずつ動かす
         let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _bin = pty::BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t0 = std::time::Instant::now();
+        while !pty::list().is_empty() && t0.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         use native::testtree::*;
         // 合成の ~/.claude: セッション A（sub-agent 1体）と、from 行で A の子になるセッション B
         let root = tmp("merge");

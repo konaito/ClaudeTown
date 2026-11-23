@@ -15,3 +15,6 @@ export const KillCtx = createContext<{ dying: Map<string, number>; ask: (a: Agen
 
 /** カードのボタンから文を送る口（#63）。値は App で一度だけ作り、町の描き直しの合図にしない（#10） */
 export const SendCtx = createContext<(a: Agent, text: string) => Promise<boolean>>(async () => false);
+
+/** カードの「再起動」の口。止めて枠の残るアカウントで立て直す。押している間の id は busy に入る */
+export const RestartCtx = createContext<{ busy: Set<string>; run: (a: Agent) => void }>({ busy: new Set(), run: () => {} });

@@ -65,12 +65,16 @@ pub(crate) fn term_close(session_id: String, generation: Option<u64>) -> Result<
     Ok(())
 }
 
-/// 打ったキー。PTY への書き込みはすぐ終わるので、届いた順にそのまま書く
+/// 打ったキー。端末ごとの列に積み、書くのを待たずに返す（pty::input、#231）。
+/// claude が入力を読まないと PTY は約1KB で詰まり、チャット欄の送信は長い文を書く間ずっと書き口の錠を持つ。
+/// この命令はメインスレッドで動くので、ここで書くと、詰まった間は窓全体が固まる。
+/// async にはしない。async の命令は非同期のランタイムの別々のスレッドで動き、続けて打ったキーが列に入る順が入れ替わりうる。
+/// async の付かない命令は届いた順にメインスレッドで1つずつ動くので、列に積む順が打った順になる
 #[tauri::command]
 pub(crate) fn term_input(session_id: String, text: String) -> Result<(), String> {
     app_guard(&session_id)?;
     refuse_if_disabled()?;
-    pty::write(&session_id, &text)
+    pty::input(&session_id, &text)
 }
 
 #[tauri::command]

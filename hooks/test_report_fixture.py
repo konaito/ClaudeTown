@@ -5,7 +5,7 @@ Python はここで events を fc-report.py に流して、出た state が見�
 Rust（src-tauri/src/lib.rs の report_cases）と TypeScript（src/model.test.ts）は同じ見本を読み、Report の形で解釈できることを検べる。
 時刻の2キー（updated_at、turn_started_at）は実行のたびに変わるので、見本では 0 にそろえる。
 見本を作り直すとき: FC_WRITE_FIXTURE=1 python3 -I -m unittest discover -s hooks
-FC_STATE_DIR と FC_LETTERS は一時の場所に向くので、本物の ~/.family-computing には書かない。
+FC_STATE_DIR、FC_LETTERS、FC_PERM_DIR は一時の場所に向くので（test_fc_report.HookCase）、本物の ~/.family-computing には書かない。
 """
 import json
 import os
@@ -41,6 +41,12 @@ SCENARIOS = [
     ("休んだリードは、チームメイトが道具を使っても休んだまま", [prompt("a"), STOP, {"hook_event_name": "PreToolUse", **MATE_TOOL}, {"hook_event_name": "PostToolUse", **MATE_TOOL}]),
     ("チームメイトの承認待ちはリードの承認待ちになる（画面はリードの端末に出る）", [prompt("a"), STOP, {**ASK, **MATE_TOOL}]),
     ("チームメイトの承認が済むと、休んだリードは休みに戻る", [prompt("a"), STOP, {**ASK, **MATE_TOOL}, {"hook_event_name": "PostToolUse", **MATE_TOOL}]),
+    # 承認の画面で理由なしの No か Esc を押したときに届いた並び（#180、2026-11-23 に Claude Code 2.1.330 で実測）。
+    # この後は PostToolUse も PostToolUseFailure も Stop も来ず、phase は needs_you のまま残る。画面側（src/model.ts の moodOf）が見分ける
+    ("承認の画面を No か Esc で閉じた（この後に hook は来ない）", [
+        prompt("a"), {"hook_event_name": "PreToolUse", **WRITE}, {**ASK, **WRITE},
+        {"hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs your permission"},
+    ]),
 ]
 
 

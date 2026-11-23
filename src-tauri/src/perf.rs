@@ -20,7 +20,8 @@ pub(crate) fn perf_log(line: String) {
 #[tauri::command]
 pub(crate) fn perf_ping() {}
 
-/// 軽さの計測（scripts/bench.ts、#2）で、窓を隠すか最小化する。FC_PERF_LOG があるとき（計測のとき）だけ動く
+/// 軽さの計測（src/term/bench.ts の hidden と minimized の scene、#2）で、窓を隠すか最小化する。FC_PERF_LOG があるとき（計測のとき）だけ動く。
+/// 場面ごとに起動して測る scripts/bench.ts は #131 で消えた（#187）
 #[tauri::command]
 pub(crate) fn perf_window(window: tauri::WebviewWindow, op: String) -> Result<(), String> {
     if std::env::var("FC_PERF_LOG").map(|p| p.is_empty()).unwrap_or(true) {

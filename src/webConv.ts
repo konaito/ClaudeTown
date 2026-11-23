@@ -105,6 +105,16 @@ const firstLine = (v: J): string => String(typeof v === "string" ? v : "").split
  * ccn の messages の1件を、画面に出す0件以上の項目に縮める。考えた中身は捨てる。道具の結果は result の項目にし、push が道具の行に付ける（#83）。
  * node はトランスクリプトの行そのまま（type、message、timestamp）。pty は {at, type, data: {type, message, …}, seq} で、中身は data に入り、時刻は at（ms）にある
  */
+/** ! のシェルの入力を、打った形の「!コマンド」の文に直す（Rust の bash_input と同じ、#254）。! の後ろの空白は残す。シェルの入力の行でなければ null */
+export function bashInput(text: string): string | null {
+  const t = text.trimStart();
+  if (!t.startsWith("<bash-input>")) return null;
+  const r = t.slice("<bash-input>".length);
+  const end = r.lastIndexOf("</bash-input>");
+  if (end < 0) return null;
+  const body = r.slice(0, end).trimEnd();
+  return body.trim() ? `!${body}` : null;
+}
 /** スラッシュコマンドの入力を、端末と同じ「/名前 引数」の文に直す（Rust の slash_command と同じ、#157）。コマンドの行でなければ null */
 export function slashCommand(text: string): string | null {
   const t = text.trimStart();
@@ -208,8 +218,9 @@ export function simplify(raw: J): Omit<ConvItem, "n">[] {
       out.push({ role: "event", kind: "interrupted", text: "ここで止めた", at });
       return out;
     }
-    // スラッシュコマンドの入力は「/名前 引数」の文にしてから見る。そのままだと `<` で始まり、下の除外で落ちる（Rust の simplify と同じ、#157）
-    text = slashCommand(text) ?? text;
+    // スラッシュコマンドの入力は「/名前 引数」の文に、! のシェルの入力は「!コマンド」の文にしてから見る。
+    // そのままだと `<` で始まり、下の除外で落ちる（Rust の simplify と同じ、#157、#254）。シェルの出力は下の除外で落とす
+    text = slashCommand(text) ?? bashInput(text) ?? text;
     // 道具の結果だけの user、hook やシステムの差し込み（<...> で始まる）は出さない
     if (!text || text.startsWith("<") || text.startsWith("Caveat:")) return out;
     // 別のセッションからの文は1行目が from 行。端末に貼った画像のパスは先頭に [Image #3] が付き、from 行はその後ろに回る

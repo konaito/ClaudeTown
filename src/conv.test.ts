@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, settlePending, answerPending, withNotes, withQueued, convFailed, type Live, type PendingItem } from "./conv";
+import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, settlePending, answerPending, withNotes, withQueued, convFailed, pendingOf, addPending, updatePending, dropPending, type Live, type PendingItem, type PendingBy } from "./conv";
 import type { ConvItem } from "./model";
+import { simplify } from "./webConv";
 
 const item = (n: number): ConvItem => ({ role: "assistant", text: `t${n}`, n });
 
@@ -110,6 +111,14 @@ describe("settlePending（#69）", () => {
     const pend = [p("/a/b.png\nこれ見て", 4)];
     expect(settlePending([u(5, "[Image #1]\nあれ見て")], pend)).toBe(pend);
   });
+  // 今の送り方は ! の文に仮の吹き出しを足さない（usePanelSend の plain、Panel の useBoot）。足すようにしたときに、
+  // 会話に出た文と突き合わせて消せることを確かめておく
+  test("! のシェルの入力は、打った文と同じ形で会話に出るので突き合わせられる（#254）", () => {
+    const line = (body: string) => ({ type: "user", timestamp: "2026-11-23T01:02:03.000Z", message: { role: "user", content: `<bash-input>${body}</bash-input>` } });
+    const shown = (body: string) => simplify(line(body)).map((x) => ({ ...x, n: 5 }) as ConvItem);
+    expect(settlePending(shown("ls"), [p("!ls", 4)])).toEqual([]);
+    expect(settlePending(shown(" git status"), [p("! git status", 4)])).toEqual([]);
+  });
   test("送り始める前の同じ文では消さない", () => {
     const pend = [p("はい", 5)];
     expect(settlePending([u(5, "はい")], pend)).toBe(pend);
@@ -142,6 +151,44 @@ describe("answerPending（#55）", () => {
     const answered = answerPending([item(5)], [p("やって", 4)]);
     expect(settlePending([item(5)], answered)).toBe(answered);
     expect(settlePending([item(5), { role: "user", text: "やって", n: 6 }], answered)).toEqual([]);
+  });
+});
+
+describe("セッションごとの送ったばかりの文（#178）", () => {
+  const p = (text: string, after: number): PendingItem => ({ role: "user", text, pending: true, after });
+  test("A の id で足すと、B の一覧は変わらない", () => {
+    const b = [p("B に送った", 2)];
+    const prev: PendingBy = { B: b };
+    const next = addPending(prev, "A", p("A に送った", 4));
+    expect(pendingOf(next, "B")).toBe(b);
+    expect(pendingOf(next, "A").map((x) => x.text)).toEqual(["A に送った"]);
+  });
+  test("無い id と undefined は、いつも同じ空の配列を返す（描き直さない）", () => {
+    const by: PendingBy = { A: [p("x", 0)] };
+    expect(pendingOf(by, "B")).toEqual([]);
+    expect(pendingOf(by, "B")).toBe(pendingOf({}, undefined));
+  });
+  test("変わらなければ同じものを返し、空になった id は消す", () => {
+    const by: PendingBy = { A: [p("一通目", 4)], B: [p("B", 1)] };
+    expect(updatePending(by, "A", (x) => x)).toBe(by);
+    expect(updatePending(by, "C", (x) => x)).toBe(by);
+    const items: ConvItem[] = [{ role: "user", text: "一通目", n: 5 }];
+    const next = updatePending(by, "A", (x) => settlePending(items, x));
+    expect("A" in next).toBe(false);
+    expect(next.B).toBe(by.B);
+  });
+  test("A に戻って取り直した会話に送った文が出たら、A の仮の項目が消える", () => {
+    // 送ってすぐ B に替えたので、A の分は A のところに入っている
+    const by = addPending({}, "A", p("A に送った", 4));
+    const itemsA: ConvItem[] = [item(3), item(4), { role: "user", text: "A に送った", n: 5 }];
+    expect(pendingOf(updatePending(by, "A", (x) => settlePending(itemsA, x)), "A")).toEqual([]);
+  });
+  test("dropPending はその id の分だけ捨てる", () => {
+    const by: PendingBy = { A: [p("a", 0)], B: [p("b", 0)] };
+    const next = dropPending(by, "A");
+    expect(pendingOf(next, "A")).toEqual([]);
+    expect(next.B).toBe(by.B);
+    expect(dropPending(next, "A")).toBe(next);
   });
 });
 
