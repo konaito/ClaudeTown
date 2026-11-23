@@ -48,7 +48,8 @@ const HELP: [string, string][] = [
 ];
 
 export function Composer({ agent, text, setText, busy, running, booting = false, support = "no", onSubmit, onError, touch, helpReq = 0, helpSeen }: {
-  /** メニューバーの「キーボードショートカット」（#300）。helpSeen より大きければキーの一覧を開き、helpSeen を進める */
+  /** メニューバーの「キーボードショートカット」（#300）。helpSeen より大きければキーの一覧を開け閉めし（? と同じ）、helpSeen を進める。
+   *  入力欄が押せないセッションでは Esc も ? も届かないので、閉じるのもメニューから */
   helpReq?: number; helpSeen?: React.MutableRefObject<number>;
   /** claude の起動を待っている。送った文は Rust が預かり、起動したら送る（入力欄の案内だけ替える） */
   booting?: boolean;
@@ -70,7 +71,7 @@ export function Composer({ agent, text, setText, busy, running, booting = false,
   useEffect(() => {
     if (!helpSeen || helpReq <= helpSeen.current) return;
     helpSeen.current = helpReq;
-    setHelp(true);
+    setHelp((h) => !h);
   }, [helpReq]);
   const kills = useRef<string[]>([]);
   const yank = useRef<{ from: number; to: number; i: number } | null>(null);

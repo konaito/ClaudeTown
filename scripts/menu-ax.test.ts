@@ -19,3 +19,21 @@ describe("menu-ax（#300）", () => {
     expect(diff(want, ["# x", "# 編集", "コピー\t⌘C"])).toEqual(["- 木だけ: 設定…\t⌘,"]);
   });
 });
+
+describe("menu-ax の判定（#300、開発版で読んだ実物）", () => {
+  test("実物は木の項目を全部持ち、違いは macOS が足した項目だけ", async () => {
+    const { ctlLines, verdict } = await import("./menu-ax");
+    const cases = (await import("./menu-ax-cases.json")).default as { tree: string[]; ctl: string[] };
+    const { missing, extra } = verdict(diff(cases.tree, ctlLines(cases.ctl)));
+    expect(missing).toEqual([]);
+    expect(extra).toContain("+ 実物だけ: 絵文字と記号\t⌘ ");
+    expect(extra).toContain("+ 実物だけ: フルスクリーンにする\tF");
+  });
+
+  test("木の項目が実物に無ければ失敗にする", async () => {
+    const { ctlLines, verdict } = await import("./menu-ax");
+    const cases = (await import("./menu-ax-cases.json")).default as { tree: string[]; ctl: string[] };
+    const ctl = cases.ctl.filter((l) => !l.startsWith("設定…"));
+    expect(verdict(diff(cases.tree, ctlLines(ctl))).missing).toEqual(["- 木だけ: 設定…\t⌘,"]);
+  });
+});

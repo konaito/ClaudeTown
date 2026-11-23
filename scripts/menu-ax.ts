@@ -122,9 +122,24 @@ async function ctl(ctlFile: string, perf: string, req: Record<string, string>): 
   throw new Error("10秒待っても結果が無い（FC_MENU_CTL と FC_PERF_LOG を付けて起動した開発版か）");
 }
 
-/** アプリの中から読んだ行を、木と同じ書き方にする（隠れた代わりの項目を除き、押せるかを外す） */
+/**
+ * アプリの中から読んだ行を、木と同じ書き方にする（押せるかと hidden の印を外す）。
+ * 隠れた代わりの項目も残す。macOS はフルスクリーンの ⌃⌘F を隠れた代わりにし、fn の F を見える方に出すので、木の ⌃⌘F は隠れた方と合う
+ */
 export function ctlLines(lines: string[]): string[] {
-  return lines.filter((l) => !l.endsWith("\thidden")).map((l) => (l.startsWith("# ") || l === "---" ? l : l.split("\t").slice(0, 2).join("\t")));
+  return lines.map((l) => (l.startsWith("# ") || l === "---" ? l : l.split("\t").slice(0, 2).join("\t")));
+}
+
+/** 比べた結果。木にあって実物に無い行（missing）だけを失敗にする。実物だけの行（extra）は macOS が足した項目なので知らせるだけにする */
+export function verdict(d: string[]): { missing: string[]; extra: string[] } {
+  return { missing: d.filter((l) => l.startsWith("- ")), extra: d.filter((l) => l.startsWith("+ ")) };
+}
+
+function report(d: string[]): number {
+  const { missing, extra } = verdict(d);
+  if (extra.length) console.log(`macOS が足した項目など（実物だけ、失敗にしない）:\n${extra.join("\n")}`);
+  console.log(missing.length ? `木にあって実物に無い:\n${missing.join("\n")}` : "木の項目は全部、同じ並びと文言とキーで実物にある");
+  return missing.length ? 1 : 0;
 }
 
 if (import.meta.main && process.argv[2]?.startsWith("ctl-")) {
@@ -134,11 +149,7 @@ if (import.meta.main && process.argv[2]?.startsWith("ctl-")) {
   if (res.error) { console.error(res.error); process.exit(1); }
   if (cmd === "ctl-press") console.log("ok");
   else if (cmd === "ctl-dump") console.log((res.lines ?? []).join("\n"));
-  else {
-    const d = diff(treeLines(), ctlLines(res.lines ?? []));
-    console.log(d.length ? d.join("\n") : "木と実物が同じ");
-    process.exit(d.length ? 1 : 0);
-  }
+  else process.exit(report(diff(treeLines(), ctlLines(res.lines ?? []))));
 } else if (import.meta.main) {
   const [cmd, pidArg, ...rest] = process.argv.slice(2);
   const pid = Number(pidArg);
@@ -149,9 +160,7 @@ if (import.meta.main && process.argv[2]?.startsWith("ctl-")) {
   if (cmd === "dump") {
     console.log(lines(readMenus(pid), true).join("\n"));
   } else if (cmd === "check") {
-    const d = diff(treeLines(), lines(readMenus(pid), false));
-    console.log(d.length ? d.join("\n") : "木と実物が同じ");
-    process.exit(d.length ? 1 : 0);
+    process.exit(report(diff(treeLines(), lines(readMenus(pid), false))));
   } else if (cmd === "press") {
     console.log(press(pid, rest[0], rest[1]));
   } else {

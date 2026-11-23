@@ -90,7 +90,7 @@ fn sub(id: &'static str, text: &str, items: Vec<Node>) -> Node {
 }
 
 /// 町の拡大、縮小、全体を表示のキー。⌘+、⌘-、⌘0 は画面全体の拡大縮小（tauri.conf.json の zoomHotkeysEnabled、WCAG 1.4.4）が
-/// 使っているので、町の項目にはキーを付けない（issue #300 の案からの変更。team-lead に確認中）
+/// 使っているので、町の項目にはキーを付けない（issue #300 の案では ⌘+、⌘-、⌘0。両方が同時に走るのを避けた。本人の判断で替えるときはここだけ直す）
 const ZOOM_KEYS: [Option<&str>; 3] = [None, None, None];
 
 /// メニューの木。name はアプリ名（productName）。最初の状態（セッションを選んでいない、左のペインが開いている、更新は分からない）で作る
