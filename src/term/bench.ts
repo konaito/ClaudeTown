@@ -22,6 +22,7 @@
 import { useEffect, useRef } from "react";
 import { call } from "../bridge";
 import { perfCounters, perfNext, perfTerm, perfWaitingPrompt } from "./perf";
+import { measureScene } from "./sceneWindow";
 
 const fromEnv = import.meta.env.DEV ? (import.meta.env.VITE_FC_BENCH as string | undefined) : undefined;
 /** 計測の引数。開発版だけで読む */
@@ -84,14 +85,12 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
         await call("perf_window", { op: scene === "hidden" ? "hide" : "minimize" });
       }
       await sleep(3000);
-      const ipc0 = { ...perfCounters };
-      await log({ ready: true, scene, at: Date.now(), paintedAt, vis: document.visibilityState, focus: document.hasFocus(), fps: await fps(1000), renderer: perfCounters.renderer || null });
+      // 数える区間と割る秒数をそろえる（#216）。順序は sceneWindow.ts にある
       const wait = Number(params.get("wait") ?? 65000);
-      const t0 = Date.now();
-      await sleep(wait);
-      const secs = (Date.now() - t0) / 1000;
-      await log({ post: true, scene, at: Date.now(), vis: document.visibilityState, visEvents: vis, fps: await fps(1000),
-        ipcPerSec: +((perfCounters.ipc - ipc0.ipc) / secs).toFixed(1), charsPerSec: Math.round((perfCounters.bytes - ipc0.bytes) / secs) });
+      const post = await measureScene({ now: Date.now, counts: () => ({ ipc: perfCounters.ipc, bytes: perfCounters.bytes }), sleep, fps }, wait,
+        async (f) => log({ ready: true, scene, at: Date.now(), paintedAt, vis: document.visibilityState, focus: document.hasFocus(), fps: await f(), renderer: perfCounters.renderer || null }),
+        () => ({ post: true, scene, at: Date.now(), vis: document.visibilityState, visEvents: vis }));
+      await log(post);
       document.removeEventListener("visibilitychange", onVis);
       return;
     }
