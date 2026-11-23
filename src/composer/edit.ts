@@ -6,7 +6,8 @@ export type Sel = { text: string; start: number; end: number };
 /** 置き換える範囲と、入れる文。カーソルは入れた文の後ろに置く。killed は Ctrl+Y で貼れるように取っておく文 */
 export type Edit = { from: number; to: number; insert: string; caret?: number; killed?: string };
 
-const lineStart = (t: string, i: number) => t.lastIndexOf("\n", i - 1) + 1;
+// i が 0 のとき lastIndexOf("\n", -1) は位置0から探すので、文が改行で始まると次の行の頭を返してしまう（#215）
+const lineStart = (t: string, i: number) => (i <= 0 ? 0 : t.lastIndexOf("\n", i - 1) + 1);
 const lineEnd = (t: string, i: number) => { const n = t.indexOf("\n", i); return n < 0 ? t.length : n; };
 
 /** Ctrl+A: 今の行（改行で区切った行）の先頭へ */
