@@ -27,6 +27,7 @@ import { useCcnReservations } from "./webReserve";
 import { Stage } from "./canvas/Stage";
 import { FamilyCanvas, Group, layoutOf } from "./canvas/FamilyCanvas";
 import { KillConfirm } from "./confirm/Confirm";
+import { killPlan } from "./killPlan";
 import { NextRow } from "./NextRow";
 import { useLetterMarks } from "./useLetterMarks";
 import { Panel } from "./panel/Panel";
@@ -263,7 +264,7 @@ export default function App() {
       }} onClose={() => setSettingsOpen(false)} />}
 
       {killAsk && (
-        <KillConfirm agent={killAsk} descendants={countDesc(tree.childrenOf, killAsk.id)}
+        <KillConfirm agent={killAsk} plan={killPlan(tree.childrenOf, killAsk)}
           onCancel={() => setKillAsk(null)} onConfirm={() => { const a = killAsk; setKillAsk(null); kill(a); }} />
       )}
       <div className="toasts">
@@ -280,6 +281,3 @@ export default function App() {
   );
 }
 
-function countDesc(childrenOf: Map<string, Agent[]>, id: string): number {
-  return (childrenOf.get(id) ?? []).reduce((n, k) => n + 1 + countDesc(childrenOf, k.id), 0);
-}
