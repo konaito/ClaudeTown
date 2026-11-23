@@ -384,6 +384,29 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Sen
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
 }
 
+/// 中身の関数の定義を包み、同じ名前と引数の命令を作る（#106）。署名を書くのは中身の1か所だけになる。
+/// 中身の関数はそのまま残る（--snapshot などと試験から同期で呼ぶ）。命令は中身と同名のモジュールの中に置き、
+/// 中身を blocking で動かす。関数とモジュールは名前の置き場所が別なので、同じ名前を使える。
+/// 各ファイルの `mod cmd` はこのモジュールを `pub use` で並べ直し、generate_handler! の書き方は前のまま変えない。
+/// 包めるのは、引数と戻り値が命令と同じで、戻り値が Result<_, String> の関数だけ。前処理や型の変換が要る命令は、`mod cmd` に手で書く
+macro_rules! blocking_command {
+    ($(#[$meta:meta])* $vis:vis fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> $ret:ty $body:block) => {
+        $(#[$meta])*
+        $vis fn $name($($arg: $ty),*) -> $ret $body
+
+        #[doc(hidden)]
+        pub(crate) mod $name {
+            #[allow(unused_imports)]
+            use super::*;
+            #[tauri::command]
+            pub async fn $name($($arg: $ty),*) -> $ret {
+                crate::blocking(move || super::$name($($arg),*)).await
+            }
+        }
+    };
+}
+pub(crate) use blocking_command;
+
 mod cmd {
     use super::*;
 

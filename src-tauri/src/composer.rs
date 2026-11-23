@@ -330,6 +330,7 @@ pub fn rank_files(files: &[String], query: &str, limit: usize) -> Vec<String> {
     scored.into_iter().take(limit).map(|(_, _, f)| f.clone()).collect()
 }
 
+crate::blocking_command! {
 pub fn file_suggestions(cwd: String, query: String) -> Result<Vec<String>, String> {
     if cwd.is_empty() || !Path::new(&cwd).is_dir() {
         return Ok(vec![]);
@@ -347,6 +348,7 @@ pub fn file_suggestions(cwd: String, query: String) -> Result<Vec<String>, Strin
         }
     };
     Ok(rank_files(&files, &query, 15))
+}
 }
 
 // ---------- PTY への直接の送信と中断 ----------
@@ -728,10 +730,7 @@ pub(crate) mod cmd {
     pub async fn slash_commands(cwd: Option<String>) -> Result<Vec<super::SlashCommand>, String> {
         crate::blocking(move || Ok(super::slash_commands(cwd))).await
     }
-    #[tauri::command]
-    pub async fn file_suggestions(cwd: String, query: String) -> Result<Vec<String>, String> {
-        crate::blocking(move || super::file_suggestions(cwd, query)).await
-    }
+    pub use super::file_suggestions::*;
     /// このアプリが立てたセッションは端末の入力欄へ貼る。外で起動したものは受信ソケットで送る（#156）
     #[tauri::command]
     pub async fn send_direct(session_id: String, text: String) -> Result<(), String> {
