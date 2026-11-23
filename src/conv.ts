@@ -160,6 +160,39 @@ export function settlePending(items: ConvItem[], pending: PendingItem[]): Pendin
 }
 
 /**
+ * 送ったばかりの文を、送った先のセッション id ごとに持つ（#178）。
+ * 送信の await の間に別の子へ切り替えても、送った文は送った先の一覧に入り、切り替えた先の会話には出ない
+ */
+export type PendingBy = Record<string, PendingItem[]>;
+const NO_PENDING: PendingItem[] = [];
+
+/** そのセッションの一覧。無ければいつも同じ空の配列を返す（描き直さない） */
+export function pendingOf(by: PendingBy, sid: string | undefined): PendingItem[] {
+  return (sid !== undefined && by[sid]) || NO_PENDING;
+}
+
+/** 送った先の一覧の末尾に足す。ほかのセッションの一覧は同じものを残す */
+export function addPending(by: PendingBy, sid: string, item: PendingItem): PendingBy {
+  return { ...by, [sid]: [...pendingOf(by, sid), item] };
+}
+
+/** そのセッションの一覧を f で替える。変わらなければ by をそのまま返し、空になったら id ごと消す */
+export function updatePending(by: PendingBy, sid: string, f: (p: PendingItem[]) => PendingItem[]): PendingBy {
+  const prev = pendingOf(by, sid);
+  const next = f(prev);
+  if (next === prev) return by;
+  if (!next.length) return dropPending(by, sid);
+  return { ...by, [sid]: next };
+}
+
+/** そのセッションの一覧を捨てる。無ければ by をそのまま返す */
+export function dropPending(by: PendingBy, sid: string): PendingBy {
+  if (!(sid in by)) return by;
+  const { [sid]: _, ...rest } = by;
+  return rest;
+}
+
+/**
  * 会話の末尾に出す順番待ちの文。作業中と承認待ちのときだけ出す（止まっているのに残った待ちは出さない）。
  * このアプリから送った文も同じ待ちに入るので、同じ文の「届けた」の仮の項目は、待ちの項目に置き換える
  */

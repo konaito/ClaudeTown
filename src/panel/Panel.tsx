@@ -87,14 +87,14 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
   // チャットを開いたとき（セッションを選んだ、タブを切り替えた）は、必ず一番下から始める。
   // 以前は stick を読み込みの effect でしか戻さず、タブの切り替えでは前の値が残り、容れ物も作り直されるのに items が変わらないので下へ送られなかった
   useLayoutEffect(() => { stick.current = true; }, [id, tab, chatReq]);
-  const { items, live, pending, setPending, convErr, convKick } = useConversation(id, isFast, working, stick, agent?.kind !== "node");
+  const { items, live, pending, addPending, convErr, convKick } = useConversation(id, isFast, working, stick, agent?.kind !== "node");
   // claude の起動の様子（アプリが立てた端末だけ）。起動前に送った文は Rust が預かり、起動したら送る（composer.rs の send_or_queue）。
   // 送れたら「届けた」の仮の吹き出しに替え、送れなかったら理由を出して入力欄に戻す
   const boot = useBoot(agent,
     // / と ! の文は会話に user として出ないことがあるので、すぐ送ったときと同じく仮の吹き出しを足さない（usePanelSend の plain）
-    (t) => { if (!(t.startsWith("!") || isSlashCommand(t))) setPending((p) => [...p, { role: "user", text: t, pending: true, at: new Date().toISOString(), after: items[items.length - 1]?.n ?? -1 }]); convKick.current(); },
+    (t) => { if (agent && !(t.startsWith("!") || isSlashCommand(t))) addPending(agent.id, { role: "user", text: t, pending: true, at: new Date().toISOString(), after: items[items.length - 1]?.n ?? -1 }); convKick.current(); },
     (t, e) => { onError(`${agent?.name ?? ""} に届かなかった: ${e}`); if (!text.trim()) setText(t); });
-  const { busy, send } = usePanelSend({ agent, hasTerm, items, switching, support, markNoSupport, addNote, setTab, setPending, setText, stick, convKick, onSent, onError, onQueued: boot.kick });
+  const { busy, send } = usePanelSend({ agent, hasTerm, items, switching, support, markNoSupport, addNote, setTab, addPending, setText, stick, convKick, onSent, onError, onQueued: boot.kick });
   // 預かった文を取り消して、入力欄に戻す（打ちかけがあれば、その前に置く）
   const cancelQueued = async () => {
     if (!agent) return;
