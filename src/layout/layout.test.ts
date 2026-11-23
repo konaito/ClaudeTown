@@ -415,6 +415,38 @@ describe("家族の木の配置", () => {
     }
   });
 
+  // #214。孫1人にひ孫が並ぶと、孫からひ孫への線が隣のひ孫の札を通る。孫までの距離を広げても、孫から見たひ孫の位置は変わらないので、
+  // 前は上限の400回まで広げて幅（真上と真下は高さ）が約6000px になり、valid: false で返していた
+  // 形は「子 n 人の i 番目の子に孫 g が1人、g にひ孫 x 人」。名前はすべて "meta"（boxOf(深さ, "meta")）
+  const GREAT_CASES: { n: number; i: number; x: number; label: string }[] = [
+    { n: 3, i: 0, x: 4, label: "左の子、ひ孫4人（issue の再現）" },
+    { n: 3, i: 1, x: 4, label: "右の子、ひ孫4人" },
+    { n: 3, i: 0, x: 10, label: "左の子、ひ孫10人" },
+    { n: 3, i: 2, x: 8, label: "真下の子、ひ孫8人" },
+    { n: 3, i: 2, x: 9, label: "真下の子、ひ孫9人" },
+    { n: 3, i: 2, x: 10, label: "真下の子、ひ孫10人" },
+    { n: 8, i: 1, x: 8, label: "真上の子、ひ孫8人" },
+    { n: 8, i: 1, x: 9, label: "真上の子、ひ孫9人" },
+    { n: 8, i: 1, x: 10, label: "真上の子、ひ孫10人" },
+  ];
+  for (const { n, i, x, label } of GREAT_CASES) {
+    test(`18-${n}-${i}-${x}. 子${n}人の${label}: 孫からひ孫への線の違反は、ひ孫までの距離を広げて直す。世帯は1200px 未満に収まる`, () => {
+      const rows: [string, string | null][] = [["r", null]];
+      for (let k = 0; k < n; k++) rows.push([`k${k}`, "r"]);
+      rows.push(["g", `k${i}`]);
+      for (let j = 0; j < x; j++) rows.push([`x${j}`, "g"]);
+      const r = layoutFamily(family(rows, Object.fromEntries(rows.map(([id]) => [id, "meta"]))));
+      report.push({ ケース: `18-${n}-${i}-${x}`, 形: label, 枠: JSON.stringify(groupSizeOf(r.metrics)), ...r.metrics });
+      expect(r.arcIndex).toBe(-1);
+      expect(ok(r.metrics)).toBe(true);
+      expect(r.valid).toBe(true);
+      expect(Array.from({ length: n }, (_, k) => get(r.nodes, `k${k}`)).map((k) => [k.x, k.y])).toEqual(childSlots(n)!.map((q) => [q.x, q.y]));
+      expect(r.metrics.width).toBeLessThan(1200);
+      expect(r.metrics.height).toBeLessThan(1200);
+      expect(r.metrics.adjustments).toBeLessThan(LAYOUT.gridMaxAdjust / 4);
+    });
+  }
+
   test("結果の表", () => {
     for (const r of report) {
       const { overlaps, crossings, edgeThroughNode, interleave, s, width, height, adjustments, ...rest } = r as Record<string, number>;
