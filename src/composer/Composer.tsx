@@ -1,6 +1,6 @@
 // チャットの入力欄。キーの動きは Claude Code の CLI の入力に合わせる。
 // 何をどう合わせたか、合わせなかったものと理由は docs/research/cli-input.md の表にある。
-import { useLayoutEffect, useRef, useState } from "react";
+import { useContext, useLayoutEffect, useRef, useState } from "react";
 import { IS_WEB, call as invoke } from "../bridge";
 import getCaretCoordinates from "textarea-caret";
 import { SendHorizontal, Square } from "lucide-react";
@@ -13,6 +13,9 @@ import { useHistorySearch } from "./useHistorySearch";
 import { routeOf } from "./route";
 import { viaCcn, type Support } from "../session/control";
 import { canInterrupt as abilityInterrupt, hasTerminal } from "../abilities";
+import { RestartCtx } from "../contexts";
+import { Confirm } from "../confirm/Confirm";
+import { stuckMs, stuckText } from "./stuck";
 import {
   backslashNewline, histDown, isSlashCommand, histUp, killToEnd, killToStart, killWordBack, killWordForward,
   toLineEnd, toLineStart, wordBack, wordForward, type Edit, type Sel,
@@ -102,7 +105,12 @@ export function Composer({ agent, text, setText, busy, running, booting = false,
   const moveTo = (p: number) => { ta.current!.setSelectionRange(p, p); setCaret(p); };
 
   const [stopping, setStopping] = useState(false);
-  const interrupt = () => invoke("interrupt_session", { sessionId: agent.id }).catch((e) => onError(`止められなかった: ${e}`));
+  // 書き込みが詰まった端末で止めるを押したとき（#240 の 2）。Esc は届かないので、claude を止めて同じ id で立て直すかを聞く。値は戻っていない時間（ms）
+  const [stuckAsk, setStuckAsk] = useState<number | null>(null);
+  const restart = useContext(RestartCtx);
+  const interrupt = () => invoke<unknown>("interrupt_session", { sessionId: agent.id })
+    .then((r) => { const ms = stuckMs(r); if (ms != null) setStuckAsk(ms); })
+    .catch((e) => onError(`止められなかった: ${e}`));
   const clearDraft = () => { if (text.trim()) remember(text); histSt.current = { index: -1, draft: "" }; replaceAll(""); };
 
   // onKeyDown の分岐。true を返したら、そのキーは処理済みで、あとの分岐へ進まない
@@ -335,6 +343,12 @@ export function Composer({ agent, text, setText, busy, running, booting = false,
         )}
       </div>
       <div className={`hint${route?.kind === "blocked" ? " bad" : ""}`}>{note}</div>
+      {stuckAsk != null && (
+        <Confirm title="この claude は入力を受け付けていない" ok="立て直す" danger
+          onCancel={() => setStuckAsk(null)} onConfirm={() => { setStuckAsk(null); restart.run(agent); }}>
+          {stuckText(stuckAsk)}
+        </Confirm>
+      )}
     </>
   );
 }

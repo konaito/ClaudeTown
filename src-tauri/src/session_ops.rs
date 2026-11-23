@@ -297,3 +297,158 @@ mod real_restart {
         assert!(!alive1);
     }
 }
+
+/// 書き込みが詰まった端末（#240 の 2）。代役の claude は raw にしてから入力を読まずに寝る。
+/// 本物の claude も raw で動くので、読まない間に PTY の入力の欄が埋まると、書き込みが戻らなくなる
+#[cfg(test)]
+mod stuck {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    /// 入力を読まない代役。raw にしてから寝る
+    const UNREAD: &str = "exec sleep 30";
+
+    /// 代役を立てる準備。代役は起動のたびに「pid 引数」を log に足し、raw にして ready を書いてから last を実行する。
+    /// 返す錠は FC_CLAUDE_BIN と町の一覧の試験を分けるもので、立て直しが済むまで持つ（取る順は pty.rs の試験と同じ）
+    fn stand_in(tag: &str, last: &str) -> (PathBuf, [std::sync::MutexGuard<'static, ()>; 2]) {
+        use std::os::unix::fs::PermissionsExt;
+        let native = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin_lock = pty::BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fc-stuck-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("place")).unwrap();
+        let d = dir.display();
+        let script = format!("#!/bin/sh\necho \"$$ $*\" >> '{d}/log'\nstty raw -echo\n: > '{d}/ready'\n{}\n", last.replace("__DIR__", &d.to_string()));
+        fs::write(dir.join("claude"), script).unwrap();
+        fs::set_permissions(dir.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", dir.join("claude")) };
+        (dir, [native, bin_lock])
+    }
+
+    fn start(dir: &std::path::Path) -> (String, u32) {
+        let r = pty::spawn(dir.join("place").to_str().unwrap(), None, &[], 80, 24, || {}).unwrap();
+        wait_for("代役が raw にならない", Duration::from_secs(5), || dir.join("ready").exists());
+        (r["id"].as_str().unwrap().to_string(), r["pid"].as_u64().unwrap() as u32)
+    }
+
+    fn finish(id: &str) {
+        let _ = pty::kill(id);
+        wait_for("代役が止まらない", Duration::from_secs(5), || !pty::owns(id));
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+    }
+
+    fn wait_for(what: &str, limit: Duration, mut f: impl FnMut() -> bool) {
+        let t0 = Instant::now();
+        while !f() {
+            assert!(t0.elapsed() < limit, "{what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// 入力の欄を埋める書き込み（1MB）を別のスレッドで投げ、wait たっても戻っていないのを確かめる。戻り値は、その書き込みの結果の受け口
+    fn jam(id: &str, wait: Duration) -> mpsc::Receiver<Result<(), String>> {
+        let (tx, rx) = mpsc::channel();
+        let id2 = id.to_string();
+        std::thread::spawn(move || { let _ = tx.send(pty::write(&id2, &"x".repeat(1 << 20))); });
+        std::thread::sleep(wait);
+        assert!(rx.try_recv().is_err(), "書き込みが戻った（詰まっていない）");
+        rx
+    }
+
+    /// interrupt_session を別のスレッドで呼び、limit まで待つ
+    fn interrupt_within(id: &str, limit: Duration) -> (Result<Result<Value, String>, mpsc::RecvTimeoutError>, Duration) {
+        let (tx, rx) = mpsc::channel();
+        let id2 = id.to_string();
+        let t0 = Instant::now();
+        std::thread::spawn(move || { let _ = tx.send(crate::composer::interrupt_session(id2)); });
+        let got = rx.recv_timeout(limit);
+        (got, t0.elapsed())
+    }
+
+    /// 詰まりが STUCK_AFTER を超えた端末で interrupt_session を呼ぶと、Esc を並べずに1秒以内に { stuck: true } で戻る
+    #[test]
+    fn interrupt_returns_on_a_stuck_terminal() {
+        let (dir, _locks) = stand_in("int", UNREAD);
+        let (id, _) = start(&dir);
+        let _jam = jam(&id, crate::composer::STUCK_AFTER + Duration::from_millis(300));
+        let (got, took) = interrupt_within(&id, Duration::from_secs(1));
+        finish(&id);
+        let v = got.unwrap_or_else(|_| panic!("詰まった端末で interrupt_session が1秒で戻らなかった（{took:?}）")).unwrap();
+        assert_eq!(v["stuck"], true, "{v}");
+        assert!(v["stuckMs"].as_u64().unwrap() >= crate::composer::STUCK_AFTER.as_millis() as u64, "{v}");
+    }
+
+    /// 詰まり始めたばかりの端末では、STUCK_AFTER まで待ってから { stuck: true } で戻る（並んだまま待ち続けない）
+    #[test]
+    fn interrupt_waits_until_the_jam_counts_as_stuck() {
+        let (dir, _locks) = stand_in("young", UNREAD);
+        let (id, _) = start(&dir);
+        let _jam = jam(&id, Duration::from_millis(300));
+        let (got, took) = interrupt_within(&id, crate::composer::STUCK_AFTER + Duration::from_secs(1));
+        finish(&id);
+        let v = got.unwrap_or_else(|_| panic!("interrupt_session が戻らなかった（{took:?}）")).unwrap();
+        assert_eq!(v["stuck"], true, "{v}");
+        assert!(took < crate::composer::STUCK_AFTER, "詰まりが始まってから STUCK_AFTER より長く待った: {took:?}");
+    }
+
+    /// 入力を読む端末では、今までどおり Esc を書いて { stuck: false } で戻る
+    #[test]
+    fn interrupt_writes_esc_when_the_terminal_reads() {
+        let (dir, _locks) = stand_in("reads", "exec cat > '__DIR__/got'");
+        let (id, _) = start(&dir);
+        let (got, took) = interrupt_within(&id, Duration::from_secs(1));
+        let got_esc = || fs::read(dir.join("got")).unwrap_or_default() == b"\x1b";
+        let t0 = Instant::now();
+        while !got_esc() && t0.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let esc = got_esc();
+        finish(&id);
+        let v = got.unwrap_or_else(|_| panic!("interrupt_session が1秒で戻らなかった（{took:?}）")).unwrap();
+        assert_eq!(v["stuck"], false, "{v}");
+        assert!(esc, "Esc が届かなかった");
+    }
+
+    /// 確かめの画面で「はい」を押したときの道。詰まった端末で restart_session を呼ぶと、代役が止まり、同じ id の代役が --resume で立つ。
+    /// restart_session は会話の jsonl から cwd を読むので、試験用の claude の置き場所（TEST_HOME、このスレッドだけに効く）に置く
+    #[test]
+    fn restart_replaces_a_stuck_terminal_with_the_same_id() {
+        let (dir, _locks) = stand_in("restart", UNREAD);
+        let (id, pid1) = start(&dir);
+        let place = dir.join("place").to_string_lossy().to_string();
+        let home = dir.join("home");
+        let proj = home.join("projects").join(native::sessions::project_dir_name(&place));
+        fs::create_dir_all(&proj).unwrap();
+        fs::write(proj.join(format!("{id}.jsonl")), format!("{{\"type\":\"user\",\"cwd\":{}}}\n", serde_json::to_string(&place).unwrap())).unwrap();
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(home.clone()));
+        let jammed = jam(&id, crate::composer::STUCK_AFTER + Duration::from_millis(300));
+        let (got, _) = interrupt_within(&id, Duration::from_secs(1));
+        assert_eq!(got.expect("interrupt_session が戻らなかった").unwrap()["stuck"], true);
+        let t0 = Instant::now();
+        let r = restart_session(id.clone());
+        let took = t0.elapsed();
+        // 前任が止まった後、詰まっていた書き込みが戻るか（戻らなければ、そのスレッドは残る）
+        let old_write = jammed.recv_timeout(Duration::from_secs(3));
+        let pid2 = r.as_ref().ok().and_then(|v| v["pid"].as_u64()).map(|p| p as u32);
+        if pid2.is_some() {
+            wait_for("立て直した代役が raw にならない", Duration::from_secs(5), || fs::read_to_string(dir.join("log")).unwrap_or_default().lines().count() >= 2);
+        }
+        let log = fs::read_to_string(dir.join("log")).unwrap_or_default();
+        let stalled_after = pty::stalled_for(&id);
+        let old_alive = unsafe { libc::kill(pid1 as i32, 0) } == 0;
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        finish(&id);
+        eprintln!("立て直しにかかった時間 {took:?}、詰まっていた書き込み {old_write:?}");
+        let r = r.unwrap();
+        let pid2 = pid2.unwrap();
+        assert_eq!(r["id"].as_str(), Some(id.as_str()));
+        assert_ne!(pid1, pid2);
+        assert!(!old_alive, "前任の代役 {pid1} がまだ生きている");
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines, vec![format!("{pid1} --session-id {id}"), format!("{pid2} --resume {id}")], "{log}");
+        assert_eq!(stalled_after, None, "立て直した端末に前の詰まりが残っている");
+        // 前任が終わると、詰まっていた書き込みは EIO で戻る（書き手のスレッドは残らない）
+        assert!(matches!(old_write, Ok(Err(_))), "詰まっていた書き込みが戻らなかった: {old_write:?}");
+    }
+}
