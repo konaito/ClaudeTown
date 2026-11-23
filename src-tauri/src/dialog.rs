@@ -176,6 +176,15 @@ pub fn parse(screen: &str) -> Option<Dialog> {
     Some(Dialog::Choice { prompt, body, rows })
 }
 
+/// 選択の行のカーソル（「❯ 1. Yes」「❯ 3.  Sonnet 5.5」）が、入力欄（区切り線のすぐ下の「❯ 」の行）より下にあるか。入力欄が無ければ、カーソルがあるだけで true。
+/// 承認の画面とモデルのピッカーは入力欄の代わりに出る。画面の上に残った前の入力（「❯ 1. a」と「  2. b」）は入力欄より上にあるので数えない（#168）
+pub fn menu_below_input(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(cursor) = lines.iter().rposition(|l| row_of(l).is_some_and(|(_, r)| r.cursor)) else { return false };
+    let input = (1..lines.len()).rev().find(|&i| lines[i].trim_start().starts_with('❯') && is_rule(lines[i - 1]) && lines[i - 1].contains('─'));
+    input.is_none_or(|i| cursor > i)
+}
+
 /// 画面から押す答え。画面の行の番号と文で指す（番号だけだと、行の並びが変わったときに別の行を押す）
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -684,9 +693,14 @@ fn settle(id: &str, quiet_ms: u64, max_ms: u64) {
     }
 }
 
-/// 答える。expect_id は画面に出した道具の id（押す前に、まだその道具を待っているかを確かめる）
+/// 答える。expect_id は画面に出した道具の id（押す前に、まだその道具を待っているかを確かめる）。
+/// 答え終わるまで端末の錠（pty::serial）を持ち、チャット欄の送信とモデルの切り替えのキーを間に入れない（#168）
 pub fn answer(id: &str, expect_id: &str, act: &Act) -> Result<String, String> {
     super::refuse_if_disabled()?;
+    super::pty::serial(id, || answer_locked(id, expect_id, act))
+}
+
+fn answer_locked(id: &str, expect_id: &str, act: &Act) -> Result<String, String> {
     let fail = |m: String| Err(format!("{m}。何も送らずに止めたので、ターミナルで答えて"));
     let mut qs = Vec::new();
     let mut wrote = false;
@@ -1171,6 +1185,31 @@ mod tests {
         assert_eq!(answer_text(q, &pk(&[2, 0], "みそ汁")), "One, Three, みそ汁");
         assert_eq!(answer_text(&qs2()[0], &pk(&[1], " 自由\n入力 ")), "自由 入力");
     }
+    /// Enter を書いてはいけない画面か（#168）。承認の画面、質問、ピッカーでは断り、画面に残った前の入力や本人の文では断らない
+    #[test]
+    fn enter_is_blocked_only_by_a_live_menu() {
+        use crate::composer::enter_blocked;
+        let rule = "─".repeat(40);
+        for s in [BASH, WRITE, PLAN, ASK_Q1, ASK_Q2, REVIEW, QUOTE_Q1, QUOTE_Q2, QUOTE_REVIEW] {
+            assert!(enter_blocked(None, s).is_some(), "{s}");
+        }
+        let picker = "❯ /model\n  Select model\n    1.  Default (recommended)\n  ❯ 2.  Sonnet 5.5\n    3.  Haiku 5.5";
+        assert!(enter_blocked(None, picker).unwrap().contains("ピッカー"));
+        assert!(enter_blocked(None, IDLE).is_none());
+        assert!(enter_blocked(Some(&json!({"state": "waiting_permission"})), IDLE).is_some());
+        assert!(enter_blocked(Some(&json!({"state": "running"})), IDLE).is_none());
+        // 前に送った「1. a」「2. b」が画面に残っている。parse は承認の画面と読むが、カーソルの行が入力欄より上なので断らない
+        let history = format!("⏺ 前の答え\n  ⎿  結果\n\n❯ 1. a\n  2. b\n\n⏺ 了解\n{rule}\n❯ hello\n{rule}\n  ⏸ manual mode on");
+        assert!(parse(&history).is_some(), "この画面は parse だけでは承認の画面に見える");
+        assert!(enter_blocked(None, &history).is_none());
+        // 貼った文が入力欄に「1. a」「2. b」で出ている
+        let typed = format!("⏺ 了解\n{rule}\n❯ 1. a\n  2. b\n{rule}\n  ⏸ manual mode on");
+        assert!(enter_blocked(None, &typed).is_none());
+        // 本人の文に「Select model」があり、前の入力に「❯ 1.」がある
+        let words = format!("❯ 1. Select model の画面を直す\n  2. 試験\n\n⏺ 直した\n{rule}\n❯ \n{rule}");
+        assert!(enter_blocked(None, &words).is_none());
+    }
+
     /// 本物の claude を、アプリと同じ PTY の道（pty::spawn）で動かし、質問、道具の承認、計画の確認に answer で答える。
     /// 人の設定（全部許可、bypassPermissions）だと承認の画面が出ないので、FC_CLAUDE_BIN に包みのスクリプトを渡す:
     ///   printf '#!/bin/sh\nexec claude --setting-sources project --permission-mode default --model haiku "$@"\n' > /tmp/fc-claude-wrap.sh && chmod +x /tmp/fc-claude-wrap.sh
