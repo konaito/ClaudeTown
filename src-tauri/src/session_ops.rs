@@ -387,7 +387,10 @@ mod stuck {
         let (id, _) = start(&dir);
         let id2 = id.clone();
         std::thread::spawn(move || { let _ = crate::terminal::term_input(id2, "x".repeat(1 << 20)); });
-        std::thread::sleep(crate::composer::STUCK_AFTER + Duration::from_millis(300));
+        let t0 = Instant::now();
+        while pty::stalled_for(&id).is_none_or(|d| d < crate::composer::STUCK_AFTER) && t0.elapsed() < crate::composer::STUCK_AFTER * 3 {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let stalled = pty::stalled_for(&id);
         let (got, took) = interrupt_within(&id, Duration::from_secs(1));
         finish(&id);
@@ -401,7 +404,7 @@ mod stuck {
     fn interrupt_waits_until_the_jam_counts_as_stuck() {
         let (dir, _locks) = stand_in("young", UNREAD);
         let (id, _) = start(&dir);
-        let _jam = jam(&id, Duration::from_millis(300));
+        let _jam = jam(&id, Duration::from_secs(1));
         let (got, took) = interrupt_within(&id, crate::composer::STUCK_AFTER + Duration::from_secs(1));
         finish(&id);
         let v = got.unwrap_or_else(|_| panic!("interrupt_session が戻らなかった（{took:?}）")).unwrap();
