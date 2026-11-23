@@ -23,6 +23,7 @@ import { useKill } from "./hooks/useKill";
 import { useRestart } from "./hooks/useRestart";
 import { useCardSend } from "./hooks/useCardSend";
 import { useQueuedWatch } from "./hooks/useQueuedWatch";
+import { useRestoreNotice } from "./hooks/useRestoreNotice";
 import { supportFor } from "./session/SessionControls";
 import { useCcnReservations } from "./webReserve";
 import { Stage } from "./canvas/Stage";
@@ -111,6 +112,8 @@ export default function App() {
   // 起動を待って預けた文が送れなかったら、パネルを開いていなくても知らせる（#184）
   const listed = useCallback((id: string) => treeRef.current.byId.has(id), []);
   useQueuedWatch(toast, listed);
+  // 起動のときの端末の立て直しで戻らなかった端末を知らせる（#262）
+  useRestoreNotice(toast);
   const counts = useMemo(() => {
     const c: Record<Mood, number> = { approval: 0, reply: 0, working: 0, done: 0, idle: 0 };
     for (const a of agents) c[moodOf(a)]++;
