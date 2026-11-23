@@ -351,9 +351,11 @@ pub fn file_suggestions(cwd: String, query: String) -> Result<Vec<String>, Strin
 
 // ---------- PTY への直接の送信と中断 ----------
 
-/// 貼り付けの終わりの印を本文から外す。本文に入っていると、そこで貼り付けが終わり、残りがキーとして読まれる
+/// 貼り付けの本文から ESC を全部外す。終わりの印（ESC[201~）が本文にあると、そこで貼り付けが終わり、残りがキーとして読まれる。
+/// 印だけを外すと、入れ子（ESC[20ESC[201~1~）で外した後に印ができ、末尾の ESC は後ろに付ける印とつながる（#173）。
+/// 本文はチャット欄と承認の答えに打った文と、添付のパスで、ESC を意図して送る使い方は無い
 pub fn paste_body(text: &str) -> String {
-    text.replace("\x1b[201~", "").replace("\x1b[200~", "")
+    text.replace('\x1b', "")
 }
 
 /// チャット欄の文を、このアプリが立てた端末の入力欄へ貼り、Enter を押す。/ と ! の文も、CLI に打ったのと同じに動く。
@@ -817,6 +819,18 @@ mod tests {
     }
 
     #[test]
+    fn paste_body_leaves_no_markers() {
+        // 入れ子にすると、内側を外した後に終わりの印ができる（#173）
+        assert!(!paste_body("\x1b[20\x1b[201~1~").contains("\x1b[201~"));
+        assert!(!paste_body("\x1b[20\x1b[200~1~").contains("\x1b[201~"));
+        assert!(!paste_body("\x1b[20\x1b[201~0~").contains("\x1b[200~"));
+        // 末尾の ESC は、後ろに付ける終わりの印とつながり、印として読まれなくなる
+        assert!(!paste_body("a\x1b").contains('\x1b'));
+        assert_eq!(paste_body("a\x1b[201~\rb"), "a[201~\rb");
+        assert_eq!(paste_body("日本語\nそのまま"), "日本語\nそのまま");
+    }
+
+    #[test]
     fn direct_send_refuses_while_waiting() {
         let ok = json!({"state":"idle","startedAt":1000,"lastActivityAt":1800});
         let now = 10_000;
@@ -827,7 +841,7 @@ mod tests {
         assert!(check_direct(None, false, 1000, now).is_err());
         assert!(check_direct(Some(&ok), true, 1000, 2000).is_err());
         assert!(check_direct(Some(&json!({"state":"waiting_permission","startedAt":1000,"lastActivityAt":1800})), true, 1000, now).is_err());
-        assert_eq!(paste_body("a\x1b[201~b"), "ab");
+        assert_eq!(paste_body("a\x1b[201~b"), "a[201~b");
         // 起動待ちだけが「待てば送れる」。承認待ちは待たない理由として返す（預かって送る見張りが、起動待ちと見分ける）
         assert_eq!(gate_of(None, false, 1000, None, now), Gate::Booting);
         assert_eq!(gate_of(Some(&ok), true, 1000, Some(1000), 2000), Gate::Booting);
