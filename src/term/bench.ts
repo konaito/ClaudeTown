@@ -3,7 +3,7 @@
 // - new: 「新しい世帯」のボタンを押し、右パネルのチャットの入力欄にフォーカスが入るまでを測る（端末は開かない）。測り終えたら、作ったセッションだけを止める
 // - open: 自分で作ったセッション1つを、選び直して右クリックと同じ操作で開き直し、❯ が見えるまでを測る
 // - all: new を n 回、続けて最後に作ったセッションで open を n 回
-// - watch: 40秒、1秒ごとに町の人数と赤い帯を記録する
+// - watch: 40秒、1秒ごとに町の人数と赤い帯とトーストを記録する
 // - resize: 新しい世帯の右パネルの境目をドラッグし、claude が新しい幅で描き直すまでを測る（#19）
 // - cpu: ?sid=<セッション> のターミナルを開いたまま30秒、IPC の回数を数える（#8、#9）
 // - order: ?sid=<セッション> のチャットを開き、子が作業中になったら、入力欄から ?a= と ?b= の2通を続けて送る。?secs=<秒>（既定 90）のあいだ1秒ごとに、
@@ -153,7 +153,7 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
     // watch: 40秒、1秒ごとに町の人数と赤い帯を記録する（一覧の取得が失敗しても町が消えないかを見る）
     if (mode === "watch") {
       for (let i = 0; i < 40; i++) {
-        await log({ t: i, at: new Date().toISOString().slice(11, 23), town: document.querySelector(".fam-title")?.textContent ?? "", banner: !!document.querySelector(".banner.bad") });
+        await log({ t: i, at: new Date().toISOString().slice(11, 23), town: document.querySelector(".fam-title")?.textContent ?? "", banner: !!document.querySelector(".banner.bad"), toasts: [...document.querySelectorAll(".toast")].map((e) => e.textContent) });
         await sleep(1000);
       }
       return;

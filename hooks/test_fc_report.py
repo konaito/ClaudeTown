@@ -300,7 +300,7 @@ class TeammateInputs(HookCase):
         self.assertEqual([x["tool"] for x in st["perm_queue"]], ["Write"])
         self.assertEqual((st["phase"], st["needs"]), ("needs_you", "承認待ち: 書く: a/b.txt"))
 
-    def test_letters_are_from_the_teammate_row(self):
+    def test_letters_are_from_the_teammate_row_and_no_made_child(self):
         # 送った記録の from は、町のチームメイトの行の id（src-tauri/src/native/subagents.rs の sub_id）にする（#271）
         self.run_hook("SessionStart")
         self.run_hook("PostToolUse", tool_name="SendMessage", tool_input={"to": "team-lead", "summary": "報告", "message": "x"},
@@ -311,6 +311,7 @@ class TeammateInputs(HookCase):
         recs = [json.loads(l) for l in self.letters.read_text().splitlines()]
         self.assertEqual([(r["ev"], r["kind"], r["from"]) for r in recs],
                          [("sent", "send", "sub-abeta-584d11236f35ece0@0123abcd"), ("sent", "ccn_create", "sub-abeta-584d11236f35ece0@0123abcd")])
+        self.assertNotIn("made_child", self.read())
         self.assertNotIn("asked", self.read())
 
     def test_empty_agent_id_is_lead(self):
