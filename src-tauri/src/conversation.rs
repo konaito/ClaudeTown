@@ -529,6 +529,11 @@ pub(crate) fn simplify(m: &Value) -> Vec<Value> {
     let content = &m["message"]["content"];
     let mut out = vec![];
     match ty {
+        // native::conv::read が読み飛ばした MAX_READ より長い行（#230）。中身は出せないので、飛ばしたことだけを出す
+        native::conv::TOO_LONG => {
+            let mb = m["bytes"].as_u64().unwrap_or(0) as f64 / (1u64 << 20) as f64;
+            out.push(json!({ "role": "event", "kind": "error", "text": format!("記録に大きすぎる行（{mb:.1}MB）があり、出さずに飛ばした"), "at": at }));
+        }
         // ターンの終わり。止めた（interrupted）と失敗（is_error）だけを会話に出す（#83）。成功は返事の文が出ているので出さない
         "result" => {
             if m["subtype"].as_str() == Some("interrupted") {
