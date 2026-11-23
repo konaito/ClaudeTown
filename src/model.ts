@@ -207,6 +207,22 @@ export function projectFromPath(cwd: string): string | null {
   return s.length ? s[s.length - 1] : null;
 }
 
+/**
+ * from 行の呼び手 "agent:<ノード>/<sid8>/<役割>" の sid8。Rust の agent_sid8（src-tauri/src/lib.rs）と、
+ * claude-code-nodes の identity/agent-name.ts の parseAgent と同じ規則で、2つ目の区切りが16進の8文字で、後ろに役割があるときだけ返す。
+ * ccn は session id が分からないと "agent:<ノード>/<役割>" を付けるので、役割を sid8 として読むと、たまたま前が合う id を親にしてしまう
+ */
+export function agentSid8(caller: unknown): string | null {
+  const m = typeof caller === "string" ? caller.match(/^agent:([^/]+)\/([0-9a-f]{8})\/(.+)$/) : null;
+  return m ? m[2] : null;
+}
+
+/** from 行の呼び手から、生きているセッションの中の親の id を引く。見つからなければ null */
+export function parentOfCaller(caller: unknown, ids: string[]): string | null {
+  const sid8 = agentSid8(caller);
+  return sid8 ? ids.find((id) => id.startsWith(sid8)) ?? null : null;
+}
+
 /** 名前を決めるのに使う、1つのセッションの材料（Rust の naming::Who と同じ） */
 export type Who = {
   id: string;

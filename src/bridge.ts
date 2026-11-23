@@ -9,7 +9,7 @@ import { perfCounters } from "./term/perf";
 import { deltaOf } from "./conv";
 import { answerPermission } from "./webPerm";
 import { newConvState, readConversation, type ConvState } from "./webConv";
-import { cardNames, projectFromPath, type ConvItem } from "./model";
+import { cardNames, parentOfCaller, projectFromPath, type ConvItem } from "./model";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 // ビルドした版（PWA）。Tauri の外で、ccn と同じオリジンの /api に直接つなぐ（ccn は別オリジンからの要求を 403 で断る）。
@@ -50,10 +50,8 @@ async function webCall<T>(cmd: string, a: Record<string, unknown> = {}): Promise
     case "snapshot": {
       const list = (await j("/sessions")) as Record<string, any>[];
       const live = list.filter((s) => s.state !== "exited");
-      const parentOf = (s: Record<string, any>) => {
-        const sid8 = typeof s.parent === "string" && s.parent.startsWith("agent:") ? s.parent.split("/")[1] : null;
-        return sid8 ? live.find((x) => x.id.startsWith(sid8))?.id ?? null : null;
-      };
+      const liveIds = live.map((s) => s.id as string);
+      const parentOf = (s: Record<string, any>) => parentOfCaller(s.parent, liveIds);
       // 名前は Rust の snapshot と同じ決め方（src/model.ts の cardNames）。.git は読めないので、パスの形だけで決める
       const names = cardNames(live.map((s) => ({ id: s.id, cwd: s.cwd, title: s.title })));
       return {

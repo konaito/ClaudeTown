@@ -48,8 +48,10 @@ class HookCase(unittest.TestCase):
         self.letters = self.dir / "letters.jsonl"
 
     def env(self, **extra):
-        env = {k: v for k, v in os.environ.items() if k not in ("CLOSE_CHECK_CHILD", "FC_REPORT_OFF")}
-        env.update(FC_STATE_DIR=str(self.state), FC_LETTERS=str(self.letters), FC_PERM_DIR=str(self.dir / "perm"), **extra)
+        # CLAUDE_PID は試験を走らせている claude のもの。ids/ の試験は自分で渡す
+        env = {k: v for k, v in os.environ.items() if k not in ("CLOSE_CHECK_CHILD", "FC_REPORT_OFF", "CLAUDE_PID")}
+        env.update(FC_STATE_DIR=str(self.state), FC_LETTERS=str(self.letters), FC_PERM_DIR=str(self.dir / "perm"),
+                   FC_IDS_DIR=str(self.dir / "ids"), **extra)
         return env
 
     def run_hook(self, event, sid=SID, env=None, **fields):
@@ -452,3 +454,83 @@ class PermInputTest(HookCase):
         self.run_hook("PermissionRequest", tool_name="Bash", tool_input={"command": "ls"})
         self.run_hook("SessionEnd")
         self.assertFalse((self.dir / "perm" / f"{SID}.json").exists())
+
+
+class IdChain(HookCase):
+    """claude のプロセス（CLAUDE_PID）ごとに、名乗った id の並びを ids/<pid>.json に残す（#266）。
+    2026-11-23 の実機（Claude Code 2.1.330）で /clear を打つと、同じ CLAUDE_PID で SessionEnd（reason=clear、前の id）と
+    SessionStart（source=clear、新しい id）が届いた。どちらの入力にも、もう一方の id は無い"""
+
+    # sweep は死んだ pid の並びを消すので、生きている pid（この試験のプロセス）を使う
+    PID = str(os.getpid())
+
+    def ids(self, pid=PID):
+        p = self.dir / "ids" / f"{pid}.json"
+        return json.loads(p.read_text()) if p.exists() else None
+
+    def hook(self, event, sid=SID, pid=PID, **fields):
+        return self.run_hook(event, sid=sid, env=self.env(CLAUDE_PID=pid), **fields)
+
+    def test_clear_links_the_old_and_new_ids(self):
+        self.hook("SessionStart", source="startup")
+        self.hook("UserPromptSubmit", prompt="やって")
+        self.hook("SessionEnd", reason="clear")
+        self.hook("SessionStart", sid=SID2, source="clear")
+        self.hook("UserPromptSubmit", sid=SID2, prompt="続き")
+        self.assertEqual(self.ids(), {"pid": int(self.PID), "ids": [SID, SID2], "updated_at": self.ids()["updated_at"]})
+        self.assertIsInstance(self.ids()["updated_at"], int)
+
+    def test_an_id_change_without_session_start_is_kept(self):
+        # 計画の承認で id が変わるときに SessionStart が届くかは確かめられていない。どのイベントでも今の id が違えば足す
+        self.hook("SessionStart", source="startup")
+        self.hook("UserPromptSubmit", sid=SID2, prompt="続き")
+        self.assertEqual(self.ids()["ids"], [SID, SID2])
+
+    def test_startup_and_resume_start_over(self):
+        # pid は使い回されるので、新しいプロセス（startup、--resume）では並びを作り直す
+        self.hook("SessionStart", source="startup")
+        self.hook("SessionStart", sid=SID2, source="clear")
+        self.hook("SessionStart", sid=SID2, source="startup")
+        self.assertEqual(self.ids()["ids"], [SID2])
+        self.hook("SessionStart", sid=SID, source="resume")
+        self.assertEqual(self.ids()["ids"], [SID])
+
+    def test_compact_keeps_the_chain(self):
+        self.hook("SessionStart", source="startup")
+        self.hook("SessionStart", sid=SID2, source="clear")
+        self.hook("SessionStart", sid=SID2, source="compact")
+        self.assertEqual(self.ids()["ids"], [SID, SID2])
+
+    def test_session_end_keeps_it(self):
+        # 終わったプロセスの並びは、次の SessionStart の sweep が pid を見て消す
+        self.hook("SessionStart", source="startup")
+        self.hook("SessionEnd", reason="clear")
+        self.hook("SessionEnd", reason="prompt_input_exit")
+        self.assertEqual(self.ids()["ids"], [SID])
+
+    def test_without_claude_pid_writes_nothing(self):
+        self.run_hook("SessionStart", source="startup")
+        self.assertFalse((self.dir / "ids").exists())
+
+    def test_teammate_inputs_do_not_touch_it(self):
+        self.hook("SessionStart", source="startup")
+        self.hook("PreToolUse", sid=SID2, tool_name="Bash", tool_input={"command": "ls"}, **MATE)
+        self.assertEqual(self.ids()["ids"], [SID])
+
+    def test_session_start_sweeps_dead_pids(self):
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        (self.dir / "ids").mkdir()
+        (self.dir / "ids" / f"{dead.pid}.json").write_text(json.dumps({"pid": dead.pid, "ids": [SID2]}))
+        live = self.dir / "ids" / f"{os.getppid()}.json"
+        live.write_text(json.dumps({"pid": os.getppid(), "ids": [SID2]}))
+        self.hook("SessionStart", source="startup")
+        self.assertFalse((self.dir / "ids" / f"{dead.pid}.json").exists())
+        self.assertTrue(live.exists())
+
+    def test_state_files_keep_their_shape(self):
+        # 安定版も読む state/<id>.json には新しいキーを足さない
+        self.hook("SessionStart", source="startup")
+        self.hook("SessionStart", sid=SID2, source="clear")
+        self.assertEqual(sorted(p.name for p in self.state.glob("*.json")), sorted([f"{SID}.json", f"{SID2}.json"]))
+        self.assertEqual(set(self.read(SID2)), {"phase", "doing", "needs", "session_id", "cwd", "updated_at"})

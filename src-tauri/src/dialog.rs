@@ -1370,11 +1370,11 @@ mod tests {
     /// 本物の claude を、アプリと同じ PTY の道（pty::spawn）で動かし、質問、道具の承認、計画の確認に answer で答える。
     /// 人の設定（全部許可、bypassPermissions）だと承認の画面が出ないので、FC_CLAUDE_BIN に包みのスクリプトを渡す:
     ///   printf '#!/bin/sh\nexec claude --setting-sources project --permission-mode default --model haiku "$@"\n' > /tmp/fc-claude-wrap.sh && chmod +x /tmp/fc-claude-wrap.sh
-    ///   FC_CLAUDE_BIN=/tmp/fc-claude-wrap.sh FC_E2E_DIR=/private/tmp/fc-ask-probe FC_PERM_DIR=/tmp/fc-e2e-perm FC_STATE_DIR=/tmp/fc-e2e-state \
+    ///   FC_CLAUDE_BIN=/tmp/fc-claude-wrap.sh FC_E2E_DIR=/private/tmp/fc-ask-probe FC_PERM_DIR=/tmp/fc-e2e-perm FC_STATE_DIR=/tmp/fc-e2e-state FC_IDS_DIR=/tmp/fc-e2e-ids \
     ///     cargo test --lib real_claude_answers -- --ignored --nocapture
     /// FC_E2E_DIR は信頼済みの空のディレクトリ（実体のパス）。`--setting-sources project` では人の hook が動かないので、
     /// FC_E2E_DIR/.claude/settings.json の PermissionRequest と SessionEnd に、このリポジトリの hooks/fc-report.py を登録しておく。
-    /// FC_PERM_DIR と FC_STATE_DIR は hook と Rust の両方が読み、本物の ~/.family-computing に書かないようにする。claude の利用枠を少し使う
+    /// FC_PERM_DIR、FC_STATE_DIR、FC_IDS_DIR は hook と Rust の両方が読み、本物の ~/.family-computing に書かないようにする。claude の利用枠を少し使う
     #[test]
     #[ignore]
     fn real_claude_answers_through_the_pty() {
