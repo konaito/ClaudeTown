@@ -27,6 +27,12 @@
 #   CT_BUILD_WORKTREE  ビルド用の一時 worktree（既定 $HOME/.cache/claude-town/stable-worktree）
 #   CT_TARGET_DIR   Rust のビルド結果の置き場（既定 $HOME/.cache/claude-town/stable-target）
 #   CT_NO_OPEN=1    最後に起動しない
+#
+# 署名（#188）:
+#   CT_SIGN_IDENTITY  コード署名に使う証明書の名前（security find-identity -p codesigning に出る名前）。
+#                     入っていれば、Tauri の公式の口 APPLE_SIGNING_IDENTITY に渡して、その証明書で署名する。
+#                     空なら今までどおり何も渡さず、ad-hoc 署名のままになる。
+#   入れた後に codesign -d -r- で指定要件を読み、cdhash だけなら警告する（止めはしない）。
 set -euo pipefail
 
 APP_NAME="Claude Town"
@@ -36,6 +42,7 @@ STATE="${CT_STABLE_HOME:-$HOME/.family-computing/stable}"
 DEST="$DEST_DIR/$APP_NAME.app"
 PREV="$STATE/previous/$APP_NAME.app"
 TARGET_DIR="${CT_TARGET_DIR:-$HOME/.cache/claude-town/stable-target}"
+SIGN_IDENTITY="${CT_SIGN_IDENTITY:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STABLE_CONF_PATH="src-tauri/tauri.stable.conf.json"
@@ -79,6 +86,11 @@ echo "ビルドする: ${wt}（上書き設定: ${STABLE_CONF}）"
 (
   cd "$wt"
   bun install --frozen-lockfile
+  if [ -n "$SIGN_IDENTITY" ]; then
+    # Tauri は APPLE_SIGNING_IDENTITY を bundle.macOS.signingIdentity より先に見る
+    export APPLE_SIGNING_IDENTITY="$SIGN_IDENTITY"
+    echo "証明書で署名する: $SIGN_IDENTITY"
+  fi
   CARGO_TARGET_DIR="$TARGET_DIR" bunx tauri build --bundles app --config "$STABLE_CONF"
 )
 built="$TARGET_DIR/release/bundle/macos/$APP_NAME.app"
@@ -112,6 +124,7 @@ if [ -d "$DEST" ]; then
 fi
 mkdir -p "$DEST_DIR"
 mv "$staged" "$DEST"
+warn_cdhash_only "$DEST"
 echo "$tag $sha" > "$STATE/current.ref"
 # 安定版はもう入れ替えたので、hook を写せなくても止まらずに記録と起動まで進め、最後に 1 で終わる
 hooks_ok=1
