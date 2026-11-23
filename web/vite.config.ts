@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { voidPlugin } from "void";
-import { devNoAuthEnabled, refuseExposedNoAuth } from "./dev-host.ts";
+import { devNoAuthEnabled, refuseExposedNoAuth } from "./dev-host";
 
 // web/.env に DEV_NO_AUTH=1 があると middleware/01.access.ts が Access の確認を飛ばすので、そのときは localhost だけで受ける（#244）
 const noAuth = devNoAuthEnabled(fileURLToPath(new URL(".", import.meta.url)));
