@@ -214,10 +214,10 @@ in-process のチームメイトと sub-agent の hook は、リードの sessio
 安定版へ上げる:
 
 ```bash
-git fetch origin && scripts/release-stable.sh origin/feat/app-v1
+git fetch origin && scripts/release-stable.sh origin/main
 ```
 
-ローカルの `feat/app-v1` を渡さない。本体の checkout のローカルのブランチは pull されずに古いままのことがある。ローカルのブランチを渡したときは、上流より古ければスクリプトが止まる。
+ローカルの `main` を渡さない。本体の checkout のローカルのブランチは pull されずに古いままのことがある。ローカルのブランチを渡したときは、上流より古ければスクリプトが止まる。
 
 スクリプトは次の順に進む。
 

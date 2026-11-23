@@ -2,7 +2,7 @@
 # Claude Town の安定版を、git の ref から作って /Applications に入れる。
 #
 #   scripts/release-stable.sh <ref>           ref に stable-YYYYMMDD-HHMM のタグを打ち、そのタグからビルドして入れる
-#                                             ふだんは git fetch origin のあと origin/feat/app-v1 を渡す
+#                                             ふだんは git fetch origin のあと origin/main を渡す
 #   scripts/release-stable.sh stable-...      すでにある stable- のタグなら、タグを打たずにそのタグからビルドして入れる
 #
 # 手順:
