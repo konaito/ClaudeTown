@@ -379,6 +379,23 @@ mod stuck {
         assert!(v["stuckMs"].as_u64().unwrap() >= crate::composer::STUCK_AFTER.as_millis() as u64, "{v}");
     }
 
+    /// ターミナルの欄の打鍵（term_input）で詰まった端末でも同じ。#231（PR #239）で打鍵は端末ごとの列から書き手のスレッドが書くようになるが、
+    /// 書き手は同じ書き口を通るので、詰まりは同じように測れる。term_input がすぐ戻る版でも待つ版でも通るよう、別のスレッドで呼ぶ
+    #[test]
+    fn interrupt_sees_a_jam_from_terminal_keys() {
+        let (dir, _locks) = stand_in("keys", UNREAD);
+        let (id, _) = start(&dir);
+        let id2 = id.clone();
+        std::thread::spawn(move || { let _ = crate::terminal::term_input(id2, "x".repeat(1 << 20)); });
+        std::thread::sleep(crate::composer::STUCK_AFTER + Duration::from_millis(300));
+        let stalled = pty::stalled_for(&id);
+        let (got, took) = interrupt_within(&id, Duration::from_secs(1));
+        finish(&id);
+        assert!(stalled.is_some_and(|d| d >= crate::composer::STUCK_AFTER), "打鍵の書き込みが詰まっていない: {stalled:?}");
+        let v = got.unwrap_or_else(|_| panic!("interrupt_session が1秒で戻らなかった（{took:?}）")).unwrap();
+        assert_eq!(v["stuck"], true, "{v}");
+    }
+
     /// 詰まり始めたばかりの端末では、STUCK_AFTER まで待ってから { stuck: true } で戻る（並んだまま待ち続けない）
     #[test]
     fn interrupt_waits_until_the_jam_counts_as_stuck() {
