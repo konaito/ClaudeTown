@@ -87,7 +87,7 @@ Claude Town の違いは3つある。データ源をこの Mac の Claude Code �
 - 信頼の確認の画面を抜けるまで、`sessions/<pid>.json` は作られない。その間は、アプリの台帳から仮の行を町に出す。
 - /clear で session id が変わっても、pid は変わらない。台帳は pid で引き、一覧で同じ pid に見えた id を同じ端末として扱う。
 - 子プロセスの環境からは、`CLAUDECODE` と、`CLAUDE_CODE_` で始まる変数などを外す。アプリを Claude Code の中から起動したときに、子が親のセッションを名乗らないようにするためである。`CLAUDE_CONFIG_DIR` は残すので、子はアプリを起動したアカウントで動く。
-- アプリを終了すると、アプリから立てた世帯の claude は全部止まる。終了のときに SIGHUP を送り、1秒で終わらなければ SIGKILL を送る。アプリが落ちたときも、PTY が閉じて claude は終わる（2026-11-21 に、子を止めずに親のプロセスを終えて確かめた）。
+- アプリを終了すると、アプリから立てた世帯の claude は全部止まる。終了のときに SIGHUP を送り、3秒で終わらなければ SIGKILL を送る（claude は SIGHUP から終わるまで 1.27 秒かかるので、1秒では後始末の途中で SIGKILL になっていた。#232）。アプリが落ちたときも、PTY が閉じて claude は終わる（2026-11-21 に、子を止めずに親のプロセスを終えて確かめた）。
 - アプリが立てた端末の一覧（台帳）を `terminals.json`（安定版は `~/.family-computing/`、開発版は `~/.family-computing/dev/`）に残す。次にアプリを起動したとき、台帳にあるセッションを `claude --resume <id>` で元の場所に立て直す（#152）。立て直した端末も、アプリが立てた端末として送れて止められる。結果は同じ置き場所の `restore.log` に書く。
   - 台帳から外すのは、画面から閉じたときと、claude が自分で終わったとき（`/exit` など）だけである。アプリを終了したとき、落ちたとき、`release-stable.sh` で入れ替えたとき（SIGTERM）は、開いていた分が台帳に残る。
   - `/clear` や `/resume` で id が変わったら、台帳には今の id を残す。
@@ -151,7 +151,7 @@ ccn を外したときに、別の機械の町、転出、引き継ぎ、チャ�
 - A（採用）: 各セッションに、いまの様子を書き出させる hook。UserPromptSubmit、PreToolUse、PermissionRequest、PostToolUse、Notification、Stop、SessionStart、SessionEnd で、頼まれたこと、いまやっていること、最後の報告、次の一手、人を待っているかを状態ファイルに書く。LLM は呼ばない。
 - B（不採用）: 各エージェントに、終わった子を閉じさせ、ツリーを浅く保たせる hook。
 
-hook の本体は `hooks/fc-report.py` に置く。2026-11-12 に本人に確かめて `~/.claude/settings.json` に登録した（同じ日に PermissionRequest も足した）。`~/.claude/settings.json` が呼ぶのは作業ツリーの hook ではなく、安定版のタグから写した `~/.family-computing/stable/hooks/fc-report.py` である（下の「安定版と開発版」）。登録と解除は `python3 scripts/hook.py install` と `python3 scripts/hook.py uninstall` で行う。install は写した先を登録し、写した先が無ければ何も書かずに止まる。書く前に settings.json の控えを残す。cam の各プロファイルの settings.json は `~/.claude/settings.json` へのリンクなので、1か所で全部に効く。
+hook の本体は `hooks/fc-report.py` に置く。2026-11-12 に本人に確かめて `~/.claude/settings.json` に登録した（同じ日に PermissionRequest も足した）。`~/.claude/settings.json` が呼ぶのは作業ツリーの hook ではなく、安定版のタグから写した `~/.family-computing/stable/hooks/fc-report.py` である（下の「安定版と開発版」）。登録と解除は `python3 scripts/hook.py install` と `python3 scripts/hook.py uninstall` で行う。install は写した先を登録し、写した先が無ければ何も書かずに止まる。書く前に settings.json の控えを残す。cam の各プロファイルの settings.json は `~/.claude/settings.json` へのリンクなので、1か所で全部に効く。登録するコマンドは、登録先のファイルが無ければ何もせず 0 で終わる（#171）。登録したまま worktree や写した先を消しても、セッションの道具と入力は止まらない。#171 より前に登録した形（`/usr/bin/python3 <パス> # family-computing`）にはこの確認が無いので、`status` が「古い形の登録がある」と出したら install し直す。
 
 hook は本物の `claude -p` で試し、頼まれたこと、道具、最後の報告、次の一手が状態ファイルに入ることを確かめた。
 
@@ -163,7 +163,7 @@ in-process のチームメイトと sub-agent の hook は、リードの sessio
 - 左クリックの「メッセージの挿入」は、端末の入力欄へ文を貼って送ることにする（2026-11-21 までは ccn で送っていた）。モックに合わせ、送る欄は右のパネルの会話の下に置く。
 - 白を基調にした明るい配色にする。
 - 状態は、作業中（緑）、返事待ち（青）、承認待ち（黄）、完了（灰）、待機の5つにする。承認待ちは `sessions/<pid>.json` の status が waiting のもの、返事待ちは hook が「人への問いで終わった」と書いたものと、set_status の blocked。
-- キャラの体は Ninja Adventure Asset Pack（CC0）のドット絵、状態の印は Noto Animated Emoji（CC BY 4.0）の WebP にする（見本ページの案 C）。印の置き方は案 A の位置の2段階目（A2）。親には大人のキャラ6体、子より下には子供のキャラ18体から、名前で決めて当てる。見本は `docs/research/assets/index.html` と `docs/research/assets/balance.html`。
+- キャラの体は Ninja Adventure Asset Pack（CC0）のドット絵、状態の印は Noto Animated Emoji（CC BY 4.0）の WebP にする（見本ページの案 C）。印の置き方は案 A の位置の2段階目（A2）。キャラは55体から、根はおじさん、子はお兄さん、孫より下は子供に見える顔ほど出やすい、世代の重みつきの乱数で選ぶ（2026-11-12 から。`src-tauri/src/avatars.rs`、`docs/design/character-age.md`）。見本は `docs/research/assets/index.html` と `docs/research/assets/balance.html`。
 - 家の絵（屋根、壁、床）は描かない。世帯は淡い色の枠で見分ける。
 - プロダクト名は Claude Town にする（2026-11-12）。数える単位は世帯で、画面の見出しは「5世帯・23人」のように出す。
 - 世帯とカードの名前は、そのセッションが作業しているプロジェクトの名前にする（2026-11-13）。プロジェクトの名前は、リポジトリの本体のディレクトリの名前（例 family-computing）。決め方は `src-tauri/src/naming.rs` と `src/model.ts` の cardNames に同じものを書き、試験の事例は `src/naming-cases.json` にまとめて両方で読む。
@@ -204,6 +204,8 @@ in-process のチームメイトと sub-agent の hook は、リードの sessio
 
 `src-tauri/tauri.conf.json` は開発版の設定にしてある。何も付けずに `bun tauri dev` や `bun tauri build` を動かすと、必ず開発版になる。安定版は `src-tauri/tauri.stable.conf.json` を Tauri の `--config` で重ねてビルドする（`--config` に渡した JSON は元の設定に重なる。配列が丸ごと置き換わる前提で、窓の定義とアイコンの一覧は全部書いてある）。開発版は 1420 番のポートを使う。安定版はビルドした画面を中に持つのでポートを使わない。2つは同時に起動できる。
 
+安定版は1つしか起動しない（#176）。2つ目は窓を作る前に終わり、1つ目の窓を前に出す。2つ目が端末の台帳（`terminals.json`）を空で書き直さないためである。止める仕組みは `tauri-plugin-single-instance` で、1つ目を identifier だけで見分ける（macOS では `/tmp/<identifier の . と - を _ にしたもの>_si.sock`）。安定版と開発版は identifier が違うので、互いを止めない。開発版は子が別のポートと別の `FC_APP_HOME` で並列に起動するので、既定では止めない。開発版で止める動きを確かめるときだけ `FC_SINGLE_INSTANCE=1` を付ける（`scripts/check-single-instance.sh`）。
+
 子と開発者の決まり:
 
 - 起動と確認には開発版だけを使う。
@@ -214,17 +216,19 @@ in-process のチームメイトと sub-agent の hook は、リードの sessio
 安定版へ上げる:
 
 ```bash
-scripts/release-stable.sh <ref>    # 例: scripts/release-stable.sh feat/app-v1
+git fetch origin && scripts/release-stable.sh origin/main
 ```
+
+ローカルの `main` を渡さない。本体の checkout のローカルのブランチは pull されずに古いままのことがある。ローカルのブランチを渡したときは、上流より古ければスクリプトが止まる。
 
 スクリプトは次の順に進む。
 
-1. ref に `stable-YYYYMMDD-HHMM` のタグを打つ。既存の `stable-` のタグを渡すと、タグを打たずにそのタグを使う。
-2. 作業ツリーとは別の一時 worktree にタグを取り出し、`bun install --frozen-lockfile` と `tauri build --bundles app` を行う。Rust のビルド結果は `$HOME/.cache/claude-town/stable-target` に置き、次のリリースで使い回す。
+1. ref に `stable-YYYYMMDD-HHMM` のタグを打つ。既存の `stable-` のタグを渡すと、タグを打たずにそのタグを使う。ref が上流より古いローカルのブランチのときと、ref に `src-tauri/tauri.stable.conf.json` が無いときは、タグを打たずに止まる。
+2. 作業ツリーとは別の一時 worktree にタグを取り出し、`bun install --frozen-lockfile` と `tauri build --bundles app` を行う。`--config` には、一時 worktree の中の `src-tauri/tauri.stable.conf.json`（上げるタグの版）を渡す。スクリプトを動かした checkout の版は使わない。Rust のビルド結果は `$HOME/.cache/claude-town/stable-target` に置き、次のリリースで使い回す。
 3. できた .app の identifier と名前が安定版の値か確かめる。違えば入れずに中断する。
 4. 安定版が動いていれば終わらせる。終わらせるのは `/Applications/Claude Town.app` の実行ファイルの pid だけで、開発版や他のプロセスには触らない。
 5. 今の .app を `$HOME/.family-computing/stable/previous/` に退避し、新しい .app を入れる。タグの `hooks/` と `scripts/hook.py` を `$HOME/.family-computing/stable/` の下に同じ相対位置で写す。どのタグから写したかは同じ場所の `hooks.ref` に残る。
-6. 安定版を起動する。
+6. 安定版を起動する。5 で hook を写せなかったときは、起動まで済ませてから 1 で終わり、`releases.log` に `hooks-failed` の行を足す。`scripts/install-stable-hooks.sh <タグ>` で写し直す。
 
 入っている版は `$HOME/.family-computing/stable/current.ref`、履歴は同じ場所の `releases.log` に残る。
 
@@ -234,16 +238,20 @@ scripts/release-stable.sh <ref>    # 例: scripts/release-stable.sh feat/app-v1
 scripts/rollback-stable.sh    # 今の版と1つ前の版を入れ替える。もう一度回すと元に戻る
 ```
 
+スクリプトを直したら `scripts/test-stable-scripts.sh` を流す。一時のリポジトリと一時の置き場所だけを使い、tauri build は偽の bunx に替えるので、本物の安定版には触らない。
+
 戻すときも、状態 hook を戻した先の版のタグから写し直す。アプリを入れ替えずに hook だけを写し直すときは `scripts/install-stable-hooks.sh [タグ]` を使う（タグを省くと、いま入っている版のタグから写す）。
 
-作業ツリーの hook を試すときは、手で見本の入力を流す。`FC_STATE_DIR`、`FC_LETTERS`、`FC_PERM_DIR`、`FC_IDS_DIR` を一時の場所に向けると、本物の状態ファイルに書かない。claude の中で流すと環境変数 `CLAUDE_PID` が付いているので、`FC_IDS_DIR` を向けないと本物の `ids/` に書く。
+作業ツリーの hook を試すときは、手で見本の入力を流す。`FC_STATE_DIR`、`FC_LETTERS`、`FC_PERM_DIR`、`FC_IDS_DIR` の4つを一時の場所に向けると、本物の状態ファイルに書かない。`FC_PERM_DIR` を忘れると、PermissionRequest が本物の `perm/` に書き、SessionStart と SessionEnd が本物の `perm/` のファイルを消す。claude の中で流すと環境変数 `CLAUDE_PID` が付いているので、`FC_IDS_DIR` を向けないと本物の `ids/` に書く。
 
 ```bash
 echo '{"session_id":"0123abcd-0000-0000-0000-000000000001","hook_event_name":"UserPromptSubmit","prompt":"試し"}' \
   | FC_STATE_DIR=/tmp/fc-try FC_LETTERS=/tmp/fc-try/letters.jsonl FC_PERM_DIR=/tmp/fc-try/perm FC_IDS_DIR=/tmp/fc-try/ids python3 hooks/fc-report.py
 ```
 
-hook が書く状態ファイルとお手紙の形は、`python3 -m unittest discover -s hooks -v` で確かめる（`hooks/test_fc_report.py`、標準ライブラリだけ、一時の場所にだけ書く）。
+hook が書く状態ファイルとお手紙の形は、`python3 -m unittest discover -s hooks -v` で確かめる（`hooks/test_fc_report.py`、標準ライブラリだけ、一時の場所にだけ書く）。`scripts/hook.py` が書く登録の形も、同じコマンドで `hooks/test_hook_install.py` が確かめる。
+
+`scripts/native/survey.py`（`~/.claude` の記録の形を数える調べもの）は、`python3 -m unittest discover -s scripts/native -v` で確かめる。合成の置き場所を一時の場所に作って引数に渡すので、本物の `~/.claude` は読まない。
 
 本物のセッションで試すときだけ、`python3 scripts/hook.py install --worktree` で作業ツリーの hook に登録を替える。その間は安定版にも作業ツリーの hook の内容が出るので、済んだら `python3 scripts/hook.py install` で写した先に戻す。2つを同時に登録しないのは、同じ状態ファイルに2つの版の hook が書くと、作業ツリーの hook がまた安定版の表示に混ざるためである。
 
@@ -270,11 +278,13 @@ Claude Town は、ブラウザから開けるインストール可能な PWA と
 
 - 画面は Tauri 版と同じ `src/` である。Tauri の外でビルドした版（`import.meta.env.PROD`）は、`invoke` の代わりに、同じオリジンの `/api` へ HTTP で話す（`src/bridge.ts` の `WEB`）。ccn の行は source が ccn で、コマンドの振り分けはこの行にだけ出る。承認の欄は、ccn の行では ccn の permissions の口で答える。モデルと権限モードの切り替えは、ccn の行では ccn の PATCH で替え、予約は画面が持つ（`src/webReserve.ts`）。
 - ccn は別オリジンからの要求を 403 で断るので、ブラウザは ccn に直接つなげない。`web/` の Worker（Void アプリ）が画面を配り、`/api` と `/n/` を `https://ccn.fybe.jp` に中継する。
+- 中継は Origin と Sec-Fetch-* を ccn へ渡さないので、ccn の CSRF の確認はブラウザ版では働かない。代わりに `web/middleware/01.access.ts` が、GET と HEAD 以外の要求で Origin の host か Sec-Fetch-Site が同じオリジンでなければ 403 を返す（`web/lib/origin.ts`、#167）。
 - 中継は、受け取った Access の JWT を `Cf-Access-Token` で渡す（Linked App Token）。ccn の Access アプリ `ccn` に、`claude-town` からの Linked App Token を通すポリシー `town-linked` を足してある。ccn には人（email）の呼び手として届き、サービストークンの秘密は持たない。
 - Service Worker（`public/sw.js`）は何もキャッシュしない。ホーム画面に追加するためだけに置いた。manifest は `public/manifest.webmanifest`、アイコンは `public/app-icon.svg` から `bun run pwa:icons` で作る。
 - デプロイは、既定ブランチへのマージで `.github/workflows/void-deploy.yml` が行う。
+- 手元の開発サーバー（`web/` で `bun run dev`）は、`web/.env` に `DEV_NO_AUTH=1` を書くと Access の確認を飛ばす。このときは localhost だけで受け、`--host` を付けると起動しない（`web/dev-host.ts`、#244）。macOS では `[::1]` で受けるので、`http://localhost:5174/` で開く（`127.0.0.1` では開けない）。Worker から見える Host と接続元の IP は LAN の別の機械でも偽れるので、受ける口を絞る。`DEV_NO_AUTH` が無いときは今までどおり全部のインターフェースで受けるが、Access の JWT が無い要求は 403 になる。
 
-会話の表示と承認への返事は、Rust の `conversation` と `answer_permission` と同じ処理を TS に移してある（`src/webConv.ts`、`src/webPerm.ts`）。承認への返事は Rust と同じ確認（まだ承認待ちか、requestId が見せた中身と同じか、質問には全部の答えがあるか）をしてから送る。ただし送信の非常停止（`~/.family-computing/send-disabled`）は手元のファイルなので、ブラウザ版では効かない。会話の「今の動き」の行（`live`）と、保存した会話は移していない。
+会話の表示は、Rust の `conversation` と同じ処理を TS に移してある（`src/webConv.ts`）。承認への返事は、ccn を使っていたころの Rust の `answer_permission` を TS に移したもので、今の Rust には無い（`src/webPerm.ts`）。承認への返事は、`src/webPerm.ts` だけが確認（まだ承認待ちか、許可でも拒否でも requestId が見せた中身と同じか、質問には全部の答えがあるか）をしてから送る。ただし送信の非常停止（`~/.family-computing/send-disabled`）は手元のファイルなので、ブラウザ版では効かない。会話の「今の動き」の行（`live`）と、保存した会話は移していない。
 
 ブラウザ版で使えない機能は次のとおり。Rust にしか実装が無いものを、TS に移していない。
 
@@ -292,11 +302,13 @@ Claude Town は、ブラウザから開けるインストール可能な PWA と
 - 入力欄は画面の下に固定する。キーボードが出ると、`visualViewport` の高さ（`--vv-h`）に合わせて縮む。Enter は改行で、送るのは送信ボタンだけである。
 - スマホの見た目の確認は、`bun run dev` を `?layout=mobile` で開き、agent-browser を 390x844、倍率 3 にして行う。モックの ccn（`scripts/mock-ccn-town.ts`）は ccn を外したときに消した。
 
-Void アプリの確認は `web/` で行う。
+Void アプリの確認は `web/` で行う。`web/src` は `../src` へのリンクで、画面が読む react や @xterm/* はリポジトリ直下の node_modules にある。先に直下で install する。
 
 ```sh
-cd web && bun install
+bun install --frozen-lockfile   # リポジトリ直下
+cd web && bun install --frozen-lockfile
 bun run build   # .cloudflare/ に Worker と画面が出る
+bun test        # web/test の試験。ルートの bun test は src だけを走らせる（bunfig.toml）
 ```
 
 ## 開発
@@ -345,5 +357,6 @@ VITE_FC_FORCE_VISIBLE=1 bun tauri dev --config '{"build":{"devUrl":"http://local
 
 - この変数で続くのは取得と時計だけで、描画は続かない。窓が隠れている間は WebKit が requestAnimationFrame を止める（2026-11-13 の実測で fps 0）。起動から隠れたままだと一度も描かれないので、`screencapture -l` で見た目を撮るときは窓を前に出す。
 - 止めるときは、自分が起動した `bun tauri dev` の pid を指定する。安定版と開発版は実行ファイル名が同じなので、名前で止めない。
+- 開発版は2つ目の起動を止めない（#176）。同じ `FC_APP_HOME` で2つ起動すると、2つ目が端末の台帳を書き直すので、起動のたびに `mktemp -d` で分ける。2つ目を止める動きは `FC_SINGLE_INSTANCE=1 scripts/check-single-instance.sh` で確かめる。
 - 軽さの計測（`src/term/bench.ts` の scene）では付けない。隠した窓の負荷を測る場面（hidden、minimized）の数字が変わる。
 - 開発版で「新しい世帯」を押すと、本物の claude が起動し、本物の `~/.claude` に会話が残る。押す確認は捨ての場所（一時のディレクトリ）を置き場所にして行い、済んだら閉じる（power）か、開発版を終了して止める。

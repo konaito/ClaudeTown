@@ -20,16 +20,19 @@ import { useSelection } from "./hooks/useSelection";
 import { useZoom } from "./hooks/useZoom";
 import { useHidden } from "./hooks/useHidden";
 import { useKill } from "./hooks/useKill";
+import { useRestart } from "./hooks/useRestart";
 import { useCardSend } from "./hooks/useCardSend";
+import { useQueuedWatch } from "./hooks/useQueuedWatch";
 import { supportFor } from "./session/SessionControls";
 import { useCcnReservations } from "./webReserve";
 import { Stage } from "./canvas/Stage";
 import { FamilyCanvas, Group, layoutOf } from "./canvas/FamilyCanvas";
 import { KillConfirm } from "./confirm/Confirm";
+import { killPlan } from "./killPlan";
 import { NextRow } from "./NextRow";
 import { useLetterMarks } from "./useLetterMarks";
 import { Panel } from "./panel/Panel";
-import { DepthCtx, KillCtx, LetterCtx, SendCtx, TownCtx } from "./contexts";
+import { DepthCtx, KillCtx, LetterCtx, RestartCtx, SendCtx, TownCtx } from "./contexts";
 import { loadPlace, savePlace } from "./newHouse/placeSetting";
 import { SettingsDialog } from "./settings/SettingsDialog";
 import { loadDefaults, sameDefaults, saveDefaults } from "./session/defaults";
@@ -98,12 +101,16 @@ export default function App() {
   const pick = useCallback((a: Agent) => setSelected(a.id), []);
 
   const { kill, killAsk, setKillAsk, killCtx } = useKill({ tree, selected, setSelected, toast, setHidden });
+  const { restartCtx } = useRestart(toast);
   // お手紙（記録はこの機械の hook が書く）
   const flights = useMemo(() => flightsOf(snap?.letters ?? [], agents), [snap, agents]);
   // ブラウザ版の ccn の行で予約したモデルと権限モードを、替えられるようになったら替える（always-switch）。アプリの端末の予約は Rust が当てる（switch.rs）
   useCcnReservations(agents, supportFor, (m) => toast(m), (m) => toast(m, true));
-  const letterMarks = useLetterMarks(flights);
+  const letterMarks = useLetterMarks(flights, snap !== null);
   const { panelSend, cardSend } = useCardSend(toast);
+  // 起動を待って預けた文が送れなかったら、パネルを開いていなくても知らせる（#184）
+  const listed = useCallback((id: string) => treeRef.current.byId.has(id), []);
+  useQueuedWatch(toast, listed);
   const counts = useMemo(() => {
     const c: Record<Mood, number> = { approval: 0, reply: 0, working: 0, done: 0, idle: 0 };
     for (const a of agents) c[moodOf(a)]++;
@@ -124,6 +131,8 @@ export default function App() {
   // 作ったらチャットを開いて入力欄にフォーカスする（本人の指定）。端末は右クリックや「端末へ」で開く
   const newHousehold = useCallback((r: CreatedSession | null) => {
     if (!r?.id) return;
+    // ログインシェルが PATH を返さず、アプリの PATH（/usr/bin:/bin:/usr/sbin:/sbin）で立てた（#175）。次に立てるときは聞き直す
+    if (r.pathFallback) toast("ログインシェルの PATH を取れなかったので、この claude は最小の PATH で動いている。bun や gh が見つからないときは立て直す", true);
     setFresh({
       // 名前は一覧と同じ決め方（cardNames）。一覧に載ったときに名前が変わって見えないようにする
       id: r.id, name: cardNames([{ id: r.id, cwd: r.cwd ?? "" }]).get(r.id) ?? r.id.slice(0, 8), kind: "terminal", state: "running", cwd: r.cwd ?? "", canSend: true, parent: null,
@@ -132,7 +141,7 @@ export default function App() {
     setSelected(r.id);
     setComposeReq((n) => n + 1);
     reload.current();
-  }, []);
+  }, [toast]);
 
   const sel = selected ? tree.byId.get(selected) ?? (fresh?.id === selected ? fresh : null) : null;
   // 一覧に載ったら仮の姿を捨てる
@@ -156,6 +165,7 @@ export default function App() {
   return (
     <SkinCtx.Provider value={skinCtx}>
     <KillCtx.Provider value={killCtx}>
+    <RestartCtx.Provider value={restartCtx}>
     <SendCtx.Provider value={cardSend}>
     <LetterCtx.Provider value={letterMarks.marks}>
     <TownCtx.Provider value={agents}><DepthCtx.Provider value={depthOf}>
@@ -260,7 +270,7 @@ export default function App() {
       }} onClose={() => setSettingsOpen(false)} />}
 
       {killAsk && (
-        <KillConfirm agent={killAsk} descendants={countDesc(tree.childrenOf, killAsk.id)}
+        <KillConfirm agent={killAsk} plan={killPlan(tree.childrenOf, killAsk)}
           onCancel={() => setKillAsk(null)} onConfirm={() => { const a = killAsk; setKillAsk(null); kill(a); }} />
       )}
       <div className="toasts">
@@ -271,11 +281,9 @@ export default function App() {
     </DepthCtx.Provider></TownCtx.Provider>
     </LetterCtx.Provider>
     </SendCtx.Provider>
+    </RestartCtx.Provider>
     </KillCtx.Provider>
     </SkinCtx.Provider>
   );
 }
 
-function countDesc(childrenOf: Map<string, Agent[]>, id: string): number {
-  return (childrenOf.get(id) ?? []).reduce((n, k) => n + 1 + countDesc(childrenOf, k.id), 0);
-}

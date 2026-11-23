@@ -3,12 +3,13 @@
 // 番号の印（epoch）は native:<inode>。ファイルが置き換わったら印が変わり、lib.rs の conversation が頭から読み直す。
 // ファイルが読み位置より短くなったときも頭から読み直す（restarted）。
 // 初めて開くとき（読み位置 0）は、末尾の FIRST_BYTES だけを読む。画面に出すのは最後の 80 件なので、頭からは読まない。
+// 最後の行が FIRST_BYTES より長いときは、その行の前の会話も読む。MAX_READ より長い行は読み飛ばし、会話に印を出す（#230）。
 //
 // 行は lib.rs の simplify と live_events にそのまま渡せる形（トランスクリプトの行）に整える。整えるのは次だけ。
 // - isMeta と isCompactSummary の user の行は出さない（スキルの本文、要約などの差し込み。全件で数えて決めた）。
 //   ただし origin が peer の行は出す。受信ソケットで届いた文（Town のチャット欄から送った文、別のセッションのお手紙）も isMeta になる（#156）
 // - 作業中に受信ソケットで届いた文（attachment の queued_command、origin が peer）は、user の行に直す（#156）
-// - teammate の受信文（<teammate-message teammate_id=…>本文</teammate-message>）は、お手紙と同じ形に直す
+// - teammate の受信文（<teammate-message>、<agent-message>）は直さずに通す。1行に2通以上入ることがあるので、simplify が包みごとにお手紙にする（#253）
 // - API の失敗（isApiErrorMessage の assistant）は、失敗の印（type: result、is_error）に直す
 // - ターンの途中で取り込まれた人の文（attachment の queued_command）は、user の行に直す（queued の印付き）
 // - 順番待ちの出し入れ（queue-operation）と起動し直した印（SessionStart の attachment を session-start に直す）は、待ちの一覧のために通す
@@ -61,49 +62,102 @@ pub fn read(path: &Path, from: u64) -> Result<Chunk, String> {
     let epoch = format!("native:{}", meta.ino());
     let restarted = from > len;
     let from = if restarted { 0 } else { from };
-    let start = if from == 0 { len.saturating_sub(FIRST_BYTES) } else { from };
     let mut f = fs::File::open(path).map_err(|e| e.to_string())?;
+    let start = if from == 0 { tail_start(&mut f, len).map_err(|e| e.to_string())? } else { from };
     f.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
-    f.take(MAX_READ).read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    (&mut f).take(MAX_READ).read_to_end(&mut buf).map_err(|e| e.to_string())?;
     // 最後の改行まで。改行が無ければ何も読まない（書きかけ）
     let Some(end) = buf.iter().rposition(|b| *b == b'\n').map(|i| i + 1).or_else(|| {
         // 改行の無い最後の行でも、ファイルの終わりで JSON として読めれば読む（書き終えた最後の行）
         (start + buf.len() as u64 == len && serde_json::from_slice::<Value>(&buf).is_ok()).then_some(buf.len())
     }) else {
+        // MAX_READ を読み切っても改行が無いのは、MAX_READ より長い行。次の改行の後へ進み、飛ばした印を出す（#230）。
+        // 改行がファイルの終わりまで無ければ、書きかけなので待つ
+        if buf.len() as u64 == MAX_READ
+            && let Some(nl) = next_newline(&mut f, start + MAX_READ).map_err(|e| e.to_string())? {
+                let skipped = json!({ "type": TOO_LONG, "bytes": nl - start });
+                return Ok(Chunk { next: nl + 1, lines: vec![skipped], epoch, restarted });
+            }
         return Ok(Chunk { next: start, lines: vec![], epoch, restarted });
     };
-    let mut body = &buf[..end];
-    // 末尾から読み始めたときは、最初の欠けた行を飛ばす
-    if from == 0 && start > 0 {
-        match body.iter().position(|b| *b == b'\n') {
-            Some(i) => body = &body[i + 1..],
-            None => body = &[],
-        }
-    }
-    let lines = body.split(|b| *b == b'\n').filter(|l| !l.is_empty()).filter_map(|l| match serde_json::from_slice::<Value>(l) {
+    let lines = buf[..end].split(|b| *b == b'\n').filter(|l| !l.is_empty()).filter_map(|l| match serde_json::from_slice::<Value>(l) {
         Ok(v) => normalize(v),
         Err(_) => { odd("会話: JSON でない行".into()); None }
     }).collect();
     Ok(Chunk { next: start + end as u64, lines, epoch, restarted })
 }
 
+/// 読み飛ばした長すぎる行の印の type。simplify が会話の印（event）にする
+pub const TOO_LONG: &str = "fc-too-long-line";
+
+/// 改行を探すときに1回で読む長さ
+const SCAN: u64 = 64 << 10;
+
+/// 初めて開くときに読み始める位置（行の頭）。末尾の FIRST_BYTES の中で最初に始まる行の頭を返す。
+/// 窓の中で始まる行が無い（最後の行が FIRST_BYTES より長い）ときは、その行の頭から前の FIRST_BYTES を同じように探す。
+/// 長い1行の一部だけを読んで捨て、前の会話が出なくなるのを避ける（#230）。長い行は read が読むか、MAX_READ を超えれば飛ばす。
+/// 改行で終わっていない最後の行（書きかけ）は、窓の終わりから外して数える。数えると、長い行の後に書きかけの行があるとき、
+/// 書きかけの行の頭を返し、何も読めない
+fn tail_start(f: &mut fs::File, len: u64) -> std::io::Result<u64> {
+    let mut end = line_head_before(f, len)?;
+    loop {
+        let start = end.saturating_sub(FIRST_BYTES);
+        if start == 0 {
+            return Ok(0);
+        }
+        // 1つ前のバイトから読み、最初の改行の次を行の頭とする
+        f.seek(SeekFrom::Start(start - 1))?;
+        let mut buf = Vec::new();
+        (&mut *f).take(end - start + 1).read_to_end(&mut buf)?;
+        if let Some(head) = buf.iter().position(|b| *b == b'\n').map(|i| start + i as u64).filter(|h| *h < end) {
+            return Ok(head);
+        }
+        end = line_head_before(f, start - 1)?;
+    }
+}
+
+/// pos より前で最後の改行の次（pos を含む行の頭）。無ければ 0
+fn line_head_before(f: &mut fs::File, pos: u64) -> std::io::Result<u64> {
+    let mut hi = pos;
+    while hi > 0 {
+        let lo = hi.saturating_sub(SCAN);
+        f.seek(SeekFrom::Start(lo))?;
+        let mut buf = Vec::new();
+        (&mut *f).take(hi - lo).read_to_end(&mut buf)?;
+        if let Some(i) = buf.iter().rposition(|b| *b == b'\n') {
+            return Ok(lo + i as u64 + 1);
+        }
+        hi = lo;
+    }
+    Ok(0)
+}
+
+/// pos から先で最初の改行の位置。ファイルの終わりまで無ければ None
+fn next_newline(f: &mut fs::File, pos: u64) -> std::io::Result<Option<u64>> {
+    f.seek(SeekFrom::Start(pos))?;
+    let mut at = pos;
+    let mut buf = vec![0u8; SCAN as usize];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        if let Some(i) = buf[..n].iter().position(|b| *b == b'\n') {
+            return Ok(Some(at + i as u64));
+        }
+        at += n as u64;
+    }
+}
+
 /// トランスクリプトの1行を、simplify に渡す形に整える。出さない行は None
-pub fn normalize(mut v: Value) -> Option<Value> {
+pub fn normalize(v: Value) -> Option<Value> {
     let ty = v["type"].as_str().unwrap_or("").to_string();
     match ty.as_str() {
         "user" => {
             let peer = v["origin"]["kind"].as_str() == Some("peer");
             if (v["isMeta"].as_bool() == Some(true) && !peer) || v["isCompactSummary"].as_bool() == Some(true) {
                 return None;
-            }
-            let text = crate::user_text(&v["message"]["content"]);
-            if let Some(rest) = text.strip_prefix("<teammate-message") {
-                let (attrs, body) = rest.split_once('>').unwrap_or(("", ""));
-                let body = body.split("</teammate-message>").next().unwrap_or("").trim();
-                let who = attrs.split("teammate_id=\"").nth(1).and_then(|x| x.split('"').next()).unwrap_or("");
-                let esc = who.replace('"', "");
-                v["message"]["content"] = json!(format!("<cross-session-message from=\"teammate:{esc}\" from-name=\"{esc}\">{body}</cross-session-message>"));
             }
             Some(v)
         }
@@ -193,11 +247,26 @@ mod tests {
         let compact = json!({"type":"user","isCompactSummary":true,"message":{"content":"This session is being continued"}});
         assert!(normalize(compact).is_none());
         let tm = json!({"type":"user","message":{"content":"<teammate-message teammate_id=\"team-lead\" summary=\"s\">\n調べて\n</teammate-message>"}});
+        // `<` で始まるが、お手紙なのでターンの始まりとして数える
+        assert!(crate::live_events(&normalize(tm.clone()).unwrap()).iter().any(|e| matches!(e, crate::LiveEv::User(_))));
         let it = crate::simplify(&normalize(tm).unwrap());
         assert_eq!(it[0]["role"], "user");
         assert_eq!(it[0]["text"], "調べて");
         assert_eq!(it[0]["letter"]["fromName"], "team-lead");
-        let err = json!({"type":"assistant","isApiErrorMessage":true,"timestamp":"t","message":{"content":[{"type":"text","text":"API Error: 529"}]}});
+        // リードに届くチームメイトの文は、前置きの後ろに包みが並ぶ。1行に2通以上入ることがある（2.1.330、#253）
+        let two = json!({"type":"user","message":{"content":"Another Claude session sent a message:\n<teammate-message teammate_id=\"fix-1\" color=\"blue\" summary=\"s\">\n1通目\n</teammate-message>\n\n<teammate-message teammate_id=\"fix-2\">\n2通目\n</teammate-message>\n\nThis came from another Claude session — not typed by your user."}});
+        let it = crate::simplify(&normalize(two).unwrap());
+        assert_eq!(it.len(), 2);
+        assert_eq!((it[0]["text"].as_str(), it[0]["letter"]["fromRaw"].as_str()), (Some("1通目"), Some("teammate:fix-1")));
+        assert_eq!((it[1]["text"].as_str(), it[1]["letter"]["fromName"].as_str()), (Some("2通目"), Some("fix-2")));
+        // 受信ソケットの agent-message（isMeta、origin が peer）と、作業中に取り込まれた agent-message（queued_command）も同じに出す（#253）
+        let am = json!({"type":"user","isMeta":true,"origin":{"kind":"peer","from":"unknown"},"message":{"content":"Another Claude session sent a message:\n<agent-message from=\"issue-1\">\n直した\n</agent-message>\n\nThat \"other Claude session\" is an agent working inside this same session."}});
+        let it = crate::simplify(&normalize(am).unwrap());
+        assert_eq!((it.len(), it[0]["text"].as_str(), it[0]["letter"]["fromName"].as_str()), (1, Some("直した"), Some("issue-1")));
+        let aq = json!({"type":"attachment","attachment":{"type":"queued_command","prompt":"<agent-message from=\"issue-1\">\n直した\n</agent-message>","commandMode":"prompt","origin":{"kind":"peer"}}});
+        let it = crate::simplify(&normalize(aq).unwrap());
+        assert_eq!((it.len(), it[0]["text"].as_str(), it[0]["letter"]["fromName"].as_str()), (1, Some("直した"), Some("issue-1")));
+        let err =json!({"type":"assistant","isApiErrorMessage":true,"timestamp":"t","message":{"content":[{"type":"text","text":"API Error: 529"}]}});
         let it = crate::simplify(&normalize(err).unwrap());
         assert_eq!(it[0]["role"], "event");
         assert_eq!(it[0]["kind"], "error");
@@ -217,6 +286,73 @@ mod tests {
         let c = read(&p, 0).unwrap();
         assert!(c.lines.len() < n && c.lines.len() > 100, "{} / {n}", c.lines.len());
         assert_eq!(c.next, fs::metadata(&p).unwrap().len());
+    }
+
+    /// 大きいファイルを、試験が落ちても消す
+    struct Rm(std::path::PathBuf);
+    impl Drop for Rm { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+
+    fn user_line(text: &str) -> String {
+        json!({"type":"user","timestamp":"2026-11-23T00:00:00Z","message":{"role":"user","content":text}}).to_string()
+    }
+
+    fn texts(lines: &[Value]) -> Vec<String> {
+        items(lines).iter().filter(|x| x["role"] == "user").filter_map(|x| x["text"].as_str().map(String::from)).collect()
+    }
+
+    /// 続きから読んでいる途中に MAX_READ を超える1行が足されても、読み位置が進み、後ろの行が取れる（#230）
+    #[test]
+    fn continues_past_a_line_longer_than_max_read() {
+        let d = tmp("conv-huge-next");
+        let _rm = Rm(d.clone());
+        let p = d.join("s.jsonl");
+        let a = user_line("前の文");
+        write(&p, &format!("{a}\n"));
+        let c = read(&p, 0).unwrap();
+        assert_eq!(texts(&c.lines), vec!["前の文"]);
+        let huge = user_line(&"x".repeat(17 << 20));
+        let b = user_line("後の文");
+        write(&p, &format!("{a}\n{huge}\n{b}\n"));
+        let len = fs::metadata(&p).unwrap().len();
+        let c2 = read(&p, c.next).unwrap();
+        assert!(c2.next > c.next, "読み位置が {} から進まない", c.next);
+        let c3 = read(&p, c2.next).unwrap();
+        let got: Vec<Value> = c2.lines.iter().chain(c3.lines.iter()).cloned().collect();
+        assert_eq!(texts(&got), vec!["後の文"]);
+        assert_eq!(c3.next, len);
+        // 飛ばした行は、会話の印で出る
+        let it = items(&got);
+        assert!(it.iter().any(|x| x["role"] == "event" && x["text"].as_str().unwrap_or("").contains("大きすぎる")), "{it:?}");
+    }
+
+    /// 初めて開くとき、最後の1行が FIRST_BYTES より長くても、前の会話が取れる（#230）
+    #[test]
+    fn first_open_reads_lines_before_a_long_last_line() {
+        let d = tmp("conv-huge-tail");
+        let _rm = Rm(d.clone());
+        let p = d.join("s.jsonl");
+        let big = user_line(&"y".repeat(5 << 20));
+        write(&p, &format!("{}\n{}\n{}\n{big}\n", user_line("1"), user_line("2"), user_line("3")));
+        let c = read(&p, 0).unwrap();
+        let t = texts(&c.lines);
+        assert_eq!(&t[..3], &["1", "2", "3"], "{:?}", t.iter().map(|s| s.len()).collect::<Vec<_>>());
+        // MAX_READ 以下の長い行は、そのまま読む
+        assert_eq!(t.len(), 4);
+        assert_eq!(c.next, fs::metadata(&p).unwrap().len());
+        // 長い行の後に書きかけの行があっても、前の行を読む
+        write(&p, &format!("{}\n{}\n{}\n{big}\n{{\"type\":\"user\",\"mess", user_line("1"), user_line("2"), user_line("3")));
+        let c = read(&p, 0).unwrap();
+        assert_eq!(texts(&c.lines).len(), 4);
+        assert_eq!(c.next, fs::metadata(&p).unwrap().len() - r#"{"type":"user","mess"#.len() as u64);
+        // 最後の行が MAX_READ より長いときは、前の行を読み、次の回にその行を飛ばして終わりまで進む
+        let huge = user_line(&"z".repeat(17 << 20));
+        write(&p, &format!("{}\n{}\n{huge}\n", user_line("1"), user_line("2")));
+        let len = fs::metadata(&p).unwrap().len();
+        let c = read(&p, 0).unwrap();
+        assert_eq!(texts(&c.lines), vec!["1", "2"]);
+        let c2 = read(&p, c.next).unwrap();
+        assert_eq!(c2.next, len);
+        assert_eq!(items(&c2.lines)[0]["role"], "event");
     }
 
     trait AddNl { fn add_nl(self) -> String; }

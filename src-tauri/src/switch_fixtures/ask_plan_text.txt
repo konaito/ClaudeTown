@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Haiku 5.5 · Claude Team
+ ▝▝   ▝▝   /private/tmp/fix250-probe.hnKY/work
+
+
+⏺ Session was started with bypass permissions, so plan mode won't ask before most edits or
+  commands. Start a new session without bypass permissions for prompts in plan mode.
+
+❯ Run this exact bash command and nothing else: echo 'plan mode on' > note.txt
+
+  Ran 1 shell command
+
+⏺ 実行した。note.txt に plan mode on を書いた。出力はなく、終了コードは成功扱いだった。
+
+✻ Worked for 7s · done 3:58 AM
+
+❯ Call the AskUserQuestion tool right now with 1 question: header "Mode" question "plan mode on
+  にする？" options Yes, No. Do nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Mode
+
+plan mode on にする？
+
+❯ 1. Yes
+     plan mode on にする
+  2. No
+     plan mode on にしない
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+
+
+
+
+
+
+

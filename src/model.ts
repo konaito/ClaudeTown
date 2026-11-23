@@ -94,10 +94,25 @@ export type ConvItem = {
  */
 export type Mood = "approval" | "reply" | "working" | "done" | "idle";
 
+/**
+ * 承認の画面が、hook に何も届かないまま閉じられた（#180）。理由なしの No と Esc では、PermissionRequest と
+ * Notification の後に PostToolUse も PostToolUseFailure も Stop も来ず、状態ファイルは needs_you のまま残る
+ * （2026-11-23 に Claude Code 2.1.330 で実測）。sessions の status は画面が出ている間 waiting で、閉じると idle に変わる。
+ * そこで、承認が元の needs_you（並びが1件以上。Stop の問いかけは並びを空にする）の後に status が変わっていたら、もう待っていない。
+ * status を sessions/<pid>.json から読む terminal の行だけに当てる。tmux のチームメイトの state は jsonl の更新時刻から作るので外す。
+ * 休んだリードの端末にチームメイトの承認が出たとき、リードの status が変わるかは測っていない。変わらなければ lastActivityAt は
+ * 報告より古いままなので、返事待ちのまま残る
+ */
+function askClosed(a: Agent): boolean {
+  const r = a.report;
+  if (a.kind !== "terminal" || !r || !((r.pending_count ?? 0) > 0)) return false;
+  return a.lastActivityAt != null && r.updated_at != null && a.lastActivityAt > r.updated_at;
+}
+
 export function moodOf(a: Agent): Mood {
   if (a.state === "waiting_permission") return "approval";
   if (a.state === "running") return "working";
-  if (a.report?.phase === "needs_you") return "reply";
+  if (a.report?.phase === "needs_you" && !askClosed(a)) return "reply";
   if (a.closeCheck?.status === "ok") return "done";
   return "idle";
 }

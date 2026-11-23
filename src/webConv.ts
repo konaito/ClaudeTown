@@ -105,6 +105,16 @@ const firstLine = (v: J): string => String(typeof v === "string" ? v : "").split
  * ccn の messages の1件を、画面に出す0件以上の項目に縮める。考えた中身は捨てる。道具の結果は result の項目にし、push が道具の行に付ける（#83）。
  * node はトランスクリプトの行そのまま（type、message、timestamp）。pty は {at, type, data: {type, message, …}, seq} で、中身は data に入り、時刻は at（ms）にある
  */
+/** ! のシェルの入力を、打った形の「!コマンド」の文に直す（Rust の bash_input と同じ、#254）。! の後ろの空白は残す。シェルの入力の行でなければ null */
+export function bashInput(text: string): string | null {
+  const t = text.trimStart();
+  if (!t.startsWith("<bash-input>")) return null;
+  const r = t.slice("<bash-input>".length);
+  const end = r.lastIndexOf("</bash-input>");
+  if (end < 0) return null;
+  const body = r.slice(0, end).trimEnd();
+  return body.trim() ? `!${body}` : null;
+}
 /** スラッシュコマンドの入力を、端末と同じ「/名前 引数」の文に直す（Rust の slash_command と同じ、#157）。コマンドの行でなければ null */
 export function slashCommand(text: string): string | null {
   const t = text.trimStart();
@@ -119,6 +129,58 @@ export function slashCommand(text: string): string | null {
   const end = r.lastIndexOf("</command-args>");
   const args = end >= 0 ? r.slice(0, end).trim() : "";
   return args ? `${name} ${args}` : name;
+}
+
+/** お手紙の包み（Rust の LETTER_TAGS） */
+const LETTER_TAGS = ["cross-session-message", "teammate-message", "agent-message"] as const;
+
+/** お手紙の包みで始まる文を、包みごとの項目にする。包みで始まらなければ null（Rust の letters、#253） */
+function letters(text: string, at: string | number | null): Omit<ConvItem, "n">[] | null {
+  const out: Omit<ConvItem, "n">[] = [];
+  let rest = text;
+  let found = false;
+  for (;;) {
+    const s = rest.trimStart();
+    const tag = LETTER_TAGS.find((t) => s.startsWith(`<${t}`));
+    if (!tag) break;
+    found = true;
+    const r = s.slice(tag.length + 1);
+    const gt = r.indexOf(">");
+    const attrs = gt >= 0 ? r.slice(0, gt) : "";
+    const after = gt >= 0 ? r.slice(gt + 1) : "";
+    const close = `</${tag}>`;
+    const ci = after.indexOf(close);
+    const raw = ci >= 0 ? after.slice(0, ci) : after;
+    rest = ci >= 0 ? after.slice(ci + close.length) : "";
+    const attr = (k: string) => { const key = `${k}="`; const i = attrs.indexOf(key); return i >= 0 ? attrs.slice(i + key.length).split('"')[0] : null; };
+    let fromName: string | null;
+    let fromRaw: string | null;
+    if (tag === "cross-session-message") {
+      fromName = attr("from-name");
+      fromRaw = attr("from");
+    } else {
+      fromName = attr(tag === "teammate-message" ? "teammate_id" : "from") ?? "";
+      fromRaw = `teammate:${fromName}`;
+    }
+    const body = tag === "teammate-message" ? teammateBody(raw.trim()) : raw.trim();
+    if (body) out.push({ role: "user", text: body, from: null, at, letter: { fromName, fromRaw } });
+  }
+  return found ? out : null;
+}
+
+/** チームメイトの文の本文。決まった形の連絡（JSON の1行）を読む（Rust の teammate_body、#253） */
+function teammateBody(body: string): string | null {
+  let j: J = null;
+  if (body.startsWith("{")) {
+    try { j = JSON.parse(body.split("\n")[0]); } catch { j = null; }
+  }
+  const text = (k: string) => (typeof j?.[k] === "string" ? j[k].trim() : null);
+  switch (typeof j?.type === "string" ? j.type : null) {
+    case "idle_notification": return text("result");
+    case "teammate_terminated": return text("message");
+    case "shutdown_request": case "shutdown_approved": return null;
+  }
+  return body;
 }
 
 export function simplify(raw: J): Omit<ConvItem, "n">[] {
@@ -144,26 +206,21 @@ export function simplify(raw: J): Omit<ConvItem, "n">[] {
   }
   if (m?.type === "user") {
     let text = userText(content);
-    const pre = "Another Claude session sent a message:";
+    // 作業中に届いた文は「… sent a message while you were working:」になる（Rust の simplify と同じ、#253）
+    const pre = text.match(/^Another Claude session sent a message[^\n:]*:/);
     // 2.1.330 からは、本文の後ろに英語の注記（This came from another Claude session — …）が付く（Rust の simplify と同じ、#156）
-    if (text.startsWith(pre)) text = text.slice(pre.length).trimStart().split("\n\nThis came from another Claude session")[0].trimEnd();
-    // 別のセッションからのお手紙（<cross-session-message from=… from-name=…>本文</cross-session-message>）は、包みの内側の本文だけ出す
-    if (text.startsWith("<cross-session-message")) {
-      const rest = text.slice("<cross-session-message".length);
-      const gt = rest.indexOf(">");
-      const attrs = gt >= 0 ? rest.slice(0, gt) : "";
-      const body = (gt >= 0 ? rest.slice(gt + 1) : "").split("</cross-session-message>")[0].trim();
-      const attr = (k: string) => { const key = `${k}="`; const i = attrs.indexOf(key); return i >= 0 ? attrs.slice(i + key.length).split('"')[0] : null; };
-      if (body) out.push({ role: "user", text: body, from: null, at, letter: { fromName: attr("from-name"), fromRaw: attr("from") } });
-      return out;
-    }
+    if (pre) text = text.slice(pre[0].length).trimStart().split("\n\nThis came from another Claude session")[0].trimEnd();
+    // 別のセッションとチームメイトからのお手紙は、包みの内側の本文だけ出す
+    const ls = letters(text, at);
+    if (ls) return ls;
     // 止めたときに claude が書く印。吹き出しにせず、止めた印にする（Rust の simplify と同じ）
     if (text.startsWith("[Request interrupted by user")) {
       out.push({ role: "event", kind: "interrupted", text: "ここで止めた", at });
       return out;
     }
-    // スラッシュコマンドの入力は「/名前 引数」の文にしてから見る。そのままだと `<` で始まり、下の除外で落ちる（Rust の simplify と同じ、#157）
-    text = slashCommand(text) ?? text;
+    // スラッシュコマンドの入力は「/名前 引数」の文に、! のシェルの入力は「!コマンド」の文にしてから見る。
+    // そのままだと `<` で始まり、下の除外で落ちる（Rust の simplify と同じ、#157、#254）。シェルの出力は下の除外で落とす
+    text = slashCommand(text) ?? bashInput(text) ?? text;
     // 道具の結果だけの user、hook やシステムの差し込み（<...> で始まる）は出さない
     if (!text || text.startsWith("<") || text.startsWith("Caveat:")) return out;
     // 別のセッションからの文は1行目が from 行。端末に貼った画像のパスは先頭に [Image #3] が付き、from 行はその後ろに回る

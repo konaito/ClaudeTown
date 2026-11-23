@@ -6,6 +6,7 @@ import type { Context } from 'hono';
 
 const CCN_ORIGIN = 'https://ccn.fybe.jp';
 // 渡すのは、中身の解釈に要る最小のヘッダーだけ。Origin、Sec-Fetch-*、Cookie は渡さない（渡すと ccn の CSRF の確認で 403 になる）
+// 渡さない代わりに、同じオリジンかどうかは middleware/01.access.ts（lib/origin.ts）が確かめてから、ここに届く
 const FORWARD = ['content-type', 'accept', 'last-event-id'];
 
 export async function proxyToCcn(c: Context): Promise<Response> {

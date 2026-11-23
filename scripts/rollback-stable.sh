@@ -5,7 +5,7 @@
 #
 # 1つ前の版は release-stable.sh が $CT_STABLE_HOME/previous/ に退避したもの。
 # 動いている安定版は、入れ先の実行ファイルの pid だけを終わらせ、入れ替えた後に起動し直す。
-# 状態 hook も、戻した先の版のタグ（previous.ref に書いてあったタグ）から写し直す。
+# 状態 hook も、戻した先の版のタグ（previous.ref に書いてあったタグ）から写し直す。写せなかったときは、起動まで済ませてから 1 で終わる。
 # 環境変数は release-stable.sh と同じ（CT_DEST_DIR、CT_STABLE_HOME、CT_NO_OPEN）。
 set -euo pipefail
 
@@ -39,13 +39,21 @@ echo "戻した: いまの版 ${prev:-不明}、1つ前の版 ${cur:-不明}"
 
 prev_tag="${prev%% *}"
 repo="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+hooks_ok=1
 if [ -n "$prev_tag" ] && git -C "$repo" rev-parse --verify --quiet "$prev_tag^{commit}" >/dev/null; then
-  install_hooks "$repo" "$prev_tag" "$STATE" || echo "状態 hook を写し直せなかった。scripts/install-stable-hooks.sh $prev_tag で写す" >&2
+  install_hooks "$repo" "$prev_tag" "$STATE" || { hooks_ok=0; echo "状態 hook を写し直せなかった。scripts/install-stable-hooks.sh $prev_tag で写す" >&2; }
 else
   echo "戻した先のタグが分からないので、状態 hook は写し直していない（scripts/install-stable-hooks.sh <タグ> で写す）" >&2
 fi
 
 if [ "${CT_NO_OPEN:-0}" != 1 ]; then
-  open "$DEST"
+  # 呼んだシェルの環境（CLAUDE_CONFIG_DIR、CLAUDE_CODE_*、FC_* など）を安定版に渡さない（#260）。
+  # open は自分の環境をアプリに渡す。空の環境で呼ぶと、launchd の既定（Finder から開いたときと同じ HOME、PATH、SHELL、TMPDIR、SSH_AUTH_SOCK）になる
+  /usr/bin/env -i /usr/bin/open "$DEST"
   echo "起動した（前に動いていた: ${was_running}）"
+fi
+
+if [ "$hooks_ok" != 1 ]; then
+  echo ".app は戻したが、状態 hook は写し直せていない。scripts/install-stable-hooks.sh $prev_tag で写す" >&2
+  exit 1
 fi

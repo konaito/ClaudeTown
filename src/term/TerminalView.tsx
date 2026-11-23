@@ -12,6 +12,7 @@ import { perfCounters, perfMark, perfEnd, perfTerm, perfWaitingPrompt } from "./
 import { benchParams } from "./bench";
 import { SIZE_KEY } from "./size";
 import { createWriteGate } from "./writeGate";
+import { connectTerminal } from "./connect";
 import { isVisible, onVisibleChange } from "../visible";
 
 /** ほかの画面の大きさが右パネルに収まらないとき、こちらの大きさを送り返す間隔の下限 */
@@ -79,6 +80,9 @@ export function TerminalView({ sessionId, onError }: { sessionId: string; onErro
     if (!box.current) return;
     // 後始末のときには ref が外れているので、容れ物を今のうちに持っておく
     const host = box.current;
+    // セッションを切り替えても部品は作り直されないので、前のセッションの表示（開けなかった理由や「終わった」）を「起動中…」に戻す。
+    // 表示の欄は高さを取るので、出ていなかったときは出さない（出すと端末の大きさが変わり、term_resize が余計に飛ぶ）
+    setStatus((s) => (s ? "起動中…" : s));
     perfMark("mount", sessionId);
     const sh = sharedTerm();
     const { term, fit, el } = sh;
@@ -148,7 +152,8 @@ export function TerminalView({ sessionId, onError }: { sessionId: string; onErro
       call("term_input", { sessionId, text }).catch((e) => onError(`ターミナルに書けなかった: ${e}`));
     });
     let close = () => {};
-    openTerminal(sessionId, (e) => {
+    // 計測の印（term_open）は、開けて画面に渡したときだけ打つ。前は閉じた後に開けたときも打っていた
+    connectTerminal(() => openTerminal(sessionId, (e) => {
       if (closed) return;
       switch (e.ev) {
         case "size":
@@ -191,9 +196,9 @@ export function TerminalView({ sessionId, onError }: { sessionId: string; onErro
           setStatus(e.data?.message ?? "ターミナルに繋がらない");
           break;
       }
-    }).then((c) => {
-      perfMark("term_open", sessionId);
-      if (closed) c(); else { close = c; pushSize(); term.focus(); }
+    }), () => closed, {
+      onOpen: (c) => { perfMark("term_open", sessionId); close = c; pushSize(); term.focus(); },
+      onFail: (m) => { setStatus(m); onError(m); },
     });
     let boxSize = "";
     const ro = new ResizeObserver((es) => {

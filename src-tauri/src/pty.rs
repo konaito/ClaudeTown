@@ -19,7 +19,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// replay のために持つ出力の末尾の長さ
@@ -45,6 +45,8 @@ struct Proc {
     master: Box<dyn MasterPty + Send>,
     /// 書き口は台帳の錠の外で書く（claude が読まずに PTY が詰まっても、出力の読み手と一覧を止めない）
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// 何回かに分けて書く操作を1つずつ通す錠（serial、#168）
+    serial: Arc<Mutex<()>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     /// 出力の末尾
     out: Vec<u8>,
@@ -72,7 +74,9 @@ pub fn owns(id: &str) -> bool {
     with(|m| pid_of(m, id).is_some())
 }
 
-/// 一覧で見えた行（id と pid）を台帳に足す。/clear などで id が変わっても、同じ pid なら同じ端末として扱う
+/// 一覧で見えた行（id と pid）を台帳に足す。/clear などで id が変わっても、同じ pid なら同じ端末として扱う。
+/// 端末が前に名乗った id が別の pid の行として見えたら（よその端末で `claude --resume <前の id>`、#174）、その端末の ids から外す。
+/// 今の id（cur）は外さない。起動の直後や、claude を子として立てる launcher では、一覧の pid が台帳の pid と合わないことがあるため
 pub fn note_ids(rows: &[(String, u32)]) {
     let changed = with(|m| {
         let mut changed = false;
@@ -84,6 +88,14 @@ pub fn note_ids(rows: &[(String, u32)]) {
                 if p.cur != *id {
                     p.cur = id.clone();
                     changed = true;
+                }
+            }
+        }
+        // cur を全部の行で決めてから外す（同じ回の一覧で /clear の後の id がまだ後ろにあっても、前の id を外せるように）
+        for (id, pid) in rows {
+            for p in m.values_mut() {
+                if p.pid != *pid && p.cur != *id && p.ids.len() > 1 {
+                    p.ids.retain(|x| x != id);
                 }
             }
         }
@@ -133,38 +145,114 @@ pub fn new_uuid() -> String {
 // ---------- claude の場所と環境 ----------
 
 /// ログインシェルの PATH。Finder から開いたアプリの PATH は /usr/bin:/bin:/usr/sbin:/sbin だけで、claude（~/.local/bin）も、
-/// claude が呼ぶ git や bun も見つからない。ターミナルで開いたときと同じ PATH を、ログインシェルに1回だけ聞いて覚える。
-/// 対話の設定（.zshrc）で PATH を足す人が多いので -i も付ける。出力の前後に設定が何か書いても拾えるよう、印で挟む
+/// claude が呼ぶ git や bun も見つからない。ターミナルで開いたときと同じ PATH をログインシェルに聞き、取れた値だけを覚える（#175）。
+/// 取れなかったときは None で、claude はアプリの PATH で動く。次に端末を立てるときにもう一度聞く
 fn login_path() -> Option<String> {
-    static P: OnceLock<Option<String>> = OnceLock::new();
-    P.get_or_init(|| {
-        let shell = std::env::var("SHELL").ok().filter(|s| s.starts_with('/')).unwrap_or_else(|| "/bin/zsh".into());
-        let mut child = std::process::Command::new(&shell)
-            .args(["-l", "-i", "-c", "printf '\\n__FC_PATH__%s__FC_PATH__\\n' \"$PATH\""])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok()?;
-        let t0 = Instant::now();
+    LOGIN.get(&login_shell(), LOGIN_WAIT, LOGIN_LIMIT)
+}
+
+/// 起動のときの立て直しの前に、ログインシェルの返事を LOGIN_LIMIT まで待つ。取れたら true。
+/// 立て直しは端末を1つずつ立て、聞いている最中の2つ目からは待たないので、ここで待たないと、
+/// .zshrc が5秒を超える Mac では立て直した端末が全部アプリの PATH になる（#175）。立て直しは別のスレッドなので、画面は止まらない
+pub fn wait_login_path() -> bool {
+    LOGIN.get(&login_shell(), LOGIN_LIMIT, LOGIN_LIMIT).is_some()
+}
+
+static LOGIN: LoginPath = LoginPath::new();
+
+fn login_shell() -> String {
+    std::env::var("SHELL").ok().filter(|s| s.starts_with('/')).unwrap_or_else(|| "/bin/zsh".into())
+}
+
+/// 端末を立てる側が、ログインシェルの返事を待つ上限。過ぎたらアプリの PATH で立てる
+const LOGIN_WAIT: Duration = Duration::from_secs(5);
+/// ログインシェルを待つ上限。LOGIN_WAIT を過ぎても裏で待ち続け、返ってきたら覚える（.zshrc が重い Mac でも、後の端末は正しい PATH になる）。
+/// これを過ぎたら固まったとみて止め、次に端末を立てるときに聞き直す
+const LOGIN_LIMIT: Duration = Duration::from_secs(30);
+
+/// ログインシェルの PATH を聞く窓口。取れた値だけを覚え、失敗は覚えない。
+/// 聞いている間はシェルを2つ起こさない。聞き始めから wait を過ぎた後に来た呼び出しは、待たずに None を返す
+/// （起動のときの立て直しは端末を1つずつ立てるので、1つごとに wait を待つと、N 個で N 倍遅くなる）
+struct LoginPath {
+    st: Mutex<Ask>,
+    cv: std::sync::Condvar,
+}
+
+enum Ask {
+    Idle,
+    Asking(Instant),
+    Got(String),
+}
+
+impl LoginPath {
+    const fn new() -> Self {
+        LoginPath { st: Mutex::new(Ask::Idle), cv: std::sync::Condvar::new() }
+    }
+
+    fn get(&'static self, shell: &str, wait: Duration, limit: Duration) -> Option<String> {
+        let mut g = self.st.lock().unwrap_or_else(|e| e.into_inner());
+        if let Ask::Idle = *g {
+            *g = Ask::Asking(Instant::now());
+            let shell = shell.to_string();
+            std::thread::spawn(move || {
+                let r = ask_login_path(&shell, limit);
+                let mut g = self.st.lock().unwrap_or_else(|e| e.into_inner());
+                *g = match r {
+                    Some(p) => Ask::Got(p),
+                    None => Ask::Idle,
+                };
+                self.cv.notify_all();
+            });
+        }
         loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if t0.elapsed() < Duration::from_secs(5) => std::thread::sleep(Duration::from_millis(20)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    eprintln!("[pty] ログインシェルが5秒で PATH を返さなかった");
-                    return None;
+            match &*g {
+                Ask::Got(p) => return Some(p.clone()),
+                // この呼び出しの間に聞いたのが失敗に終わった。聞き直すのは次の呼び出し
+                Ask::Idle => return None,
+                Ask::Asking(t0) => {
+                    let left = (*t0 + wait).saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return None;
+                    }
+                    g = self.cv.wait_timeout(g, left).unwrap_or_else(|e| e.into_inner()).0;
                 }
             }
         }
-        let mut s = String::new();
-        child.stdout.take()?.read_to_string(&mut s).ok()?;
-        let p = s.split("__FC_PATH__").nth(1)?.to_string();
-        (!p.is_empty()).then_some(p)
-    })
-    .clone()
+    }
+}
+
+/// ログインシェルに PATH を1回聞く。対話の設定（.zshrc）で PATH を足す人が多いので -i も付ける。
+/// 出力の前後に設定が何か書いても拾えるよう、印で挟む。limit を過ぎたらシェルを止めて None
+fn ask_login_path(shell: &str, limit: Duration) -> Option<String> {
+    let mut child = std::process::Command::new(shell)
+        .args(["-l", "-i", "-c", "printf '\\n__FC_PATH__%s__FC_PATH__\\n' \"$PATH\""])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .inspect_err(|e| eprintln!("[pty] ログインシェル {shell} を起動できなかった: {e}"))
+        .ok()?;
+    let t0 = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if t0.elapsed() < limit => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                eprintln!("[pty] ログインシェルが{}秒で PATH を返さなかった。次に端末を立てるときに聞き直す", limit.as_secs());
+                return None;
+            }
+        }
+    }
+    let mut s = String::new();
+    child.stdout.take()?.read_to_string(&mut s).ok()?;
+    let p = s.split("__FC_PATH__").nth(1)?.to_string();
+    if p.is_empty() {
+        eprintln!("[pty] ログインシェルの出力に PATH が無かった。次に端末を立てるときに聞き直す");
+        return None;
+    }
+    Some(p)
 }
 
 /// claude の実行ファイル。FC_CLAUDE_BIN があればそれ（試験用）、無ければログインシェルの PATH、~/.local/bin の順に探す
@@ -357,9 +445,12 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
     if let Some(p) = &path {
         cmd.env("PATH", p);
     }
-    // 選べたときだけ差し替える。アプリの環境に別の値があっても（cam の launcher から開いた開発版）、選んだプロファイルにする
-    if let Some(d) = &config_dir {
-        cmd.env("CLAUDE_CONFIG_DIR", d);
+    // 選べたときだけ差し替える。アプリの環境に別の値があっても（cam の launcher から開いた開発版）、選んだプロファイルにする。
+    // cam が --default のコマンドを選んだら外して ~/.claude で起動する（#251）。選べないときは触らない
+    match &config_dir {
+        crate::account::ConfigDir::Set(d) => { cmd.env("CLAUDE_CONFIG_DIR", d); }
+        crate::account::ConfigDir::Unset => { cmd.env_remove("CLAUDE_CONFIG_DIR"); }
+        crate::account::ConfigDir::Keep => {}
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -374,7 +465,7 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
     let killer = child.clone_killer();
     let started_at = crate::now_ms() as u64;
     with(|m| {
-        m.insert(pid, Proc { pid, ids: vec![id.clone()], cur: id.clone(), name, cwd: cwd.to_string(), started_at, size: (cols, rows), master: pair.master, writer: Arc::new(Mutex::new(writer)), killer, out: vec![], screen: new_screen(cols, rows), sub: None, carry: vec![] });
+        m.insert(pid, Proc { pid, ids: vec![id.clone()], cur: id.clone(), name, cwd: cwd.to_string(), started_at, size: (cols, rows), master: pair.master, writer: Arc::new(Mutex::new(writer)), serial: Arc::new(Mutex::new(())), killer, out: vec![], screen: new_screen(cols, rows), sub: None, carry: vec![] });
     });
     eprintln!("[pty] claude を{}した pid {pid} id {id} cwd {cwd}", if resume.is_some() { "resume で起動" } else { "起動" });
     persist();
@@ -386,6 +477,9 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
         // 読み手が最後の出力を送り終えるのを少し待ってから、台帳から外す
         std::thread::sleep(Duration::from_millis(200));
         let gone = with(|m| m.remove(&pid));
+        if let Some(p) = &gone {
+            end_input(pid, &p.writer);
+        }
         if let Some(p) = gone
             && let Some((_, tx)) = &p.sub {
                 let _ = tx.send(TermOut::Event("exit".into(), json!({ "reason": "終わった", "code": code })));
@@ -394,7 +488,8 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
         persist();
         notice();
     });
-    Ok(json!({ "id": id, "pid": pid, "cwd": cwd }))
+    // pathFallback は、ログインシェルの PATH を取れず、アプリの PATH で立てた印。画面がトーストで知らせる（#175）
+    Ok(json!({ "id": id, "pid": pid, "cwd": cwd, "pathFallback": path.is_none() }))
 }
 
 fn read_loop(pid: u32, mut reader: Box<dyn Read + Send>) {
@@ -502,9 +597,24 @@ pub fn write(id: &str, text: &str) -> Result<(), String> {
     w.write_all(text.as_bytes()).and_then(|_| w.flush()).map_err(|e| format!("ターミナルに書けなかった: {e}"))
 }
 
+/// 端末へ何回かに分けて書く操作（貼り付けと Enter、モデルと権限モードの切り替え、承認への答え）を、端末ごとに1つずつ通す（#168）。
+/// 錠を持たないと、貼り付けと Enter の間にモデルのピッカーのキーが入り、ピッカーの中で Enter が押される。
+/// 錠は台帳の1件（pid）に持たせるので、/clear などで session id が変わっても同じ錠になる。台帳の錠（PROCS）は、錠を取り出す間だけ持つ。
+/// f の中で serial をもう一度呼ばない（同じ錠を待って止まる）
+pub fn serial<T>(id: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let lock = with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| p.serial.clone())).ok_or("このセッションの端末はこのアプリに無い")?;
+    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
+
 /// このアプリが立てたセッションの pid
 pub fn pid_of_id(id: &str) -> Option<u32> {
     with(|m| pid_of(m, id))
+}
+
+/// このアプリが立てたセッションの端末の大きさ（cols, rows）。立て直すときに同じ大きさで起動する
+pub fn size_of(id: &str) -> Option<(u16, u16)> {
+    with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| p.size))
 }
 
 /// 同じ端末が名乗ったことのある session id の全部（/clear や計画の承認で id が変わっても、pid は同じ）。台帳に無ければ id だけ
@@ -531,6 +641,65 @@ pub fn resize(id: &str, cols: u16, rows: u16) -> Result<(), String> {
     })
 }
 
+// ---------- 打鍵の列（#231） ----------
+
+/// 端末ごとの打鍵の列（送り口）と、その端末の書き口。キーは pid。書き口は Weak で持ち、端末が台帳から外れたら今までどおり Proc と一緒に落ちる
+struct Input {
+    writer: std::sync::Weak<Mutex<Box<dyn Write + Send>>>,
+    tx: Sender<String>,
+}
+static INPUTS: Mutex<Option<HashMap<u32, Input>>> = Mutex::new(None);
+
+/// 打ったキー（ターミナルの欄の打鍵と貼り付け）を端末の列に積み、書くのを待たずに返す（#231）。
+/// 呼び手は Tauri のメインスレッドなので、claude が入力を読まずに PTY が詰まっても、チャット欄の送信が書き口の錠を持っていても、待つと窓全体が固まる。
+/// 書くのは端末ごとに1本の書き手のスレッドで、積んだ順に1件ずつ書くので、打った順は変わらない。
+/// 書き手が取るのは書き口の錠（writer）だけ。分けて書く操作の錠（#168 の serial）は取らない。書けなかったときは、開いている画面に input_error を送る
+pub fn input(id: &str, text: &str) -> Result<(), String> {
+    let (pid, writer) = with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| (p.pid, Arc::downgrade(&p.writer)))).ok_or("このセッションの端末はこのアプリに無い")?;
+    let mut g = INPUTS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = g.get_or_insert_with(HashMap::new);
+    // 同じ pid でも書き口が違えば別の端末（pid が使い回された）なので、列を作り直す
+    if !map.get(&pid).is_some_and(|q| q.writer.ptr_eq(&writer)) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let w = writer.clone();
+        std::thread::spawn(move || input_loop(pid, w, rx));
+        map.insert(pid, Input { writer, tx });
+    }
+    map[&pid].tx.send(text.to_string()).map_err(|_| "ターミナルの書き手が止まっている".to_string())
+}
+
+/// 書き手のスレッド。列が閉じる（end_input）か、端末が台帳から外れたら終わる
+fn input_loop(pid: u32, writer: std::sync::Weak<Mutex<Box<dyn Write + Send>>>, rx: std::sync::mpsc::Receiver<String>) {
+    while let Ok(text) = rx.recv() {
+        let Some(w) = writer.upgrade() else { return };
+        let r = {
+            let mut g = w.lock().unwrap_or_else(|e| e.into_inner());
+            g.write_all(text.as_bytes()).and_then(|_| g.flush())
+        };
+        let Err(e) = r else { continue };
+        // 続けて積まれていた分は捨てる。前の打鍵が届かないまま、後の打鍵だけを書かない
+        let dropped = rx.try_iter().count();
+        let message = if dropped > 0 { format!("ターミナルに書けなかった: {e}（続けて打った {dropped} 件も送らなかった）") } else { format!("ターミナルに書けなかった: {e}") };
+        eprintln!("[pty] {message} pid {pid}");
+        with(|m| {
+            if let Some(p) = m.get(&pid)
+                && Arc::ptr_eq(&p.writer, &w)
+                && let Some((_, tx)) = &p.sub {
+                    let _ = tx.send(TermOut::Event("input_error".into(), json!({ "message": message })));
+                }
+        });
+    }
+}
+
+/// 端末が台帳から外れたので、その端末の列を閉じる。書き手のスレッドは書き口を取り出せずに終わる
+fn end_input(pid: u32, writer: &Arc<Mutex<Box<dyn Write + Send>>>) {
+    let mut g = INPUTS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = g.as_mut()
+        && map.get(&pid).is_some_and(|q| q.writer.ptr_eq(&Arc::downgrade(writer))) {
+            map.remove(&pid);
+        }
+}
+
 /// 1つ止める。SIGHUP を送る（portable-pty の clone_killer の kill は SIGHUP だけを送る。0.9.0 のソースで確かめた）。
 /// 2秒たっても終わっていなければ、別のスレッドから SIGKILL を送る。待つ間は錠を持たない
 pub fn kill(id: &str) -> Result<(), String> {
@@ -547,7 +716,12 @@ pub fn kill(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// アプリを終えるときに、ここから立てた claude を全部止める。SIGHUP を全部に送り、1秒待って残りに SIGKILL
+/// アプリを終えるとき、SIGHUP の後に claude が自分で終わるのを待つ長さ。これを過ぎて残っているものに SIGKILL を送る。
+/// claude は SIGHUP から終わるまで 1.27 秒かかった（2026-11-22 の実測、README）。前の1秒では足りず、SIGKILL で
+/// SessionEnd の hook と sessions/<pid>.json の片付けが飛んだ（#232）。全部が終われば、この長さを待たずに戻る
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
+
+/// アプリを終えるときに、ここから立てた claude を全部止める。SIGHUP を全部に送り、SHUTDOWN_WAIT まで待って残りに SIGKILL
 pub fn kill_all() {
     // 台帳はアプリを終える前のまま残す（次の起動で戻す）
     begin_shutdown();
@@ -555,17 +729,23 @@ pub fn kill_all() {
     if pids.is_empty() {
         return;
     }
-    for &pid in &pids {
+    hangup_all(&pids);
+    eprintln!("[pty] アプリを終えるので {} 体の claude を止めた", pids.len());
+}
+
+/// kill_all の止め方。pids に SIGHUP を送り、全部が終わるか SHUTDOWN_WAIT が過ぎるまで待ち、残りに SIGKILL を送る。
+/// 試験が代役の pid だけを渡して同じ処理を流せるように、台帳と SHUTTING には触らない
+fn hangup_all(pids: &[u32]) {
+    for &pid in pids {
         unsafe { libc::kill(pid as i32, libc::SIGHUP) };
     }
     let t0 = Instant::now();
-    while t0.elapsed() < Duration::from_secs(1) && pids.iter().any(|&p| alive(p)) {
+    while t0.elapsed() < SHUTDOWN_WAIT && pids.iter().any(|&p| alive(p)) {
         std::thread::sleep(Duration::from_millis(50));
     }
     for &pid in pids.iter().filter(|&&p| alive(p)) {
         unsafe { libc::kill(pid as i32, libc::SIGKILL) };
     }
-    eprintln!("[pty] アプリを終えるので {} 体の claude を止めた", pids.len());
 }
 
 fn alive(pid: u32) -> bool {
@@ -575,6 +755,10 @@ fn alive(pid: u32) -> bool {
     }
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
+
+/// FC_CLAUDE_BIN を書き換えて代役を立てる試験の錠（環境変数はプロセスで1つなので、立てる間だけ持つ）
+#[cfg(test)]
+pub(crate) static BIN_LOCK: Mutex<()> = Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -665,6 +849,95 @@ mod tests {
         assert_eq!(replay_text(b""), "");
     }
 
+    /// 1回目だけ first_sleep 秒黙ってから、PATH を返すシェルの台本。何回起こされたかを count に書く。
+    /// 試験ごとに別の窓口（LoginPath）と台本を使い、SHELL の環境変数は変えない（ほかの試験の spawn が本物のシェルに聞くのと競合しない）
+    fn slow_then_fast_shell(tag: &str, first_sleep: &str) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("fc-pty-shell-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sh = dir.join("sh");
+        let body = format!(
+            "#!/bin/sh\nn=$(cat '{d}/count' 2>/dev/null || echo 0)\necho $((n+1)) > '{d}/count'\nif [ \"$n\" = 0 ]; then sleep {first_sleep}; fi\nprintf '\\n__FC_PATH__/fake/bin:/usr/bin__FC_PATH__\\n'\n",
+            d = dir.display()
+        );
+        std::fs::write(&sh, body).unwrap();
+        std::fs::set_permissions(&sh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (sh, dir.join("count"))
+    }
+
+    fn asked(count: &std::path::Path) -> u32 {
+        std::fs::read_to_string(count).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+    }
+
+    /// Some を返すまで5秒まで呼び続ける（ほかの試験と並んで、台本の起動が遅れても落ちないように）
+    fn poll(f: impl Fn() -> Option<String>) -> Option<String> {
+        let t0 = Instant::now();
+        loop {
+            let r = f();
+            if r.is_some() || t0.elapsed() > Duration::from_secs(5) {
+                return r;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn fresh_login() -> &'static LoginPath {
+        Box::leak(Box::new(LoginPath::new()))
+    }
+
+    /// #175 の再現。ログインシェルが1回目に5秒（LOGIN_WAIT）を超えても、後の呼び出しでは PATH を取れる（失敗を覚え続けない）
+    #[test]
+    fn login_path_recovers_after_a_slow_shell() {
+        let (sh, count) = slow_then_fast_shell("repro", "6");
+        let login = fresh_login();
+        let t0 = Instant::now();
+        let mut got = None;
+        while t0.elapsed() < Duration::from_secs(12) && got.is_none() {
+            got = login.get(sh.to_str().unwrap(), LOGIN_WAIT, LOGIN_LIMIT);
+            if got.is_none() { std::thread::sleep(Duration::from_millis(500)); }
+        }
+        assert_eq!(got.as_deref(), Some("/fake/bin:/usr/bin"));
+        // 取れた値は覚え、もう聞かない
+        let n = asked(&count);
+        assert_eq!(login.get(sh.to_str().unwrap(), LOGIN_WAIT, LOGIN_LIMIT).as_deref(), Some("/fake/bin:/usr/bin"));
+        assert_eq!(asked(&count), n);
+    }
+
+    /// 1回目が上限（limit）を超えて止められたら、次の呼び出しでもう一度聞き、2回目の速い返事を覚える
+    #[test]
+    fn login_path_asks_again_after_a_failure() {
+        let (sh, count) = slow_then_fast_shell("retry", "5");
+        let sh = sh.to_str().unwrap();
+        let login = fresh_login();
+        let (wait, limit) = (Duration::from_millis(200), Duration::from_millis(600));
+        let t0 = Instant::now();
+        assert_eq!(login.get(sh, wait, limit), None);
+        assert!(t0.elapsed() < Duration::from_secs(2), "{:?}", t0.elapsed());
+        // 聞いている最中で、聞き始めから wait を過ぎている。待たずに None を返し、2つ目のシェルを起こさない
+        let t1 = Instant::now();
+        assert_eq!(login.get(sh, wait, limit), None);
+        assert!(t1.elapsed() < Duration::from_millis(100), "{:?}", t1.elapsed());
+        // 1回目が limit で止められた後の呼び出しは、もう一度聞いて速い返事を取る。
+        // 止められる前の呼び出しは None を返すだけでシェルを起こさないので、取れるまで回しても起こしたシェルは2つになる
+        assert_eq!(poll(|| login.get(sh, wait, limit)).as_deref(), Some("/fake/bin:/usr/bin"));
+        assert_eq!(asked(&count), 2);
+        assert_eq!(login.get(sh, wait, limit).as_deref(), Some("/fake/bin:/usr/bin"));
+        assert_eq!(asked(&count), 2);
+    }
+
+    /// wait を過ぎても limit の内に返ってきた PATH は、聞き直さずに覚える（.zshrc が重い Mac）
+    #[test]
+    fn login_path_keeps_a_late_answer() {
+        let (sh, count) = slow_then_fast_shell("late", "0.6");
+        let sh = sh.to_str().unwrap();
+        let login = fresh_login();
+        let (wait, limit) = (Duration::from_millis(100), Duration::from_secs(5));
+        assert_eq!(login.get(sh, wait, limit), None);
+        assert_eq!(poll(|| login.get(sh, wait, limit)).as_deref(), Some("/fake/bin:/usr/bin"));
+        assert_eq!(asked(&count), 1);
+    }
+
     #[test]
     fn child_env_drops_the_parent_session() {
         assert!(drop_env("CLAUDE_CODE_SESSION_ID"));
@@ -674,33 +947,52 @@ mod tests {
         assert!(!drop_env("HOME"));
     }
 
-    /// 書き込みが詰まっても台帳の錠を持たない（読まない子に大きく書いている間も、owns と list が返る）
+    /// 書き込みが詰まっても台帳の錠を持たない（読まない子に大きく書いている間も、owns と list が返る）。
+    /// 代役は claude と同じく raw にしてから寝る。行の編集のモードのままだと、macOS は行の上限を超えた分を捨て、書き込みは詰まらない（#240）
     #[test]
     fn a_stuck_write_does_not_hold_the_table() {
+        use std::os::unix::fs::PermissionsExt;
+        // 町の一覧を数える試験（lib.rs）にこの端末が混ざらないよう、台帳から消えるまで持つ。取る順は launched_config_dir_as と同じ
+        let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("fc-pty-stuck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("claude");
-        // 入力を読まない子
-        std::fs::write(&bin, "#!/bin/sh\nexec sleep 30\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
+        // 入力を読まない子。raw にしたら ready を書く
+        std::fs::write(&bin, format!("#!/bin/sh\nstty raw -echo\n: > '{}'\nexec sleep 30\n", dir.join("ready").display())).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
-        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {}).unwrap();
+        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {});
         unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
-        let id = r["id"].as_str().unwrap().to_string();
+        let id = r.unwrap()["id"].as_str().unwrap().to_string();
+        let t0 = Instant::now();
+        while !dir.join("ready").exists() && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let ready = dir.join("ready").exists();
         let id2 = id.clone();
         // PTY の入力の欄（数KB）を超えて書く。子が読まないので、この書き込みは戻らない
-        std::thread::spawn(move || { let _ = write(&id2, &"x".repeat(1 << 20)); });
-        std::thread::sleep(Duration::from_millis(300));
+        let (tx, rx) = std::sync::mpsc::channel();
+        if ready {
+            std::thread::spawn(move || { let _ = tx.send(write(&id2, &"x".repeat(1 << 20))); });
+        }
+        let stuck = rx.recv_timeout(Duration::from_millis(300));
         let t0 = Instant::now();
-        assert!(owns(&id));
-        assert!(!list().is_empty());
-        assert!(t0.elapsed() < Duration::from_millis(200), "台帳の錠が書き込みに取られている");
+        let owned = owns(&id);
+        let listed = !list().is_empty();
+        let took = t0.elapsed();
+        // 確かめる前に止める（落ちても代役を残さない）
         kill(&id).unwrap();
+        let t1 = Instant::now();
+        while t1.elapsed() < Duration::from_secs(5) && owns(&id) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(ready, "代役が raw にならない");
+        assert!(stuck.is_err(), "書き込みが戻った（PTY が詰まっていない）: {stuck:?}");
+        assert!(owned && listed);
+        assert!(took < Duration::from_millis(200), "台帳の錠が書き込みに取られている: {took:?}");
     }
-
-    static BIN_LOCK: Mutex<()> = Mutex::new(());
 
     /// 偽の cam と偽の claude を置いた試験用のディレクトリ。cam usage --json は usage を返し、sync は呼ばれた名前を sync.log に足す。
     /// claude は自分の環境を env.txt に書いてから寝る
@@ -730,7 +1022,8 @@ mod tests {
 
     /// resume が Some なら、その id で resume として起動する
     fn launched_config_dir_as(dir: &std::path::Path, resume_id: Option<&str>) -> Result<Option<String>, String> {
-        // 町の一覧を数える試験（lib.rs）に、この端末が混ざらないようにする。錠は端末が台帳から消えるまで持つ
+        // 町の一覧を数える試験（lib.rs）に、この端末が混ざらないようにする。錠は端末が台帳から消えるまで持つ。
+        // 取る順は lib.rs と composer.rs と同じ NATIVE_TEST_LOCK、BIN_LOCK（逆に取ると互いに待って止まる）
         let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("CLAUDE_CONFIG_DIR").ok();
@@ -781,6 +1074,16 @@ mod tests {
         let dir = fake_cam_dir("unknown", r#"{"best":null,"choice":"unknown","next_available":null,"accounts":[]}"#);
         assert_eq!(launched_config_dir(&dir).unwrap().as_deref(), Some("/nowhere/inherited"));
         assert!(!dir.join("sync.log").exists());
+    }
+
+    /// cam の best が --default のコマンド（プロファイルのディレクトリが無い）なら、~/.claude で起動する。
+    /// アプリの環境の CLAUDE_CONFIG_DIR を外す（#251）。開いたのが cam のプロファイルで動くセッションだと、この値が入る。
+    /// 開発版だけでなく、そうしたセッションから release-stable.sh の `open` で開いた安定版も受け継ぐ。直す前は親の値のまま起動していた
+    #[test]
+    fn launch_drops_the_inherited_config_dir_for_a_default_command() {
+        let dir = fake_cam_dir("default", r#"{"best":"main","choice":"normal","next_available":null,"accounts":[]}"#);
+        assert_eq!(launched_config_dir(&dir).unwrap(), None);
+        assert!(!dir.join("sync.log").exists(), "--default のコマンドに cam sync は掛けない（launcher も掛けない）");
     }
 
     /// 全部のアカウントが上限で、戻る時刻が先にあるときは起動しない。理由に戻るアカウントを書く
@@ -839,6 +1142,56 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("terminals.json.bad")).unwrap(), "{ not json");
         std::fs::write(&p, r#"{"version":1,"terminals":[{"id":"x","cwd":"/tmp"}]}"#).unwrap();
         assert_eq!(read_ledger(&p), vec![Entry { id: "x".into(), cwd: "/tmp".into(), name: None, cols: 120, rows: 40, started_at: 0 }]);
+    }
+
+    /// アプリを終えるときの止め方（kill_all の hangup_all）で、SIGHUP を受けてから 1.5 秒かけて後始末をして終わる代役が、
+    /// SIGKILL されずに後始末を終える（#232）。本物の claude は SIGHUP から終わるまで 1.27 秒かかった（README）。
+    /// kill_all はほかの試験の端末も止めて SHUTTING も立てるので、代役の pid だけを hangup_all に渡す
+    #[test]
+    fn shutdown_waits_for_a_slow_hangup() {
+        use std::os::unix::fs::PermissionsExt;
+        // 町の一覧を数える試験（lib.rs）に、この端末が混ざらないようにする。錠は端末が台帳から消えるまで持つ
+        let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fc-pty-hup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (ready, hup, done) = (dir.join("ready"), dir.join("hup"), dir.join("done"));
+        // SIGHUP を受けたら hup を書き、1.5 秒寝てから done を書いて終わる。trap を張ってから ready を書く。
+        // 待つのは短い sleep の輪（sh は前面の子が終わるまで trap を動かさない）。試験が落ちても 30 秒で自分で終わる
+        let bin = dir.join("claude");
+        std::fs::write(&bin, format!(
+            "#!/bin/sh\ntrap ': > \"{hup}\"; sleep 1.5; : > \"{done}\"; exit 0' HUP\n: > \"{ready}\"\ni=0\nwhile [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done\n",
+            hup = hup.display(), done = done.display(), ready = ready.display()
+        )).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
+        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {});
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+        let id = r.unwrap()["id"].as_str().unwrap().to_string();
+        let pid = pid_of_id(&id).unwrap();
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(5) && !ready.exists() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(ready.exists(), "代役が ready を書かなかった");
+
+        let t0 = Instant::now();
+        hangup_all(&[pid]);
+        let took = t0.elapsed();
+        // SIGKILL で止まった後に done が遅れて書かれることは無いが、念のため少し待ってから見る
+        std::thread::sleep(Duration::from_millis(500));
+        let (got_hup, got_done) = (hup.exists(), done.exists());
+        let t1 = Instant::now();
+        while t1.elapsed() < Duration::from_secs(5) && owns(&id) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(got_hup, "代役に SIGHUP が届かなかった");
+        assert!(got_done, "SIGHUP の後始末の途中で SIGKILL された（{took:?} で戻った）");
+        // 全部が終わったら、待ちの上限まで待たずに戻る
+        assert!(took < SHUTDOWN_WAIT, "代役が終わった後も待ち続けた（{took:?}）");
+        assert!(!owns(&id));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 台帳の出入り（#152）。閉じたものと自分で終わったものは外れ、アプリを終えるときに止めたものは残り、
@@ -936,6 +1289,50 @@ mod tests {
         unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
     }
 
+    /// /clear で X から Y になった端末の X が、別の pid の行として見えたら（よその端末で `claude --resume X`）、X はもうこの端末ではない（#174）。
+    /// 今の id のまま別の pid に見えたときは外さない（起動の直後や、claude を子として立てる launcher で pid が合わないときに、自分の端末を手放さない）
+    #[test]
+    fn an_old_id_seen_on_another_pid_leaves_the_terminal() {
+        use std::os::unix::fs::PermissionsExt;
+        // 町の一覧を数える試験（lib.rs）に、この端末が混ざらないようにする
+        let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fc-pty-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        std::fs::write(&bin, "#!/bin/sh\nexec cat\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
+        let x = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {}).unwrap()["id"].as_str().unwrap().to_string();
+        let z = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {}).unwrap()["id"].as_str().unwrap().to_string();
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+        let px = pid_of_id(&x).unwrap();
+        let pz = pid_of_id(&z).unwrap();
+        // 台帳に無い pid（この試験のプロセス）を、よその端末の pid にする
+        let other = std::process::id();
+        let y = format!("cleared-{x}");
+
+        note_ids(&[(y.clone(), px)]);
+        assert_eq!(pid_of_id(&x), Some(px), "/clear の前の id でも同じ端末");
+        note_ids(&[(x.clone(), other), (y.clone(), px)]);
+        assert_eq!(pid_of_id(&x), None, "よその端末で resume した前の id を、まだこのアプリの端末として扱っている");
+        assert_eq!(pid_of_id(&y), Some(px), "今の id はこの端末のまま");
+        assert_eq!(ids_of(&y), vec![y.clone()]);
+
+        // 今の id が別の pid に見えても外さない
+        note_ids(&[(z.clone(), other)]);
+        assert_eq!(pid_of_id(&z), Some(pz));
+
+        for id in [&y, &z] {
+            kill(id).unwrap();
+        }
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(5) && (owns(&y) || owns(&z)) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!owns(&y) && !owns(&z));
+    }
+
     /// 本物の PTY で、cat を起動して書き、読み、止める（claude の代わり）
     #[test]
     fn spawn_write_read_kill_with_a_stand_in() {
@@ -972,6 +1369,85 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(!owns(&id));
+    }
+
+    /// 代役の claude（中身は script）を立てて id を返す。返す錠は、町の一覧を数える試験（lib.rs）と FC_CLAUDE_BIN を分けるもので、
+    /// 端末を止めて台帳から消えるまで持つ（取る順は launched_config_dir_as と同じ NATIVE_TEST_LOCK、BIN_LOCK）
+    fn stand_in(tag: &str, script: &str) -> (String, PathBuf, [std::sync::MutexGuard<'static, ()>; 2]) {
+        use std::os::unix::fs::PermissionsExt;
+        let native = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let bin_lock = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fc-pty-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        std::fs::write(&bin, script.replace("__DIR__", &dir.to_string_lossy())).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
+        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {});
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+        let id = r.unwrap()["id"].as_str().unwrap().to_string();
+        (id, dir, [native, bin_lock])
+    }
+
+    fn stop(id: &str) {
+        kill(id).unwrap();
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(5) && owns(id) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// 代役が raw にした（ready を書いた）のを待つ
+    fn wait_ready(dir: &std::path::Path) {
+        let t0 = Instant::now();
+        while !dir.join("ready").exists() {
+            assert!(t0.elapsed() < Duration::from_secs(5), "代役が raw にならない");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// 入力を読まない claude に、ターミナルの欄から長い貼り付け（4096 文字）が来ても、term_input はすぐ戻る（#231）。
+    /// term_input は async の付かない命令で、Tauri のメインスレッドで動く。戻らないと窓全体が固まる。
+    /// 代役は claude と同じく raw にしてから寝る（行の編集のモードのままだと、macOS は行の上限を超えた分を捨て、書き込みは詰まらない）
+    #[test]
+    fn term_input_returns_while_the_child_does_not_read() {
+        let (id, dir, _locks) = stand_in("unread", "#!/bin/sh\nstty raw -echo\n: > '__DIR__/ready'\nexec sleep 30\n");
+        wait_ready(&dir);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let id2 = id.clone();
+        // メインスレッドの代わり
+        std::thread::spawn(move || { let _ = tx.send(crate::terminal::term_input(id2, "x".repeat(4096))); });
+        let r = rx.recv_timeout(Duration::from_secs(1));
+        stop(&id);
+        assert!(matches!(r, Ok(Ok(()))), "term_input が1秒で戻らなかった: {r:?}");
+    }
+
+    /// 打った順に届く（#231）。代役は raw にしてから1秒読まずに待ち（その間 PTY は詰まる）、その後に受けた分を全部ファイルに書く。
+    /// 1字ずつと貼り付けを、待たずに続けて term_input に渡す
+    #[test]
+    fn term_input_keeps_the_order() {
+        let script = "#!/bin/sh\nstty raw -echo\n: > '__DIR__/ready'\nsleep 1\nexec cat > '__DIR__/got'\n";
+        let (id, dir, _locks) = stand_in("order", script);
+        wait_ready(&dir);
+        let mut want = String::new();
+        let t0 = Instant::now();
+        for i in 0..400 {
+            let s = if i % 50 == 0 { format!("[paste {i} {}]", "y".repeat(500)) } else { format!("{}", i % 10) };
+            crate::terminal::term_input(id.clone(), s.clone()).unwrap();
+            want.push_str(&s);
+        }
+        let queued_in = t0.elapsed();
+        let t0 = Instant::now();
+        let got = loop {
+            let got = std::fs::read_to_string(dir.join("got")).unwrap_or_default();
+            if got.len() >= want.len() || t0.elapsed() > Duration::from_secs(10) { break got; }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        stop(&id);
+        assert_eq!(got.len(), want.len(), "届いた長さが違う");
+        assert!(got == want, "順が入れ替わった");
+        assert!(queued_in < Duration::from_millis(500), "代役が読まない間に term_input が待った: {queued_in:?}");
     }
 }
 

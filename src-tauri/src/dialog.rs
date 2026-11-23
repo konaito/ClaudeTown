@@ -34,7 +34,7 @@ pub struct Row {
 pub enum Dialog {
     /// 質問の1問。submit は複数選択の「Submit」の行があるときに Some（中身はカーソルがそこにあるか）
     Ask { question: String, rows: Vec<Row>, submit: Option<bool> },
-    /// 全部の質問に答えた後の確かめ。answers は「→ 」の後ろ
+    /// 全部の質問に答えた後の確かめ。answers は「→ 」の後ろと、折り返した続きの行をつないだもの
     Review { answers: Vec<String>, rows: Vec<Row> },
     /// 道具の承認と計画の確認。prompt は番号の行のすぐ上の行、body はその上の区切り線から prompt の前まで
     Choice { prompt: String, body: String, rows: Vec<Row> },
@@ -81,6 +81,30 @@ fn is_tabs(line: &str) -> bool {
     (t.starts_with('←') || t.starts_with('☐') || t.starts_with('☒')) && (t.contains('☐') || t.contains('☒'))
 }
 
+/// 確かめの画面の答え（「→ 」の後ろ）。1行に入らない答えは折り返され、続きの行は「→」と同じ桁に字下げされて出る
+/// （2026-11-23、v2.1.330 の tmux 100 桁で見た。#256）。「→」の行のすぐ下で、字下げが「→」の桁以上あり、
+/// 質問の行（「●」）でも引用の罫線（「│」）でも次の答えでもない行を、続きとしてつなぐ
+fn review_answers(lines: &[&str]) -> Vec<String> {
+    let indent = |l: &str| l.chars().take_while(|c| *c == ' ').count();
+    let mut answers: Vec<String> = Vec::new();
+    let mut arrow: Option<usize> = None;
+    for l in lines {
+        let t = l.trim();
+        if let Some(a) = t.strip_prefix("→ ") {
+            answers.push(a.trim().to_string());
+            arrow = Some(indent(l));
+        } else if let (Some(i), Some(last)) = (arrow, answers.last_mut()) {
+            if !t.is_empty() && indent(l) >= i && !t.starts_with(['●', '│', '→']) {
+                last.push(' ');
+                last.push_str(t);
+            } else {
+                arrow = None;
+            }
+        }
+    }
+    answers
+}
+
 /// 今の画面（vt100 で解いた文字）から、承認の画面を読む。無ければ None
 pub fn parse(screen: &str) -> Option<Dialog> {
     let lines: Vec<&str> = screen.lines().collect();
@@ -88,8 +112,7 @@ pub fn parse(screen: &str) -> Option<Dialog> {
     if let Some(r) = lines.iter().rposition(|l| l.trim() == "Review your answers") {
         let rows: Vec<Row> = lines[r + 1..].iter().filter_map(|l| row_of(l).map(|x| x.1)).collect();
         if rows.iter().any(|x| x.label.starts_with("Submit answers")) {
-            let answers = lines[r + 1..].iter().filter_map(|l| l.trim().strip_prefix("→ ").map(|a| a.trim().to_string())).collect();
-            return Some(Dialog::Review { answers, rows });
+            return Some(Dialog::Review { answers: review_answers(&lines[r + 1..]), rows });
         }
     }
     // 質問
@@ -174,6 +197,15 @@ pub fn parse(screen: &str) -> Option<Dialog> {
         }
     }
     Some(Dialog::Choice { prompt, body, rows })
+}
+
+/// 選択の行のカーソル（「❯ 1. Yes」「❯ 3.  Sonnet 5.5」）が、入力欄（区切り線のすぐ下の「❯ 」の行）より下にあるか。入力欄が無ければ、カーソルがあるだけで true。
+/// 承認の画面とモデルのピッカーは入力欄の代わりに出る。画面の上に残った前の入力（「❯ 1. a」と「  2. b」）は入力欄より上にあるので数えない（#168）
+pub fn menu_below_input(screen: &str) -> bool {
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(cursor) = lines.iter().rposition(|l| row_of(l).is_some_and(|(_, r)| r.cursor)) else { return false };
+    let input = (1..lines.len()).rev().find(|&i| lines[i].trim_start().starts_with('❯') && is_rule(lines[i - 1]) && lines[i - 1].contains('─'));
+    input.is_none_or(|i| cursor > i)
 }
 
 /// 画面から押す答え。画面の行の番号と文で指す（番号だけだと、行の並びが変わったときに別の行を押す）
@@ -262,6 +294,17 @@ pub fn answer_text(q: &Q, p: &Pick) -> String {
         return if other.is_empty() { picked.first().cloned().unwrap_or_default() } else { other };
     }
     picked.into_iter().chain((!other.is_empty()).then_some(other)).collect::<Vec<_>>().join(", ")
+}
+
+/// answer が画面を読み直してキーを書く回数の上限の下限。道具の承認と計画の確認は、これで足りる
+const MIN_KEYS: usize = 40;
+
+/// answer が画面を読み直してキーを書く回数の上限。質問は、問いごとに要る回数の和に半分の余裕を足す（#256）。
+/// 単一選択は多くて3回（「その他」の番号、貼る、Enter）。複数選択は選択肢 n 個で多くて 2n+4 回
+/// （印を n+1 個、「その他」の行まで ↓ を n 回、貼る、Tab、Enter）。確かめの画面で1回
+pub fn key_limit(qs: &[Q]) -> usize {
+    let need = 1 + qs.iter().map(|q| if q.multi { 2 * q.labels.len() + 4 } else { 3 }).sum::<usize>();
+    MIN_KEYS.max(need + need / 2)
 }
 
 /// 画面と答えから、次に書くものを決める。画面だけから決めるので、途中で止まっても読み直せば続きから決まる
@@ -414,21 +457,58 @@ pub fn open_tools(text: &str) -> Vec<Tool> {
     out
 }
 
-/// 道具の承認の画面に必ず出る文（その道具の承認だと確かめるのに使う）。分からない道具は None（ここからは答えない）
-pub fn hint_of(tool: &str, input: &Value) -> Option<String> {
+/// 道具の承認の画面で、その道具の承認だと確かめるのに使う文。比べるときは空白を除く（norm）
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hint {
+    /// 画面に必ず出る文。Bash は command の1行目の頭30字、ファイルの道具はファイル名の頭30字。これが無い候補は使わない
+    pub head: String,
+    /// 画面に出うる全体。Bash は command 全体、ファイルの道具はパス全体。どこまで画面に出ているかで候補を比べる
+    pub full: String,
+    /// full を後ろから比べる（ファイルのパス。画面には cwd からの相対のパスが出ることがある）
+    pub tail: bool,
+}
+
+/// 分からない道具は None（ここからは答えない）
+pub fn hint_of(tool: &str, input: &Value) -> Option<Hint> {
     let s = |k: &str| input[k].as_str().map(str::to_string);
-    let h = match tool {
-        "Bash" => s("command").and_then(|c| c.lines().find(|l| !l.trim().is_empty()).map(str::to_string)),
-        "Write" | "Edit" | "MultiEdit" | "Read" | "NotebookEdit" => s("file_path").or(s("notebook_path")).and_then(|p| p.rsplit('/').next().map(str::to_string)),
-        "WebFetch" => s("url").map(|u| u.split("://").nth(1).unwrap_or(&u).split('/').next().unwrap_or("").to_string()),
-        "WebSearch" => s("query"),
-        "Glob" | "Grep" => s("pattern"),
-        "Skill" => s("skill"),
-        t if t.starts_with("mcp__") => t.rsplit("__").next().map(str::to_string),
-        _ => None,
-    }?;
-    let h: String = norm(&h).chars().take(30).collect();
-    (!h.is_empty()).then_some(h)
+    let (head, full, tail) = match tool {
+        "Bash" => {
+            let c = s("command")?;
+            (c.lines().find(|l| !l.trim().is_empty())?.to_string(), c, false)
+        }
+        "Write" | "Edit" | "MultiEdit" | "Read" | "NotebookEdit" => {
+            let p = s("file_path").or(s("notebook_path"))?;
+            (p.rsplit('/').next()?.to_string(), p, true)
+        }
+        "WebFetch" => s("url").map(|u| {
+            let rest = u.split("://").nth(1).unwrap_or(&u).to_string();
+            (rest.split('/').next().unwrap_or("").to_string(), rest, false)
+        })?,
+        "WebSearch" => s("query").map(|q| (q.clone(), q, false))?,
+        "Glob" | "Grep" => s("pattern").map(|q| (q.clone(), q, false))?,
+        "Skill" => s("skill").map(|q| (q.clone(), q, false))?,
+        t if t.starts_with("mcp__") => t.rsplit("__").next().map(|q| (q.to_string(), q.to_string(), false))?,
+        _ => return None,
+    };
+    let head: String = norm(&head).chars().take(30).collect();
+    (!head.is_empty()).then(|| Hint { head, full: norm(&full), tail })
+}
+
+/// 画面の本文（norm 済み）に、hint がどれだけ出ているか。(full の頭か後ろから続けて本文に出ている字数, full が全部出ているか)。
+/// head が出ていなければ None
+fn strength(h: &Hint, body: &str) -> Option<(usize, bool)> {
+    if !body.contains(&h.head) {
+        return None;
+    }
+    let cs: Vec<char> = h.full.chars().collect();
+    let piece = |k: usize| -> String { if h.tail { cs[cs.len() - k..].iter().collect() } else { cs[..k].iter().collect() } };
+    // 頭（後ろ）から k 字が出ていれば、それより短いものも出ているので、二分探索で一番長い k を探す
+    let (mut lo, mut hi) = (0, cs.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if body.contains(&piece(mid)) { lo = mid } else { hi = mid - 1 }
+    }
+    Some((lo, lo == cs.len()))
 }
 
 /// hook（fc-report.py）が PermissionRequest で残した道具（perm/<session_id>.json の items）。agent_id はチームメイトと sub-agent の印
@@ -485,11 +565,63 @@ pub fn match_tool(d: &Dialog, hook: &[HookItem], open: &[Tool]) -> Result<(Tool,
                 let f = cands.iter().find(|(t, _)| t.1 == "ExitPlanMode");
                 return pick(f, "画面の計画の確認が、待っている道具と合わない").map(|t| (t, "tool"));
             }
-            let b = norm(body);
-            let f = cands.iter()
-                .filter(|(t, _)| !matches!(t.1.as_str(), "AskUserQuestion" | "ExitPlanMode" | "Agent" | "Task"))
-                .find(|(t, _)| hint_of(&t.1, &t.2).is_some_and(|h| b.contains(&h)));
-            pick(f, "画面の承認が、待っている道具と合わない（ここで読めない道具かもしれない）").map(|t| (t, "tool"))
+            // 画面の本文に一番長く出ている候補を取る。頭だけで比べると、頭の同じ別の道具（画面に出ていないほう）を取ることがあった（#169）
+            // 折り返した command と複数行の command は、各行の頭に「│ 」が付いて出る（2026-11-23、v2.1.330）。行頭の1つだけ外して比べる
+            let lines: Vec<&str> = body.lines().map(|l| { let t = l.trim(); t.strip_prefix('│').map(str::trim_start).unwrap_or(t) }).collect();
+            // 本文の1行目は承認の種類の見出し（実物で見たのは「Bash command」「Create file」「Edit file」）。見出しで候補の道具を絞る。
+            // 答えた後も残る hook の古い記録が、Write の中身や Edit の diff に出ていると、今の承認より長く合ってしまうため。
+            // ファイルの承認は、見出しのすぐ下のパスの行（中身の行「  1 hi」の前まで）だけで比べる。知らない見出しは今まで通り本文の全体で比べる
+            const FILE_TOOLS: [&str; 5] = ["Write", "Edit", "MultiEdit", "Read", "NotebookEdit"];
+            let head_at = lines.iter().position(|l| !l.is_empty());
+            let content_row = |l: &str| { let d = l.chars().take_while(char::is_ascii_digit).count(); d > 0 && l[d..].starts_with(char::is_whitespace) };
+            let (only, area): (Option<&[&str]>, &[&str]) = match head_at.map(|i| (i, lines[i])) {
+                Some((_, "Bash command")) => (Some(&["Bash"]), &lines[..]),
+                Some((i, "Create file" | "Edit file")) => {
+                    let end = lines[i + 1..].iter().position(|l| content_row(l)).map_or(lines.len(), |k| i + 1 + k);
+                    (Some(&FILE_TOOLS), &lines[i + 1..end])
+                }
+                _ => (None, &lines[..]),
+            };
+            let b = norm(&area.join("\n"));
+            // cands の hook.len() 番目からが transcript の分
+            struct Scored<'a> { c: &'a (Tool, bool), st: (usize, bool), full: String, open: bool }
+            let scored: Vec<Scored> = cands.iter().enumerate()
+                .filter(|(_, (t, _))| !matches!(t.1.as_str(), "AskUserQuestion" | "ExitPlanMode" | "Agent" | "Task"))
+                .filter(|(_, (t, _))| only.is_none_or(|o| o.contains(&t.1.as_str())))
+                .filter_map(|(i, c)| hint_of(&c.0 .1, &c.0 .2).and_then(|h| strength(&h, &b).map(|st| Scored { c, st, full: h.full, open: i >= hook.len() })))
+                .collect();
+            let best = scored.iter().map(|x| x.st).max();
+            let top_all: Vec<&Scored> = scored.iter().filter(|x| Some(x.st) == best).collect();
+            // 同じ組（道具の名前、画面に出うる全体 full、チームメイトか）の候補は、画面で区別できない
+            let same = |x: &Scored, y: &Scored| x.c.0 .1 == y.c.0 .1 && x.full == y.full && x.c.1 == y.c.1;
+            // 一番強い候補の組が2つ以上なら、画面からはどれか決められない。同じ組の中は、前と同じく先のもの（hook の新しいもの）を取る。
+            // hook の記録は答えた後も残る（fc-report.py は新しい順に8件残し、SessionEnd まで消さない）ので、同じファイルの2回目の Edit などで古い記録と同じ組になる
+            let mut top: Vec<&Scored> = Vec::new();
+            for x in &top_all {
+                if !top.iter().any(|y| same(x, y)) {
+                    top.push(x);
+                }
+            }
+            if top.len() > 1 {
+                if top.iter().all(|x| x.c.1) {
+                    return Err("画面の承認は、チームメイトか sub-agent のもの。ここからは答えない".into());
+                }
+                return Err(format!("画面の承認に同じだけ合う道具が{}件あり、どれの承認か決められない", top.len()));
+            }
+            // transcript の分は結果がまだ無い（古い記録ではない）。同じ組に中身の違う道具が2つ以上待っていれば、どれか決められない
+            if let Some(first) = top.first() {
+                let mut open_inputs: Vec<&Value> = Vec::new();
+                for x in top_all.iter().filter(|x| x.open && same(x, first)) {
+                    if !open_inputs.contains(&&x.c.0 .2) {
+                        open_inputs.push(&x.c.0 .2);
+                    }
+                }
+                if open_inputs.len() > 1 {
+                    return Err(format!("画面の承認に同じだけ合う道具が{}件あり、どれの承認か決められない", open_inputs.len()));
+                }
+            }
+            let top: Vec<&(Tool, bool)> = top.into_iter().map(|x| x.c).collect();
+            pick(top.first().copied(), "画面の承認が、待っている道具と合わない（ここで読めない道具かもしれない）").map(|t| (t, "tool"))
         }
     }
 }
@@ -595,16 +727,23 @@ fn settle(id: &str, quiet_ms: u64, max_ms: u64) {
     }
 }
 
-/// 答える。expect_id は画面に出した道具の id（押す前に、まだその道具を待っているかを確かめる）
+/// 答える。expect_id は画面に出した道具の id（押す前に、まだその道具を待っているかを確かめる）。
+/// 答え終わるまで端末の錠（pty::serial）を持ち、チャット欄の送信とモデルの切り替えのキーを間に入れない（#168）
 pub fn answer(id: &str, expect_id: &str, act: &Act) -> Result<String, String> {
     super::refuse_if_disabled()?;
+    super::pty::serial(id, || answer_locked(id, expect_id, act))
+}
+
+fn answer_locked(id: &str, expect_id: &str, act: &Act) -> Result<String, String> {
     let fail = |m: String| Err(format!("{m}。何も送らずに止めたので、ターミナルで答えて"));
     let mut qs = Vec::new();
     let mut wrote = false;
     // 承認の画面が出た直後に書いたキーは、受け付けられないことがあった（2026-11-22、直した計画の画面が出てすぐ押した「2」で画面が変わらなかった）。
     // 最初のキーの前に、画面が 400ms 変わらなくなるのを待つ（長くて3秒）
     settle(id, 400, 3000);
-    for _ in 0..40 {
+    let mut tries = 0;
+    while tries < key_limit(&qs) {
+        tries += 1;
         let screen = super::pty::screen_text(id).ok_or("このセッションの端末はこのアプリに無い")?;
         let d = parse(&screen);
         if d.is_none() && wrote {
@@ -848,6 +987,127 @@ mod tests {
         assert!(matches!(step(REVIEW, &other, &qs2()), Step::Fail(_)));
     }
 
+    // 2026-11-23 に v2.1.330 の claude（haiku）を tmux（100x50）で動かして撮った確かめの画面。
+    // 長い自由入力と、4つ選んだ複数選択の答えが、どちらも2行に折り返されている。続きの行は「→」と同じ桁に字下げされる（#256）
+    const WRAPPED_REVIEW: &str = include_str!("dialog_fixtures/ask_wrapped_review.txt");
+
+    #[test]
+    fn review_reads_wrapped_answers() {
+        let qs = vec![
+            Q { question: "このメモに何と書く？".into(), labels: vec!["短い".into(), "長い".into()], multi: false },
+            Q {
+                question: "今週の献立に入れるものは？".into(),
+                labels: vec!["鶏の照り焼きと季節の野菜の炒め物".into(), "鮭の塩焼きと具だくさんの豚汁".into(), "牛肉とごぼうのしぐれ煮".into(), "麻婆豆腐と卵のスープ".into()],
+                multi: true,
+            },
+        ];
+        let memo = "会議の要点と次の打ち合わせまでに各自が調べておくことを、日付と担当者の名前を添えて箇条書きで残しておく";
+        let act = Act::Ask { picks: vec![pk(&[], memo), pk(&[0, 1, 2, 3], "")] };
+        let d = parse(WRAPPED_REVIEW).expect("確かめの画面");
+        let Dialog::Review { answers, .. } = &d else { panic!("Review ではない: {d:?}") };
+        assert_eq!(answers.len(), 2, "{answers:?}");
+        assert_eq!(next_step(Some(&d), &act, &qs), Step::Final("1".into()));
+        // 続きの行まで比べるので、1行目が同じで続きだけが違う答えは送らない
+        let tail = Act::Ask { picks: vec![pk(&[], &memo.replace("しておく", "さない")), pk(&[0, 1, 2, 3], "")] };
+        assert!(matches!(next_step(Some(&d), &tail, &qs), Step::Fail(_)));
+        let other = Act::Ask { picks: vec![pk(&[], memo), pk(&[0, 1, 2], "")] };
+        assert!(matches!(next_step(Some(&d), &other, &qs), Step::Fail(_)));
+        // 質問の文の続き（引用の罫線「│」付き）は答えに混ぜない
+        let Some(Dialog::Review { answers, .. }) = parse(QUOTE_REVIEW) else { panic!() };
+        assert_eq!(answers, vec!["Release の v0.2.0".to_string(), "キーチェーン以外を消す".to_string()]);
+    }
+
+    /// 複数選択の質問の画面を、書いたキーに合わせて動かす見本。動きは 2026-11-23 に v2.1.330 の tmux で見たもの
+    /// （番号で印を付け外しし、カーソルは動かない。↓ で「Type something」の次は「Submit」。Submit で Enter を押すと次の質問）
+    struct MultiSim {
+        qs: Vec<Q>,
+        at: usize,
+        checked: Vec<Vec<bool>>,
+        /// 1..=n+1 は番号の行、n+2 は Submit
+        cur: usize,
+        /// 確かめの画面で送った
+        sent: bool,
+    }
+
+    impl MultiSim {
+        fn new(qs: Vec<Q>) -> Self {
+            let checked = qs.iter().map(|q| vec![false; q.labels.len() + 1]).collect();
+            MultiSim { qs, at: 0, checked, cur: 1, sent: false }
+        }
+        fn screen(&self) -> String {
+            let tabs = format!("←  {}  ✔ Submit  →", (0..self.qs.len()).map(|i| format!("{} Q{i}", if i < self.at { '☒' } else { '☐' })).collect::<Vec<_>>().join("  "));
+            let c = |on: bool| if on { "❯ " } else { "  " };
+            if self.sent {
+                return String::new();
+            }
+            if self.at == self.qs.len() {
+                let mut s = format!("{tabs}\n\nReview your answers\n\n");
+                for (i, q) in self.qs.iter().enumerate() {
+                    let picked: Vec<usize> = (0..q.labels.len()).filter(|&j| self.checked[i][j]).collect();
+                    s += &format!(" ● {}\n   → {}\n", q.question, answer_text(q, &pk(&picked, "")));
+                }
+                return s + "\n❯ 1. Submit answers\n  2. Cancel\n";
+            }
+            let q = &self.qs[self.at];
+            let n = q.labels.len();
+            let mut s = format!("{tabs}\n{}\n", q.question);
+            for (j, l) in q.labels.iter().chain(std::iter::once(&"Type something".to_string())).enumerate() {
+                let mark = if self.checked[self.at][j] { "✔" } else { " " };
+                s += &format!("{}{}. [{mark}] {l}\n", c(self.cur == j + 1), j + 1);
+            }
+            s += &format!("{}   Submit\n{}\n  {}. Chat about this\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n", c(self.cur == n + 2), "─".repeat(40), n + 2);
+            s
+        }
+        fn key(&mut self, k: &str) {
+            if self.at == self.qs.len() {
+                assert_eq!(k, "1", "確かめの画面で Submit answers 以外を押した");
+                self.sent = true;
+                return;
+            }
+            let n = self.qs[self.at].labels.len();
+            match k {
+                "\x1b[B" => self.cur = (self.cur + 1).min(n + 2),
+                "\x1b[A" => self.cur = self.cur.saturating_sub(1).max(1),
+                "\t" if self.cur == n + 1 => self.cur = n + 2,
+                "\r" if self.cur == n + 2 => {
+                    self.at += 1;
+                    self.cur = 1;
+                }
+                d => {
+                    let d: usize = d.parse().unwrap_or_else(|_| panic!("見本が知らないキー {d:?}"));
+                    assert!((1..=n + 1).contains(&d), "番号 {d} は行に無い");
+                    self.checked[self.at][d - 1] ^= true;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn many_multi_select_questions_reach_the_submit() {
+        // 選択肢4つの複数選択を4問。全部の印を付けると、1問に10回（印4つ、↓4回、Tab、Enter）押し、確かめの画面で1回押す
+        let q = |i: usize| Q { question: format!("Which items {i}?"), labels: ["One", "Two", "Three", "Four"].iter().map(|s| s.to_string()).collect(), multi: true };
+        let qs: Vec<Q> = (0..4).map(q).collect();
+        let act = Act::Ask { picks: vec![pk(&[0, 1, 2, 3], ""); 4] };
+        let mut sim = MultiSim::new(qs.clone());
+        // answer と同じく、1回に画面を読み直して1つ書く
+        let mut tries = 0;
+        let fin = loop {
+            assert!(tries < key_limit(&qs), "上限 {} 回で送るところまで届かない。止まった画面:\n{}", key_limit(&qs), sim.screen());
+            tries += 1;
+            match next_step(parse(&sim.screen()).as_ref(), &act, &qs) {
+                Step::Key(k) => sim.key(&k),
+                Step::Final(k) => break k,
+                s => panic!("{s:?}\n{}", sim.screen()),
+            }
+        };
+        assert_eq!((fin.as_str(), tries), ("1", 41));
+        // 送ると承認の画面が閉じる
+        sim.key(&fin);
+        assert_eq!(next_step(parse(&sim.screen()).as_ref(), &act, &qs), Step::Done);
+        // 質問の無い承認（道具の承認、計画の確認）は今までと同じ上限
+        assert_eq!(key_limit(&[]), 40);
+    }
+
     #[test]
     fn question_mismatch_sends_nothing() {
         let qs = vec![Q { question: "Which pet?".into(), labels: vec!["Cat".into()], multi: false }];
@@ -905,6 +1165,132 @@ mod tests {
         assert_eq!(match_tool(&parse(&typed).unwrap(), &[], &open).unwrap().0.0, t.0);
     }
 
+    /// BASH の画面の command を置き換えた画面
+    fn bash_screen(cmd: &str) -> String {
+        BASH.replace("Bash(echo probe-ok > probe2.txt)", &format!("Bash({cmd})")).replace(" echo probe-ok > probe2.txt\n", &format!(" {cmd}\n"))
+    }
+    /// WRITE の画面を、path の Edit の承認にした画面
+    fn edit_screen(path: &str) -> String {
+        let name = path.rsplit('/').next().unwrap();
+        WRITE.replace("Write(hi.txt)", &format!("Update({path})")).replace(" Create file\n hi.txt", &format!(" Edit file\n {path}"))
+            .replace("Do you want to create hi.txt?", &format!("Do you want to make this edit to {name}?"))
+    }
+    fn bash(id: &str, cmd: &str) -> Tool {
+        (id.into(), "Bash".into(), json!({ "command": cmd }))
+    }
+    fn edit(id: &str, path: &str) -> Tool {
+        (id.into(), "Edit".into(), json!({ "file_path": path, "old_string": "a", "new_string": "b" }))
+    }
+
+    #[test]
+    fn same_head_bash_picks_the_one_on_screen() {
+        // #169。頭の30字が同じ Bash が2件待っている。新しいほう（t2）は画面に出ていない
+        let rm = "cd /Users/a/Documents/family-computing && rm -rf dist";
+        let st = "cd /Users/a/Documents/family-computing && git status";
+        let open = vec![bash("t1", rm), bash("t2", st)];
+        let d = parse(&bash_screen(rm)).unwrap();
+        assert_eq!(match_tool(&d, &[], &open).unwrap().0.0, "t1");
+        let d = parse(&bash_screen(st)).unwrap();
+        assert_eq!(match_tool(&d, &[], &open).unwrap().0.0, "t2");
+        // 画面の command が、待っている片方の command の頭になっている場合も、全体が合うほうを取る
+        let open = vec![bash("t1", rm), bash("t2", &format!("{rm} && ls"))];
+        assert_eq!(match_tool(&parse(&bash_screen(rm)).unwrap(), &[], &open).unwrap().0.0, "t1");
+        assert_eq!(match_tool(&parse(&bash_screen(&format!("{rm} && ls"))).unwrap(), &[], &open).unwrap().0.0, "t2");
+        // 古いチームメイトの承認が画面に出ている間に、リードが頭の同じ承認を出した。チームメイトのものとして断る
+        let hook = vec![hk("Bash", json!({ "command": rm }), Some("abeta-1"), 5), hk("Bash", json!({ "command": st }), None, 6)];
+        assert!(match_tool(&parse(&bash_screen(rm)).unwrap(), &hook, &[]).unwrap_err().contains("チームメイト"));
+    }
+
+    #[test]
+    fn same_strength_candidates_are_not_answered() {
+        // 画面の command が両方に同じだけ合う（画面で区別できない）ときは答えない
+        let rm = "cd /Users/a/Documents/family-computing && rm -rf dist";
+        let open = vec![bash("t1", &format!("{rm}\necho one")), bash("t2", &format!("{rm}\necho two"))];
+        let d = parse(&bash_screen(rm)).unwrap();
+        assert!(match_tool(&d, &[], &open).unwrap_err().contains("決められない"));
+        // 同じ道具が hook と transcript の両方にあるのは1件と数える（hook の分を返す）
+        let hook = vec![hk("Bash", json!({ "command": rm }), None, 5)];
+        assert_eq!(match_tool(&d, &hook, &[bash("t1", rm)]).unwrap().0.0, "hook:5");
+    }
+
+    #[test]
+    fn same_file_name_edit_picks_the_directory_on_screen() {
+        let a = "/Users/a/proj/src/a/mod.rs";
+        let b = "/Users/a/proj/src/b/mod.rs";
+        let open = vec![edit("t1", a), edit("t2", b)];
+        // 画面には cwd からの相対のパスが出る
+        assert_eq!(match_tool(&parse(&edit_screen("src/a/mod.rs")).unwrap(), &[], &open).unwrap().0.0, "t1");
+        assert_eq!(match_tool(&parse(&edit_screen("src/b/mod.rs")).unwrap(), &[], &open).unwrap().0.0, "t2");
+        assert_eq!(match_tool(&parse(&edit_screen(a)).unwrap(), &[], &open).unwrap().0.0, "t1");
+        // ファイル名しか出ていなければ、どちらか決められないので答えない
+        assert!(match_tool(&parse(&edit_screen("mod.rs")).unwrap(), &[], &open).is_err());
+    }
+
+    // 2026-11-23 に v2.1.330 の claude を tmux（100x50）で動かして撮った実物の道具の承認の画面（#169）。
+    // 折り返した command と複数行の command は、各行の頭に「│ 」が付く。Edit はパスが cwd からの相対で出る
+    const BASH_LONG: &str = include_str!("dialog_fixtures/bash_long_wrapped.txt");
+    const BASH_MULTI: &str = include_str!("dialog_fixtures/bash_multiline.txt");
+    const EDIT_NESTED: &str = include_str!("dialog_fixtures/edit_nested.txt");
+
+    #[test]
+    fn real_tool_screens_pick_the_tool_on_screen() {
+        let long = "echo first-segment-0123456789-abcdefghijklmnopqrstuvwxyz second-segment-0123456789-abcdefghijklmnopqrstuvwxyz third-segment-0123456789-abcdefghijklmnopqrstuvwxyz fourth-segment-0123456789 > long-output-file.txt && wc -c long-output-file.txt";
+        let long2 = long.replace("third-segment", "other-segment");
+        let multi = "touch multiline-probe-first-file-aaaaaaaaaaaaaaaa.txt\ntouch multiline-probe-second-file-bbbbbbbbbbbbbbbb.txt";
+        let multi2 = multi.replace("second-file", "other-file");
+        let path = "/private/tmp/fc169-probe/src/deep/nested/mod.rs";
+        let path2 = "/private/tmp/fc169-probe/src/other/mod.rs";
+        for (screen, right, wrong) in [(BASH_LONG, bash("t1", long), bash("t2", &long2)), (BASH_MULTI, bash("t1", multi), bash("t2", &multi2)), (EDIT_NESTED, edit("t1", path), edit("t2", path2))] {
+            let d = parse(screen).expect("道具の承認の画面");
+            // 1件だけなら今まで通り当たる
+            assert_eq!(match_tool(&d, &[], std::slice::from_ref(&right)).unwrap().0.0, "t1");
+            // 頭の同じ別の道具（新しいほう）があっても、画面に出ているほうを取る
+            assert_eq!(match_tool(&d, &[], &[right.clone(), wrong.clone()]).unwrap().0.0, "t1", "{screen}");
+            assert_eq!(match_tool(&d, &[], &[wrong.clone(), right.clone()]).unwrap().0.0, "t1");
+        }
+    }
+
+    #[test]
+    fn old_records_in_the_file_content_do_not_win() {
+        // 答えた後も残る古い Bash の記録の command が、Write の中身に出ている。前と同じく Write を取る
+        let screen = WRITE.replace("  1 hi", "  1 echo probe-ok > probe2.txt");
+        let hook = vec![
+            hk("Bash", json!({ "command": "echo probe-ok > probe2.txt" }), None, 5),
+            hk("Write", json!({ "file_path": "/private/tmp/fc-ask-probe/hi.txt", "content": "echo probe-ok > probe2.txt" }), None, 6),
+        ];
+        assert_eq!(match_tool(&parse(&screen).unwrap(), &hook, &[]).unwrap().0.0, "hook:6");
+        // 古い Edit の記録のパスが、今の Edit の diff に出ている。画面のパスの行で比べる
+        let screen = edit_screen("src/x.ts").replace("  1 hi", "  1 import { c } from \"/Users/a/proj/src/b/config.ts\"");
+        let hook = vec![
+            hk("Edit", json!({ "file_path": "/Users/a/proj/src/b/config.ts", "old_string": "a", "new_string": "b" }), None, 5),
+            hk("Edit", json!({ "file_path": "/Users/a/proj/src/x.ts", "old_string": "a", "new_string": "b" }), None, 6),
+        ];
+        assert_eq!(match_tool(&parse(&screen).unwrap(), &hook, &[]).unwrap().0.0, "hook:6");
+    }
+
+    #[test]
+    fn same_file_edit_again_uses_the_newest_hook_record() {
+        // hook の記録は答えた後も残る。同じファイルの2回目の Edit は、古い記録と画面で区別できないので、前と同じく新しい記録を取る
+        let a = "/Users/a/proj/src/a/mod.rs";
+        let old = hk("Edit", json!({ "file_path": a, "old_string": "x", "new_string": "y" }), None, 5);
+        let new = hk("Edit", json!({ "file_path": a, "old_string": "y", "new_string": "z" }), None, 6);
+        let d = parse(&edit_screen("src/a/mod.rs")).unwrap();
+        assert_eq!(match_tool(&d, &[old.clone(), new.clone()], &[]).unwrap().0.0, "hook:6");
+        // 同じ Bash の2回目も同じ
+        let rm = "cd /Users/a/Documents/family-computing && rm -rf dist";
+        let hook = vec![hk("Bash", json!({ "command": rm }), None, 5), hk("Bash", json!({ "command": rm }), None, 7)];
+        assert_eq!(match_tool(&parse(&bash_screen(rm)).unwrap(), &hook, &[]).unwrap().0.0, "hook:7");
+        // transcript で結果の無い（両方とも待っている）同じファイルの Edit が2件あれば、どれの承認か決められない
+        let open = vec![
+            ("t1".to_string(), "Edit".to_string(), old.tool_input.clone()),
+            ("t2".to_string(), "Edit".to_string(), new.tool_input.clone()),
+        ];
+        assert!(match_tool(&d, &[], &open).unwrap_err().contains("決められない"));
+        // 古いチームメイトの記録と、リードの同じ command が同じだけ合うときは、どちらのものか決められないので答えない
+        let hook = vec![hk("Bash", json!({ "command": rm }), Some("abeta-1"), 5), hk("Bash", json!({ "command": rm }), None, 7)];
+        assert!(match_tool(&parse(&bash_screen(rm)).unwrap(), &hook, &[]).is_err());
+    }
+
     fn hk(tool: &str, input: Value, agent: Option<&str>, at: u64) -> HookItem {
         HookItem { tool_name: tool.into(), tool_input: input, agent_id: agent.map(Into::into), at }
     }
@@ -956,6 +1342,31 @@ mod tests {
         assert_eq!(answer_text(q, &pk(&[2, 0], "みそ汁")), "One, Three, みそ汁");
         assert_eq!(answer_text(&qs2()[0], &pk(&[1], " 自由\n入力 ")), "自由 入力");
     }
+    /// Enter を書いてはいけない画面か（#168）。承認の画面、質問、ピッカーでは断り、画面に残った前の入力や本人の文では断らない
+    #[test]
+    fn enter_is_blocked_only_by_a_live_menu() {
+        use crate::composer::enter_blocked;
+        let rule = "─".repeat(40);
+        for s in [BASH, WRITE, PLAN, ASK_Q1, ASK_Q2, REVIEW, QUOTE_Q1, QUOTE_Q2, QUOTE_REVIEW] {
+            assert!(enter_blocked(None, s).is_some(), "{s}");
+        }
+        let picker = "❯ /model\n  Select model\n    1.  Default (recommended)\n  ❯ 2.  Sonnet 5.5\n    3.  Haiku 5.5";
+        assert!(enter_blocked(None, picker).unwrap().contains("ピッカー"));
+        assert!(enter_blocked(None, IDLE).is_none());
+        assert!(enter_blocked(Some(&json!({"state": "waiting_permission"})), IDLE).is_some());
+        assert!(enter_blocked(Some(&json!({"state": "running"})), IDLE).is_none());
+        // 前に送った「1. a」「2. b」が画面に残っている。parse は承認の画面と読むが、カーソルの行が入力欄より上なので断らない
+        let history = format!("⏺ 前の答え\n  ⎿  結果\n\n❯ 1. a\n  2. b\n\n⏺ 了解\n{rule}\n❯ hello\n{rule}\n  ⏸ manual mode on");
+        assert!(parse(&history).is_some(), "この画面は parse だけでは承認の画面に見える");
+        assert!(enter_blocked(None, &history).is_none());
+        // 貼った文が入力欄に「1. a」「2. b」で出ている
+        let typed = format!("⏺ 了解\n{rule}\n❯ 1. a\n  2. b\n{rule}\n  ⏸ manual mode on");
+        assert!(enter_blocked(None, &typed).is_none());
+        // 本人の文に「Select model」があり、前の入力に「❯ 1.」がある
+        let words = format!("❯ 1. Select model の画面を直す\n  2. 試験\n\n⏺ 直した\n{rule}\n❯ \n{rule}");
+        assert!(enter_blocked(None, &words).is_none());
+    }
+
     /// 本物の claude を、アプリと同じ PTY の道（pty::spawn）で動かし、質問、道具の承認、計画の確認に answer で答える。
     /// 人の設定（全部許可、bypassPermissions）だと承認の画面が出ないので、FC_CLAUDE_BIN に包みのスクリプトを渡す:
     ///   printf '#!/bin/sh\nexec claude --setting-sources project --permission-mode default --model haiku "$@"\n' > /tmp/fc-claude-wrap.sh && chmod +x /tmp/fc-claude-wrap.sh
