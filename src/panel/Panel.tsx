@@ -20,6 +20,7 @@ import { StateTab } from "./StateTab";
 import { useConversation } from "./useConversation";
 import { usePanelSend } from "./usePanelSend";
 import { useBoot } from "./useBoot";
+import { doneLog } from "./bootDone";
 import { isSlashCommand } from "../composer/edit";
 import { call as invoke } from "../bridge";
 import { canAnswerPermission, hasTerminal } from "../abilities";
@@ -102,6 +103,12 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
     boot.kick();
     if (back?.length) setText([...back, text].filter((x) => x.trim()).join("\n"));
   };
+  // パネルを開く前に送れなかった預けた文（#184、App の見張りが知らせた分）を、開いたら入力欄に戻す（打ちかけがあれば、その前に置く）
+  useEffect(() => {
+    if (!agent) return;
+    const back = doneLog.takeBack(agent.id);
+    if (back.length) setText([...back, text].filter((x) => x.trim()).join("\n"));
+  }, [agent?.id]);
 
   // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
   // -p の子は返事が出ると、送った文の仮の印が外れる（#55、answerPending）。外れた分は after の位置に置く（withNotes）

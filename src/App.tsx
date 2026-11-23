@@ -22,6 +22,7 @@ import { useHidden } from "./hooks/useHidden";
 import { useKill } from "./hooks/useKill";
 import { useRestart } from "./hooks/useRestart";
 import { useCardSend } from "./hooks/useCardSend";
+import { useQueuedWatch } from "./hooks/useQueuedWatch";
 import { supportFor } from "./session/SessionControls";
 import { useCcnReservations } from "./webReserve";
 import { Stage } from "./canvas/Stage";
@@ -107,6 +108,9 @@ export default function App() {
   useCcnReservations(agents, supportFor, (m) => toast(m), (m) => toast(m, true));
   const letterMarks = useLetterMarks(flights, snap !== null);
   const { panelSend, cardSend } = useCardSend(toast);
+  // 起動を待って預けた文が送れなかったら、パネルを開いていなくても知らせる（#184）
+  const listed = useCallback((id: string) => treeRef.current.byId.has(id), []);
+  useQueuedWatch(toast, listed);
   const counts = useMemo(() => {
     const c: Record<Mood, number> = { approval: 0, reply: 0, working: 0, done: 0, idle: 0 };
     for (const a of agents) c[moodOf(a)]++;
