@@ -36,6 +36,7 @@ import { Panel } from "./panel/Panel";
 import { DepthCtx, KillCtx, LetterCtx, RestartCtx, SendCtx, TownCtx } from "./contexts";
 import { loadPlace, savePlace } from "./newHouse/placeSetting";
 import { SettingsDialog } from "./settings/SettingsDialog";
+import { showDot, useUpdateStatus } from "./settings/update";
 import { loadDefaults, sameDefaults, saveDefaults } from "./session/defaults";
 import "./App.css";
 import "./mobile/mobile.css";
@@ -178,6 +179,9 @@ export default function App() {
   // 設定（#92）。「新しい世帯」で親を立てる場所。null は既定（~/Documents/meta）
   const [place, setPlace] = useState<string | null>(loadPlace);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 安定版の更新があるか（#295）。あれば歯車に点を付ける。開発版とブラウザ版では null のまま
+  const [update, setUpdate] = useUpdateStatus(60_000);
+  const updateDot = showDot(update);
 
   return (
     <SkinCtx.Provider value={skinCtx}>
@@ -213,7 +217,10 @@ export default function App() {
             </div>
             <div className="top-mid" />
             <div className="top-right">
-              <button className="side-toggle" onClick={() => setSettingsOpen(true)} aria-label="設定" title="設定" aria-haspopup="dialog"><Settings size={18} strokeWidth={1.8} /></button>
+              <button className="side-toggle set-gear" onClick={() => setSettingsOpen(true)} aria-label={updateDot ? "設定（更新がある）" : "設定"}
+                title={updateDot ? "設定（更新がある）" : "設定"} aria-haspopup="dialog">
+                <Settings size={18} strokeWidth={1.8} />{updateDot && <i className="set-dot" aria-hidden />}
+              </button>
             </div>
           </header>
 
@@ -284,7 +291,7 @@ export default function App() {
         if (p !== place) { savePlace(p); setPlace(p); msgs.push(p ? "新しい世帯の場所を変えた" : "新しい世帯の場所を既定に戻した"); }
         if (!sameDefaults(d, loadDefaults())) { saveDefaults(d); msgs.push("新しい世帯のモデルと権限モードを変えた"); }
         toast(msgs.length ? msgs.join("。") : "設定を保存した");
-      }} onClose={() => setSettingsOpen(false)} />}
+      }} onClose={() => setSettingsOpen(false)} onUpdateStatus={setUpdate} />}
 
       {killAsk && (
         <KillConfirm agent={killAsk} plan={killPlan(tree.childrenOf, killAsk)}

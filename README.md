@@ -238,6 +238,18 @@ git fetch origin && scripts/release-stable.sh origin/main
 
 入っている版は `$HOME/.family-computing/stable/current.ref`、履歴は同じ場所の `releases.log` に残る。
 
+設定の画面から上げる（#295）:
+
+安定版の設定の画面に「更新」の欄がある。欄には、今の版（`current.ref` のタグと sha）、`origin/main` の sha、何コミット新しいかを出す。`origin/main` が今の版の子孫で、同じでないときは、ヘッダーの歯車に青い点を付ける。
+
+- 安定版は、起動の20秒後から5分ごとに、本体の checkout（`~/Documents/family-computing`）で `git fetch origin` を裏で回す。設定の画面を開いたときも1回回す。どれも起動を待たせない。
+- 「更新して再起動」を押すと、本体の checkout の `scripts/release-stable.sh origin/main` を、`git fetch origin` の後に走らせる。PATH はログインシェルのもので、無ければ `~/.cargo/bin`、`~/.bun/bin`、`/usr/sbin` を足す。
+- スクリプトはアプリから切り離して走らせる。新しいセッション（setsid）にし、標準入力は `/dev/null`、出力は `$HOME/.family-computing/stable/update-run.log` に書く。0〜2 以外のファイル記述子は exec で閉じる。スクリプトが途中で安定版を終わらせても、スクリプトは最後まで進む。
+- 終わったときの時刻と終了コードは、同じ場所の `update-run.exit` に書く。失敗したら、設定の画面に終了コードと出力の末尾を出す。2つのファイルは足しただけで、古い安定版は読まない。
+- 開発版は欄も点も出さない。確かめるときは `FC_UPDATE=1` を付ける。開発版で「更新して再起動」が走るのは、`CT_DEST_DIR`、`CT_STABLE_HOME`、`FC_UPDATE_REPO`（比べる相手と走らせるスクリプトのリポジトリ）の3つを付けたときだけである。`--update-run` は安定版の実行ファイルでは断る。スクリプトに渡す PATH は `FC_UPDATE_PATH` で差し替えられる。
+
+安定版の中の端末（Claude Code）から `release-stable.sh` を走らせない。スクリプトが安定版を終わらせると、端末の claude と一緒にスクリプトも止まる。2026-11-23 には、.app だけ入れ替わり、`current.ref`、hook の写し、`releases.log`、起動が抜けた。安定版から上げるときは「更新して再起動」を使う。
+
 1つ前の版に戻す:
 
 ```bash
@@ -245,6 +257,8 @@ scripts/rollback-stable.sh    # 今の版と1つ前の版を入れ替える。�
 ```
 
 スクリプトを直したら `scripts/test-stable-scripts.sh` を流す。一時のリポジトリと一時の置き場所だけを使い、tauri build は偽の bunx に替えるので、本物の安定版には触らない。
+
+「更新して再起動」の切り離しは `scripts/test-update-detach.sh` で確かめる。開発版の実行ファイルを一時の入れ先の .app に写し、`--update-run`（画面を作らずに同じ処理を走らせる開発用の引数）で動かす。スクリプトの `stop_stable` がこのプロセスを終わらせた後も、入れ替え、`current.ref`、hook の写し、`releases.log` まで進むかを見る。
 
 戻すときも、状態 hook を戻した先の版のタグから写し直す。アプリを入れ替えずに hook だけを写し直すときは `scripts/install-stable-hooks.sh [タグ]` を使う（タグを省くと、いま入っている版のタグから写す）。
 
@@ -417,4 +431,5 @@ VITE_FC_FORCE_VISIBLE=1 bun tauri dev --config '{"build":{"devUrl":"http://local
 - 開発版は2つ目の起動を止めない（#176）。同じ `FC_APP_HOME` で2つ起動すると、2つ目が端末の台帳を書き直すので、起動のたびに `mktemp -d` で分ける。2つ目を止める動きは `FC_SINGLE_INSTANCE=1 scripts/check-single-instance.sh` で確かめる。
 - 軽さの計測（`src/term/bench.ts` の scene）では付けない。隠した窓の負荷を測る場面（hidden、minimized）の数字が変わる。
 - 開発版はお便りの通知（#292）を出さない。確かめるときだけ `FC_NOTIFY=1` を付ける。開発版は通知をターミナル（`com.apple.Terminal`）の名義で出す。2026-11-23 に確かめた機械では、usernoted が要求を断り、画面に出なかった。ターミナルの通知を許可すれば出るかは確かめていない。出す判定が動いたかは `FC_PERF_LOG` の `notify` の行で見る。
+- 開発版は設定の「更新」の欄とヘッダーの歯車の点（#295）を出さない。確かめるときは `FC_UPDATE=1` と、`CT_STABLE_HOME`（`current.ref` を置いた一時の場所）、`FC_UPDATE_REPO`（一時のリポジトリ）を付ける。「更新して再起動」まで押すときは、`CT_DEST_DIR`、`CT_BUILD_WORKTREE`、`CT_TARGET_DIR`、`CT_NO_OPEN=1` も一時の場所に向け、`FC_UPDATE_PATH` で偽の bunx を PATH の先頭に置く。
 - 開発版で「新しい世帯」を押すと、本物の claude が起動し、本物の `~/.claude` に会話が残る。押す確認は捨ての場所（一時のディレクトリ）を置き場所にして行い、済んだら閉じる（power）か、開発版を終了して止める。

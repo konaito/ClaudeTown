@@ -589,7 +589,8 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 }
 
 /* 設定の画面（#92）。.modal と .modal-scrim は確認の画面と同じ */
-.set-modal { width: min(460px, 92vw); }
+.set-modal { width: min(460px, 92vw); max-height: calc(100vh - 32px); overflow-y: auto; box-sizing: border-box; }
+/* 更新の欄（#295）を足して背が伸びたので、窓が低いときは中を巻き取る（保存のボタンが窓の外に出ないように） */
 .set-sec { display: flex; flex-direction: column; gap: 6px; }
 .set-sec .hint { margin: 0; }
 .set-label { font-size: 13px; font-weight: 600; }
@@ -605,3 +606,9 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .set-pair .set-sub { margin-top: 0; }
 .set-list { max-height: 220px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; padding: 4px; }
 .set-list .nh-row.on { background: #efece7; font-weight: 600; }
+/* 更新（#295）。歯車の点は状態の点（.dot）と同じ大きさで、返事待ちの青 */
+.set-gear { position: relative; }
+.set-dot { position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border-radius: 50%; background: var(--reply); box-shadow: 0 0 0 2px var(--bg); }
+.set-ver { font-size: 13px; font-variant-numeric: tabular-nums; user-select: text; }
+.set-news { margin: 0; font-size: 12px; color: var(--reply-ink); font-weight: 600; }
+.set-log { margin: 0; max-height: 120px; overflow: auto; padding: 4px 8px; border: 1px solid var(--line); border-radius: 10px; font-size: 11.5px; color: var(--sub); white-space: pre-wrap; user-select: text; }
