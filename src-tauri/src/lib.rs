@@ -87,6 +87,14 @@ fn place(home: &std::path::Path, app_id: Option<&str>, app_home: Option<String>,
     dir.join(name)
 }
 
+/// 2つ目の起動を止めるか（#176）。止めるときは tauri-plugin-single-instance を使う。
+/// プラグインは identifier だけで1つ目を見分ける（macOS では /tmp/<identifier>_si.sock）。安定版と開発版は identifier が違うので止め合わない。
+/// 開発版は、子が別のポートと別の FC_APP_HOME で並列に起動するので、既定では止めない（止めると2体目の子の開発版が黙って終わる）。
+/// 開発版で止める動きを確かめるときだけ FC_SINGLE_INSTANCE=1 を付ける
+fn single_instance_wanted(app_id: &str, force: Option<&str>) -> bool {
+    app_id == STABLE_ID || force == Some("1")
+}
+
 fn read_json(p: &PathBuf) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(p).ok()?).ok()
 }
@@ -457,7 +465,26 @@ pub fn run() {
         println!("{}", serde_json::to_string_pretty(&conversation(id, None).map(|d| d.items)).unwrap_or_default());
         return;
     }
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // 2つ目の起動は、窓を作る前（build の中のプラグインの初期化）に終わる。台帳（terminals.json）を空で書き直さない（#176）。
+    // プラグインの決まりで、ほかのプラグインより先に入れる
+    let app_id = context.config().identifier.clone();
+    if single_instance_wanted(&app_id, std::env::var("FC_SINGLE_INSTANCE").ok().as_deref()) {
+        let stable = app_id == STABLE_ID;
+        builder = builder.plugin(tauri_plugin_single_instance::init(move |app, _args, _cwd| {
+            eprintln!("[single-instance] 2つ目の起動を断った");
+            // 安定版は1つ目の窓を前に出す。開発版は前面を奪わない（本人が別のアプリを使っている間に子が確かめるため）
+            if stable {
+                use tauri::Manager;
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.unminimize();
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+        }));
+    }
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
@@ -677,6 +704,22 @@ mod tests {
         // FC_APP_HOME はアプリの分だけを差し替える
         assert_eq!(p(Some(STABLE_ID), Some("/t"), Scope::App, "avatars.json"), PathBuf::from("/t/avatars.json"));
         assert_eq!(p(dev, Some("/t"), Scope::Shared, "letters.jsonl"), PathBuf::from("/h/.family-computing/letters.jsonl"));
+    }
+
+    #[test]
+    fn single_instance_only_for_stable_unless_forced() {
+        // 安定版はいつも2つ目を止める。開発版は子が並列で起動するので、FC_SINGLE_INSTANCE=1 のときだけ止める（#176）
+        let dev = "jp.fybe.family-computing.dev";
+        assert!(single_instance_wanted(STABLE_ID, None));
+        assert!(single_instance_wanted(STABLE_ID, Some("0")));
+        assert!(!single_instance_wanted(dev, None));
+        assert!(!single_instance_wanted(dev, Some("")));
+        assert!(!single_instance_wanted(dev, Some("0")));
+        assert!(single_instance_wanted(dev, Some("1")));
+        // 設定ファイルの identifier が、この判定の前提（安定版の値と開発版の値）のままか
+        let conf: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["identifier"], dev);
+        assert!(!single_instance_wanted(conf["identifier"].as_str().unwrap(), None));
     }
 
     #[test]

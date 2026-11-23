@@ -204,6 +204,8 @@ in-process のチームメイトと sub-agent の hook は、リードの sessio
 
 `src-tauri/tauri.conf.json` は開発版の設定にしてある。何も付けずに `bun tauri dev` や `bun tauri build` を動かすと、必ず開発版になる。安定版は `src-tauri/tauri.stable.conf.json` を Tauri の `--config` で重ねてビルドする（`--config` に渡した JSON は元の設定に重なる。配列が丸ごと置き換わる前提で、窓の定義とアイコンの一覧は全部書いてある）。開発版は 1420 番のポートを使う。安定版はビルドした画面を中に持つのでポートを使わない。2つは同時に起動できる。
 
+安定版は1つしか起動しない（#176）。2つ目は窓を作る前に終わり、1つ目の窓を前に出す。2つ目が端末の台帳（`terminals.json`）を空で書き直さないためである。止める仕組みは `tauri-plugin-single-instance` で、1つ目を identifier だけで見分ける（macOS では `/tmp/<identifier の . と - を _ にしたもの>_si.sock`）。安定版と開発版は identifier が違うので、互いを止めない。開発版は子が別のポートと別の `FC_APP_HOME` で並列に起動するので、既定では止めない。開発版で止める動きを確かめるときだけ `FC_SINGLE_INSTANCE=1` を付ける（`scripts/check-single-instance.sh`）。
+
 子と開発者の決まり:
 
 - 起動と確認には開発版だけを使う。
@@ -351,5 +353,6 @@ VITE_FC_FORCE_VISIBLE=1 bun tauri dev --config '{"build":{"devUrl":"http://local
 
 - この変数で続くのは取得と時計だけで、描画は続かない。窓が隠れている間は WebKit が requestAnimationFrame を止める（2026-11-13 の実測で fps 0）。起動から隠れたままだと一度も描かれないので、`screencapture -l` で見た目を撮るときは窓を前に出す。
 - 止めるときは、自分が起動した `bun tauri dev` の pid を指定する。安定版と開発版は実行ファイル名が同じなので、名前で止めない。
+- 開発版は2つ目の起動を止めない（#176）。同じ `FC_APP_HOME` で2つ起動すると、2つ目が端末の台帳を書き直すので、起動のたびに `mktemp -d` で分ける。2つ目を止める動きは `FC_SINGLE_INSTANCE=1 scripts/check-single-instance.sh` で確かめる。
 - 軽さの計測（`src/term/bench.ts` の scene）では付けない。隠した窓の負荷を測る場面（hidden、minimized）の数字が変わる。
 - 開発版で「新しい世帯」を押すと、本物の claude が起動し、本物の `~/.claude` に会話が残る。押す確認は捨ての場所（一時のディレクトリ）を置き場所にして行い、済んだら閉じる（power）か、開発版を終了して止める。
