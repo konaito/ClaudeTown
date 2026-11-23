@@ -4,14 +4,18 @@ import { checkPlace, DEFAULT_PLACE_LABEL } from "../newHouse/placeSetting";
 import { placeLabel, recentPlaces, type PlacesInput, type RecentPlace } from "../newHouse/places";
 import { EFFORTS, MODELS, MODES } from "../session/control";
 import type { SessionDefaults } from "../session/defaults";
+import { asStatus, canRun, checkedText, compareText, runText, shortSha, useUpdateStatus, type UpdateStatus } from "./update";
 
 /**
- * 設定の画面（#92）。ヘッダーの右端の歯車から開くモーダル。項目は「新しい世帯の場所」と「新しい世帯のモデル、権限モード、effort」。
+ * 設定の画面（#92）。ヘッダーの右端の歯車から開くモーダル。項目は「新しい世帯の場所」と「新しい世帯のモデル、権限モード、effort」と「更新」（#295）。
+ * 「更新」は安定版だけに出る（Rust の update_status が null の版では出さない）。保存のボタンとは別に、その場で走らせる。
  * 項目を足すときは、<section className="set-sec"> を1つ足し、保存する値を onSave の引数に足す。
  */
-export function SettingsDialog({ place, defaults, onSave, onClose }: {
+export function SettingsDialog({ place, defaults, onSave, onClose, onUpdateStatus }: {
   place: string | null; defaults: SessionDefaults;
   onSave: (place: string | null, defaults: SessionDefaults) => void; onClose: () => void;
+  /** 読み直した更新の状態を渡す（ヘッダーの歯車の点を、App の1分ごとの読み直しを待たずに合わせる） */
+  onUpdateStatus?: (s: UpdateStatus) => void;
 }) {
   // 入力欄の文字。空は「設定しない（既定）」
   const [text, setText] = useState(place ?? "");
@@ -27,6 +31,20 @@ export function SettingsDialog({ place, defaults, onSave, onClose }: {
       .catch(() => live && setSrc("error"));
     return () => { live = false; };
   }, []);
+  // 更新（#295）。開いている間は2秒ごとに読み直し、開いたときに裏の fetch も始める
+  const [upd, setUpd] = useUpdateStatus(2000, true);
+  const [pressing, setPressing] = useState(false);
+  const [runErr, setRunErr] = useState<string | null>(null);
+  const runUpdate = () => {
+    setPressing(true);
+    setRunErr(null);
+    invoke<unknown>("update_run")
+      .then((v) => { const s = asStatus(v); if (s) setUpd(s); })
+      .catch((e) => setRunErr(String(e)))
+      .finally(() => setPressing(false));
+  };
+  useEffect(() => { if (upd) onUpdateStatus?.(upd); }, [upd, onUpdateStatus]);
+  const ran = upd ? runText(upd.run) : null;
   useEffect(() => {
     const k = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", k);
@@ -95,6 +113,34 @@ export function SettingsDialog({ place, defaults, onSave, onClose }: {
             </label>
           </div>
         </section>
+        {upd && (
+          <section className="set-sec set-update">
+            <span className="set-label">更新</span>
+            <p className="hint">押すと {upd.branch} を fetch して、scripts/release-stable.sh {upd.branch} を走らせる。ビルドに数分かかり、済むとアプリが終わって新しい版で起動し直す。開いていた端末は、起動し直した後に立て直す。</p>
+            <div className="set-row">
+              <div className="set-pair">
+                <span className="set-sub">今の版</span>
+                <span className="set-ver" title={upd.current?.sha}>{upd.current ? `${upd.current.tag}（${shortSha(upd.current.sha)}）` : "—"}</span>
+              </div>
+              <div className="set-pair">
+                <span className="set-sub">{upd.branch}</span>
+                <span className="set-ver" title={upd.remote ?? undefined}>{shortSha(upd.remote)}</span>
+              </div>
+            </div>
+            <p className={upd.available ? "set-news" : "hint"}>{compareText(upd)}</p>
+            <p className="hint">{checkedText(upd, Date.now())}</p>
+            <div>
+              <button className="pane-btn" disabled={!canRun(upd, pressing)} onClick={runUpdate}>
+                {upd.run.state === "running" || pressing ? "更新している…" : "更新して再起動"}
+              </button>
+            </div>
+            {ran && <p className={ran.bad ? "set-bad" : "hint"}>{ran.text}</p>}
+            {upd.run.state === "finished" && !upd.run.ok && upd.run.tail.length > 0 && (
+              <pre className="set-log">{upd.run.tail.slice(-6).join("\n")}</pre>
+            )}
+            {runErr && <p className="set-bad">{runErr}</p>}
+          </section>
+        )}
         <div className="modal-btns">
           <button className="pane-btn" onClick={onClose}>やめる（Esc）</button>
           <button className="primary" disabled={!!bad} onClick={save}>保存</button>

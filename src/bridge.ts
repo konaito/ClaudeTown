@@ -81,6 +81,8 @@ async function webCall<T>(cmd: string, a: Record<string, unknown> = {}): Promise
     }
     // 場所のリポジトリ名（#99）は .git を読む Rust にしか取れない。ブラウザ版では空にして、ディレクトリ名だけを出す
     case "place_repos": return {} as T;
+    // 安定版の更新（#295）はアプリだけ。ブラウザ版では欄も点も出さない
+    case "update_status": return null as T;
     // Rust の send_direct と同じく、貼り付けてから Enter を押す
     case "send_direct": {
       await post(`/sessions/${a.sessionId}/terminal/input`, { text: `\x1b[200~${String(a.text)}\x1b[201~` });
@@ -135,6 +137,8 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   // 見た目の確認用: public/dev-house-places.json（Rust の house_places の出力）。無ければ空の一覧
   if (cmd === "house_places") return devJson<T>("dev-house-places.json", { roots: [], lobby: null, sessions: [], places: null } as T);
   if (cmd === "place_repos") return devJson<T>("dev-place-repos.json", {} as T);
+  // 見た目の確認用: public/dev-update-status.json（Rust の update_status の出力）。無ければ更新の欄も点も出さない
+  if (cmd === "update_status") return devJson<T>("dev-update-status.json", null as T);
   // 見た目の確認用: ?approval=<名前> を付けると、承認の欄の中身に public/dev-approval-<名前>.json（Rust の session_detail の出力の形）を返す
   if (cmd === "session_detail" && location.search.includes("approval=")) {
     return devJson<T>(`dev-approval-${new URLSearchParams(location.search).get("approval")}.json`, { pending: [] } as T);

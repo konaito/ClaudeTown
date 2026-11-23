@@ -147,7 +147,7 @@ pub fn new_uuid() -> String {
 /// ログインシェルの PATH。Finder から開いたアプリの PATH は /usr/bin:/bin:/usr/sbin:/sbin だけで、claude（~/.local/bin）も、
 /// claude が呼ぶ git や bun も見つからない。ターミナルで開いたときと同じ PATH をログインシェルに聞き、取れた値だけを覚える（#175）。
 /// 取れなかったときは None で、claude はアプリの PATH で動く。次に端末を立てるときにもう一度聞く
-fn login_path() -> Option<String> {
+pub(crate) fn login_path() -> Option<String> {
     LOGIN.get(&login_shell(), LOGIN_WAIT, LOGIN_LIMIT)
 }
 

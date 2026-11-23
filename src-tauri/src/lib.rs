@@ -21,6 +21,7 @@ mod places;
 mod pty;
 mod repo;
 mod switch;
+mod update;
 mod native;
 mod perf;
 use perf::*;
@@ -624,6 +625,11 @@ pub fn run() {
         print_native_list();
         return;
     }
+    // family-computing --update-run   画面を作らずに「更新して再起動」と同じ処理を走らせ、終わるまで待つ（#295、scripts/test-update-detach.sh）。
+    // 開発版では CT_DEST_DIR と CT_STABLE_HOME を差し替えたときだけ走る
+    if args.iter().any(|a| a == "--update-run") {
+        std::process::exit(update::run_cli());
+    }
     if args.iter().any(|a| a == "--snapshot") {
         print_snapshot();
         return;
@@ -660,6 +666,8 @@ pub fn run() {
         .setup(|app| {
             // お便りの承認待ちと返事待ちを macOS の通知で知らせる（#292）。窓が隠れている間も動く
             notify::start(app.handle());
+            // 安定版の更新があるかを、裏で数分ごとに確かめる（#295）。起動は待たせない
+            update::start();
             // 前回開いていた端末を立て直す（#152）。ログインシェルに PATH を聞くので（最大5秒）、別のスレッドで
             if std::env::var("FC_NO_RESTORE").is_err() {
                 std::thread::spawn(session_ops::restore_terminals);
@@ -688,7 +696,8 @@ pub fn run() {
             term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
             composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::send_or_queue, composer::cmd::cancel_queued, composer::cmd::boot_status, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files,
-            switch::cmd::session_settings, dialog::cmd::session_detail, dialog::cmd::answer_dialog, switch::cmd::switch_session, switch::cmd::cancel_switch
+            switch::cmd::session_settings, dialog::cmd::session_detail, dialog::cmd::answer_dialog, switch::cmd::switch_session, switch::cmd::cancel_switch,
+            update::cmd::update_status, update::cmd::update_run
         ])
         .build(context)
         .expect("error while building tauri application")
