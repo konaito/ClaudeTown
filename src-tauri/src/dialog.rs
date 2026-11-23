@@ -414,21 +414,58 @@ pub fn open_tools(text: &str) -> Vec<Tool> {
     out
 }
 
-/// 道具の承認の画面に必ず出る文（その道具の承認だと確かめるのに使う）。分からない道具は None（ここからは答えない）
-pub fn hint_of(tool: &str, input: &Value) -> Option<String> {
+/// 道具の承認の画面で、その道具の承認だと確かめるのに使う文。比べるときは空白を除く（norm）
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hint {
+    /// 画面に必ず出る文。Bash は command の1行目の頭30字、ファイルの道具はファイル名の頭30字。これが無い候補は使わない
+    pub head: String,
+    /// 画面に出うる全体。Bash は command 全体、ファイルの道具はパス全体。どこまで画面に出ているかで候補を比べる
+    pub full: String,
+    /// full を後ろから比べる（ファイルのパス。画面には cwd からの相対のパスが出ることがある）
+    pub tail: bool,
+}
+
+/// 分からない道具は None（ここからは答えない）
+pub fn hint_of(tool: &str, input: &Value) -> Option<Hint> {
     let s = |k: &str| input[k].as_str().map(str::to_string);
-    let h = match tool {
-        "Bash" => s("command").and_then(|c| c.lines().find(|l| !l.trim().is_empty()).map(str::to_string)),
-        "Write" | "Edit" | "MultiEdit" | "Read" | "NotebookEdit" => s("file_path").or(s("notebook_path")).and_then(|p| p.rsplit('/').next().map(str::to_string)),
-        "WebFetch" => s("url").map(|u| u.split("://").nth(1).unwrap_or(&u).split('/').next().unwrap_or("").to_string()),
-        "WebSearch" => s("query"),
-        "Glob" | "Grep" => s("pattern"),
-        "Skill" => s("skill"),
-        t if t.starts_with("mcp__") => t.rsplit("__").next().map(str::to_string),
-        _ => None,
-    }?;
-    let h: String = norm(&h).chars().take(30).collect();
-    (!h.is_empty()).then_some(h)
+    let (head, full, tail) = match tool {
+        "Bash" => {
+            let c = s("command")?;
+            (c.lines().find(|l| !l.trim().is_empty())?.to_string(), c, false)
+        }
+        "Write" | "Edit" | "MultiEdit" | "Read" | "NotebookEdit" => {
+            let p = s("file_path").or(s("notebook_path"))?;
+            (p.rsplit('/').next()?.to_string(), p, true)
+        }
+        "WebFetch" => s("url").map(|u| {
+            let rest = u.split("://").nth(1).unwrap_or(&u).to_string();
+            (rest.split('/').next().unwrap_or("").to_string(), rest, false)
+        })?,
+        "WebSearch" => s("query").map(|q| (q.clone(), q, false))?,
+        "Glob" | "Grep" => s("pattern").map(|q| (q.clone(), q, false))?,
+        "Skill" => s("skill").map(|q| (q.clone(), q, false))?,
+        t if t.starts_with("mcp__") => t.rsplit("__").next().map(|q| (q.to_string(), q.to_string(), false))?,
+        _ => return None,
+    };
+    let head: String = norm(&head).chars().take(30).collect();
+    (!head.is_empty()).then(|| Hint { head, full: norm(&full), tail })
+}
+
+/// 画面の本文（norm 済み）に、hint がどれだけ出ているか。(full の頭か後ろから続けて本文に出ている字数, full が全部出ているか)。
+/// head が出ていなければ None
+fn strength(h: &Hint, body: &str) -> Option<(usize, bool)> {
+    if !body.contains(&h.head) {
+        return None;
+    }
+    let cs: Vec<char> = h.full.chars().collect();
+    let piece = |k: usize| -> String { if h.tail { cs[cs.len() - k..].iter().collect() } else { cs[..k].iter().collect() } };
+    // 頭（後ろ）から k 字が出ていれば、それより短いものも出ているので、二分探索で一番長い k を探す
+    let (mut lo, mut hi) = (0, cs.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if body.contains(&piece(mid)) { lo = mid } else { hi = mid - 1 }
+    }
+    Some((lo, lo == cs.len()))
 }
 
 /// hook（fc-report.py）が PermissionRequest で残した道具（perm/<session_id>.json の items）。agent_id はチームメイトと sub-agent の印
@@ -485,11 +522,63 @@ pub fn match_tool(d: &Dialog, hook: &[HookItem], open: &[Tool]) -> Result<(Tool,
                 let f = cands.iter().find(|(t, _)| t.1 == "ExitPlanMode");
                 return pick(f, "画面の計画の確認が、待っている道具と合わない").map(|t| (t, "tool"));
             }
-            let b = norm(body);
-            let f = cands.iter()
-                .filter(|(t, _)| !matches!(t.1.as_str(), "AskUserQuestion" | "ExitPlanMode" | "Agent" | "Task"))
-                .find(|(t, _)| hint_of(&t.1, &t.2).is_some_and(|h| b.contains(&h)));
-            pick(f, "画面の承認が、待っている道具と合わない（ここで読めない道具かもしれない）").map(|t| (t, "tool"))
+            // 画面の本文に一番長く出ている候補を取る。頭だけで比べると、頭の同じ別の道具（画面に出ていないほう）を取ることがあった（#169）
+            // 折り返した command と複数行の command は、各行の頭に「│ 」が付いて出る（2026-11-23、v2.1.330）。行頭の1つだけ外して比べる
+            let lines: Vec<&str> = body.lines().map(|l| { let t = l.trim(); t.strip_prefix('│').map(str::trim_start).unwrap_or(t) }).collect();
+            // 本文の1行目は承認の種類の見出し（実物で見たのは「Bash command」「Create file」「Edit file」）。見出しで候補の道具を絞る。
+            // 答えた後も残る hook の古い記録が、Write の中身や Edit の diff に出ていると、今の承認より長く合ってしまうため。
+            // ファイルの承認は、見出しのすぐ下のパスの行（中身の行「  1 hi」の前まで）だけで比べる。知らない見出しは今まで通り本文の全体で比べる
+            const FILE_TOOLS: [&str; 5] = ["Write", "Edit", "MultiEdit", "Read", "NotebookEdit"];
+            let head_at = lines.iter().position(|l| !l.is_empty());
+            let content_row = |l: &str| { let d = l.chars().take_while(char::is_ascii_digit).count(); d > 0 && l[d..].starts_with(char::is_whitespace) };
+            let (only, area): (Option<&[&str]>, &[&str]) = match head_at.map(|i| (i, lines[i])) {
+                Some((_, "Bash command")) => (Some(&["Bash"]), &lines[..]),
+                Some((i, "Create file" | "Edit file")) => {
+                    let end = lines[i + 1..].iter().position(|l| content_row(l)).map_or(lines.len(), |k| i + 1 + k);
+                    (Some(&FILE_TOOLS), &lines[i + 1..end])
+                }
+                _ => (None, &lines[..]),
+            };
+            let b = norm(&area.join("\n"));
+            // cands の hook.len() 番目からが transcript の分
+            struct Scored<'a> { c: &'a (Tool, bool), st: (usize, bool), full: String, open: bool }
+            let scored: Vec<Scored> = cands.iter().enumerate()
+                .filter(|(_, (t, _))| !matches!(t.1.as_str(), "AskUserQuestion" | "ExitPlanMode" | "Agent" | "Task"))
+                .filter(|(_, (t, _))| only.is_none_or(|o| o.contains(&t.1.as_str())))
+                .filter_map(|(i, c)| hint_of(&c.0 .1, &c.0 .2).and_then(|h| strength(&h, &b).map(|st| Scored { c, st, full: h.full, open: i >= hook.len() })))
+                .collect();
+            let best = scored.iter().map(|x| x.st).max();
+            let top_all: Vec<&Scored> = scored.iter().filter(|x| Some(x.st) == best).collect();
+            // 同じ組（道具の名前、画面に出うる全体 full、チームメイトか）の候補は、画面で区別できない
+            let same = |x: &Scored, y: &Scored| x.c.0 .1 == y.c.0 .1 && x.full == y.full && x.c.1 == y.c.1;
+            // 一番強い候補の組が2つ以上なら、画面からはどれか決められない。同じ組の中は、前と同じく先のもの（hook の新しいもの）を取る。
+            // hook の記録は答えた後も残る（fc-report.py は新しい順に8件残し、SessionEnd まで消さない）ので、同じファイルの2回目の Edit などで古い記録と同じ組になる
+            let mut top: Vec<&Scored> = Vec::new();
+            for x in &top_all {
+                if !top.iter().any(|y| same(x, y)) {
+                    top.push(x);
+                }
+            }
+            if top.len() > 1 {
+                if top.iter().all(|x| x.c.1) {
+                    return Err("画面の承認は、チームメイトか sub-agent のもの。ここからは答えない".into());
+                }
+                return Err(format!("画面の承認に同じだけ合う道具が{}件あり、どれの承認か決められない", top.len()));
+            }
+            // transcript の分は結果がまだ無い（古い記録ではない）。同じ組に中身の違う道具が2つ以上待っていれば、どれか決められない
+            if let Some(first) = top.first() {
+                let mut open_inputs: Vec<&Value> = Vec::new();
+                for x in top_all.iter().filter(|x| x.open && same(x, first)) {
+                    if !open_inputs.contains(&&x.c.0 .2) {
+                        open_inputs.push(&x.c.0 .2);
+                    }
+                }
+                if open_inputs.len() > 1 {
+                    return Err(format!("画面の承認に同じだけ合う道具が{}件あり、どれの承認か決められない", open_inputs.len()));
+                }
+            }
+            let top: Vec<&(Tool, bool)> = top.into_iter().map(|x| x.c).collect();
+            pick(top.first().copied(), "画面の承認が、待っている道具と合わない（ここで読めない道具かもしれない）").map(|t| (t, "tool"))
         }
     }
 }
@@ -903,6 +992,132 @@ mod tests {
         assert!(t.0.starts_with("screen:"));
         let typed = PLAN.replace("   3. Tell Claude what to change", " ❯ 3. 直して").replace(" ❯ 1. Yes", "   1. Yes");
         assert_eq!(match_tool(&parse(&typed).unwrap(), &[], &open).unwrap().0.0, t.0);
+    }
+
+    /// BASH の画面の command を置き換えた画面
+    fn bash_screen(cmd: &str) -> String {
+        BASH.replace("Bash(echo probe-ok > probe2.txt)", &format!("Bash({cmd})")).replace(" echo probe-ok > probe2.txt\n", &format!(" {cmd}\n"))
+    }
+    /// WRITE の画面を、path の Edit の承認にした画面
+    fn edit_screen(path: &str) -> String {
+        let name = path.rsplit('/').next().unwrap();
+        WRITE.replace("Write(hi.txt)", &format!("Update({path})")).replace(" Create file\n hi.txt", &format!(" Edit file\n {path}"))
+            .replace("Do you want to create hi.txt?", &format!("Do you want to make this edit to {name}?"))
+    }
+    fn bash(id: &str, cmd: &str) -> Tool {
+        (id.into(), "Bash".into(), json!({ "command": cmd }))
+    }
+    fn edit(id: &str, path: &str) -> Tool {
+        (id.into(), "Edit".into(), json!({ "file_path": path, "old_string": "a", "new_string": "b" }))
+    }
+
+    #[test]
+    fn same_head_bash_picks_the_one_on_screen() {
+        // #169。頭の30字が同じ Bash が2件待っている。新しいほう（t2）は画面に出ていない
+        let rm = "cd /Users/a/Documents/family-computing && rm -rf dist";
+        let st = "cd /Users/a/Documents/family-computing && git status";
+        let open = vec![bash("t1", rm), bash("t2", st)];
+        let d = parse(&bash_screen(rm)).unwrap();
+        assert_eq!(match_tool(&d, &[], &open).unwrap().0.0, "t1");
+        let d = parse(&bash_screen(st)).unwrap();
+        assert_eq!(match_tool(&d, &[], &open).unwrap().0.0, "t2");
+        // 画面の command が、待っている片方の command の頭になっている場合も、全体が合うほうを取る
+        let open = vec![bash("t1", rm), bash("t2", &format!("{rm} && ls"))];
+        assert_eq!(match_tool(&parse(&bash_screen(rm)).unwrap(), &[], &open).unwrap().0.0, "t1");
+        assert_eq!(match_tool(&parse(&bash_screen(&format!("{rm} && ls"))).unwrap(), &[], &open).unwrap().0.0, "t2");
+        // 古いチームメイトの承認が画面に出ている間に、リードが頭の同じ承認を出した。チームメイトのものとして断る
+        let hook = vec![hk("Bash", json!({ "command": rm }), Some("abeta-1"), 5), hk("Bash", json!({ "command": st }), None, 6)];
+        assert!(match_tool(&parse(&bash_screen(rm)).unwrap(), &hook, &[]).unwrap_err().contains("チームメイト"));
+    }
+
+    #[test]
+    fn same_strength_candidates_are_not_answered() {
+        // 画面の command が両方に同じだけ合う（画面で区別できない）ときは答えない
+        let rm = "cd /Users/a/Documents/family-computing && rm -rf dist";
+        let open = vec![bash("t1", &format!("{rm}\necho one")), bash("t2", &format!("{rm}\necho two"))];
+        let d = parse(&bash_screen(rm)).unwrap();
+        assert!(match_tool(&d, &[], &open).unwrap_err().contains("決められない"));
+        // 同じ道具が hook と transcript の両方にあるのは1件と数える（hook の分を返す）
+        let hook = vec![hk("Bash", json!({ "command": rm }), None, 5)];
+        assert_eq!(match_tool(&d, &hook, &[bash("t1", rm)]).unwrap().0.0, "hook:5");
+    }
+
+    #[test]
+    fn same_file_name_edit_picks_the_directory_on_screen() {
+        let a = "/Users/a/proj/src/a/mod.rs";
+        let b = "/Users/a/proj/src/b/mod.rs";
+        let open = vec![edit("t1", a), edit("t2", b)];
+        // 画面には cwd からの相対のパスが出る
+        assert_eq!(match_tool(&parse(&edit_screen("src/a/mod.rs")).unwrap(), &[], &open).unwrap().0.0, "t1");
+        assert_eq!(match_tool(&parse(&edit_screen("src/b/mod.rs")).unwrap(), &[], &open).unwrap().0.0, "t2");
+        assert_eq!(match_tool(&parse(&edit_screen(a)).unwrap(), &[], &open).unwrap().0.0, "t1");
+        // ファイル名しか出ていなければ、どちらか決められないので答えない
+        assert!(match_tool(&parse(&edit_screen("mod.rs")).unwrap(), &[], &open).is_err());
+    }
+
+    // 2026-11-23 に v2.1.330 の claude を tmux（100x50）で動かして撮った実物の道具の承認の画面（#169）。
+    // 折り返した command と複数行の command は、各行の頭に「│ 」が付く。Edit はパスが cwd からの相対で出る
+    const BASH_LONG: &str = include_str!("dialog_fixtures/bash_long_wrapped.txt");
+    const BASH_MULTI: &str = include_str!("dialog_fixtures/bash_multiline.txt");
+    const EDIT_NESTED: &str = include_str!("dialog_fixtures/edit_nested.txt");
+
+    #[test]
+    fn real_tool_screens_pick_the_tool_on_screen() {
+        let long = "echo first-segment-0123456789-abcdefghijklmnopqrstuvwxyz second-segment-0123456789-abcdefghijklmnopqrstuvwxyz third-segment-0123456789-abcdefghijklmnopqrstuvwxyz fourth-segment-0123456789 > long-output-file.txt && wc -c long-output-file.txt";
+        let long2 = long.replace("third-segment", "other-segment");
+        let multi = "touch multiline-probe-first-file-aaaaaaaaaaaaaaaa.txt\ntouch multiline-probe-second-file-bbbbbbbbbbbbbbbb.txt";
+        let multi2 = multi.replace("second-file", "other-file");
+        let path = "/private/tmp/fc169-probe/src/deep/nested/mod.rs";
+        let path2 = "/private/tmp/fc169-probe/src/other/mod.rs";
+        for (screen, right, wrong) in [(BASH_LONG, bash("t1", long), bash("t2", &long2)), (BASH_MULTI, bash("t1", multi), bash("t2", &multi2)), (EDIT_NESTED, edit("t1", path), edit("t2", path2))] {
+            let d = parse(screen).expect("道具の承認の画面");
+            // 1件だけなら今まで通り当たる
+            assert_eq!(match_tool(&d, &[], std::slice::from_ref(&right)).unwrap().0.0, "t1");
+            // 頭の同じ別の道具（新しいほう）があっても、画面に出ているほうを取る
+            assert_eq!(match_tool(&d, &[], &[right.clone(), wrong.clone()]).unwrap().0.0, "t1", "{screen}");
+            assert_eq!(match_tool(&d, &[], &[wrong.clone(), right.clone()]).unwrap().0.0, "t1");
+        }
+    }
+
+    #[test]
+    fn old_records_in_the_file_content_do_not_win() {
+        // 答えた後も残る古い Bash の記録の command が、Write の中身に出ている。前と同じく Write を取る
+        let screen = WRITE.replace("  1 hi", "  1 echo probe-ok > probe2.txt");
+        let hook = vec![
+            hk("Bash", json!({ "command": "echo probe-ok > probe2.txt" }), None, 5),
+            hk("Write", json!({ "file_path": "/private/tmp/fc-ask-probe/hi.txt", "content": "echo probe-ok > probe2.txt" }), None, 6),
+        ];
+        assert_eq!(match_tool(&parse(&screen).unwrap(), &hook, &[]).unwrap().0.0, "hook:6");
+        // 古い Edit の記録のパスが、今の Edit の diff に出ている。画面のパスの行で比べる
+        let screen = edit_screen("src/x.ts").replace("  1 hi", "  1 import { c } from \"/Users/a/proj/src/b/config.ts\"");
+        let hook = vec![
+            hk("Edit", json!({ "file_path": "/Users/a/proj/src/b/config.ts", "old_string": "a", "new_string": "b" }), None, 5),
+            hk("Edit", json!({ "file_path": "/Users/a/proj/src/x.ts", "old_string": "a", "new_string": "b" }), None, 6),
+        ];
+        assert_eq!(match_tool(&parse(&screen).unwrap(), &hook, &[]).unwrap().0.0, "hook:6");
+    }
+
+    #[test]
+    fn same_file_edit_again_uses_the_newest_hook_record() {
+        // hook の記録は答えた後も残る。同じファイルの2回目の Edit は、古い記録と画面で区別できないので、前と同じく新しい記録を取る
+        let a = "/Users/a/proj/src/a/mod.rs";
+        let old = hk("Edit", json!({ "file_path": a, "old_string": "x", "new_string": "y" }), None, 5);
+        let new = hk("Edit", json!({ "file_path": a, "old_string": "y", "new_string": "z" }), None, 6);
+        let d = parse(&edit_screen("src/a/mod.rs")).unwrap();
+        assert_eq!(match_tool(&d, &[old.clone(), new.clone()], &[]).unwrap().0.0, "hook:6");
+        // 同じ Bash の2回目も同じ
+        let rm = "cd /Users/a/Documents/family-computing && rm -rf dist";
+        let hook = vec![hk("Bash", json!({ "command": rm }), None, 5), hk("Bash", json!({ "command": rm }), None, 7)];
+        assert_eq!(match_tool(&parse(&bash_screen(rm)).unwrap(), &hook, &[]).unwrap().0.0, "hook:7");
+        // transcript で結果の無い（両方とも待っている）同じファイルの Edit が2件あれば、どれの承認か決められない
+        let open = vec![
+            ("t1".to_string(), "Edit".to_string(), old.tool_input.clone()),
+            ("t2".to_string(), "Edit".to_string(), new.tool_input.clone()),
+        ];
+        assert!(match_tool(&d, &[], &open).unwrap_err().contains("決められない"));
+        // 古いチームメイトの記録と、リードの同じ command が同じだけ合うときは、どちらのものか決められないので答えない
+        let hook = vec![hk("Bash", json!({ "command": rm }), Some("abeta-1"), 5), hk("Bash", json!({ "command": rm }), None, 7)];
+        assert!(match_tool(&parse(&bash_screen(rm)).unwrap(), &hook, &[]).is_err());
     }
 
     fn hk(tool: &str, input: Value, agent: Option<&str>, at: u64) -> HookItem {

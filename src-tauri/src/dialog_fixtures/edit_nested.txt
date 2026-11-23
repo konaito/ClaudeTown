@@ -1,0 +1,50 @@
+❯ Next, run one Bash tool call whose command is exactly these two lines (a newline between them, no
+  && ): line 1 is: echo line-one-from-the-multiline-probe   and line 2 is: echo
+  line-two-from-the-multiline-probe
+
+⏺ Bash(echo line-one-from-the-multiline-probe
+      echo line-two-from-the-multiline-probe)
+  ⎿  line-one-from-the-multiline-probe
+     line-two-from-the-multiline-probe
+
+⏺ I ran the two-line Bash command as you specified, and it printed both lines:
+
+  line-one-from-the-multiline-probe
+  line-two-from-the-multiline-probe
+
+  The earlier command that wrote long-output-file.txt was rejected, so I did not run it and the file
+  was not created.
+
+✻ Sautéed for 2s · done 12:09 AM
+
+❯ Now run one Bash tool call whose command is exactly these two lines separated by a newline (no
+  &&): line 1: touch multiline-probe-first-file-aaaaaaaaaaaaaaaa.txt  line 2: touch
+  multiline-probe-second-file-bbbbbbbbbbbbbbbb.txt
+
+⏺ Bash(touch multiline-probe-first-file-aaaaaaaaaaaaaaaa.txt
+      touch multiline-probe-second-file-bbbbbbbbbbbbbbbb.txt)
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ Next, use the Edit tool on src/deep/nested/mod.rs to replace the line beta with gamma. Read it
+  first if needed.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ Update(src/deep/nested/mod.rs)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Edit file
+ src/deep/nested/mod.rs
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ 1  alpha
+ 2 -beta
+ 2 +gamma
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to make this edit to mod.rs?
+ ❯ 1. Yes
+   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this
+      session (shift+tab)
+   3. No
+
+ Esc to cancel · Tab to amend
+
