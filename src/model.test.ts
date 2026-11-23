@@ -9,7 +9,8 @@ const ag = (id: string, cwd: string, over: Partial<Agent> = {}): Agent => ({
 
 // src-tauri/src/naming.rs の shared_cases と同じ事例
 describe("cardNames（src/naming-cases.json）", () => {
-  for (const c of cases as { name: string; sessions: Who[]; expect: Record<string, string> }[]) {
+  // JSON の推論型は、事例ごとに無いキーを ?: undefined にするので Partial で受ける
+  for (const c of cases as { name: string; sessions: Who[]; expect: Partial<Record<string, string>> }[]) {
     test(c.name, () => {
       const got = cardNames(c.sessions);
       for (const [id, want] of Object.entries(c.expect)) expect(got.get(id)).toBe(want);
