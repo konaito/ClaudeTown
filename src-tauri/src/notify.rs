@@ -127,13 +127,13 @@ static STARTED_AT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 /// 見張りが最後に一覧を渡した時刻
 static FROM_WATCH_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
-/// 一覧を見て、入った子の通知を出す
-fn observe(agents: &[Value]) {
+/// 一覧を見て、入った子の通知を出す。via は一覧の出どころ（記録に残す。watch は見張り、hidden はこのスレッド）
+fn observe(agents: &[Value], via: &str) {
     let Some(app) = APP.get() else { return };
     let started_at = STARTED_AT.get().copied().unwrap_or(0);
     let notices = step(&mut SEEN.lock().unwrap_or_else(|e| e.into_inner()), agents, started_at);
     for n in &notices {
-        show(app, n);
+        show(app, n, via);
     }
 }
 
@@ -143,7 +143,7 @@ pub(crate) fn from_watch(agents: &[Value]) {
         return;
     }
     *FROM_WATCH_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
-    observe(agents);
+    observe(agents, "watch");
 }
 
 fn watch_alive() -> bool {
@@ -162,7 +162,7 @@ fn hidden_loop() {
             continue;
         }
         let agents = agents_from(town_rows());
-        observe(&agents);
+        observe(&agents, "hidden");
         let key = Value::Array(agents).to_string();
         wait = next_wait(wait, last.as_deref() != Some(key.as_str()));
         last = Some(key);
@@ -180,7 +180,7 @@ fn bring_front(app: &tauri::AppHandle) {
     }
 }
 
-fn show(app: &tauri::AppHandle, n: &Notice) {
+fn show(app: &tauri::AppHandle, n: &Notice, via: &str) {
     use tauri_plugin_notification::NotificationExt;
     let mut b = app.notification().builder().title(&n.title).sound(SOUND);
     if !n.body.is_empty() {
@@ -188,7 +188,7 @@ fn show(app: &tauri::AppHandle, n: &Notice) {
     }
     let r = b.show();
     let kind = match n.wait { Wait::Approval => "approval", Wait::Reply => "reply" };
-    perf_log(json!({ "notify": kind, "id": n.id, "ok": r.is_ok(), "err": r.err().map(|e| e.to_string()), "at": now_ms() as u64 }).to_string());
+    perf_log(json!({ "notify": kind, "id": n.id, "via": via, "ok": r.is_ok(), "err": r.err().map(|e| e.to_string()), "at": now_ms() as u64 }).to_string());
 }
 
 /// 通知を出すか。安定版はいつも出す。開発版は FC_NOTIFY=1 のときだけ出す。
