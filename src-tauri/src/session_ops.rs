@@ -5,13 +5,17 @@ use super::*;
 crate::blocking_command! {
 /// 新しい世帯を立てる。claude をこのアプリの中の端末で起動する（pty.rs）。cwd を省くと ~/Documents/meta（本人の指定）。
 /// cols と rows は、画面のターミナルの今の大きさ。渡せば claude を最初からその大きさで起動し、開いた直後の描き直しを省く（#18）
-/// model と permission_mode は設定の既定（src/session/defaults.ts）。claude の --model と --permission-mode で起動する（pty::start_args）
-pub(crate) fn create_session(cwd: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, model: Option<String>, permission_mode: Option<String>) -> Result<Value, String> {
+/// model、permission_mode、effort は設定の既定（src/session/defaults.ts）。claude の --model、--permission-mode、--effort で起動する（pty::start_args）
+pub(crate) fn create_session(cwd: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, model: Option<String>, permission_mode: Option<String>, effort: Option<String>) -> Result<Value, String> {
     refuse_if_disabled()?;
     let cwd = cwd.filter(|c| !c.is_empty()).unwrap_or_else(default_place);
     let ok = |v: Option<u16>, d: u16| v.filter(|n| (10..=1000).contains(n)).unwrap_or(d);
-    let start = pty::start_args(model.as_deref(), permission_mode.as_deref())?;
+    let start = pty::start_args(model.as_deref(), permission_mode.as_deref(), effort.as_deref())?;
     let r = pty::spawn(&cwd, name.as_deref(), &start, ok(cols, 120), ok(rows, 40), town_kick)?;
+    // 起動に渡した effort は transcript に残らないので、今の値として覚えておく（switch::status）
+    if let (Some(id), Some(e)) = (r["id"].as_str(), effort.as_deref().map(str::trim).filter(|e| !e.is_empty())) {
+        switch::launched_with(id, e);
+    }
     town_kick();
     Ok(r)
 }
@@ -408,7 +412,7 @@ mod real_restart {
     #[ignore]
     fn real_restart_keeps_the_id_and_replaces_the_process() {
         let cwd = std::env::var("FC_RESTART_CWD").expect("FC_RESTART_CWD");
-        let start = pty::start_args(Some("haiku"), None).unwrap();
+        let start = pty::start_args(Some("haiku"), None, None).unwrap();
         let r = pty::spawn(&cwd, Some("ct-probe-restart"), &start, 120, 40, || {}).unwrap();
         let (id, pid1) = (r["id"].as_str().unwrap().to_string(), r["pid"].as_u64().unwrap() as u32);
         std::thread::sleep(Duration::from_secs(6));
