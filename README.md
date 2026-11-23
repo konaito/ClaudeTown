@@ -270,6 +270,7 @@ Claude Town は、ブラウザから開けるインストール可能な PWA と
 
 - 画面は Tauri 版と同じ `src/` である。Tauri の外でビルドした版（`import.meta.env.PROD`）は、`invoke` の代わりに、同じオリジンの `/api` へ HTTP で話す（`src/bridge.ts` の `WEB`）。ccn の行は source が ccn で、コマンドの振り分けはこの行にだけ出る。承認の欄は、ccn の行では ccn の permissions の口で答える。モデルと権限モードの切り替えは、ccn の行では ccn の PATCH で替え、予約は画面が持つ（`src/webReserve.ts`）。
 - ccn は別オリジンからの要求を 403 で断るので、ブラウザは ccn に直接つなげない。`web/` の Worker（Void アプリ）が画面を配り、`/api` と `/n/` を `https://ccn.fybe.jp` に中継する。
+- 中継は Origin と Sec-Fetch-* を ccn へ渡さないので、ccn の CSRF の確認はブラウザ版では働かない。代わりに `web/middleware/01.access.ts` が、GET と HEAD 以外の要求で Origin の host か Sec-Fetch-Site が同じオリジンでなければ 403 を返す（`web/lib/origin.ts`、#167）。
 - 中継は、受け取った Access の JWT を `Cf-Access-Token` で渡す（Linked App Token）。ccn の Access アプリ `ccn` に、`claude-town` からの Linked App Token を通すポリシー `town-linked` を足してある。ccn には人（email）の呼び手として届き、サービストークンの秘密は持たない。
 - Service Worker（`public/sw.js`）は何もキャッシュしない。ホーム画面に追加するためだけに置いた。manifest は `public/manifest.webmanifest`、アイコンは `public/app-icon.svg` から `bun run pwa:icons` で作る。
 - デプロイは、既定ブランチへのマージで `.github/workflows/void-deploy.yml` が行う。
@@ -297,6 +298,7 @@ Void アプリの確認は `web/` で行う。
 ```sh
 cd web && bun install
 bun run build   # .cloudflare/ に Worker と画面が出る
+bun test        # web/test の試験。ルートの bun test は src だけを走らせる（bunfig.toml）
 ```
 
 ## 開発
