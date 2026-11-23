@@ -449,7 +449,8 @@ pub(crate) fn result_text(content: &Value) -> String {
         }).filter(|x| !x.is_empty()).collect::<Vec<_>>().join("\n"),
         _ => String::new(),
     };
-    let t = t.trim();
+    // 前後の U+FEFF（BOM 付きのファイルを読んだ結果の先頭に付く）も落とす。Rust の trim は落とさず、TypeScript の trim は落とす（#138）
+    let t = t.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
     // lines() は行末の \r も落とすので、省いていないのに長さが縮んで「続きは省いた」が付く。\n だけで割り、TypeScript の split("\n") と合わせる
     // lines() は行末の \r も落とすので、省いていないのに長さが縮んで「続きは省いた」が付く。\n だけで割り、TypeScript の split("\n") と合わせる
     let mut out: String = t.split('\n').take(RESULT_LINES).collect::<Vec<_>>().join("\n");
