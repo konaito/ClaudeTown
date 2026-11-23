@@ -5,13 +5,17 @@ use super::*;
 crate::blocking_command! {
 /// 新しい世帯を立てる。claude をこのアプリの中の端末で起動する（pty.rs）。cwd を省くと ~/Documents/meta（本人の指定）。
 /// cols と rows は、画面のターミナルの今の大きさ。渡せば claude を最初からその大きさで起動し、開いた直後の描き直しを省く（#18）
-/// model と permission_mode は設定の既定（src/session/defaults.ts）。claude の --model と --permission-mode で起動する（pty::start_args）
-pub(crate) fn create_session(cwd: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, model: Option<String>, permission_mode: Option<String>) -> Result<Value, String> {
+/// model、permission_mode、effort は設定の既定（src/session/defaults.ts）。claude の --model、--permission-mode、--effort で起動する（pty::start_args）
+pub(crate) fn create_session(cwd: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, model: Option<String>, permission_mode: Option<String>, effort: Option<String>) -> Result<Value, String> {
     refuse_if_disabled()?;
     let cwd = cwd.filter(|c| !c.is_empty()).unwrap_or_else(default_place);
     let ok = |v: Option<u16>, d: u16| v.filter(|n| (10..=1000).contains(n)).unwrap_or(d);
-    let start = pty::start_args(model.as_deref(), permission_mode.as_deref())?;
+    let start = pty::start_args(model.as_deref(), permission_mode.as_deref(), effort.as_deref())?;
     let r = pty::spawn(&cwd, name.as_deref(), &start, ok(cols, 120), ok(rows, 40), town_kick)?;
+    // 起動に渡した effort は transcript に残らないので、今の値として覚えておく（switch::status）
+    if let (Some(id), Some(e)) = (r["id"].as_str(), effort.as_deref().map(str::trim).filter(|e| !e.is_empty())) {
+        switch::launched_with(id, e);
+    }
     town_kick();
     Ok(r)
 }
@@ -408,7 +412,7 @@ mod real_restart {
     #[ignore]
     fn real_restart_keeps_the_id_and_replaces_the_process() {
         let cwd = std::env::var("FC_RESTART_CWD").expect("FC_RESTART_CWD");
-        let start = pty::start_args(Some("haiku"), None).unwrap();
+        let start = pty::start_args(Some("haiku"), None, None).unwrap();
         let r = pty::spawn(&cwd, Some("ct-probe-restart"), &start, 120, 40, || {}).unwrap();
         let (id, pid1) = (r["id"].as_str().unwrap().to_string(), r["pid"].as_u64().unwrap() as u32);
         std::thread::sleep(Duration::from_secs(6));
@@ -610,5 +614,115 @@ mod stuck {
         assert_eq!(stalled_after, None, "立て直した端末に前の詰まりが残っている");
         // 前任が終わると、詰まっていた書き込みは EIO で戻る（書き手のスレッドは残らない）
         assert!(matches!(old_write, Ok(Err(_))), "詰まっていた書き込みが戻らなかった: {old_write:?}");
+    }
+}
+
+#[cfg(test)]
+mod real_effort {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn wait_for(sec: u64, f: impl Fn() -> bool) -> bool {
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(sec) {
+            if f() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        false
+    }
+
+    /// 本物の claude（haiku）を --effort high で立て、送信先の行と同じ口（switch::request）で effort を替える。
+    /// 1往復した後（会話があると `/effort <値>` は既定を書き換える）と作業中に替えて、今の値が替わり、settings.json が変わらないことを確かめる。
+    /// FC_EFFORT_CWD に信頼済みの捨てのディレクトリを渡す。2往復分の API を使う。
+    /// env -u CLAUDE_CONFIG_DIR FC_CAM_BIN=$HOME/.cam/bin/cam FC_EFFORT_CWD=<dir> cargo test --lib real_effort -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_effort_switches_for_this_session_only() {
+        let cwd = std::env::var("FC_EFFORT_CWD").expect("FC_EFFORT_CWD");
+        let settings = home().join(".claude/settings.json");
+        let before = std::fs::read_to_string(&settings).unwrap();
+        assert!(!before.trim().is_empty(), "settings.json が空で読めた。戻せないので試さない");
+        let effort_of = |id: &str| switch::status(id)["effort"].as_str().map(str::to_string);
+        let start = pty::start_args(Some("haiku"), None, Some("high")).unwrap();
+        let r = pty::spawn(&cwd, Some("ct-probe-effort"), &start, 120, 40, || {}).unwrap();
+        let id = r["id"].as_str().unwrap().to_string();
+        switch::launched_with(&id, "high");
+        let done = |id: &str, v: &str| {
+            let s = switch::status(id);
+            s["pending"]["effort"].is_null() && s["last"]["what"] == "effort" && s["last"]["value"] == v
+        };
+        let result = (|| -> Result<(), String> {
+            std::thread::sleep(Duration::from_secs(6));
+            println!("起動の後: {:?}", effort_of(&id));
+            if effort_of(&id).as_deref() != Some("high") { return Err("起動に渡した high が今の値に出ない".into()); }
+            pty::write(&id, "ok とだけ返して\r")?;
+            let root = native::claude_home();
+            if !wait_for(90, || native::sessions::find_jsonl(&root, &id).is_some()) { return Err("jsonl が出来ない".into()); }
+            std::thread::sleep(Duration::from_secs(8));
+            // 待機中に替える
+            switch::request(&id, None, None, Some("low".into()))?;
+            if !wait_for(20, || done(&id, "low")) { return Err(format!("low に替わらない: {}", switch::status(&id))); }
+            println!("待機中に low: last {} / 今 {:?}", switch::status(&id)["last"], effort_of(&id));
+            if switch::status(&id)["last"]["ok"] != true { return Err(format!("失敗: {}", switch::status(&id)["last"])); }
+            if effort_of(&id).as_deref() != Some("low") { return Err("今の値が low にならない".into()); }
+            // 作業中に替える
+            pty::write(&id, "\x1b[200~Bash で sleep 8 を実行してから done とだけ返して\x1b[201~")?;
+            std::thread::sleep(Duration::from_millis(200));
+            pty::write(&id, "\r")?;
+            std::thread::sleep(Duration::from_secs(4));
+            println!("作業中に max を頼む時の状態: {}", switch::status(&id)["status"]);
+            switch::request(&id, None, None, Some("max".into()))?;
+            if !wait_for(40, || done(&id, "max")) { return Err(format!("max に替わらない: {}", switch::status(&id))); }
+            println!("作業中に max: last {} / 今 {:?}", switch::status(&id)["last"], effort_of(&id));
+            if switch::status(&id)["last"]["ok"] != true { return Err(format!("失敗: {}", switch::status(&id)["last"])); }
+            if effort_of(&id).as_deref() != Some("max") { return Err("今の値が max にならない".into()); }
+            // モデルを替えた後の effort（settings.json は effortLevel をモデルごとに持つので、替わるかもしれない）。
+            // 作業が終わってから替え、/effort のピッカーが開いたときの段と、今の値を比べる
+            if !wait_for(60, || switch::status(&id)["status"] == "idle") { return Err("作業が終わらない".into()); }
+            switch::request(&id, Some("sonnet".into()), None, None)?;
+            if !wait_for(30, || { let s = switch::status(&id); s["pending"]["model"].is_null() && s["last"]["what"] == "model" }) { return Err(format!("モデルが替わらない: {}", switch::status(&id))); }
+            println!("モデルを替えた: last {}", switch::status(&id)["last"]);
+            std::thread::sleep(Duration::from_secs(1));
+            let shown = effort_of(&id);
+            let opened = pty::serial(&id, || {
+                pty::write(&id, "\x1b[200~/effort\x1b[201~")?;
+                std::thread::sleep(Duration::from_millis(150));
+                pty::write(&id, "\r")?;
+                let t0 = Instant::now();
+                let mut cur = None;
+                while t0.elapsed() < Duration::from_secs(4) && cur.is_none() {
+                    cur = pty::screen_text(&id).as_deref().filter(|s| s.contains(switch::EFFORT_PICKER)).and_then(switch::effort_cursor);
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                if cur.is_none() {
+                    println!("読めなかった画面:\n{}", pty::screen_text(&id).unwrap_or_default());
+                }
+                pty::write(&id, "\x1b")?;
+                std::thread::sleep(Duration::from_millis(800));
+                Ok::<_, String>(cur)
+            })?;
+            println!("モデルを替えた後: 今の値 {shown:?} / ピッカーの段 {opened:?}");
+            if opened.is_none() { return Err("ピッカーの段が読めない".into()); }
+            if shown.as_deref() != opened { return Err(format!("モデルを替えた後の今の値 {shown:?} がピッカーの段 {opened:?} と違う")); }
+            // モデルを替えた後はピッカーの案内が「Enter to use this session only」の形になる。その形でも替えられて、既定は変わらない
+            switch::request(&id, None, None, Some("medium".into()))?;
+            if !wait_for(20, || done(&id, "medium")) { return Err(format!("medium に替わらない: {}", switch::status(&id))); }
+            println!("モデルを替えた後に medium: last {} / 今 {:?}", switch::status(&id)["last"], effort_of(&id));
+            if switch::status(&id)["last"]["ok"] != true { return Err(format!("失敗: {}", switch::status(&id)["last"])); }
+            if effort_of(&id).as_deref() != Some("medium") { return Err("今の値が medium にならない".into()); }
+            Ok(())
+        })();
+        println!("画面: {}", pty::screen_text(&id).unwrap_or_default().lines().filter(|l| !l.trim().is_empty()).rev().take(10).collect::<Vec<_>>().join(" / "));
+        let _ = pty::kill(&id);
+        let after = std::fs::read_to_string(&settings).unwrap();
+        if before != after {
+            // 書き換えられていたら元に戻してから落とす
+            std::fs::write(&settings, &before).unwrap();
+            panic!("settings.json が書き換えられた（元に戻した）");
+        }
+        println!("settings.json は変わらなかった");
+        result.unwrap();
     }
 }

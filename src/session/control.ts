@@ -1,4 +1,4 @@
-// チャット欄からモデルと権限モードを替えるときの決まり（#97）。画面は SessionControls.tsx。
+// チャット欄からモデル、権限モード、effort を替えるときの決まり（#97、effort は #291）。画面は SessionControls.tsx。
 // ccn の口の仕様は claude-code-nodes の docs/superpowers/specs/2026-11-21-session-control-for-town.md にある。
 // 選択はいつでも押せる。今は替えられなければ予約し、替えられるようになったら替える（always-switch）。
 // - app（このアプリが PTY で立てた claude）: 端末に /model と Shift+Tab を書く（src-tauri/src/switch.rs）。予約も Rust が持つ。
@@ -6,6 +6,8 @@
 // - ccn（ブラウザ版の ccn の行）: node（-p の子）は SDK で替えるので、承認待ちのほかはいつでも受ける。
 //   pty（ノードが端末で動かす対話の claude）は、待機中だけ受ける。同じ id で起動し直すので約3秒かかる（実測 2.9 秒）。予約は画面が持つ（src/webReserve.ts）
 // - none（端末で起動したセッション、記録から読むだけのセッション、チームメイト、sub-agent）: 外から届ける口が無い。代わりの手を出す
+// - effort は app だけが替えられる（/effort のピッカーで s、作業中でも効く。承認待ちだけ待つ）。ccn の PATCH は effort を受けず、
+//   pty の子への /effort は設定に保存されるとして断る（claude-code-nodes の src/engine/pty-driver.ts の PERSISTING_COMMANDS）
 
 import type { Agent } from "../model";
 
@@ -32,6 +34,15 @@ export const MODES: { value: string; label: string; title: string }[] = [
   { value: "auto", label: "auto", title: "承認の要否を Claude Code が判断する" },
   { value: "dontAsk", label: "dontAsk", title: "許可の決まりに無い道具は、聞かずに断る" },
   { value: "bypassPermissions", label: "bypassPermissions", title: "承認を全部飛ばす" },
+];
+
+/** claude の --effort と /effort のピッカーの段（低い順）。Rust の pty::EFFORTS と同じ */
+export const EFFORTS: { value: string; label: string; title: string }[] = [
+  { value: "low", label: "low", title: "速く、考える量を減らす" },
+  { value: "medium", label: "medium", title: "速さと考える量の釣り合いを取る" },
+  { value: "high", label: "high", title: "よく考える" },
+  { value: "xhigh", label: "xhigh", title: "high より深く考える（対応するモデルだけ）" },
+  { value: "max", label: "max", title: "いちばん深く考える。時間とトークンを多く使う" },
 ];
 
 export type Support = "unknown" | "yes" | "no";
@@ -73,7 +84,10 @@ export function routeOf(a: Pick<Agent, "kind" | "source" | "capabilities">): Rou
   return "none";
 }
 
-export type What = "model" | "mode";
+export type What = "model" | "mode" | "effort";
+
+/** 画面に出す名前 */
+export const LABEL: Record<What, string> = { model: "モデル", mode: "権限モード", effort: "effort" };
 
 /**
  * 選んだ値をいつ当てるか。now はすぐ、wait は予約して when の時点で当てる、none は当てる口が無い（why に代わりの手を書く）。
@@ -92,6 +106,7 @@ export const UNREACHABLE_MODES = ["dontAsk"];
 export function planOf(a: Pick<Agent, "kind" | "state" | "source" | "capabilities" | "name">, what: What, value: string | null, support: Support, switching: boolean): Plan {
   const route = routeOf(a);
   if (route === "none") return { kind: "none", why: noRouteWhy(a, what, value) };
+  if (route === "ccn" && what === "effort") return { kind: "none", why: CCN_NO_EFFORT };
   if (route === "app") {
     if (what === "mode" && value && UNREACHABLE_MODES.includes(value)) {
       return { kind: "none", why: `${value} は Shift+Tab の順に出ないので、端末からは替えられない。claude を --permission-mode ${value} で起動し直す` };
@@ -109,12 +124,17 @@ export function planOf(a: Pick<Agent, "kind" | "state" | "source" | "capabilitie
   return { kind: "now" };
 }
 
-/** 外から届ける口が無いセッションで、代わりにできること。Claude Code に外から入力やモデルを渡す口は無い（README の「モデルと権限モード」） */
+/** ccn の行で effort を選んだときの文言 */
+export const CCN_NO_EFFORT = "ccn には effort を替える口が無い（端末のセッションの /effort は設定ファイルに保存されるので ccn が断る）。そのターミナルで /effort を開き、s で選ぶ";
+
+/** 外から届ける口が無いセッションで、代わりにできること。Claude Code に外から入力やモデルを渡す口は無い（README の「モデルと権限モードと effort」） */
 export function noRouteWhy(a: Pick<Agent, "kind" | "source">, what: What, value: string | null): string {
-  const v = value ?? (what === "model" ? "<モデル>" : "<モード>");
-  const inTerm = what === "model" ? `/model ${v} を打つ` : v === "plan" ? "/plan を打つか、Shift+Tab で plan にする" : `Shift+Tab で ${v} にする`;
+  const v = value ?? (what === "model" ? "<モデル>" : what === "effort" ? "<effort>" : "<モード>");
+  // /effort に値を付けて打つと、会話があると新しいセッションの既定まで替わる（2026-11-23、v2.1.330 で確かめた）。ピッカーの s はこのセッションだけ
+  const inTerm = what === "model" ? `/model ${v} を打つ` : what === "effort" ? `/effort を開き、${v} に動かして s を押す（値を付けて打つと既定まで替わる）` : v === "plan" ? "/plan を打つか、Shift+Tab で plan にする" : `Shift+Tab で ${v} にする`;
   if (a.kind === "subagent") return "sub-agent は親のセッションの中で動くので、ここからは替えられない";
   if (a.kind === "teammate") {
+    if (what === "effort") return "チームメイトの effort は、ここからは替えられない";
     return what === "model"
       ? "チームメイトのモデルは起動のときに決まり、後から替えられない（Claude Code の仕様）"
       : `チームメイトの権限モードは、リードの端末でそのチームメイトを開き、Shift+Tab で ${v} にする（次のターンから効く）`;
@@ -150,6 +170,12 @@ export function modelOptions(current: string | null | undefined): { value: strin
   if (!current || MODELS.some((m) => m.value === current)) return MODELS;
   // 幅が狭いので、表示だけ claude- を外す（値はそのまま）
   return [{ value: current, label: current.replace(/^claude-/, "") }, ...MODELS];
+}
+
+/** effort の選択肢。今の値が候補に無ければ先頭に足す */
+export function effortOptions(current: string | null | undefined): { value: string; label: string; title: string }[] {
+  if (!current || EFFORTS.some((m) => m.value === current)) return EFFORTS;
+  return [{ value: current, label: current, title: current }, ...EFFORTS];
 }
 
 /** 権限モードの選択肢。今の値が候補に無ければ（新しいモードなど）先頭に足す */

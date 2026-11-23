@@ -380,9 +380,12 @@ pub fn spawn(cwd: &str, name: Option<&str>, start: &[String], cols: u16, rows: u
     launch(cwd, None, name, start, cols, rows, notice)
 }
 
-/// 新しい世帯を立てるときのモデルと権限モード（設定の既定、src/session/defaults.ts）を、claude の --model と --permission-mode にする。
-/// 空の値は渡さない（この Mac の Claude Code の既定になる）。空白を含む値や、知らない権限モードは断る（引数を1つずつ渡すので混ざりはしないが、打ち間違いを起動の前に止める）
-pub fn start_args(model: Option<&str>, mode: Option<&str>) -> Result<Vec<String>, String> {
+/// claude の --effort が受ける値（2.1.330 の --help と /effort のピッカーの並び。低い順）
+pub const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// 新しい世帯を立てるときのモデル、権限モード、effort（設定の既定、src/session/defaults.ts）を、claude の --model、--permission-mode、--effort にする。
+/// 空の値は渡さない（この Mac の Claude Code の既定になる）。空白を含む値や、知らない権限モードと effort は断る（引数を1つずつ渡すので混ざりはしないが、打ち間違いを起動の前に止める）
+pub fn start_args(model: Option<&str>, mode: Option<&str>, effort: Option<&str>) -> Result<Vec<String>, String> {
     const MODES: [&str; 6] = ["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto"];
     let mut a = vec![];
     if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
@@ -396,6 +399,12 @@ pub fn start_args(model: Option<&str>, mode: Option<&str>) -> Result<Vec<String>
             return Err(format!("知らない権限モード: {p}"));
         }
         a.extend(["--permission-mode".to_string(), p.to_string()]);
+    }
+    if let Some(e) = effort.map(str::trim).filter(|e| !e.is_empty()) {
+        if !EFFORTS.contains(&e) {
+            return Err(format!("知らない effort: {e}"));
+        }
+        a.extend(["--effort".to_string(), e.to_string()]);
     }
     Ok(a)
 }
@@ -1251,12 +1260,14 @@ mod tests {
 
     #[test]
     fn start_args_from_the_settings() {
-        assert_eq!(start_args(Some("sonnet"), Some("plan")).unwrap(), vec!["--model", "sonnet", "--permission-mode", "plan"]);
+        assert_eq!(start_args(Some("sonnet"), Some("plan"), None).unwrap(), vec!["--model", "sonnet", "--permission-mode", "plan"]);
+        assert_eq!(start_args(None, None, Some("xhigh")).unwrap(), vec!["--effort", "xhigh"]);
         // 設定していない項目と空の値は渡さない
-        assert!(start_args(None, Some(" ")).unwrap().is_empty());
-        assert!(start_args(Some("opus 1"), None).is_err());
-        assert!(start_args(Some("--x"), None).is_err());
-        assert!(start_args(None, Some("yolo")).is_err());
+        assert!(start_args(None, Some(" "), Some("")).unwrap().is_empty());
+        assert!(start_args(Some("opus 1"), None, None).is_err());
+        assert!(start_args(Some("--x"), None, None).is_err());
+        assert!(start_args(None, Some("yolo"), None).is_err());
+        assert!(start_args(None, None, Some("ultra")).is_err());
     }
 
     #[test]

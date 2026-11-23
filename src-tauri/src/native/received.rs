@@ -130,7 +130,7 @@ fn from_line(to: &str, line: &[u8]) -> Vec<Value> {
 }
 
 /// jsonl の timestamp（2026-11-23T01:00:00.000Z の形、UTC）を ms にする
-fn iso_ms(s: &str) -> Option<u64> {
+pub(crate) fn iso_ms(s: &str) -> Option<u64> {
     let s = s.strip_suffix('Z').unwrap_or(s);
     let (date, time) = s.split_once('T')?;
     let mut d = date.split('-').map(|x| x.parse::<i64>().ok());
