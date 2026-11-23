@@ -78,6 +78,8 @@ v1="$(g rev-parse HEAD)"
 run() { # run <名前> [環境変数...]  出力は $root/<名前>.out、終了コードは $root/<名前>.rc
   local name="$1"; shift
   rm -rf "$root/dest" "$root/stable"
+  # SIGN_FILE があれば、置き場の sign-identity にその名前を書いてから走らせる
+  if [ -n "${SIGN_FILE:-}" ]; then mkdir -p "$root/stable"; printf '%s\n' "$SIGN_FILE" > "$root/stable/sign-identity"; fi
   env -u APPLE_SIGNING_IDENTITY -u CT_SIGN_IDENTITY "$@" \
     HOME="$root/home" PATH="$TEST_PATH" FAKE_LOG="$root/$name.bunx" \
     CT_DEST_DIR="$root/dest" CT_STABLE_HOME="$root/stable" \
@@ -106,6 +108,24 @@ if [ "$(rc without_id)" = 0 ] && grep -qx 'APPLE_SIGNING_IDENTITY unset' "$root/
 else
   ng "CT_SIGN_IDENTITY が無いのに何かを渡した（終了 $(rc without_id)）"
   show without_id
+fi
+
+# 2b. CT_SIGN_IDENTITY が無くても、置き場の sign-identity があればその名前を渡す（設定の「更新して再起動」は環境変数を渡さない、#297）
+SIGN_FILE="Claude Town File Signing" run with_file
+if [ "$(rc with_file)" = 0 ] && grep -qx 'APPLE_SIGNING_IDENTITY=Claude Town File Signing' "$root/with_file.bunx" 2>/dev/null; then
+  ok "置き場の sign-identity の名前が APPLE_SIGNING_IDENTITY として tauri build に渡る"
+else
+  ng "置き場の sign-identity が tauri build に渡っていない（終了 $(rc with_file)）"
+  show with_file
+fi
+
+# 2c. 両方あれば CT_SIGN_IDENTITY を使う
+SIGN_FILE="Claude Town File Signing" run both CT_SIGN_IDENTITY="Claude Town Env Signing"
+if [ "$(rc both)" = 0 ] && grep -qx 'APPLE_SIGNING_IDENTITY=Claude Town Env Signing' "$root/both.bunx" 2>/dev/null; then
+  ok "CT_SIGN_IDENTITY と sign-identity の両方があれば CT_SIGN_IDENTITY を使う"
+else
+  ng "CT_SIGN_IDENTITY が sign-identity より先になっていない（終了 $(rc both)）"
+  show both
 fi
 
 # 3. 入れた .app の指定要件が cdhash だけなら警告を出す。止めはしない（終了 0、.app は入る）
