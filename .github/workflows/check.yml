@@ -1,0 +1,89 @@
+name: Check
+on:
+  pull_request:
+  push:
+    branches: [main] # このリポジトリの既定ブランチ
+
+concurrency:
+  group: check-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # 同じ PR に後から push したら前の確認を止める。main への push は1回ずつ最後まで回す
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  types:
+    name: tsc と web の check と試験
+    # void-deploy.yml と同じ手順。ubuntu で通ることはデプロイの回で分かっている
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          check-latest: true
+      - run: bun install --frozen-lockfile
+      # 確認のうちいくつかは、まだマージされていない PR で増える。入る前に落ちないよう、それぞれ自分が要るものの有無で流すかを決める
+      # package.json の typecheck（#255）は、試験と設定ファイルの型も見る。無ければ前と同じ tsc --noEmit だけにする
+      - run: |
+          if jq -e '.scripts.typecheck' package.json >/dev/null; then
+            bun run typecheck
+          else
+            echo "::notice::package.json に typecheck が無いので bunx tsc --noEmit だけ流す"
+            bunx tsc --noEmit
+          fi
+      - run: bun install --frozen-lockfile
+        working-directory: web
+      - run: bun run check
+        working-directory: web
+      # web の試験（#190、#261 の web/test）は web の依存（hono、jose、vite）が要るので、web の install をしたこのジョブで流す
+      - run: |
+          if [ -n "$(find test -name '*.test.ts' 2>/dev/null)" ]; then
+            bun test ./test
+          else
+            echo "::notice::web/test に試験が無いので web の bun test を飛ばす"
+          fi
+        working-directory: web
+
+  tests:
+    name: bun test と hooks と scripts の試験
+    # アプリは macOS 専用で、手元で確かめたのも macOS なので、同じ OS で回す
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: python3 -m unittest discover -s hooks -v
+      # #190 の bunfig.toml（root = "src"）の後は、上の bun test が scripts の試験（#219）を拾わない
+      - run: |
+          if [ -n "$(find scripts -name '*.test.ts')" ]; then
+            bun test ./scripts
+          else
+            echo "::notice::scripts に試験が無いので bun test ./scripts を飛ばす"
+          fi
+      # scripts/native の試験（#213）。試験が0件だと unittest は終了コード 5 で落ちるので、あるときだけ流す
+      - run: |
+          if [ -n "$(find scripts/native -name 'test_*.py' 2>/dev/null)" ]; then
+            python3 -I -m unittest discover -s scripts/native -v
+          else
+            echo "::notice::scripts/native に試験が無いので飛ばす"
+          fi
+
+  rust:
+    name: cargo test
+    # アプリは macOS 専用（osascript、BSD の ps を呼ぶ）。Linux では Tauri の webkit2gtk も要るので macOS で回す
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: cargo test --locked
+        working-directory: src-tauri

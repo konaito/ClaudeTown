@@ -7,13 +7,14 @@ import { isHttp, noRoute, viaCcn } from "../session/control";
 import { BUILTINS, opensDialog } from "../composer/commands";
 import { isSlashCommand } from "../composer/edit";
 import type { useNodeSupport } from "../session/SessionControls";
+import { clearsDraft, type SendFrom } from "./draft";
 
 type Opts = {
   agent: Agent | null; hasTerm: boolean; items: ConvItem[]; switching: boolean;
   support: ReturnType<typeof useNodeSupport>[0]; markNoSupport: () => void;
   addNote: (sid: string, n: PendingItem) => void; setTab: (t: "term" | "talk" | "state") => void;
   /** 送った先のセッション id の仮の一覧に足す（#178） */
-  addPending: (sid: string, item: PendingItem) => void; setText: (v: string) => void;
+  addPending: (sid: string, item: PendingItem) => void; setText: (v: string | ((now: string) => string)) => void;
   stick: React.MutableRefObject<boolean>; convKick: React.MutableRefObject<() => void>;
   onSent: (a: Agent) => void; onError: (m: string) => void;
   /** 起動前に送って Rust が預かったとき（起動の見張りを読み直させる） */
@@ -26,8 +27,8 @@ export function usePanelSend({ agent, hasTerm, items, switching, support, markNo
   // 今パネルで開いているセッション（#178）。await の間に別の子へ切り替えたら、送った先と違う
   const shownId = useRef(agent?.id);
   shownId.current = agent?.id;
-  /** quick はカードのボタンから送るとき。入力欄の下書きは消さない */
-  const send = async (body: string, quick = false) => {
+  /** from は送った文の出どころ。入力欄の下書きを消すのは、入力欄から送ったときだけ（#182、draft.ts） */
+  const send = async (body: string, from: SendFrom) => {
     if (!agent || !body.trim() || busy || switching) return false;
     // / で始まる組み込みのコマンドの振り分け（#97、src/composer/route.ts）。使えないものは送らずに理由を出す。
     // ブラウザ版（PWA）の ccn の行のほかは、端末のセッションと同じく振り分けない
@@ -76,7 +77,8 @@ export function usePanelSend({ agent, hasTerm, items, switching, support, markNo
         await invoke("send_message", { sessionId: agent.id, text: body });
         addPending(to, { role: "user", text: body, pending: true, at: new Date().toISOString(), after });
       }
-      if (!quick) setText("");
+      // 送るのを待つ間に打ち足した文を消さないよう、空にするかはその時点の入力欄の中身で決める
+      setText((now) => (clearsDraft(from, body, now) ? "" : now));
       if (here()) {
         stick.current = true;
         // 返事が来るまでは間隔を縮めて取る（#5）
