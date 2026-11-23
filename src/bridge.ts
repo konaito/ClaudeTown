@@ -18,6 +18,8 @@ const WEB = !inTauri && import.meta.env.PROD && typeof location !== "undefined";
 const API = WEB ? `${location.origin}/api` : null;
 
 export const IS_WEB = WEB;
+/** Tauri のアプリの中か（開発版と安定版）。ブラウザ版と、開発中にブラウザで開いたときは false */
+export const IN_TAURI = inTauri;
 const LOADED_AT = Date.now();
 
 async function devJson<T>(name: string, fallback: T): Promise<T> {

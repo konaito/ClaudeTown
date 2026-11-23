@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Skin } from "../kid/pokemon";
 
 /** 素材の表示と、キャラの見た目（いつもの / ポケモン）の切り替え。見た目で使う素材が変わるので同じ所に置く */
-export function Credits({ skin, onSkin }: { skin: Skin; onSkin: (s: Skin) => void }) {
+export function Credits({ skin, onSkin, openReq = 0 }: { skin: Skin; onSkin: (s: Skin) => void; openReq?: number }) {
   const [open, setOpen] = useState(false);
+  // メニューバーの「素材のクレジット」（#300）。増えたら開く
+  useEffect(() => { if (openReq) setOpen(true); }, [openReq]);
   return (
     <span className="credits">
       <button className="credit-btn" onClick={() => setOpen((o) => !o)}>素材</button>

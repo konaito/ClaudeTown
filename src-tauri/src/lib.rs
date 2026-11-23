@@ -22,6 +22,7 @@ mod pty;
 mod repo;
 mod switch;
 mod update;
+mod menu;
 mod native;
 mod perf;
 use perf::*;
@@ -630,6 +631,13 @@ pub fn run() {
     if args.iter().any(|a| a == "--update-run") {
         std::process::exit(update::run_cli());
     }
+    // family-computing --menu-tree   メニューバーの木（#300）を1行ずつ出す。scripts/menu-ax.ts が実物のメニューと比べる
+    if args.iter().any(|a| a == "--menu-tree") {
+        for l in menu::plain_lines(&context.package_info().name) {
+            println!("{l}");
+        }
+        return;
+    }
     if args.iter().any(|a| a == "--snapshot") {
         print_snapshot();
         return;
@@ -663,11 +671,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
+        // メニューバー（#300）。Tauri の既定の英語のメニューの代わりに、日本語のメニューを組む（menu.rs）
+        .menu(menu::build)
+        .on_menu_event(|app, ev| menu::on_event(app, ev.id().as_ref()))
         .setup(|app| {
             // お便りの承認待ちと返事待ちを macOS の通知で知らせる（#292）。窓が隠れている間も動く
             notify::start(app.handle());
             // 安定版の更新があるかを、裏で数分ごとに確かめる（#295）。起動は待たせない
             update::start();
+            // 開発版の確認用に、メニューを中から読んで押す口（#300、FC_MENU_CTL のときだけ）
+            menu::start_dev_ctl(app.handle());
             // 前回開いていた端末を立て直す（#152）。ログインシェルに PATH を聞くので（最大5秒）、別のスレッドで
             if std::env::var("FC_NO_RESTORE").is_err() {
                 std::thread::spawn(session_ops::restore_terminals);
@@ -697,7 +710,8 @@ pub fn run() {
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
             composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::send_or_queue, composer::cmd::cancel_queued, composer::cmd::boot_status, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files,
             switch::cmd::session_settings, dialog::cmd::session_detail, dialog::cmd::answer_dialog, switch::cmd::switch_session, switch::cmd::cancel_switch,
-            update::cmd::update_status, update::cmd::update_run
+            update::cmd::update_status, update::cmd::update_run,
+            menu::menu_state
         ])
         .build(context)
         .expect("error while building tauri application")

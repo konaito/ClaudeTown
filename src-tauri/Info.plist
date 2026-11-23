@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- メニューバー（#300）。macOS がメニューに自分で足す項目（すべてを閉じる、音声入力、絵文字と記号、作文ツールなど）を日本語で出す。
+	     アプリが日本語の訳を持つと宣言しないと、AppKit は英語で足す。tauri dev では実行ファイルに埋め込まれ、tauri build では .app の Info.plist に重なる -->
+	<key>CFBundleDevelopmentRegion</key>
+	<string>ja</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>ja</string>
+	</array>
+</dict>
+</plist>

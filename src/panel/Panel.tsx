@@ -27,12 +27,14 @@ import { canAnswerPermission, hasTerminal } from "../abilities";
 
 const NO_NOTES: PendingItem[] = [];
 
-export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, onSent, onSent2, onError, needs, onSelect, mobile, onBack, onClose }: {
+export function Panel({ agent, lineage, termReq, chatReq, composeReq, stateReq = 0, helpReq = 0, sendHook, onSent, onSent2, onError, needs, onSelect, mobile, onBack, onClose }: {
   /** スマホ専用の画面（src/mobile）。見出しを戻るつきの1行にし、細かいボタンは出さない */
   mobile?: boolean; onBack?: () => void;
   /** 見出しの × で選ぶのをやめる（#89）。右パネルが閉じる */
   onClose?: () => void;
   agent: Agent | null; lineage: Agent[]; termReq: number; chatReq: number; composeReq: number;
+  /** メニューバー（#300）の「状態」のタブと「キーボードショートカット」の合図。増えたら開く */
+  stateReq?: number; helpReq?: number;
   /** カードのボタン（#63）が、選んでいるセッションへの送信をこのパネルに任せる口。選んでいないセッションなら null を返す */
   sendHook: React.MutableRefObject<((id: string, text: string) => Promise<boolean> | null) | null>;
   onSent: (a: Agent) => void; onSent2: (m: string) => void; onError: (m: string) => void; needs: Agent[]; onSelect: (a: Agent) => void;
@@ -44,12 +46,17 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
   useEffect(() => { setTab("talk"); }, [agent?.id, hasTerm]);
   useEffect(() => { if (termReq && hasTerm) setTab("term"); }, [termReq]);
   useEffect(() => { if (chatReq) setTab("talk"); }, [chatReq]);
+  useEffect(() => { if (stateReq) setTab("state"); }, [stateReq]);
   // composeReq が来たら、チャットの入力欄にフォーカスする。前に選んでいた子が端末を開いていると、
   // 最初の描画ではまだ tab が "term" で入力欄が無いので、入力欄が出てからフォーカスする
   // 入力欄は Composer（#53）の中にあり、子を替えるたびに作り直されるので、枠から textarea を探す
   const composerBox = useRef<HTMLDivElement>(null);
   const wantCompose = useRef(false);
   useEffect(() => { if (composeReq) { wantCompose.current = true; setTab("talk"); } }, [composeReq]);
+  // キーの一覧（入力欄の ? と同じ）。一覧は入力欄（Composer）の中にあるので、チャットを出して入力欄にフォーカスし、Composer に開かせる。
+  // 開いた合図の番号は Panel が持つ（Composer は子を替えるたびと、ターミナルのタブから戻るたびに作り直される）
+  const helpSeen = useRef(0);
+  useEffect(() => { if (helpReq) { wantCompose.current = true; setTab("talk"); } }, [helpReq]);
   useEffect(() => {
     const el = composerBox.current?.querySelector<HTMLTextAreaElement>("textarea");
     if (!wantCompose.current || !el || el.disabled) return;
@@ -270,7 +277,7 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
         <div className="to"><span className="to-name">送信先: {target}</span>
           <SessionControls key={agent.id} agent={agent} support={support} onNoSupport={markNoSupport} onSwitching={setSwitching} onDone={onSent2} onError={onError} />
         </div>
-        <Composer key={agent.id} touch={mobile} agent={agent} text={text} setText={setText} busy={busy || switching} running={mood === "working"} booting={boot.booting} support={support} onSubmit={(b) => send(b, "composer")} onError={onError} />
+        <Composer key={agent.id} touch={mobile} helpReq={helpReq} helpSeen={helpSeen} agent={agent} text={text} setText={setText} busy={busy || switching} running={mood === "working"} booting={boot.booting} support={support} onSubmit={(b) => send(b, "composer")} onError={onError} />
       </div>}
     </aside>
   );

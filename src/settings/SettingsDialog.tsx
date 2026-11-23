@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { call as invoke } from "../bridge";
 import { checkPlace, DEFAULT_PLACE_LABEL } from "../newHouse/placeSetting";
 import { placeLabel, recentPlaces, type PlacesInput, type RecentPlace } from "../newHouse/places";
@@ -11,8 +11,10 @@ import { asStatus, canRun, checkedText, compareText, runText, shortSha, useUpdat
  * 「更新」は安定版だけに出る（Rust の update_status が null の版では出さない）。保存のボタンとは別に、その場で走らせる。
  * 項目を足すときは、<section className="set-sec"> を1つ足し、保存する値を onSave の引数に足す。
  */
-export function SettingsDialog({ place, defaults, onSave, onClose, onUpdateStatus }: {
+export function SettingsDialog({ place, defaults, onSave, onClose, onUpdateStatus, focus = null }: {
   place: string | null; defaults: SessionDefaults;
+  /** 開いたときに見せる欄。"update" はメニューバーの「アップデートを確認…」（#300）で、更新の欄が出たらそこまで送る */
+  focus?: "update" | null;
   onSave: (place: string | null, defaults: SessionDefaults) => void; onClose: () => void;
   /** 読み直した更新の状態を渡す（ヘッダーの歯車の点を、App の1分ごとの読み直しを待たずに合わせる） */
   onUpdateStatus?: (s: UpdateStatus) => void;
@@ -45,6 +47,9 @@ export function SettingsDialog({ place, defaults, onSave, onClose, onUpdateStatu
   };
   useEffect(() => { if (upd) onUpdateStatus?.(upd); }, [upd, onUpdateStatus]);
   const ran = upd ? runText(upd.run) : null;
+  const updBox = useRef<HTMLElement>(null);
+  const hasUpd = upd !== null;
+  useEffect(() => { if (focus === "update" && hasUpd) updBox.current?.scrollIntoView({ block: "nearest" }); }, [focus, hasUpd]);
   useEffect(() => {
     const k = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", k);
@@ -114,7 +119,7 @@ export function SettingsDialog({ place, defaults, onSave, onClose, onUpdateStatu
           </div>
         </section>
         {upd && (
-          <section className="set-sec set-update">
+          <section className="set-sec set-update" ref={updBox}>
             <span className="set-label">更新</span>
             <p className="hint">押すと {upd.branch} を fetch して、scripts/release-stable.sh {upd.branch} を走らせる。ビルドに数分かかり、済むとアプリが終わって新しい版で起動し直す。開いていた端末は、起動し直した後に立て直す。</p>
             <div className="set-row">
