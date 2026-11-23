@@ -5,7 +5,10 @@
 //   sent      送り手の PostToolUse。SendMessage、ccn の send_message、ccn の create_session。宛先は生のまま。
 //             in-process のチームメイトと sub-agent が送ったものは、from が町の行の id（sub-<agent_id>@<sid8>）
 //   received  受け手の UserPromptSubmit。<cross-session-message from=… from-name=…> か、1行目が from agent:<ノード>/<sid8>/… の文。
-//             agent teams のチームメイトの文（<teammate-message>）では UserPromptSubmit が出ないので、received は無い（#271）
+//             agent teams のチームメイトの文（<teammate-message>）では UserPromptSubmit が出ないので、hook の received は無い（#271）
+// アプリ（src-tauri/src/native/received.rs）は、受けた側の jsonl に出た <teammate-message> と <agent-message> から、
+// via: "jsonl" の received を作って一覧に足す（#276）。ファイルには書かない。送り手は from_raw の teammate:<名前> で、受け手のチームの中で引く。
+// この received は既読の印にだけ使い、対になる sent が無ければ捨てる（idle_notification など、SendMessage で送っていない連絡がある）
 // 宛先と送り手は、アプリが町の一覧からセッション ID に結び付ける（resolve）:
 //   1. uds:/tmp/cc-socks/<pid>.sock の pid（Claude Code のソケットの pid は ccn の pid と同じ。2026-11-12 に確かめた）
 //   2. セッション ID か、その先頭8字以上（"<ノード>/<ID>" の形も読む）
@@ -13,6 +16,7 @@
 //   どれでも1人に決まらなければ結ばない（推測で飛ばさない）。別の町のセッションも、この町の一覧にいないので結ばない。
 // 1通に記録が2つ（sent と received）出るので、sent で飛ばし、対になる received を「読んだ」の印にする。
 // 対になる received が無い sent も飛ばす。対になる sent が無い received（hook の無い送り手など）は、received の時刻で飛ばす。
+// 対は hook の received で先に取り、余った sent に jsonl の received を当てる。
 import type { Agent } from "./model";
 
 export type LetterRec = {
@@ -29,6 +33,8 @@ export type LetterRec = {
   from_node?: string | null;
   from_sid8?: string | null;
   summary?: string;
+  /** "jsonl" なら、hook ではなくアプリが受けた側の jsonl から作った received（#276） */
+  via?: "jsonl";
 };
 
 export type Flight = {
@@ -112,6 +118,15 @@ export function resolvePeer(raw: string | null | undefined, name: string | null 
   return one(raw) ?? resolve(sid8, agents) ?? one(name);
 }
 
+/**
+ * sent の summary（hook が空白をつめて60字で切り、切ったら末尾に … を付けたもの）と、包みの summary 属性が同じか。
+ * hook の切り方は hooks/fc-report.py の clip
+ */
+export function sameSummary(sent: string, wrapped: string): boolean {
+  const w = wrapped.replace(/\s+/g, " ").trim();
+  return sent === w || (sent.endsWith("…") && w.startsWith(sent.slice(0, -1)));
+}
+
 /** 記録の並びから、飛ばす封筒の一覧を作る（古い順） */
 export function flightsOf(recs: LetterRec[], agents: Agent[]): Flight[] {
   const live = new Set(agents.map((a) => a.id));
@@ -126,17 +141,32 @@ export function flightsOf(recs: LetterRec[], agents: Agent[]): Flight[] {
   }
   const out = [...sent];
   const used = new Set<string>();
+  // 対になる sent: 同じ送り手と受け手で、受けた時刻の少し後から、10分前までに送ったもの。古い順に1通ずつ当てる
+  const pairOf = (from: string, to: string, at: number, ok: (f: Flight) => boolean = () => true) =>
+    sent.find((f) => !used.has(f.id) && f.from === from && f.to === to && f.at - PAIR_BEFORE_MS <= at && at - f.at <= PAIR_AFTER_MS && ok(f));
   for (const r of recs) {
-    if (r.ev !== "received" || !r.to || !live.has(r.to)) continue;
+    if (r.ev !== "received" || r.via === "jsonl" || !r.to || !live.has(r.to)) continue;
     const from = resolve(r.from_raw, agents) ?? resolve(r.from_sid8, agents) ?? resolve(r.from_name, agents);
     if (!from || from === r.to) continue;
-    // 対になる sent: 同じ送り手と受け手で、受けた時刻の少し後から、10分前までに送ったもの。古い順に1通ずつ当てる
-    const pair = sent.find((f) => !used.has(f.id) && f.from === from && f.to === r.to && f.at - PAIR_BEFORE_MS <= r.at && r.at - f.at <= PAIR_AFTER_MS);
+    const pair = pairOf(from, r.to, r.at);
     if (pair) {
       used.add(pair.id);
       pair.readAt = r.at;
     } else {
       out.push({ id: r.id, from, to: r.to, at: r.at, summary: r.summary ?? "", readAt: r.at });
+    }
+  }
+  // 受けた側の jsonl の received（#276）。送り手は受け手のチームの中で引き、対になる sent が無ければ捨てる。
+  // 包みに summary があれば、同じ summary の sent にだけ当てる。Agent で立てたときの最初の文も teammate-message で届き、sent の行が無いので、
+  // 時刻だけで当てると、直後に送った別の sent を既読にしてしまう
+  for (const r of recs) {
+    if (r.ev !== "received" || r.via !== "jsonl" || !r.to || !live.has(r.to)) continue;
+    const from = resolvePeer(r.from_raw, r.from_name, byId.get(r.to)!, agents);
+    if (!from || from === r.to) continue;
+    const pair = pairOf(from, r.to, r.at, (f) => !r.summary || sameSummary(f.summary, r.summary));
+    if (pair) {
+      used.add(pair.id);
+      pair.readAt = r.at;
     }
   }
   return out.sort((a, b) => a.at - b.at || (a.id < b.id ? -1 : 1));

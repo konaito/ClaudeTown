@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { flightsOf, resolve, resolvePeer, type LetterRec } from "./letters";
 import type { Agent } from "./model";
+import cases from "./teammate-read-cases.json";
 
 const ag = (id: string, name: string, pid?: number, parent: string | null = null): Agent => ({
   id, name, pid, parent, kind: "terminal", state: "idle", cwd: "/", canSend: true,
@@ -154,5 +155,26 @@ describe("agent teams の送った記録（#271。2026-11-23 に Claude Code 2.1
       sent("2af50b8ce620", L2, "bob", 1795374905206),
     ], team);
     expect(f.map((x) => [x.from, x.to])).toEqual([[BOB2, L2], [L2, BOB2]]);
+  });
+});
+
+describe("受けた側の jsonl の teammate-message で既読にする（#276。src/teammate-read-cases.json を Rust の native/received.rs と同じに読む）", () => {
+  const c = cases as unknown as { agents: Agent[]; sent: LetterRec[]; received: LetterRec[]; readAt: Record<string, number | null> };
+
+  test("sent と、受けた側の jsonl から作った received を対にして、readAt を付ける", () => {
+    const f = flightsOf([...c.sent, ...c.received], c.agents);
+    expect(Object.fromEntries(f.map((x) => [x.id, x.readAt]))).toEqual(c.readAt);
+  });
+
+  test("対になる sent の無い jsonl の received（idle_notification など）は、封筒にしない", () => {
+    const f = flightsOf(c.received, c.agents);
+    expect(f).toEqual([]);
+  });
+
+  test("hook の received が先に対を取ったら、jsonl の received は余って捨てる（二重に既読にしない）", () => {
+    const [L, BOB] = [c.agents[0].id, c.agents[1].id];
+    const hook = recv("h1", BOB, 1795395600800, { from_raw: L });
+    const f = flightsOf([c.sent[0], hook, c.received[0]], c.agents);
+    expect(f.map((x) => [x.id, x.readAt])).toEqual([["s1", 1795395600800]]);
   });
 });
