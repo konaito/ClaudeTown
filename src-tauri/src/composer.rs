@@ -257,11 +257,17 @@ static FILES_CACHE: Mutex<Option<HashMap<String, FilesEntry>>> = Mutex::new(None
 const FILES_MAX: usize = 30000;
 
 fn list_files(cwd: &str) -> Vec<String> {
+    // 既定の core.quotePath=true だと、日本語などを含むパスが "\346\227\245..." の形で返る。-z ならどの名前も引用符を付けずに NUL で区切る
     let out = std::process::Command::new("git")
-        .args(["-C", cwd, "ls-files", "--cached", "--others", "--exclude-standard"])
+        .args(["-c", "core.quotePath=false", "-C", cwd, "ls-files", "-z", "--cached", "--others", "--exclude-standard"])
         .output();
     let mut files: Vec<String> = match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).lines().take(FILES_MAX).map(|s| s.to_string()).collect(),
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .take(FILES_MAX)
+            .map(|s| s.to_string())
+            .collect(),
         _ => {
             let mut v = Vec::new();
             fn walk(base: &Path, d: &Path, v: &mut Vec<String>, depth: usize) {
@@ -878,6 +884,35 @@ mod tests {
         assert!(!paste_body("a\x1b").contains('\x1b'));
         assert_eq!(paste_body("a\x1b[201~\rb"), "a[201~\rb");
         assert_eq!(paste_body("日本語\nそのまま"), "日本語\nそのまま");
+    }
+
+    #[test]
+    fn lists_non_ascii_paths_as_is() {
+        // git の既定（core.quotePath=true）では、日本語の名前が "\346\227\245..." の形で返る
+        let root = std::env::temp_dir().join(format!("ct-files-{}-{}", std::process::id(), fastrand::u32(..)));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("フォルダ/下")).unwrap();
+        fs::write(root.join("日本語.txt"), "a").unwrap();
+        fs::write(root.join("フォルダ/下/中身.md"), "b").unwrap();
+        fs::write(root.join("a b.txt"), "c").unwrap();
+        fs::write(root.join("plain.txt"), "d").unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git").arg("-C").arg(&root).args(args).output().unwrap().status.success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        // 登録済み（--cached）と未登録（--others）の両方を見る
+        git(&["add", "日本語.txt", "plain.txt"]);
+        let mut got = list_files(root.to_str().unwrap());
+        got.sort();
+        assert!(got.iter().all(|f| !f.starts_with('"') && !f.contains('\\')), "{got:?}");
+        let want = ["a b.txt", "plain.txt", "フォルダ/", "フォルダ/下/", "フォルダ/下/中身.md", "日本語.txt"];
+        let mut want: Vec<String> = want.iter().map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(got, want);
+        // 日本語で打つと候補に合う
+        assert_eq!(rank_files(&got, "中身", 10), vec!["フォルダ/下/中身.md"]);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
