@@ -1,25 +1,30 @@
-import { useEffect } from "react";
+import { useEffect, useId, useRef } from "react";
 import { Power } from "lucide-react";
 import type { Agent } from "../model";
 import { ICON, STROKE } from "../icons";
+import { confirmKeyAction } from "./keys";
 
-/** セッションを止める操作の前の確認。Enter で進める、Esc でやめる。ok は進めるボタンの名前。single なら、やめるボタンを出さない（読んで閉じるだけの知らせ） */
+/** セッションを止める操作の前の確認。Enter で進める（フォーカスが「やめる」にあるときはやめる）、Esc でやめる。ok は進めるボタンの名前。single なら、やめるボタンを出さない（読んで閉じるだけの知らせ） */
 export function Confirm({ title, ok, danger, single, onCancel, onConfirm, children }: { title: string; ok: string; danger?: boolean; single?: boolean; onCancel: () => void; onConfirm: () => void; children: React.ReactNode }) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { e.preventDefault(); onCancel(); }
-      if (e.key === "Enter") { e.preventDefault(); onConfirm(); }
+      const act = confirmKeyAction(e.key, !!cancelRef.current && document.activeElement === cancelRef.current);
+      if (!act) return;
+      e.preventDefault();
+      if (act === "cancel") onCancel(); else onConfirm();
     };
     window.addEventListener("keydown", k);
     return () => window.removeEventListener("keydown", k);
   }, [onCancel, onConfirm]);
   return (
     <div className="modal-scrim" onMouseDown={onCancel}>
-      <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="modal-title">{title}</div>
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby={titleId} onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-title" id={titleId}>{title}</div>
         <p className="hint">{children}</p>
         <div className="modal-btns">
-          {!single && <button className="pane-btn" onClick={onCancel}>やめる（Esc）</button>}
+          {!single && <button ref={cancelRef} className="pane-btn" onClick={onCancel}>やめる（Esc）</button>}
           <button className={danger ? "danger" : "primary"} autoFocus onClick={onConfirm}>{ok}（Enter）</button>
         </div>
       </div>
