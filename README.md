@@ -412,5 +412,5 @@ VITE_FC_FORCE_VISIBLE=1 bun tauri dev --config '{"build":{"devUrl":"http://local
 - 止めるときは、自分が起動した `bun tauri dev` の pid を指定する。安定版と開発版は実行ファイル名が同じなので、名前で止めない。
 - 開発版は2つ目の起動を止めない（#176）。同じ `FC_APP_HOME` で2つ起動すると、2つ目が端末の台帳を書き直すので、起動のたびに `mktemp -d` で分ける。2つ目を止める動きは `FC_SINGLE_INSTANCE=1 scripts/check-single-instance.sh` で確かめる。
 - 軽さの計測（`src/term/bench.ts` の scene）では付けない。隠した窓の負荷を測る場面（hidden、minimized）の数字が変わる。
-- 開発版はお便りの通知（#292）を出さない。確かめるときだけ `FC_NOTIFY=1` を付ける。開発版は通知をターミナル（`com.apple.Terminal`）の名義で出すので、ターミナルの通知が許可されていない機械では画面に出ず、音も鳴らない。出したかどうかは `FC_PERF_LOG` の `notify` の行で見る。
+- 開発版はお便りの通知（#292）を出さない。確かめるときだけ `FC_NOTIFY=1` を付ける。開発版は通知をターミナル（`com.apple.Terminal`）の名義で出す。2026-11-23 に確かめた機械では、usernoted が要求を断り、画面に出なかった。ターミナルの通知を許可すれば出るかは確かめていない。出す判定が動いたかは `FC_PERF_LOG` の `notify` の行で見る。
 - 開発版で「新しい世帯」を押すと、本物の claude が起動し、本物の `~/.claude` に会話が残る。押す確認は捨ての場所（一時のディレクトリ）を置き場所にして行い、済んだら閉じる（power）か、開発版を終了して止める。

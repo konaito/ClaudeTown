@@ -23,7 +23,9 @@ use super::*;
 // - 音は sound に NSUserNotificationDefaultSoundName を渡すと既定の音になる（mac-notification-sys の objc/notify.m）。渡さなければ鳴らない
 // - 押した知らせは on_action に "tap" で来る（2.6.0 から）。show の時点で handler が登録済みのときだけ追跡するので、最初の通知より前に登録する
 // - `bun tauri dev` の実行ファイル（tauri::is_dev()）では、通知は com.apple.Terminal の名義で出る（プラグインの desktop.rs）。
-//   ターミナルの通知が許可されていない機械では、出しても画面に出ず、音も鳴らない。開発版は FC_NOTIFY=1 のときだけ出す（wanted）
+//   2026-11-23 にこの機械の開発版で出すと、usernoted が要求を断った（「Denying message 3 from connection <LegacyConnection identifier:
+//   com.apple.Terminal>」）。ターミナルの通知を許可すれば出るかは確かめていない。開発版は FC_NOTIFY=1 のときだけ出す（wanted）
+// - アプリが最前面のときは、macOS が通知を出さないはず（mac-notification-sys の delegate に shouldPresentNotification が無い）。確かめていない
 
 /// 一覧から消えた子の記録を捨てるまでの、続けて見えなかった回数
 const FORGET_AFTER: u32 = 30;
