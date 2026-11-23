@@ -1,0 +1,3 @@
+# bun test はルートの src だけを探す。web/ の試験は web/ の依存（hono、jose、void）が要るので、web/ で bun test を走らせる
+[test]
+root = "src"

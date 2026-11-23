@@ -9,7 +9,7 @@
 //    前に選んだ候補は引き継がない。同じ顔ぶれなら、どの町で、どの順で増えても同じ配置になる（docs/design/geometric-layout.md の末尾）
 // ただし、子が1〜8人の世帯（根と子がカードの大きさ）は、上の計算をせず childSlots の固定の座標に子を置く。
 // 孫がいても子の位置は変えず、孫より下をその子の、親から離れる向きの延長に並べる（placeGrid）。
-// 検査を通らなければ、子の位置はそのままで、違反した枝の孫までの距離を広げる。上の計算には戻さない。
+// 検査を通らなければ、子の位置はそのままで、違反した枝の孫まで（ひ孫より下の線の違反なら、その世代まで）の距離を広げる。上の計算には戻さない。
 // 子が9人以上の世帯は上の計算のまま（docs/design/geometric-layout.md の「子1〜4人の固定の座標」「子3人、5人、6人の格子と、孫がいる世帯」「子4人、7人、8人の格子」）
 
 import { LAYOUT } from "./params";
@@ -216,9 +216,9 @@ function radialHalfAt(n: LNode, theta: number): number {
  * 孫がいなければ、子の位置をそのまま返す。
  * - 子 k の枝の世代 d の半径 R_k[d] は、根から子 k までの距離から始め、子 k の角度の向きで箱の半分の長さと radialGap を足していく
  * - 兄弟は、子 k の角度（孫より下は親の角度）を中心に、重ならない最小の角度 2·arcsin(r/R) で並べる。葉から必要な幅を足し上げる
- * - extra[k] は子 k の枝の孫の半径に足す。検査に通らないときに広げる
+ * - extra[k][d] は子 k の枝の世代 d の半径に足す（d は2以上）。検査に通らないときに広げる。d より外の世代も同じだけ外へ動く
  */
-function placeGrid(t: Tree, slots: { x: number; y: number }[], gap: number, radialGap: number, extra: number[]): Placed[] {
+function placeGrid(t: Tree, slots: { x: number; y: number }[], gap: number, radialGap: number, extra: number[][]): Placed[] {
   const ks = t.kids.get(t.root.id) ?? [];
   const out: Placed[] = [placedRoot(t)];
   ks.forEach((k, i) => {
@@ -230,7 +230,7 @@ function placeGrid(t: Tree, slots: { x: number; y: number }[], gap: number, radi
     walkH(k, 1);
     const R: number[] = [];
     R[1] = Math.hypot(slots[i].x, slots[i].y);
-    for (let d = 2; d < half.length; d++) R[d] = R[d - 1] + half[d - 1] + half[d] + radialGap + (d === 2 ? extra[i] : 0);
+    for (let d = 2; d < half.length; d++) R[d] = R[d - 1] + half[d - 1] + half[d] + radialGap + (extra[i][d] ?? 0);
     const need = new Map<string, number>();
     const needOf = (n: LNode, d: number): number => {
       const own = 2 * Math.asin(Math.min(1, (tangentHalf(n, th) + gap / 2) / R[d]));
@@ -350,11 +350,32 @@ function solve(t: Tree, arcLimit: number, gap: number, radialGap: number, view: 
   return { nodes, m };
 }
 
+/** 交差した線と、箱を通る線の、子の側の箱。measure と同じ判定で数える */
+function badEdgeKids(nodes: Placed[], margin: number): Placed[] {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const edges = nodes.filter((n) => n.parent).map((n) => [byId.get(n.parent!)!, n] as const);
+  const bad = new Set<Placed>();
+  for (let i = 0; i < edges.length; i++) for (let j = i + 1; j < edges.length; j++) {
+    const [a, b] = edges[i], [c, d] = edges[j];
+    if (a === c || a === d || b === c || b === d) continue;
+    if (segCross(a, b, c, d)) { bad.add(b); bad.add(d); }
+  }
+  for (const [a, b] of edges) for (const n of nodes) {
+    if (n === a || n === b) continue;
+    if (segHitsRect(a, b, n, margin)) bad.add(b);
+  }
+  return [...bad];
+}
+
 const passes = (m: Metrics) => !m.overlaps && !m.crossings && !m.edgeThroughNode && !m.interleave;
 
 /**
  * 子1〜8人の世帯を childSlots の位置に置く。子の位置は動かさず、検査に通るまで、違反した枝の孫までの距離を radiusStep ずつ広げる。
- * 重なった組は、深いほうの箱の枝（同じ深さなら両方の枝）を広げる。重なりが無く線の検査だけが残るときは、孫のいる枝をすべて広げる。
+ * 重なった組は、深いほうの箱の枝（同じ深さなら両方の枝）を広げる。
+ * 重なりが無く線の検査だけが残るときは、違反した線（交差した線、箱を通る線）の子の側が深さ3以上なら、その枝のその世代の半径だけを広げる。
+ * 孫からひ孫への線は、孫までの距離を広げても形が変わらない（ひ孫の並びは孫と一緒に動く）ので、ひ孫までの距離を広げる（#214）。
+ * 弧の計算の solve が一番外の世代（extraR[maxDepth]）を広げるのと同じ考え方である。
+ * 違反した線の子の側が深さ2以下のときと、枝の混ざりが残るときは、前と同じく孫のいる枝をすべて、孫までの距離を広げる。
  * 孫までの距離を広げるほど、兄弟を並べる角度が狭まり、枝どうしが離れるので、いずれ通る。
  * gridMaxAdjust 回で通らなければ、最後の結果を valid: false で返す（画面は「配置が重なっている」を出す）。
  */
@@ -362,21 +383,29 @@ function solveGrid(t: Tree, slots: { x: number; y: number }[], gap: number, radi
   const ks = t.kids.get(t.root.id) ?? [];
   const branch = new Map<string, number>();
   ks.forEach((k, i) => { const walk = (n: LNode) => { branch.set(n.id, i); for (const c of t.kids.get(n.id) ?? []) walk(c); }; walk(k); });
-  const extra: number[] = Array(ks.length).fill(0);
+  const extra: number[][] = ks.map(() => []);
+  const grow = (i: number, d: number) => { extra[i][d] = (extra[i][d] ?? 0) + LAYOUT.radiusStep; };
   let nodes = placeGrid(t, slots, gap, radialGap, extra);
   let m = measure(nodes, view, gap / 2);
   let n = 0;
   while (!passes(m) && n < LAYOUT.gridMaxAdjust) {
     n++;
-    const grow = new Set<number>();
+    // 枝の番号と深さの組を "i/d" で集め、1回に1度ずつ広げる
+    const targets = new Set<string>();
     outer: for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
       const a = nodes[i], b = nodes[j];
       if (!rectOverlap(a, b)) continue;
-      for (const x of [a, b]) if (x.depth >= 2 && x.depth === Math.max(a.depth, b.depth)) grow.add(branch.get(x.id)!);
+      for (const x of [a, b]) if (x.depth >= 2 && x.depth === Math.max(a.depth, b.depth)) targets.add(`${branch.get(x.id)}/2`);
       break outer;
     }
-    if (!grow.size) ks.forEach((k, i) => { if (t.kids.get(k.id)?.length) grow.add(i); });
-    for (const i of grow) extra[i] += LAYOUT.radiusStep;
+    if (!targets.size) {
+      // 重なりは無く線の検査だけが残る。違反した線の子が深さ3以上なら、その枝のその世代だけを広げる（弧の計算の extraR[maxDepth] と同じ考え方）。
+      // 孫より上の線の違反と枝の混ざりは、前と同じく孫のいる枝の孫までの距離を広げる
+      const bad = badEdgeKids(nodes, gap / 2);
+      for (const c of bad) if (c.depth >= 3) targets.add(`${branch.get(c.id)}/${c.depth}`);
+      if (!bad.length || bad.some((c) => c.depth < 3) || m.interleave) ks.forEach((k, i) => { if (t.kids.get(k.id)?.length) targets.add(`${i}/2`); });
+    }
+    for (const key of targets) { const [i, d] = key.split("/").map(Number); grow(i, d); }
     nodes = placeGrid(t, slots, gap, radialGap, extra);
     m = measure(nodes, view, gap / 2);
   }

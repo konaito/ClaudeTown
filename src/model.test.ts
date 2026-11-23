@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { accountText, cardNames, houseNameOf, projectFromPath, statusClass, statusLabel, targetLabel, type Agent, type Who } from "./model";
+import { accountText, cardNames, houseNameOf, moodOf, projectFromPath, statusClass, statusLabel, targetLabel, type Agent, type Report, type Who } from "./model";
 import cases from "./naming-cases.json";
+import reportCases from "./report-cases.json";
 
 const ag = (id: string, cwd: string, over: Partial<Agent> = {}): Agent => ({
   id, name: id, kind: "terminal", state: "idle", cwd, canSend: true, parent: null, ...over,
@@ -68,5 +69,34 @@ describe("起動中の札", () => {
     expect(statusClass({ booting: true }, "idle")).toBe("st st-idle st-boot");
     expect(statusLabel({}, "idle")).toBe("待機");
     expect(statusClass({ booting: false }, "working")).toBe("st st-working");
+  });
+});
+
+// 承認の画面を理由なしの No か Esc で閉じると、hook は何も来ず、状態ファイルは needs_you のまま残る（#180）。
+// 時刻は 2026-11-23 の実測（Esc の回）。状態ファイルの updated_at は Notification の時刻、sessions の updatedAt は Esc の後に idle へ変わった時刻
+describe("承認を断った後の様子（#180）", () => {
+  const caseOf = (name: string) => (reportCases as { name: string; state: Report }[]).find((c) => c.name === name)!.state;
+  const denied = { ...caseOf("承認の画面を No か Esc で閉じた（この後に hook は来ない）"), updated_at: 1795364494292 };
+  const asking = { ...caseOf("問いかけで止まる"), updated_at: 1795364494292 };
+
+  test("断った後に status が idle へ変わったら、返事待ちにしない", () => {
+    expect(moodOf(ag("a", "/w", { report: denied, state: "idle", lastActivityAt: 1795364498158 }))).toBe("idle");
+  });
+
+  test("承認の画面が出ている間は承認待ち", () => {
+    expect(moodOf(ag("a", "/w", { report: denied, state: "waiting_permission", lastActivityAt: 1795364489000 }))).toBe("approval");
+  });
+
+  test("status が報告より後に変わっていなければ、返事待ちのまま（休んだリードの端末に出たチームメイトの承認）", () => {
+    expect(moodOf(ag("a", "/w", { report: denied, state: "idle", lastActivityAt: 1795364400000 }))).toBe("reply");
+    expect(moodOf(ag("a", "/w", { report: denied, state: "idle" }))).toBe("reply");
+  });
+
+  test("Stop の問いかけは、status が後で変わっても返事待ち", () => {
+    expect(moodOf(ag("a", "/w", { report: asking, state: "idle", lastActivityAt: 1795364498158 }))).toBe("reply");
+  });
+
+  test("status を持たない tmux のチームメイトは、今までどおり返事待ち", () => {
+    expect(moodOf(ag("a", "/w", { kind: "teammate", report: denied, state: "idle", lastActivityAt: 1795364498158 }))).toBe("reply");
   });
 });

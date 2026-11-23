@@ -20,6 +20,7 @@ import { StateTab } from "./StateTab";
 import { useConversation } from "./useConversation";
 import { usePanelSend } from "./usePanelSend";
 import { useBoot } from "./useBoot";
+import { doneLog } from "./bootDone";
 import { isSlashCommand } from "../composer/edit";
 import { call as invoke } from "../bridge";
 import { canAnswerPermission, hasTerminal } from "../abilities";
@@ -59,7 +60,15 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
   // 下書きは宛先ごとに持つ。宛先を切り替えたとき、打ちかけの文が次の宛先に送られないようにする
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const text = agent ? drafts[agent.id] ?? "" : "";
-  const setText = (v: string) => { if (agent) setDrafts((d) => ({ ...d, [agent.id]: v })); };
+  // 関数を渡すと、その時点の下書きから次の下書きを作る（送った後に入力欄を空にするかを、待つ間に打った文で決める、#182）
+  const setText = (v: string | ((now: string) => string)) => {
+    if (!agent) return;
+    const id = agent.id;
+    setDrafts((d) => {
+      const next = typeof v === "function" ? v(d[id] ?? "") : v;
+      return d[id] === next ? d : { ...d, [id]: next };
+    });
+  };
   // モデルか権限モードを替えている間（#97）。pty は claude を起動し直すので、その間は送らない
   const [switching, setSwitching] = useState(false);
   useEffect(() => { setSwitching(false); }, [agent?.id]);
@@ -87,14 +96,14 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
   // チャットを開いたとき（セッションを選んだ、タブを切り替えた）は、必ず一番下から始める。
   // 以前は stick を読み込みの effect でしか戻さず、タブの切り替えでは前の値が残り、容れ物も作り直されるのに items が変わらないので下へ送られなかった
   useLayoutEffect(() => { stick.current = true; }, [id, tab, chatReq]);
-  const { items, live, pending, setPending, convErr, convKick } = useConversation(id, isFast, working, stick, agent?.kind !== "node");
+  const { items, live, pending, addPending, convErr, convKick } = useConversation(id, isFast, working, stick, agent?.kind !== "node");
   // claude の起動の様子（アプリが立てた端末だけ）。起動前に送った文は Rust が預かり、起動したら送る（composer.rs の send_or_queue）。
   // 送れたら「届けた」の仮の吹き出しに替え、送れなかったら理由を出して入力欄に戻す
   const boot = useBoot(agent,
     // / と ! の文は会話に user として出ないことがあるので、すぐ送ったときと同じく仮の吹き出しを足さない（usePanelSend の plain）
-    (t) => { if (!(t.startsWith("!") || isSlashCommand(t))) setPending((p) => [...p, { role: "user", text: t, pending: true, at: new Date().toISOString(), after: items[items.length - 1]?.n ?? -1 }]); convKick.current(); },
+    (t) => { if (agent && !(t.startsWith("!") || isSlashCommand(t))) addPending(agent.id, { role: "user", text: t, pending: true, at: new Date().toISOString(), after: items[items.length - 1]?.n ?? -1 }); convKick.current(); },
     (t, e) => { onError(`${agent?.name ?? ""} に届かなかった: ${e}`); if (!text.trim()) setText(t); });
-  const { busy, send } = usePanelSend({ agent, hasTerm, items, switching, support, markNoSupport, addNote, setTab, setPending, setText, stick, convKick, onSent, onError, onQueued: boot.kick });
+  const { busy, send } = usePanelSend({ agent, hasTerm, items, switching, support, markNoSupport, addNote, setTab, addPending, setText, stick, convKick, onSent, onError, onQueued: boot.kick });
   // 預かった文を取り消して、入力欄に戻す（打ちかけがあれば、その前に置く）
   const cancelQueued = async () => {
     if (!agent) return;
@@ -102,6 +111,12 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
     boot.kick();
     if (back?.length) setText([...back, text].filter((x) => x.trim()).join("\n"));
   };
+  // パネルを開く前に送れなかった預けた文（#184、App の見張りが知らせた分）を、開いたら入力欄に戻す（打ちかけがあれば、その前に置く）
+  useEffect(() => {
+    if (!agent) return;
+    const back = doneLog.takeBack(agent.id);
+    if (back.length) setText([...back, text].filter((x) => x.trim()).join("\n"));
+  }, [agent?.id]);
 
   // 吹き出しの並びと選択肢は、会話が変わったときだけ作り直す（App の1秒の tick で描き直されても、Bubble の memo が効く）
   // -p の子は返事が出ると、送った文の仮の印が外れる（#55、answerPending）。外れた分は after の位置に置く（withNotes）
@@ -165,7 +180,7 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
   const canAnswer = canAnswerPermission(agent);
   // 同じ名前の人が町にいたら、送信先に ID の先頭8字を添える（#36）。見出しは幅が足りず ID が切れるので名前だけにする
   const target = targetLabel(agent, town);
-  quickSend.current = (to, body) => (to === agent.id ? send(body, true) : null);
+  quickSend.current = (to, body) => (to === agent.id ? send(body, "card") : null);
 
   const choices = mood !== "working" ? lastChoices : [];
 
@@ -243,7 +258,7 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
           )}
           {choices.length > 0 && (
             <div className="choices">
-              {choices.map((c) => <button key={c} className="choice" disabled={busy} onClick={() => send(c)}>{c}</button>)}
+              {choices.map((c) => <button key={c} className="choice" disabled={busy} onClick={() => send(c, "choice")}>{c}</button>)}
             </div>
           )}
         </ScrollEdgeGradient>
@@ -255,7 +270,7 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
         <div className="to"><span className="to-name">送信先: {target}</span>
           <SessionControls key={agent.id} agent={agent} support={support} onNoSupport={markNoSupport} onSwitching={setSwitching} onDone={onSent2} onError={onError} />
         </div>
-        <Composer key={agent.id} touch={mobile} agent={agent} text={text} setText={setText} busy={busy || switching} running={mood === "working"} booting={boot.booting} support={support} onSubmit={send} onError={onError} />
+        <Composer key={agent.id} touch={mobile} agent={agent} text={text} setText={setText} busy={busy || switching} running={mood === "working"} booting={boot.booting} support={support} onSubmit={(b) => send(b, "composer")} onError={onError} />
       </div>}
     </aside>
   );

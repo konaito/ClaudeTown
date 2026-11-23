@@ -257,11 +257,17 @@ static FILES_CACHE: Mutex<Option<HashMap<String, FilesEntry>>> = Mutex::new(None
 const FILES_MAX: usize = 30000;
 
 fn list_files(cwd: &str) -> Vec<String> {
+    // 既定の core.quotePath=true だと、日本語などを含むパスが "\346\227\245..." の形で返る。-z ならどの名前も引用符を付けずに NUL で区切る
     let out = std::process::Command::new("git")
-        .args(["-C", cwd, "ls-files", "--cached", "--others", "--exclude-standard"])
+        .args(["-c", "core.quotePath=false", "-C", cwd, "ls-files", "-z", "--cached", "--others", "--exclude-standard"])
         .output();
     let mut files: Vec<String> = match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).lines().take(FILES_MAX).map(|s| s.to_string()).collect(),
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .take(FILES_MAX)
+            .map(|s| s.to_string())
+            .collect(),
         _ => {
             let mut v = Vec::new();
             fn walk(base: &Path, d: &Path, v: &mut Vec<String>, depth: usize) {
@@ -351,20 +357,22 @@ pub fn file_suggestions(cwd: String, query: String) -> Result<Vec<String>, Strin
 
 // ---------- PTY への直接の送信と中断 ----------
 
-/// 貼り付けの終わりの印を本文から外す。本文に入っていると、そこで貼り付けが終わり、残りがキーとして読まれる
+/// 貼り付けの本文から ESC を全部外す。終わりの印（ESC[201~）が本文にあると、そこで貼り付けが終わり、残りがキーとして読まれる。
+/// 印だけを外すと、入れ子（ESC[20ESC[201~1~）で外した後に印ができ、末尾の ESC は後ろに付ける印とつながる（#173）。
+/// 本文はチャット欄と承認の答えに打った文と、添付のパスで、ESC を意図して送る使い方は無い
 pub fn paste_body(text: &str) -> String {
-    text.replace("\x1b[201~", "").replace("\x1b[200~", "")
+    text.replace('\x1b', "")
 }
 
 /// チャット欄の文を、このアプリが立てた端末の入力欄へ貼り、Enter を押す。/ と ! の文も、CLI に打ったのと同じに動く。
-/// 承認待ちのときに Enter を送ると、許可を押したことになるので、送る前に状態を見る（check_direct）
+/// 承認待ちのときに Enter を送ると、許可を押したことになるので、送る前に状態を見る（deliver）
 pub fn send_direct(session_id: String, text: String) -> Result<(), String> {
     super::refuse_if_disabled()?;
     if text.trim().is_empty() {
         return Err("文が空".into());
     }
-    match gate(&session_id)? {
-        Gate::Ready => paste_enter(&session_id, &text),
+    match deliver(&session_id, &text)? {
+        Gate::Ready => Ok(()),
         Gate::Booting => Err(NOT_BOOTED.into()),
         Gate::Refused(e) => Err(e),
     }
@@ -373,11 +381,56 @@ pub fn send_direct(session_id: String, text: String) -> Result<(), String> {
 const NOT_BOOTED: &str = "claude がまだ起動していない（信頼の確認の画面かもしれない）。ターミナルで確かめてから送って";
 const WAITING: &str = "承認待ちなので送らなかった。先にターミナルで承認に答えて";
 
+/// 端末の錠（pty::serial）の中で、送ってよいかを見てから貼り、Enter を押す（#168）。Ready を返したら送った。
+/// Booting と Refused は何も書かずに返す。状態は錠を取った後に読む（錠を待つ間に、モデルの切り替えや承認への答えで変わる）
+fn deliver(session_id: &str, text: &str) -> Result<Gate, String> {
+    super::pty::serial(session_id, || {
+        let g = gate(session_id)?;
+        if g != Gate::Ready {
+            return Ok(g);
+        }
+        if let Some(why) = blocked_now(session_id) {
+            return Ok(Gate::Refused(format!("{why}ので送らなかった。先にターミナルで答えて")));
+        }
+        paste_enter(session_id, text)?;
+        Ok(Gate::Ready)
+    })
+}
+
+/// 錠の中で呼ぶ（deliver）。貼った後、Enter の前に状態を読み直す。貼り付けと Enter の間に承認の画面が出ると、Enter でカーソルの行（Yes）が選ばれる
 fn paste_enter(session_id: &str, text: &str) -> Result<(), String> {
     super::pty::write(session_id, &format!("\x1b[200~{}\x1b[201~", paste_body(text)))?;
     // 貼り付けと Enter の間を空ける。続けて書くと、貼り付けの最後と Enter が1つの入力として読まれ、改行になることがある
     std::thread::sleep(Duration::from_millis(150));
+    if let Some(why) = blocked_now(session_id) {
+        return Err(format!("貼った直後に{why}ので、Enter を送らなかった。ターミナルの入力欄に文が残っているかもしれない"));
+    }
     super::pty::write(session_id, "\r")
+}
+
+/// 今の sessions/<pid>.json と画面で、Enter を書いてはいけないかを見る（enter_blocked）
+pub(crate) fn blocked_now(session_id: &str) -> Option<String> {
+    let row = super::pty::pid_of_id(session_id).and_then(|pid| super::native::sessions::fresh_row(&super::native::claude_home(), pid));
+    let screen = super::pty::screen_text(session_id).unwrap_or_default();
+    enter_blocked(row.as_ref(), &screen)
+}
+
+/// 端末にキーを書いてはいけない状態か。承認待ち（row の state）、承認の画面、/model のピッカーのどれかなら、理由を返す（#168）。
+/// 道具の承認とピッカーは、選択の行のカーソルが入力欄より下にあるときだけ数える（画面に残った前の入力の「❯ 1. a」で断らない）
+pub fn enter_blocked(row: Option<&Value>, screen: &str) -> Option<String> {
+    use super::dialog::{menu_below_input, parse, Dialog};
+    if row.is_some_and(|r| r.get("state").and_then(|s| s.as_str()) == Some("waiting_permission")) {
+        return Some("承認待ちになった".into());
+    }
+    // ピッカーも parse では Choice に読めるので、先に見る（理由の文を合わせるため）
+    if screen.contains(super::switch::PICKER) && super::switch::picker_cursor(screen).is_some() && menu_below_input(screen) {
+        return Some("モデルのピッカーが開いている".into());
+    }
+    match parse(screen) {
+        Some(Dialog::Ask { .. } | Dialog::Review { .. }) => Some("質問の画面が出ている".into()),
+        Some(Dialog::Choice { .. }) if menu_below_input(screen) => Some("承認の画面が出ている".into()),
+        _ => None,
+    }
 }
 
 /// 今この端末へ送ってよいか
@@ -538,8 +591,8 @@ pub fn send_or_queue(session_id: String, text: String) -> Result<Value, String> 
     if queued {
         return Ok(serde_json::json!({ "queued": true }));
     }
-    match gate(&session_id)? {
-        Gate::Ready => paste_enter(&session_id, &text).map(|_| serde_json::json!({ "queued": false })),
+    match deliver(&session_id, &text)? {
+        Gate::Ready => Ok(serde_json::json!({ "queued": false })),
         Gate::Refused(e) => Err(e),
         Gate::Booting => {
             let start = waits(|w| {
@@ -610,11 +663,16 @@ fn watch_waits() {
                 w.sending.insert(id.clone(), item.clone());
                 Some(item)
             }) else { continue };
-            let r = if super::send_disabled() { Err("送信を止めている（~/.family-computing/send-disabled がある）".to_string()) } else { paste_enter(&id, &item.text) };
+            let r = if super::send_disabled() { Err("送信を止めている（~/.family-computing/send-disabled がある）".to_string()) } else { deliver(&id, &item.text) };
             eprintln!("[boot] {id} 預かった文を送った: {r:?}");
             waits(|w| {
                 w.sending.remove(&id);
-                finish(w, &id, item, r.err());
+                match r {
+                    Ok(Gate::Ready) => finish(w, &id, item, None),
+                    // 錠を待つ間に承認待ちになった、または画面に承認かピッカーが出た。何も書いていないので、先頭に戻して待つ
+                    Ok(_) => w.queue.entry(id.clone()).or_default().insert(0, item),
+                    Err(e) => finish(w, &id, item, Some(e)),
+                }
             });
             // 続けて送る文は、前の文が入力として読まれてから送る
             std::thread::sleep(Duration::from_millis(500));
@@ -817,6 +875,47 @@ mod tests {
     }
 
     #[test]
+    fn paste_body_leaves_no_markers() {
+        // 入れ子にすると、内側を外した後に終わりの印ができる（#173）
+        assert!(!paste_body("\x1b[20\x1b[201~1~").contains("\x1b[201~"));
+        assert!(!paste_body("\x1b[20\x1b[200~1~").contains("\x1b[201~"));
+        assert!(!paste_body("\x1b[20\x1b[201~0~").contains("\x1b[200~"));
+        // 末尾の ESC は、後ろに付ける終わりの印とつながり、印として読まれなくなる
+        assert!(!paste_body("a\x1b").contains('\x1b'));
+        assert_eq!(paste_body("a\x1b[201~\rb"), "a[201~\rb");
+        assert_eq!(paste_body("日本語\nそのまま"), "日本語\nそのまま");
+    }
+
+    #[test]
+    fn lists_non_ascii_paths_as_is() {
+        // git の既定（core.quotePath=true）では、日本語の名前が "\346\227\245..." の形で返る
+        let root = std::env::temp_dir().join(format!("ct-files-{}-{}", std::process::id(), fastrand::u32(..)));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("フォルダ/下")).unwrap();
+        fs::write(root.join("日本語.txt"), "a").unwrap();
+        fs::write(root.join("フォルダ/下/中身.md"), "b").unwrap();
+        fs::write(root.join("a b.txt"), "c").unwrap();
+        fs::write(root.join("plain.txt"), "d").unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git").arg("-C").arg(&root).args(args).output().unwrap().status.success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        // 登録済み（--cached）と未登録（--others）の両方を見る
+        git(&["add", "日本語.txt", "plain.txt"]);
+        let mut got = list_files(root.to_str().unwrap());
+        got.sort();
+        assert!(got.iter().all(|f| !f.starts_with('"') && !f.contains('\\')), "{got:?}");
+        let want = ["a b.txt", "plain.txt", "フォルダ/", "フォルダ/下/", "フォルダ/下/中身.md", "日本語.txt"];
+        let mut want: Vec<String> = want.iter().map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(got, want);
+        // 日本語で打つと候補に合う
+        assert_eq!(rank_files(&got, "中身", 10), vec!["フォルダ/下/中身.md"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn direct_send_refuses_while_waiting() {
         let ok = json!({"state":"idle","startedAt":1000,"lastActivityAt":1800});
         let now = 10_000;
@@ -827,7 +926,7 @@ mod tests {
         assert!(check_direct(None, false, 1000, now).is_err());
         assert!(check_direct(Some(&ok), true, 1000, 2000).is_err());
         assert!(check_direct(Some(&json!({"state":"waiting_permission","startedAt":1000,"lastActivityAt":1800})), true, 1000, now).is_err());
-        assert_eq!(paste_body("a\x1b[201~b"), "ab");
+        assert_eq!(paste_body("a\x1b[201~b"), "a[201~b");
         // 起動待ちだけが「待てば送れる」。承認待ちは待たない理由として返す（預かって送る見張りが、起動待ちと見分ける）
         assert_eq!(gate_of(None, false, 1000, None, now), Gate::Booting);
         assert_eq!(gate_of(Some(&ok), true, 1000, Some(1000), 2000), Gate::Booting);
@@ -874,5 +973,199 @@ mod bench {
         let third = t.elapsed();
         let size = |x: &super::History| serde_json::to_string(x).unwrap().len();
         println!("project: 1回目 {first:?}、2回目 {second:?}、{} 件、JSON {} バイト／all: {third:?}、{} 件、JSON {} バイト", h.project.len(), size(&h2), a.all.len(), size(&a));
+    }
+}
+
+/// 端末へ分けて書く送信（貼り付けと Enter）が、承認の画面とモデルのピッカーに割り込まれないか（#168）。
+/// 代役の claude（FC_CLAUDE_BIN）を本物の PTY で立て、代役が受けたキーを、そのとき出していた画面の種類と一緒に記録させて確かめる
+#[cfg(test)]
+mod interleave {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::MutexGuard;
+    use std::time::{Duration, Instant};
+
+    /// 代役の claude。入力を raw で読み、貼り付けの終わりと Enter を「paste:<画面>:<入力欄の文>」「enter:<画面>:<文>」の形で events に書く。
+    /// 画面は input（入力欄）、dialog（道具の承認）、picker（/model のピッカー）のどれか。
+    /// __ON_PASTE__ が dialog なら最初の貼り付けの直後に承認の画面を出す（sessions/<pid>.json は idle のまま、画面だけが先に変わる場合）。
+    /// dialog-waiting なら、あわせて sessions/<pid>.json を waiting にする。/model と Enter でピッカーを出し、矢印は無視し、Esc で閉じる
+    const STAND_IN: &str = r#"#!/usr/bin/env python3
+import json, os, time, tty
+D = "__DIR__"; ROOT = "__ROOT__"; ON_PASTE = "__ON_PASTE__"
+tty.setraw(0)
+RULE = "─" * 60
+INPUT = RULE + "\n❯ \n" + RULE + "\n  ⏸ manual mode on · ? for shortcuts"
+DIALOG = ("⏺ Bash(echo probe-ok > probe2.txt)\n  ⎿  Waiting…\n" + RULE + "\n Bash command\n echo probe-ok > probe2.txt\n"
+          " Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and always allow access\n   3. No\n Esc to cancel · Tab to amend")
+PICKER = ("❯ /model\n  Select model\n    1.  Default (recommended)\n    2.  Opus 5.5\n  ❯ 3.  Sonnet 5.5\n    4.  Haiku 5.5\n"
+          " Enter to confirm · Esc to exit")
+pid = os.getpid()
+started = int(time.time() * 1000)
+def row(status):
+    p = f"{ROOT}/sessions/{pid}.json"
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p + ".tmp", "w") as f:
+        json.dump({"pid": pid, "sessionId": "stand-in", "cwd": D, "startedAt": started, "updatedAt": started + 1, "kind": "interactive", "status": status}, f)
+    os.replace(p + ".tmp", p)
+def show(s):
+    os.write(1, ("\x1b[2J\x1b[H" + s.replace("\n", "\r\n")).encode())
+def event(e):
+    with open(f"{D}/events", "a") as f:
+        f.write(e + "\n")
+mode = "input"; text = ""; pasting = False; popped = False
+show(INPUT); row("idle")
+buf = b""
+while True:
+    b = os.read(0, 4096)
+    if not b:
+        break
+    buf += b
+    while buf:
+        if buf.startswith(b"\x1b[200~"):
+            pasting = True; buf = buf[6:]
+        elif buf.startswith(b"\x1b[201~"):
+            pasting = False; buf = buf[6:]
+            event(f"paste:{mode}:{text}")
+            if mode == "input" and not popped and ON_PASTE.startswith("dialog"):
+                popped = True; mode = "dialog"; show(DIALOG)
+                if ON_PASTE == "dialog-waiting":
+                    row("waiting")
+        elif buf.startswith(b"\x1b[2") and len(buf) < 6:
+            break
+        elif buf.startswith(b"\x1b[") and len(buf) >= 3:
+            buf = buf[3:]
+        elif buf == b"\x1b[":
+            break
+        elif buf.startswith(b"\x1b"):
+            buf = buf[1:]
+            if mode == "picker":
+                mode = "input"; show(INPUT)
+        elif pasting:
+            i = buf.find(b"\x1b")
+            i = len(buf) if i < 0 else i
+            text += buf[:i].decode("utf-8", "replace"); buf = buf[i:]
+        elif buf.startswith(b"\r"):
+            buf = buf[1:]
+            event(f"enter:{mode}:{text}")
+            if mode == "input" and text.strip() == "/model":
+                mode = "picker"; show(PICKER)
+            text = ""
+        else:
+            if mode == "input":
+                text += chr(buf[0])
+            buf = buf[1:]
+"#;
+
+    struct Stand {
+        id: String,
+        dir: PathBuf,
+        root: PathBuf,
+        // 代役を立てている間は FC_CLAUDE_BIN と台帳をほかの試験と分ける（pty.rs の試験と同じ錠）
+        _bin: MutexGuard<'static, ()>,
+        // 代役の端末は町の一覧（pty::list）に出るので、一覧の数を数える試験（lib.rs）と重ならないようにする
+        _native: MutexGuard<'static, ()>,
+    }
+
+    impl Stand {
+        fn events(&self) -> String {
+            fs::read_to_string(self.dir.join("events")).unwrap_or_default()
+        }
+        fn screen(&self) -> String {
+            crate::pty::screen_text(&self.id).unwrap_or_default()
+        }
+    }
+
+    impl Drop for Stand {
+        fn drop(&mut self) {
+            let _ = crate::pty::kill(&self.id);
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_secs(3) && crate::pty::owns(&self.id) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            crate::native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        }
+    }
+
+    fn until(sec: u64, what: &str, f: impl Fn() -> bool) {
+        let t0 = Instant::now();
+        while !f() {
+            assert!(t0.elapsed() < Duration::from_secs(sec), "{what} が {sec} 秒で来なかった");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// 代役を立て、送ってよい状態（gate が Ready）になるまで待つ。TEST_HOME はこのスレッドだけに効く
+    fn stand_in(on_paste: &str) -> Stand {
+        use std::os::unix::fs::PermissionsExt;
+        // 錠の順は NATIVE_TEST_LOCK、BIN_LOCK（feat/app-v1 の pty.rs の試験と同じ。逆に取る試験があると互いに待って止まる）
+        let native = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = crate::pty::BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fc-168-{}-{}", std::process::id(), fastrand::u64(..)));
+        fs::create_dir_all(dir.join("home/sessions")).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let root = dir.join("home");
+        let bin = dir.join("claude");
+        let script = STAND_IN.replace("__DIR__", &dir.to_string_lossy()).replace("__ROOT__", &root.to_string_lossy()).replace("__ON_PASTE__", on_paste);
+        fs::write(&bin, script).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
+        let r = crate::pty::spawn(dir.to_str().unwrap(), None, &[], 140, 40, || {});
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+        let id = r.unwrap()["id"].as_str().unwrap().to_string();
+        crate::native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        let s = Stand { id, dir, root, _bin: guard, _native: native };
+        until(10, "代役の入力欄", || s.screen().contains("manual mode on"));
+        // 起動の印を見てから3秒は Booting（gate_of）。Booting で断っただけの試験にしないため、Ready まで待つ
+        until(8, "gate の Ready", || super::booted(&s.id) == Some(true));
+        s
+    }
+
+    /// 対照: 何も出ていなければ、貼り付けも Enter も入力欄に届く
+    #[test]
+    fn enter_reaches_the_input_when_nothing_pops_up() {
+        let s = stand_in("none");
+        super::send_direct(s.id.clone(), "hello".into()).unwrap();
+        until(3, "入力欄への Enter", || s.events().contains("enter:input:hello"));
+        assert_eq!(s.events(), "paste:input:hello\nenter:input:hello\n");
+    }
+
+    /// 貼った直後に承認の画面が出たら、Enter を書かない（書くとカーソルの行の Yes が選ばれる）。
+    /// 画面だけが先に変わる場合と、sessions/<pid>.json も waiting になる場合
+    #[test]
+    fn enter_is_held_when_an_approval_pops_up_after_the_paste() {
+        let mut bad = vec![];
+        for on_paste in ["dialog", "dialog-waiting"] {
+            let s = stand_in(on_paste);
+            let r = super::send_direct(s.id.clone(), "hello".into());
+            std::thread::sleep(Duration::from_millis(600));
+            let ev = s.events();
+            assert!(ev.contains("paste:input:hello"), "{on_paste}: 貼り付けが届いていない（競り合いを作れていない）: {ev:?}");
+            if ev.contains("enter:dialog") || r.is_ok() {
+                bad.push(format!("{on_paste}: 承認の画面に Enter が届いたか、成功を返した: {ev:?} {r:?}"));
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    /// モデルを替えている間（/model のピッカーが開いている間）に送った文は、ピッカーに入らず、閉じた後に入力欄へ届く
+    #[test]
+    fn send_waits_while_the_model_picker_is_open() {
+        let s = stand_in("none");
+        let (id, root) = (s.id.clone(), s.root.clone());
+        let t = std::thread::spawn(move || {
+            crate::native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root));
+            // 代役のピッカーは矢印で動かないので、Opus の行は見つからず、約1.6秒後に Esc で閉じる
+            crate::switch::set_model(&id, "opus")
+        });
+        until(5, "ピッカー", || s.screen().contains("Select model"));
+        let r = super::send_direct(s.id.clone(), "hello".into());
+        let m = t.join().unwrap();
+        until(3, "入力欄への Enter", || s.events().contains("enter:input:hello") || s.events().contains("enter:picker"));
+        let ev = s.events();
+        assert!(!ev.contains("paste:picker") && !ev.contains("enter:picker"), "ピッカーに文か Enter が届いた: {ev:?}");
+        // 送った文は、ピッカーが閉じた後に入力欄へ届く
+        assert_eq!(ev, "paste:input:/model\nenter:input:/model\npaste:input:hello\nenter:input:hello\n");
+        assert!(r.is_ok(), "{r:?}");
+        assert!(m.is_err(), "代役のピッカーに Opus の行は無い: {m:?}");
     }
 }

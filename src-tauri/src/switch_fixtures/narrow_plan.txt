@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Haiku 5.5 · Claude Team
+ ▝▝   ▝▝   /…/tmp/fix250-probe.hnKY/work
+
+
+⏺ Session was started with bypass
+  permissions, so plan mode won't
+  ask before most edits or commands.
+  Start a new session without
+  bypass permissions for prompts in
+  plan mode.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+              ctrl+y to paste deleted text
+────────────────────────────────────────────
+❯ Try "write a test for <filepath>"
+────────────────────────────────────────────
+  work
+  ⏸ plan mode on (shift+tab to cycle)

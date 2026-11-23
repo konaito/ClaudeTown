@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { backslashNewline, insertPaths, isSlashCommand, quotePath, histDown, histUp, killToEnd, killToStart, killWordBack, killWordForward, mergeHistory, rankCommands, searchHistory, tokenAt, toLineEnd, toLineStart, wordBack, wordForward } from "./edit";
+import { acceptFile, backslashNewline, insertPaths, isSlashCommand, quotePath, histDown, histUp, killToEnd, killToStart, killWordBack, killWordForward, mergeHistory, rankCommands, searchHistory, tokenAt, toLineEnd, toLineStart, wordBack, wordForward } from "./edit";
 import { BUILTINS, opensDialog } from "./commands";
 
 const at = (text: string, i = text.length) => ({ text, start: i, end: i });
@@ -17,6 +17,22 @@ describe("readline のキー", () => {
   test("Ctrl+U は行頭まで、続けて押すと前の行に進む", () => {
     expect(killToStart(at("abc\ndef", 6))).toEqual({ from: 4, to: 6, insert: "", killed: "de" });
     expect(killToStart(at("abc\ndef", 4))).toEqual({ from: 3, to: 4, insert: "", killed: "\n" });
+  });
+  test("文が改行で始まり、カーソルが先頭にあるときは次の行に効かない（#215）", () => {
+    const t = "\nabc";
+    expect(toLineStart(at(t, 0))).toBe(0);
+    expect(killToStart(at(t, 0))).toBeNull();
+    expect(toLineEnd(at(t, 0))).toBe(0);
+    expect(killToEnd(at(t, 0))).toEqual({ from: 0, to: 1, insert: "", killed: "\n" });
+    expect(killWordBack(at(t, 0))).toBeNull();
+    // 2行目の頭では、これまでどおり前の改行を消す
+    expect(toLineStart(at(t, 1))).toBe(1);
+    expect(killToStart(at(t, 1))).toEqual({ from: 0, to: 1, insert: "", killed: "\n" });
+    // 空の文と、改行で始まらない文の先頭
+    expect(toLineStart(at("", 0))).toBe(0);
+    expect(killToStart(at("", 0))).toBeNull();
+    expect(toLineStart(at("abc", 0))).toBe(0);
+    expect(killToStart(at("abc", 0))).toBeNull();
   });
   test("Ctrl+W は空白まで消す。パスは1回で消える", () => {
     expect(killWordBack(at("open src/utils/foo.ts"))?.killed).toBe("src/utils/foo.ts");
@@ -127,5 +143,54 @@ describe("パスで始まる文はコマンドにしない（#64）", () => {
     const t = "/Users/a/x.png 見て";
     expect(tokenAt({ text: t, start: 3, end: 3 })).toBeNull();
     expect(tokenAt({ text: "/mo", start: 3, end: 3 })?.kind).toBe("slash");
+  });
+});
+
+// @ の候補を選んだときに入れる文（#257）。CLI 2.1.330 で、空白を含むパスを1つのパスとして読むのは @"a b.txt" の形だけだった。
+// @a b.txt と @a\ b.txt は a を読み、@'a b.txt' と閉じていない @"my dir/ は何も添付しなかった（claude -p で実測）
+describe("@ の候補を選ぶ（#257）", () => {
+  const pick = (text: string, f: string, i = text.length) => {
+    const t = tokenAt(at(text, i));
+    if (!t || t.kind !== "file") throw new Error("file の語ではない");
+    return acceptFile(text, t, f);
+  };
+  test("空白を含むファイルは @\"...\" で囲み、後ろに空白を付ける", () => {
+    expect(pick("see @a", "a b.txt")).toEqual({ text: 'see @"a b.txt" ', caret: 15 });
+  });
+  test("空白を含まないファイルは今までどおり囲まない", () => {
+    expect(pick("see @ap", "src/App.tsx")).toEqual({ text: "see @src/App.tsx ", caret: 17 });
+  });
+  test("空白を含まないフォルダは囲まず、空白も付けない", () => {
+    expect(pick("see @sr", "src/")).toEqual({ text: "see @src/", caret: 9 });
+  });
+  test("空白を含むフォルダは囲み、カーソルを閉じる \" の前に置く。続けて打つと中を選べる", () => {
+    const r = pick("see @my", "my dir/");
+    expect(r).toEqual({ text: 'see @"my dir/"', caret: 13 });
+    // 続けて打った文の語は、閉じる " までを含む
+    const typed = r.text.slice(0, r.caret) + "in" + r.text.slice(r.caret);
+    expect(tokenAt(at(typed, r.caret + 2))).toEqual({ kind: "file", query: "my dir/in", from: 4, to: 16, atStart: false, quoted: true });
+    expect(pick(typed, "my dir/inner.txt", r.caret + 2)).toEqual({ text: 'see @"my dir/inner.txt" ', caret: 24 });
+  });
+  test("囲んだ語の中では、空白のないパスを選んでも囲みを保つ", () => {
+    expect(pick('@"sr', "src/a.ts")).toEqual({ text: '@"src/a.ts" ', caret: 12 });
+  });
+  test("後ろの文は残す。フォルダのときも後ろの空白を消さない", () => {
+    expect(pick("see @sr and more", "src/", 7)).toEqual({ text: "see @src/ and more", caret: 9 });
+    expect(pick("see @a and more", "a b.txt", 6)).toEqual({ text: 'see @"a b.txt" and more', caret: 15 });
+  });
+  test("全角の空白やタブも空白として囲む", () => {
+    expect(pick("@x", "x\u3000y.txt").text).toBe('@"x\u3000y.txt" ');
+    expect(pick("@x", "x\ty.txt").text).toBe('@"x\ty.txt" ');
+  });
+  test("\" を含むパスは @\"...\" で書けないので囲まない", () => {
+    expect(pick("@a", 'a"b.txt').text).toBe('@a"b.txt ');
+  });
+  test("閉じる \" を探すのは同じ行の中だけ", () => {
+    expect(tokenAt(at('@"my d\nrest"', 6))).toEqual({ kind: "file", query: "my d", from: 0, to: 6, atStart: true, quoted: true });
+    expect(tokenAt(at('@"my\nd', 6))).toBeNull();
+  });
+  test("閉じた \" の後ろや、閉じる \" の無い行の後ろの文は語に入れない", () => {
+    expect(tokenAt(at('see @"a b.txt" x'))?.query).toBeUndefined();
+    expect(tokenAt(at('@"ab more text', 4))).toEqual({ kind: "file", query: "ab", from: 0, to: 4, atStart: true, quoted: true });
   });
 });

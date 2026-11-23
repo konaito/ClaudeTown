@@ -211,6 +211,15 @@ pub(crate) fn slash_command(text: &str) -> Option<String> {
     Some(if args.is_empty() { name } else { format!("{name} {args}") })
 }
 
+/// ! のシェルの入力を、打った形の「!コマンド」の文に直す（#254）。シェルの入力の行でなければ None。
+/// jsonl には <bash-input>コマンド</bash-input> の形で残る。! の後ろの空白はそのまま残っているので、頭は削らない。
+/// コマンドには `<` も入るので、終わりは最後の </bash-input> で決める
+pub(crate) fn bash_input(text: &str) -> Option<String> {
+    let r = text.trim_start().strip_prefix("<bash-input>")?;
+    let body = r[..r.rfind("</bash-input>")?].trim_end();
+    (!body.trim_start().is_empty()).then(|| format!("!{body}"))
+}
+
 /// 会話の1行から、今の動きに効く出来事を取り出す。simplify と同じく、jsonl の行と data で包んだ形の両方を読む
 pub(crate) fn live_events(m: &Value) -> Vec<LiveEv> {
     let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
@@ -239,6 +248,8 @@ pub(crate) fn live_events(m: &Value) -> Vec<LiveEv> {
                 out.push(LiveEv::Result(ids, at));
             } else {
                 let text = user_text(content);
+                // ! のシェルの入力は「!コマンド」の文にしてから見る。`<` で始まらなくなるので、ターンの始まりとして数える（#254）
+                let text = bash_input(&text).unwrap_or(text);
                 if !text.is_empty() {
                     out.push(LiveEv::Queue(QEv::Delivered(text.clone())));
                 }
@@ -246,8 +257,8 @@ pub(crate) fn live_events(m: &Value) -> Vec<LiveEv> {
                 if m["queued"].as_bool() == Some(true) {
                     return out;
                 }
-                // hook やシステムの差し込み（<...>、Caveat:）はターンの始まりにしない。お手紙（<cross-session-message>）は始まりにする
-                let letter = text.contains("<cross-session-message");
+                // hook やシステムの差し込み（<...>、Caveat:）はターンの始まりにしない。お手紙（<cross-session-message>、<teammate-message>、<agent-message>）は始まりにする
+                let letter = has_letter(&text);
                 let command = slash_command(&text).is_some();
                 if !text.is_empty() && !m["isMeta"].as_bool().unwrap_or(false) && (letter || command || !(text.starts_with('<') || text.starts_with("Caveat:"))) {
                     out.push(LiveEv::User(at));
@@ -451,6 +462,64 @@ pub(crate) fn result_text(content: &Value) -> String {
     out
 }
 
+/// お手紙の包み。cross-session-message は別のセッションから、teammate-message と agent-message は agent teams のチームメイトから届く（#253）
+const LETTER_TAGS: [&str; 3] = ["cross-session-message", "teammate-message", "agent-message"];
+
+/// 文がお手紙の包みを含むか（live_events がターンの始まりを決めるのに使う）
+fn has_letter(text: &str) -> bool {
+    LETTER_TAGS.iter().any(|t| text.contains(&format!("<{t}")))
+}
+
+/// お手紙の包みで始まる文を、包みごとの項目にする。包みで始まらなければ None。
+/// 1行に2通以上の包みが並ぶことがある（2.1.330 のリードに届くチームメイトの文、#253）。最後の包みの後ろの注記は読まない。
+/// - cross-session-message from=… from-name=…: 送り手は from-name と from
+/// - teammate-message teammate_id=…、agent-message from=…: 送り手はチームメイトの名前。src/letters.ts の resolvePeer がチームの中で引けるように、
+///   生の値は teammate:<名前> にする
+fn letters(text: &str, at: &Value) -> Option<Vec<Value>> {
+    let mut out = vec![];
+    let mut rest = text;
+    let mut found = false;
+    loop {
+        let s = rest.trim_start();
+        let Some((tag, r)) = LETTER_TAGS.iter().find_map(|t| s.strip_prefix('<').and_then(|x| x.strip_prefix(t)).map(|r| (*t, r))) else { break };
+        found = true;
+        let (attrs, after) = r.split_once('>').unwrap_or(("", ""));
+        let (body, next) = after.split_once(&format!("</{tag}>")).unwrap_or((after, ""));
+        rest = next;
+        let attr = |k: &str| {
+            let key = format!("{k}=\"");
+            attrs.find(&key).and_then(|i| attrs[i + key.len()..].split('"').next()).map(String::from)
+        };
+        let (name, raw) = match tag {
+            "cross-session-message" => (attr("from-name"), attr("from")),
+            _ => {
+                let who = attr(if tag == "teammate-message" { "teammate_id" } else { "from" }).unwrap_or_default();
+                (Some(who.clone()), Some(format!("teammate:{who}")))
+            }
+        };
+        let body = body.trim();
+        let body = if tag == "teammate-message" { teammate_body(body) } else { Some(body.to_string()) };
+        if let Some(body) = body.filter(|b| !b.is_empty()) {
+            out.push(json!({ "role": "user", "text": body, "from": null, "at": at, "letter": { "fromName": name, "fromRaw": raw } }));
+        }
+    }
+    found.then_some(out)
+}
+
+/// チームメイトの文の本文。決まった形の連絡は JSON の1行で来る（2.1.330 の ~/.claude/projects で数えた、#253）。
+/// idle_notification は result（チームメイトのターンの最後の返事）、teammate_terminated は message を出す。
+/// 止める手続き（shutdown_request、shutdown_approved）は出さない。知らない type は JSON のまま出す
+fn teammate_body(body: &str) -> Option<String> {
+    let j = body.strip_prefix('{').and_then(|_| serde_json::from_str::<Value>(body.lines().next().unwrap_or("")).ok());
+    let text = |k: &str, j: &Value| j[k].as_str().map(|s| s.trim().to_string());
+    match j.as_ref().and_then(|j| j["type"].as_str().map(|t| (t, j))) {
+        Some(("idle_notification", j)) => text("result", j),
+        Some(("teammate_terminated", j)) => text("message", j),
+        Some(("shutdown_request" | "shutdown_approved", _)) => None,
+        _ => Some(body.to_string()),
+    }
+}
+
 pub(crate) fn simplify(m: &Value) -> Vec<Value> {
     let (m, at) = match m.get("data").filter(|d| m.get("message").is_none() && d.is_object()) {
         Some(d) => (d, m["at"].clone()),
@@ -460,6 +529,11 @@ pub(crate) fn simplify(m: &Value) -> Vec<Value> {
     let content = &m["message"]["content"];
     let mut out = vec![];
     match ty {
+        // native::conv::read が読み飛ばした MAX_READ より長い行（#230）。中身は出せないので、飛ばしたことだけを出す
+        native::conv::TOO_LONG => {
+            let mb = m["bytes"].as_u64().unwrap_or(0) as f64 / (1u64 << 20) as f64;
+            out.push(json!({ "role": "event", "kind": "error", "text": format!("記録に大きすぎる行（{mb:.1}MB）があり、出さずに飛ばした"), "at": at }));
+        }
         // ターンの終わり。止めた（interrupted）と失敗（is_error）だけを会話に出す（#83）。成功は返事の文が出ているので出さない
         "result" => {
             if m["subtype"].as_str() == Some("interrupted") {
@@ -481,34 +555,25 @@ pub(crate) fn simplify(m: &Value) -> Vec<Value> {
             // 貼り付けの包み（<pasted_content>）は外してから見る。外さないと `<` で始まり、下の除外で落ちる（#69）
             let text = user_text(content);
             let text = text.as_str();
-            // ターミナルのセッションには、お手紙の前に「Another Claude session sent a message:」の1行が付く
-            let text = match text.strip_prefix("Another Claude session sent a message:") {
+            // ターミナルのセッションには、お手紙の前に「Another Claude session sent a message:」の1行が付く。
+            // 作業中に届いた文は「… sent a message while you were working:」になる（#253）
+            let text = match text.strip_prefix("Another Claude session sent a message").and_then(|r| r.split_once(':')).filter(|(head, _)| !head.contains('\n')) {
                 // 2.1.330 からは、本文の後ろに英語の注記（This came from another Claude session — …）が付く（#156）
-                Some(r) => r.trim_start().split("\n\nThis came from another Claude session").next().unwrap_or("").trim_end(),
+                Some((_, r)) => r.trim_start().split("\n\nThis came from another Claude session").next().unwrap_or("").trim_end(),
                 None => text,
             };
-            // 別のセッションからのお手紙（<cross-session-message from=… from-name=…>本文</cross-session-message>、後ろに注記が付くことがある）は、包みの内側の本文だけ出す
-            if let Some(rest) = text.strip_prefix("<cross-session-message") {
-                let (attrs, body) = rest.split_once('>').unwrap_or(("", ""));
-                let body = body.split("</cross-session-message>").next().unwrap_or("");
-                let attr = |k: &str| {
-                    let key = format!("{k}=\"");
-                    attrs.find(&key).and_then(|i| attrs[i + key.len()..].split('"').next()).map(String::from)
-                };
-                let body = body.trim();
-                if !body.is_empty() {
-                    out.push(json!({ "role": "user", "text": body, "from": null, "at": at,
-                        "letter": { "fromName": attr("from-name"), "fromRaw": attr("from") } }));
-                }
-                return out;
+            // 別のセッションとチームメイトからのお手紙は、包みの内側の本文だけ出す
+            if let Some(letters) = letters(text, &at) {
+                return letters;
             }
             // 止めたときに claude が書く印（-p の子で見た。2026-11-21）。吹き出しにせず、止めた印にする（#83）
             if text.starts_with("[Request interrupted by user") {
                 out.push(json!({ "role": "event", "kind": "interrupted", "text": "ここで止めた", "at": at }));
                 return out;
             }
-            // スラッシュコマンドの入力は「/名前 引数」の文にしてから見る。そのままだと `<` で始まり、下の除外で落ちる（#157）
-            let command = slash_command(text);
+            // スラッシュコマンドの入力は「/名前 引数」の文に、! のシェルの入力は「!コマンド」の文にしてから見る。
+            // そのままだと `<` で始まり、下の除外で落ちる（#157、#254）。シェルの出力（<bash-stdout>、<bash-stderr>）は下の除外で落とす
+            let command = slash_command(text).or_else(|| bash_input(text));
             let text = command.as_deref().unwrap_or(text);
             // 道具の結果だけの user、hook やシステムの差し込み（<...> で始まる）は出さない
             if text.is_empty() || text.starts_with('<') || text.starts_with("Caveat:") {
@@ -985,6 +1050,30 @@ mod tests {
         // 本文の配列で来ても同じ
         let arr = json!({"type": "user", "timestamp": "t", "message": {"role": "user", "content": [{"type": "text", "text": "<command-name>/clear</command-name>"}]}});
         assert_eq!(simplify(&arr)[0]["text"], "/clear");
+    }
+
+    // ! のシェルの入力（#254）。jsonl には <bash-input> の user の行が残り（isMeta ではない）、出力は次の user の行の
+    // <bash-stdout> と <bash-stderr> に入る（2.1.74〜2.1.323 の jsonl で見た形。中身は作った）
+    #[test]
+    fn bash_input_shows_as_user_text() {
+        let line = |c: &str| json!({"type": "user", "timestamp": "2026-11-23T01:02:03.000Z", "message": {"role": "user", "content": c}});
+        let ls = line("<bash-input>ls</bash-input>");
+        let out = simplify(&ls);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[0]["text"], "!ls");
+        // 手元の jsonl の129行のうち92行は、出力の行の直後に assistant の返事が来る。ターンの始まりとして数える（#157 の / と同じ）
+        assert!(live_events(&ls).iter().any(|e| matches!(e, LiveEv::User(_))));
+        // 順番待ちと突き合わせる文も、打った形にそろえる
+        assert!(live_events(&ls).iter().any(|e| matches!(e, LiveEv::Queue(QEv::Delivered(t)) if t == "!ls")));
+        // 「! git status」と打つと、! の後ろの空白も残る。端末と同じに出す
+        assert_eq!(simplify(&line("<bash-input> git status</bash-input>"))[0]["text"], "! git status");
+        // 中に < を含むコマンド
+        assert_eq!(simplify(&line("<bash-input>echo '<b>' | cat</bash-input>"))[0]["text"], "!echo '<b>' | cat");
+        // 空の入力と、出力の行は出さない
+        assert!(simplify(&line("<bash-input>  </bash-input>")).is_empty());
+        assert!(simplify(&line("<bash-stdout>a\nb</bash-stdout><bash-stderr></bash-stderr>")).is_empty());
+        assert!(simplify(&line("<bash-stderr>x</bash-stderr>")).is_empty());
     }
 
     // 2026-11-14、写した画像のパスを入れて送った文を、CLI が画像の添付にした形（当時の会話の形のまま、#69）

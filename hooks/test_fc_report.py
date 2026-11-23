@@ -147,6 +147,23 @@ class StateShape(HookCase):
         self.assertEqual(st["phase"], "needs_you")
         self.assertEqual(st["needs"], "Bash を許可しますか")
 
+    def test_denied_permission_leaves_marks_for_the_screen(self):
+        """承認の画面を理由なしの No か Esc で閉じたときに届いた並び（#180、2026-11-23 に Claude Code 2.1.330 で実測。
+        No と Esc で同じだった）。この後は PostToolUse も PostToolUseFailure も Stop も来ないので、hook では needs_you を解けない。
+        画面（src/model.ts の moodOf）は、承認が元の needs_you（pending_count が1以上）と、その後に sessions の status が
+        idle に変わったことで見分ける。ここでは、画面が頼る印が残ることを固定する"""
+        write = dict(tool_name="Write", tool_input={"file_path": "/tmp/x/out.txt", "content": "hello"})
+        self.run_hook("UserPromptSubmit", prompt="Write で /tmp/x/out.txt を作って")
+        self.run_hook("PreToolUse", **write)
+        self.run_hook("PermissionRequest", **write)
+        self.run_hook("Notification", notification_type="permission_prompt", message="Claude needs your permission")
+        st = self.read()
+        self.check_report(st)
+        self.assertEqual(st["phase"], "needs_you")
+        self.assertEqual(st["pending_count"], 1)
+        self.assertEqual(st["perm_queue"][0]["tool"], "Write")
+        self.assertIsInstance(st["updated_at"], int)
+
     def test_stop_resting_with_next(self):
         self.run_hook("UserPromptSubmit", prompt="a")
         self.run_hook("PreToolUse", tool_name="Bash", tool_input={"command": "ls"})
@@ -188,11 +205,12 @@ class StateShape(HookCase):
         self.run_hook("SessionStart")
         self.assertFalse(old.exists())
 
-    def test_made_child_flag(self):
+    def test_no_made_child_flag(self):
+        # made_child は名付けの促しに使っていた。#93 で促しを消し、アプリにも安定版にも読み手が無いので書かない（#186）
         self.run_hook("SessionStart")
         self.run_hook("PostToolUse", tool_name="mcp__ccn__create_session",
                       tool_input={"prompt": "x"}, tool_response=json.dumps({"id": CHILD_ID}))
-        self.assertIs(self.read()["made_child"], True)
+        self.assertNotIn("made_child", self.read())
 
     def test_session_message_does_not_override_human_asked(self):
         self.run_hook("UserPromptSubmit", prompt="人の依頼")
@@ -282,7 +300,7 @@ class TeammateInputs(HookCase):
         self.assertEqual([x["tool"] for x in st["perm_queue"]], ["Write"])
         self.assertEqual((st["phase"], st["needs"]), ("needs_you", "承認待ち: 書く: a/b.txt"))
 
-    def test_no_letters_or_made_child(self):
+    def test_mate_writes_no_letters(self):
         self.run_hook("SessionStart")
         self.run_hook("PostToolUse", tool_name="SendMessage", tool_input={"to": "team-lead", "summary": "報告", "message": "x"},
                       tool_response={"success": True}, **MATE)
@@ -290,7 +308,6 @@ class TeammateInputs(HookCase):
                       tool_response=json.dumps({"id": CHILD_ID}), **MATE)
         self.run_hook("UserPromptSubmit", prompt='<cross-session-message from="abc">x</cross-session-message>', **MATE)
         self.assertFalse(self.letters.exists())
-        self.assertNotIn("made_child", self.read())
 
     def test_empty_agent_id_is_lead(self):
         self.run_hook("UserPromptSubmit", prompt="a", agent_id="")
