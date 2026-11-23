@@ -36,7 +36,7 @@ stop_stable() {
 }
 
 # タグの状態 hook（hooks/ と scripts/hook.py）を、安定版の置き場（$3）の下に同じ相対位置で写す。
-# fc-report.py は ../scripts/hook.py を世帯の名付けの案内に使うので、hook.py も写す。
+# hook.py も同じタグから写す。fc-report.py が hook.py を世帯の名付けの案内に使っていたのは #93（7e8ec6b）までで、今は参照しない。
 # 写すのは2段に分ける。release-stable.sh は、安定版を止める前に stage_hooks を済ませ、だめなら何も触らずに中断する。
 #   stage_hooks  <リポジトリ> <タグか ref> <置き場>   $3/hooks-incoming に取り出して構文を確かめる
 #   commit_hooks <リポジトリ> <タグか ref> <置き場>   取り出した分を、ファイルごとに mv で置き換える

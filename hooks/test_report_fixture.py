@@ -5,7 +5,7 @@ Python はここで events を fc-report.py に流して、出た state が見�
 Rust（src-tauri/src/lib.rs の report_cases）と TypeScript（src/model.test.ts）は同じ見本を読み、Report の形で解釈できることを検べる。
 時刻の2キー（updated_at、turn_started_at）は実行のたびに変わるので、見本では 0 にそろえる。
 見本を作り直すとき: FC_WRITE_FIXTURE=1 python3 -I -m unittest discover -s hooks
-FC_STATE_DIR と FC_LETTERS は一時の場所に向くので、本物の ~/.family-computing には書かない。
+FC_STATE_DIR、FC_LETTERS、FC_PERM_DIR は一時の場所に向くので（test_fc_report.HookCase）、本物の ~/.family-computing には書かない。
 """
 import json
 import os

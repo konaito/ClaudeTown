@@ -436,7 +436,8 @@ pub fn run() {
     //   family-computing --conversation <id>    会話
     // identifier はビルド時の設定（開発版は tauri.conf.json、安定版は tauri.stable.conf.json を重ねたもの）から取る。
     // 下の開発用の引数も、画面と同じ置き場所を使う
-    // 軽さの計測（scripts/bench.ts）: プロセスが始まった時刻を書く。画面が町を描いた時刻との差を、起動の時間にする
+    // 軽さの計測（src/term/bench.ts の scene）: プロセスが始まった時刻を書く。画面が町を描いた時刻との差を、起動の時間にする。
+    // 場面ごとに起動して測る scripts/bench.ts は #131 で消えた（#187）
     if std::env::var("FC_PERF_LOG").map(|p| !p.is_empty()).unwrap_or(false) {
         perf_log(json!({ "bench": "proc", "procStartMs": now_ms() as u64 }).to_string());
     }
@@ -492,7 +493,7 @@ pub fn run() {
             if std::env::var("FC_NO_RESTORE").is_err() {
                 std::thread::spawn(session_ops::restore_terminals);
             }
-            // 開発の計測用（src/term/bench.ts、scripts/bench.ts）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、
+            // 開発の計測用（src/term/bench.ts。scripts/bench.ts は #131 で消えた）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、
             // 最前面に出し、どのデスクトップにも出す（本人が別のデスクトップに移っても隠れないように）。
             // 前面は奪わない（FC_BENCH_FOCUS=1 のときだけ奪う）。起動のたびに前面を奪うと、本人の作業の邪魔になる
             if std::env::var("FC_BENCH_TOP").is_ok() {

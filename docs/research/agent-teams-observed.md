@@ -112,6 +112,7 @@ TaskCreated と TaskCompleted は、どの回でも来なかった。タスク�
    - B. `ps` で `--parent-session-id` と `--agent-name` の付いた claude のプロセスを探し、引数から親と名前を取る。pid の生死も分かる。会話の jsonl は、同じ cwd の projects の下で `agentName` の合うもの。
    - A は ps を起こさず、B はプロセスの生死が確かに分かる。A で一覧を作り、生死の判定にだけ B を使う組み合わせが無理が少ない。tmux の回が1回しか取れていないので、決める前にもう1回取る。
 3. **hook の状態ファイル**: in-process のチームメイトの hook は、リードの `session_id` で届く。今の `hooks/fc-report.py` は `agent_id` を見ていないので、チームメイトの PreToolUse などがリードの状態ファイル（「いまやっていること」）に混ざるはずである。確かめていない。混ざるなら、`agent_id` があるイベントはリードの状態に書かない、などの手当てが要る。
+   - 2026-11-23 の追記: 2026-11-21 の b2a0e8c で、`fc-report.py` は `agent_id` の付いた入力をリードの状態ファイルとお手紙に書かない形にした。承認だけはリードの並びに足して外す。確かめたのは `hooks/test_fc_report.py` の `MATE` を使う試験で、実物の状態ファイルでは見ていない。
 4. 知らない形（members の知らない backendType、jsonl の無い member など）は、`Stats::odd` に数えて黙って落とさない。
 
 ## tmux の2回目（tmux2）
@@ -131,14 +132,14 @@ TaskCreated と TaskCompleted は、どの回でも来なかった。タスク�
 - 起動の引数の `--agent-type general-purpose` と、config.json の member の agentType が、2回目には無かった。SessionStart の hook の agent_type も null だった。agentType には頼らない。
 - hook の状態ファイル（`~/.family-computing/state/<sid>.json`）は、チームメイトの session id でも書かれた（ca615164、9ff4c1fc）。町では、tmux のチームメイトの様子をこのファイルから読む。
 
-コードを読んだ範囲で分かったこと: `hooks/fc-report.py` は hook の入力の agent_id を見ていない。in-process のチームメイトと sub-agent の PreToolUse などは、リードの session_id で届くので、リードの状態ファイルの「いまやっていること」に混ざるはずである。実物の状態ファイルでは確かめていない。町の sub-agent とチームメイトの様子は meta.json と jsonl の末尾から作るので、混ざるのはリードの表示だけになる。
+コードを読んだ範囲で分かったこと: `hooks/fc-report.py` は hook の入力の agent_id を見ていない。in-process のチームメイトと sub-agent の PreToolUse などは、リードの session_id で届くので、リードの状態ファイルの「いまやっていること」に混ざるはずである。実物の状態ファイルでは確かめていない。町の sub-agent とチームメイトの様子は meta.json と jsonl の末尾から作るので、混ざるのはリードの表示だけになる。この段落は観測した時点のコードの話で、今の `fc-report.py` は `agent_id` を見る（上の3の追記）。
 
 ## まだ確かめていないこと
 
 - tmux のチームメイトに長い作業をさせたときの流れ（2回とも、1ファイルを書くだけだった）。
 - TaskCreated、TaskCompleted の入力（タスクの一覧を使わせていない）。
 - チームを片付けた（チームの削除を頼んだ）ときに、config.json と transcript がどうなるか。
-- in-process のチームメイトの hook が、fc-report.py の状態ファイルに混ざるか（コードを読んだ範囲では混ざる。上の「tmux の2回目」の最後）。
+- in-process のチームメイトの hook が、fc-report.py の状態ファイルに混ざるか（観測した時点のコードでは混ざった。b2a0e8c で書かない形にしたが、実物では確かめていない）。
 - `~/.claude/tasks/<チーム名>/` と `inboxes/` の中身（見ていない）。
 
 ## 生の記録の一覧
