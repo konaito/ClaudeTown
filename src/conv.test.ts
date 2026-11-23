@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, type Live } from "./conv";
+import { deltaOf, mergeConv, KEEP_CONV, savedLabel, elapsedText, liveSummary, sameLive, settlePending, answerPending, withNotes, withQueued, convFailed, type Live, type PendingItem } from "./conv";
 import type { ConvItem } from "./model";
 
 const item = (n: number): ConvItem => ({ role: "assistant", text: `t${n}`, n });
@@ -80,5 +80,108 @@ describe("今の動き（#59）", () => {
     expect(sameLive(base, { ...base })).toBe(true);
     expect(sameLive(base, { ...base, last: "tool" })).toBe(false);
     expect(sameLive(null, undefined)).toBe(true);
+  });
+});
+
+describe("settlePending（#69）", () => {
+  const u = (n: number, text: string): ConvItem => ({ role: "user", text, n });
+  const p = (text: string, after: number): PendingItem => ({ role: "user", text, pending: true, after });
+  test("会話に出た文の仮の項目を消す。出ていなければ同じ配列", () => {
+    const pend = [p("一通目", 4)];
+    expect(settlePending([u(3, "前"), item(4)], pend)).toBe(pend);
+    expect(settlePending([item(4), u(5, "一通目")], pend)).toEqual([]);
+  });
+  test("改行や行末の空白の違いは同じ文とみなす", () => {
+    expect(settlePending([u(5, "/a/b.png \n\nこれ見て")], [p("/a/b.png\nこれ見て ", 4)])).toEqual([]);
+  });
+  test("画像のパスが会話で [Image #3] になっていても同じ文とみなす", () => {
+    const sent = "/Users/me/.family-computing/attachments/drop-20261114-054022-9dae-スクリーンショット-2026-11-14-14.50.00.png \n（ドロップの確認）見て";
+    expect(settlePending([u(5, "[Image #3]\n（ドロップの確認）見て")], [p(sent, 4)])).toEqual([]);
+    // 読めなかったパスはそのまま残る（2026-11-14 の meta）
+    const tmp = "/var/folders/lp/x/T/TemporaryItems/NSIRD_screencaptureui_GJ7Y9w/スクリーンショット\\ 2026-11-14\\ 14.20.54.png \n\nこれ挙動がおかしいぞ";
+    expect(settlePending([u(5, tmp)], [p(tmp, 4)])).toEqual([]);
+    // パスでない「x.png」は文として比べる
+    expect(settlePending([u(5, "[Image #1] b.png を見て")], [p("/a/x.png a.png を見て", 4)]).length).toBe(1);
+    // 長い1語でも遅くならない
+    const t0 = performance.now();
+    settlePending([u(5, "a".repeat(20000))], [p("/" + "b".repeat(20000), 4)]);
+    expect(performance.now() - t0).toBeLessThan(200);
+    // パスだけが違う文は同じとみなすが、本文が違えば消さない
+    const pend = [p("/a/b.png\nこれ見て", 4)];
+    expect(settlePending([u(5, "[Image #1]\nあれ見て")], pend)).toBe(pend);
+  });
+  test("送り始める前の同じ文では消さない", () => {
+    const pend = [p("はい", 5)];
+    expect(settlePending([u(5, "はい")], pend)).toBe(pend);
+  });
+  test("同じ文を2回送ったら、会話に出た数だけ消す", () => {
+    const pend = [p("はい", 4), p("はい", 4)];
+    expect(settlePending([u(5, "はい")], pend)).toEqual([pend[1]]);
+  });
+  test("後に送った文が出たら、前に送った仮の項目も消す（後の文より下に残さない）", () => {
+    // 1通目は会話では形が変わって突き合わせられない（[Image #1] にされたなど）、2通目は出た、3通目はまだ
+    const pend = [p("/tmp/a.png これ見て", 4), p("先に送ったやつ", 4), p("三通目", 4)];
+    const items = [item(4), u(5, "[Image #1] これ見て"), item(6), u(7, "先に送ったやつ")];
+    expect(settlePending(items, pend)).toEqual([pend[2]]);
+  });
+});
+
+describe("answerPending（#55）", () => {
+  const p = (text: string, after: number): PendingItem => ({ role: "user", text, pending: true, after });
+  // -p の子の会話には、送った文の user が出ない（2026-11-21 に ccn の messages で確認。出るのは assistant と result だけ）
+  test("返事（assistant）が after より後に出たら、仮の印を外して残す", () => {
+    const pend = [p("やって", 4)];
+    const out = answerPending([item(4), item(5)], pend);
+    expect(out).toEqual([{ ...pend[0], pending: false }]);
+  });
+  test("返事がまだなら同じ配列。after 以前の assistant では外さない", () => {
+    const pend = [p("やって", 4)];
+    expect(answerPending([item(3), item(4)], pend)).toBe(pend);
+  });
+  test("外れた項目は後から settlePending でも消えず、user が会話に出たら消える", () => {
+    const answered = answerPending([item(5)], [p("やって", 4)]);
+    expect(settlePending([item(5)], answered)).toBe(answered);
+    expect(settlePending([item(5), { role: "user", text: "やって", n: 6 }], answered)).toEqual([]);
+  });
+});
+
+describe("withNotes（#97）", () => {
+  const it = (n: number) => ({ role: "assistant" as const, text: `a${n}`, n });
+  const note = (after: number) => ({ role: "event" as const, kind: "command" as const, text: `/x ${after}`, after, at: `t${after}` });
+  test("実行したときの最後の番号の後ろに置く", () => {
+    expect(withNotes([it(1), it(2), it(3)], [note(2)]).map((x) => x.text)).toEqual(["a1", "a2", "/x 2", "a3"]);
+  });
+  test("後ろに何も無ければ末尾、送ったばかりの項目の前", () => {
+    expect(withNotes([it(1)], [note(1)]).map((x) => x.text)).toEqual(["a1", "/x 1"]);
+    expect(withNotes([it(1), { role: "user", text: "仮", pending: true }], [note(1)]).map((x) => x.text)).toEqual(["a1", "/x 1", "仮"]);
+  });
+  test("印が無ければ同じ配列を返す", () => {
+    const xs = [it(1)];
+    expect(withNotes(xs, [])).toBe(xs);
+  });
+});
+
+describe("withQueued（順番待ち）", () => {
+  const q: ConvItem[] = [{ role: "user", text: "一回オンにしたけど、開き直す？", at: "2026-11-22T11:49:56.503Z" }, { role: "user", text: "こんにちは", from: "from local via konaito-pro", at: "t2" }];
+  const sent: PendingItem = { role: "user", text: "こんにちは", pending: true, at: "t1", after: 3 };
+  const other: PendingItem = { role: "user", text: "別の文", pending: true, at: "t1", after: 3 };
+  test("作業中は待ちの文を印付きで出し、このアプリから送った同じ文の仮の項目は待ちに置き換える", () => {
+    const r = withQueued([sent, other], q, true);
+    expect(r.queued.map((x) => [x.text, x.queued, x.pending])).toEqual([["一回オンにしたけど、開き直す？", true, true], ["こんにちは", true, true]]);
+    expect(r.waiting).toEqual([other]);
+  });
+  test("止まっているとき、待ちが無いときは何も足さず、仮の項目もそのまま", () => {
+    const w = [sent];
+    expect(withQueued(w, q, false)).toEqual({ waiting: w, queued: [] });
+    expect(withQueued(w, undefined, true).waiting).toBe(w);
+  });
+});
+
+describe("convFailed（取得の失敗を画面に出す条件）", () => {
+  test("1回の失敗では出さない。続けて CONV_ERR_AFTER 回失敗したら出す", () => {
+    expect(convFailed(0)).toBe(false);
+    expect(convFailed(1)).toBe(false);
+    expect(convFailed(2)).toBe(true);
+    expect(convFailed(5)).toBe(true);
   });
 });

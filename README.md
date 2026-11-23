@@ -2,33 +2,24 @@
 
 Claude Town は、Claude Code のセッションの親子を、町に住む家族の子供たちが働く姿として見せる Tauri 製のデスクトップアプリである。旧名はファミリーコンピューティングで、リポジトリとディレクトリの名前（family-computing）、bundle identifier、hook と状態の置き場（`~/.family-computing/`）は旧名のまま使う。画面の子供をクリックすると、その子に注文を出せる。この文書は企画書で、決まったことと決まっていないことを分けて書く。
 
-## ccn とセットで動く
+## 動かすのに要るもの
 
-Claude Town は、ccn（Claude Code Nodes）とセットで動くアプリである。Claude Town だけでは動かない。ccn は作者が作っている別のプロダクトで、リポジトリは公開していない。
+Claude Town は、この Mac の Claude Code の記録と、状態を書く hook だけで動く。ほかに常駐するプログラムは要らない。2026-11-20 までは ccn（Claude Code Nodes）とセットで動いていたが、2026-11-21 の本人の決定で、アプリから ccn を外した。
 
-ccn は、機械ごとに常駐するノードである。ノードは、その機械で Claude Code のセッションを立て、一覧にし、文を送り、承認に答える HTTP の口を出す。ノードどうしをつなぐと、別の機械のセッションも同じ口で扱える。
+- Claude Code の CLI（`claude`）が要る。町の一覧と会話は `~/.claude` の記録から読む。新しい世帯は、アプリの中の端末で `claude` を起動して立てる。
+- 状態の hook（`hooks/fc-report.py`）が要る。頼まれたことや、いまやっていることを `~/.family-computing/state/` に書く。登録の仕方は下の「hook」にある。
 
-Claude Town は、手元のノード（`127.0.0.1`、ポートは `~/.config/ccn/ccn.json` の `port`）に次の口を呼ぶ。別の機械のセッションは、パスの頭に `/n/<ノード名>` を付けて、手元のノードに中継してもらう。
+アプリは `claude` を、ログインシェルの PATH から探す。見つからなければ `~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` の順に探す。
 
-| 用途 | ccn の口 |
-| --- | --- |
-| 機械の一覧 | `GET /api/peers` |
-| セッションの一覧、状態、親子 | `GET /api/sessions` |
-| 承認の中身などの詳細 | `GET /api/sessions/<id>` |
-| 新しい世帯を立てる | `POST /api/sessions`（`terminal: true`） |
-| 会話を読む、文を送る | `GET /api/sessions/<id>/messages`、`POST /api/sessions/<id>/messages` |
-| 端末 | `GET /api/sessions/<id>/terminal`（SSE）、`POST /api/sessions/<id>/terminal/input`、`POST /api/sessions/<id>/terminal/resize` |
-| 承認に答える | `POST /api/sessions/<id>/permissions/<requestId>` |
-| 閉じる | `DELETE /api/sessions/<id>` |
-| 別の機械へ移す（転出） | `GET /api/sessions/<id>/teleport`、`POST /api/sessions/<id>/teleport` |
+ブラウザ版（PWA）は、まだ ccn を通して動く。扱いは本人が決める（下の「ブラウザ版（PWA）」）。
 
 ## 何を作るか
 
 エージェンティックコーディングでは、1人の人が Claude Code を親、子、孫と何十体も並べて動かす。Claude Town は、この並びを「家族」として扱う。人が開いたセッションが親で、親が作ったセッションが子、子が作ったセッションが孫になる。1つの親とその子孫を1世帯と数え、町は世帯の集まりになる。
 
-画面は左右に分ける。左には世帯（根のセッション1つとその子孫）ごとに、淡い色の角丸の枠を1つ描き、中に親と子と孫を木の形で並べる。右には選んだ子の会話と注文の欄を出す。
+画面は3つのペインに分ける（#89）。左は新しい世帯のペインで、最近使った場所の一覧から親を立てる。中央は町で、世帯（根のセッション1つとその子孫）ごとに、淡い色の角丸の枠を1つ描き、中に親と子と孫を木の形で並べる。右には選んだ子の会話と注文の欄を出す。左のペインはヘッダーのボタンとドラッグで開け閉めでき、右の欄はセッションを選んでいない間は閉じている。スマホの幅では別の画面（`src/mobile/`）になり、この3ペインではない。
 
-世帯の中の配置は、決定論的な幾何の配置で決める（`src/layout/`。方針は `docs/design/geometric-layout.md`、検証の条件は `docs/design/physics-layout.md` の 10）。世帯の一番上の親を中心に、世代ごとの半径に並べる。根の子は下向きを中心に、孫より下は親の角度を中心に、兄弟を重ならない最小の角度（2·arcsin(r/R)）で並べる。子孫の多い枝には、葉から計算した広い角度を割り当てる。実際の箱（キャラと名前）で重なり、親子線の交差、線が箱を通ること、枝の混ざりを検査し、残れば決まった順序で角度の余白、次に半径を広げる。兄弟を並べる弧の上限を4通り試し、検査を通るもののうち s（配置の幅と高さを表示領域で割った大きいほう）が一番小さいものを選ぶ。乱数と時刻は使わない。配置を計算し直すのは世帯の顔ぶれが変わったときだけで、新しい座標へは短いアニメーションで移る。パラメータは `src/layout/params.ts` にまとめた。
+世帯の中の配置は、決定論的な幾何の配置で決める（`src/layout/`。方針は `docs/design/geometric-layout.md`、検証の条件は `docs/design/physics-layout.md` の 10）。世帯の一番上の親を中心に、世代ごとの半径に並べる。根の子は下向きを中心に、孫より下は親の角度を中心に、兄弟を重ならない最小の角度（2·arcsin(r/R)）で並べる。子孫の多い枝には、葉から計算した広い角度を割り当てる。実際の箱（キャラと名前）で重なり、親子線の交差、線が箱を通ること、枝の混ざりを検査し、残れば決まった順序で角度の余白、次に半径を広げる。兄弟を並べる弧の上限を4通り試し、検査を通るもののうち s（配置の幅と高さを表示領域で割った大きいほう）が一番小さいものを選ぶ。子が1〜8人の世帯は、この計算をせず決まった座標に子を置く。3人から8人は格子に並べ、左右の子は親と同じ高さにする。子3人は親の左右に1人ずつと真下に1人、子4人は親の左右に1人ずつと下の段に2人、子5人は親の左右に1人ずつと下の段に3人を並べる。子6人は上の段に2人、親の左右に1人ずつ、下の段に2人を並べる。子7人は6人の下の段に真下を足し、子8人はさらに真上を足して親の周りの8か所を埋める。子9人以上は上の計算で置く。孫がいても子の座標は変えず、孫をその子の、親から離れる向きの延長に並べる。検査を通らなければ、孫までの距離を広げる。乱数と時刻は使わない。配置を計算し直すのは世帯の顔ぶれが変わったときだけで、新しい座標へは短いアニメーションで移る。パラメータは `src/layout/params.ts` にまとめた。
 
 孫より下は、キャラと名前と状態の点だけの小さい札にする。札を押すと、親や子と同じ大きさのカードを上に重ねて広げ、周りの配置は動かさない。空白を押すと元に戻る。
 
@@ -55,51 +46,103 @@ Claude Town は、ペインの中身を読まなくても、状態と次の一�
 - 端末へ移る操作と、承認に答える操作を持つものはある。キャラから任意の文を送れるものは、調べた範囲では見つからなかった。
 - 深さ3以上の親子を一度に見せるものも見つからなかった。表現はオフィスと社員が中心で、家族として見せるものは無かった。
 
-Claude Town の違いは3つある。データ源を ccn に寄せること、キャラから文を送れること、孫までの親子を家族の木として見せることである。
+Claude Town の違いは3つある。データ源をこの Mac の Claude Code の記録に寄せること、キャラから文を送れること、孫までの親子を家族の木として見せることである。
 
 ## データの取り方
 
-2026-11-12 に、右パネルを本物の端末にする方針（`docs/design/terminal-panel.md` の A2）に切り替えた。claude は ccn のノードが PTY の中で対話モードのまま動かし、Claude Town は ccn の口だけを使う。ほかのターミナルアプリには依存しない。ccn の PTY の口は、2026-11-12 に ccn に入った。ccn を動かさずに画面を作るときは、同じ口を持つモックのノード（`scripts/mock-ccn-pty.ts`）を使う。
+町の一覧と会話は、この Mac の Claude Code の記録と、hook の状態ファイルから作る。記録の置き場所は `~/.claude` で、`FC_CLAUDE_HOME` で差し替えられる。読むだけで、`~/.claude` には書かない。cam の各プロファイルの `sessions`、`projects`、`teams` は `~/.claude` へのリンクなので、1か所を読めば全部のアカウントの分が読める。
 
 | 知りたいこと | 取り方 |
 | --- | --- |
-| 生きているセッション、状態、親子 | 手元の ccn ノードの `GET /api/sessions`。親は一覧の parent（`agent:<ノード>/<親の sid 先頭8>/<役割>`）から引く。ポートは `~/.config/ccn/ccn.json` の `port` |
-| 端末の画面 | `GET /api/sessions/<id>/terminal`（SSE）。最初に size、続けて末尾の replay、以後 data。Rust で読み、Tauri のイベントで xterm.js に流す |
-| 承認の中身 | `GET /api/sessions/<id>` の pending（toolName、input、requestId） |
+| 生きている対話セッションと状態 | `~/.claude/sessions/<pid>.json`。pid が生きているものだけを出す。status の busy は作業中、waiting は承認待ち、idle は待機にする（`src-tauri/src/native/sessions.rs`） |
+| 会話 | `~/.claude/projects/<cwd を直した名前>/<session id>.jsonl` を、前に読んだ位置から続けて読む（`native/conv.rs`） |
+| sub-agent と in-process のチームメイト | 親のセッションの `<session id>/subagents/agent-<agent id>.jsonl` と `.meta.json`。meta の taskKind が in_process_teammate ならチームメイトとして出す（`native/subagents.rs`） |
+| tmux のチームメイト | `~/.claude/teams/<チーム名>/config.json` の members と、ps で見た claude の起動の引数（`--agent-id`、`--parent-session-id`）。会話は同じ cwd の jsonl のうち、teamName と agentName が合うもの（`native/teams.rs`） |
+| 親子 | sub-agent とチームメイトは、置き場所と config.json から親を決める。ほかのセッションは、最初の文の from 行（`from agent:<ノード>/<親の sid 先頭8>/<役割> via <ノード>`）から引く。from 行は ccn などのプロダクトが子を立てるときに付ける |
 | 頼まれたこと、いまやっていること、最後の報告、次の一手 | hook が書く `~/.family-computing/state/<session_id>.json` |
 | 閉じてよいか | close-check-state hook が書く `~/.claude/close-check/<session_id>.json` |
+| 新しい世帯の「最近の場所」 | Claude Code の入力の履歴 `~/.claude/history.jsonl` の project と timestamp（`src-tauri/src/places.rs`） |
 
-人がターミナルで開いたセッションは、ccn から一覧と送信だけができる。親子は ccn の parent だけから引く。ccn を通さずに作った子は、親とつながらず別の世帯として出る。名前の決め方は、ccn で作ったセッションと同じにする（下の「世帯とカードの名前」）。
+記録から読むセッション（Claude Town の外で起動したもの）には、停止、割り込み、端末、承認の操作ができない。操作できるのは、アプリが立てたセッションだけである（下の「アプリの中の端末」）。
 
-ccn は Origin 付きの要求を CSRF として断る。このため、HTTP の要求は画面からではなく Tauri の Rust 側から出す。
+文の送信だけは、外で起動した対話セッションにもできる（#156）。`sessions/<pid>.json` の `messagingSocketPath` にある受信ソケットへ、`{"type":"user","message":{"role":"user","content":"<文>"}}` の1行を書く。ccn の `terminal-driver.ts` と同じ形である。届いた文は、相手には別の Claude のセッションからの文として入る。
 
-### ネットが切れたとき
+- 相手が作業中なら、文は順番待ちになり、ターンの途中で取り込まれる（2026-11-22、2.1.330 で確かめた）。
+- `/` のコマンドと `!` のシェルは、コマンドとして動かずに文として届くので、送らずに断る。
+- 相手は、送り主を別のセッションと読む。2026-11-22 の確認では、haiku の相手が返事を SendMessage で送り返そうとして、送り主が分からずに止まった。
+- ソケットのファイルが無いセッション、sub-agent、チームメイトには送れない。
 
-別の機械の町（`/n/<機械>/api`）と peers は Cloudflare を通るので、ネットが切れると読めない。Rust は読めた分を、アプリが書く置き場所の `cache/` に保存し、読めないときにそれを出す（`src-tauri/src/offline.rs`）。
+チームメイトの出し方は、2026-11-21 の実測（`docs/research/agent-teams-observed.md`）に合わせた。
 
-| 保存するもの | ファイル | 中身 |
-| --- | --- | --- |
-| 会話 | `cache/conv/<町>__<セッション>.json` | 会話の欄に出す最後の KEEP_MESSAGES 件（80件）。一度でも開いたセッションだけ |
-| 町の一覧 | `cache/towns/<町>.json` | snapshot の agents。中身が前回保存と同じなら書かない。顔ぶれが同じで中身だけ変わったときは、前の書き込みから30秒空けて書く |
-| peers | `cache/peers.json` | ccn の peers。読めないときは、別の機械の status を cached にして返す |
+- 終わったセッションのチームは `~/.claude/teams` に残る（61件のうち58件はリードが死んでいた）。リードの session id が生きているセッションの一覧にあり、`leadProcess.pid` がそのセッションの pid と同じチームだけを見る。
+- tmux のチームメイトは `sessions/<pid>.json` を作らない（2回の観測の両方で同じだった）。ps に起動の引数が無ければ、終わったものとして出さない。
+- in-process のチームメイトには finished の印が付かない。チームの config.json の members にいる間は、待機のまま町に出し続ける。
+- 知らない形（知らない backendType、読めない config.json など）は、黙って落とさず件数に数える。数は snapshot の `sources.native.unexpected` に出る。
 
-手元の町は `_local` と書く。形式はどれも `{ "v": 1, "savedAt": <ms>, ... }` にしてある。会話の欄は、開いた直後に保存分を出し、ccn から読めたら差し替える。読めない間は、会話の欄の上端の中央に保存した時刻の印を重ね、中身の上に印の高さぶんの余白を足す。欄の外枠とグラデーションの位置は変えない。会話の保存は、起動のたびに14日より古いものと300件を超えた分を消し、画面から止めたセッションの分はその場で消す。ccn の一覧に無いことを理由には消さない。
+### アプリの中の端末
 
-ccn の messages には末尾から件数を指定する口が無いので、開いていないセッションの先読みはしない。
+「新しい世帯」を押すと、Rust が PTY の中で `claude --session-id <新しい UUID>` を起動する（`src-tauri/src/pty.rs`）。出力は右パネルの xterm.js に流し、打ったキーは PTY に書く。crate は portable-pty（wezterm の一部、MIT）を使う。
 
-確かめ方は次のとおり。`scripts/offline-ccn-proxy.ts` を ccn の前に置き、切り替えのファイルで別の機械と peers だけ、または全部を断る。ブラウザ表示では `?offline` で、ccn に届かない状態の見た目を出す。開発版では `?bench=offline&sid=<セッション>` で、会話の欄の表示を1秒ごとに `FC_PERF_LOG` へ書く。
+- Claude Code は、`--session-id` で渡した id を `sessions/<pid>.json` に書く。この pid は、PTY で起動した claude の pid と同じである（2026-11-21 に実測）。
+- 信頼の確認の画面を抜けるまで、`sessions/<pid>.json` は作られない。その間は、アプリの台帳から仮の行を町に出す。
+- /clear で session id が変わっても、pid は変わらない。台帳は pid で引き、一覧で同じ pid に見えた id を同じ端末として扱う。
+- 子プロセスの環境からは、`CLAUDECODE` と、`CLAUDE_CODE_` で始まる変数などを外す。アプリを Claude Code の中から起動したときに、子が親のセッションを名乗らないようにするためである。`CLAUDE_CONFIG_DIR` は残すので、子はアプリを起動したアカウントで動く。
+- アプリを終了すると、アプリから立てた世帯の claude は全部止まる。終了のときに SIGHUP を送り、1秒で終わらなければ SIGKILL を送る。アプリが落ちたときも、PTY が閉じて claude は終わる（2026-11-21 に、子を止めずに親のプロセスを終えて確かめた）。
+- アプリが立てた端末の一覧（台帳）を `terminals.json`（安定版は `~/.family-computing/`、開発版は `~/.family-computing/dev/`）に残す。次にアプリを起動したとき、台帳にあるセッションを `claude --resume <id>` で元の場所に立て直す（#152）。立て直した端末も、アプリが立てた端末として送れて止められる。結果は同じ置き場所の `restore.log` に書く。
+  - 台帳から外すのは、画面から閉じたときと、claude が自分で終わったとき（`/exit` など）だけである。アプリを終了したとき、落ちたとき、`release-stable.sh` で入れ替えたとき（SIGTERM）は、開いていた分が台帳に残る。
+  - `/clear` や `/resume` で id が変わったら、台帳には今の id を残す。
+  - 会話の記録（`projects/*/<id>.jsonl`）が無いもの（1通目を送る前に止まったもの）と、同じ id がよそで動いているものは、立て直さずに台帳から外す。起動に失敗したものは台帳に残し、次の起動でもう一度試す。
+  - `FC_NO_RESTORE=1` で起動すると、立て直さず、台帳も書かない。
+- 左のペインの下の「セッション id で開き直す」に、終わったセッションの id を入れて Enter を押すと、会話の記録の場所で `claude --resume` を立てる。
 
 ## 操作
 
-- 子供を左クリックすると、右のパネルにその子が出る。端末のセッションは「端末」の欄が先に開き、打ったキーはそのまま PTY に届く（`POST /api/sessions/<id>/terminal/input`）。端末の大きさは、開いたときに ccn に伝える（後に開いた画面に合わせる）。
-- 子供を右クリックすると、その子を選んで端末を開く。
-- 子は親のセッション自身が ccn の create_session（terminal: true）で作る。画面から子を足す操作は出さない（2026-11-12、本人の判断。使う機会が無いため）。
-- どのセッションを PTY で立てるかの比較と提案は `docs/research/pty-or-headless.md` にある。
-- 上の「＋ 新しい世帯」を押すと、すぐ `~/Documents/meta` で親のいない端末のセッションを立て、そのノードを選んで右のチャットを開き、入力欄にフォーカスを当てる。最初の依頼の欄は出さない。端末は右クリックか「端末へ」で開く。セッションが0本の空の町でも、ここから最初の世帯を作れる。
-- 右パネルの「転出」で、ccn の teleport（PR #18）を呼び、別の機械へ移す（move）か複製する（fork）。下見は移動元の説明（`GET /api/sessions/<id>/teleport`）だけを見せる。行き先の下見は clone することがあるので、実行の中で ccn に任せる。作業中と承認待ちのセッションは転出できない。世帯ごとの転出は出していない。ccn に一括の口が無く、1つずつ移すと子の parent が転出を呼んだ側に変わり、同じリポジトリの子が行き先の同じ作業ツリーを書き換え合うため（`docs/research/ccn-teleport.md`）。
-- 承認待ちの子は、カードの枠が黄色で点滅し、右パネルに承認の中身と「許可する」「拒否する」を出す。押すと、今も承認待ちで requestId が同じかを確かめてから、ccn の permissions の口で答える。質問（AskUserQuestion）や計画の確認（ExitPlanMode）の待ちには許可を送らない。人が端末で開いたセッションは、その端末で答える。
-- 上の帯のノードの切り替えで、ccn につながる別の機械のセッションも出せる。
-- 送信の非常停止: `~/.family-computing/send-disabled` があると、注文、端末への入力、承認、作成、転出を全部断る。
+- 子供を左クリックすると、右のパネルにその子の会話が出る。
+- 子供を右クリックすると、その子を選んで端末を開く。端末を開けるのは、アプリが立てたセッションだけである。
+- 左のペインの「新しい世帯」（lucide の plus の付いたボタン）を押すと、すぐ設定の場所（設定していなければ `~/Documents/meta`）で、親のいない claude を立てる（上の「アプリの中の端末」）。立てたら、そのセッションを選んで右のチャットを開き、入力欄にフォーカスを当てる。最初の依頼の欄は出さない。セッションが0本の空の町でも、ここから最初の世帯を作れる。
+- 「新しい世帯」の下の「最近の場所」は、Claude Code の入力の履歴から作り、新しい順に20件出す。worktree はリポジトリの場所にまとめ、今は無い場所は出さない。新しい世帯の置き場所（設定した場所、無ければ `~/Documents/meta`）は、ボタンと同じ場所なので一覧から除く（2026-11-21）。ペインに見出しは出さない（2026-11-21）。
+- 置き場所は、ヘッダーの右端の歯車（設定）の「新しい世帯の場所」で変える。最近の場所から選ぶか、絶対パスを入力する。無い場所は、立てるときに断り、通知に場所を出す。保存先は localStorage の `claude-town.newHousePlace` で、この Mac のアプリ（ブラウザ版ではそのブラウザ）ごとに1つ。
+- 子は親のセッション自身が作る（Agent ツールや agent team）。画面から子を足す操作は出さない（2026-11-12、本人の判断。使う機会が無いため）。
+- チャット欄の文は、アプリが立てたセッションの端末の入力欄へ貼り、Enter を押して送る。/ と ! で始まる文も、CLI に打ったのと同じに動く。画面を開くコマンド（/model など）は、送った後にターミナルのタブを開く。承認待ちのときと、claude がまだ起動していないとき（信頼の確認の画面）は送らない。
+- カードの右下と右パネルの見出しに、同じ3つのボタンを並べる。閉じる（lucide の power）、様子を聞く（message-circle-question-mark）、許可する（thumbs-up）の順で、並びと送る文は `src/card/CardActions.tsx` の `CARD_ACTIONS` で決める。ボタンに乗せると、押せるときは何をするか、押せないときは押せない理由を、WebView の標準のツールチップ（`title`）で出す。
+- 閉じる（power）は、アプリが立てた claude を、子孫ごと孫から順に止める。Claude Town の外で起動したセッションは止めずに残す。
+- 承認待ちの子は、カードの枠が黄色で点滅する。アプリが立てたセッションの承認には、右パネルの承認の欄から答えられる（下の「承認の欄」）。Claude Town の外で起動したセッションは、起動した端末で答える。
+- 作業中で入力欄が空のときは、送るボタンが止めるボタン（lucide の square を塗ったもの）になる。押すと端末に Esc を書き、今の作業を止める（#83）。
+- 会話の道具の行は、結果が届いたら押して開ける。開くと、まとめた道具ごとに1行と結果の頭（40行、1500字まで）を出し、失敗した道具には「失敗」と付ける（#83）。止めたターンと失敗したターンは、会話の中に「ここで止めた」「ターンが失敗で終わった」の印を出す。
+- `~/.family-computing/send-disabled` があると、注文、端末への入力、新しい世帯の作成、停止を全部断る（送信の非常停止）。
+
+ccn を外したときに、別の機械の町、転出、引き継ぎ、チャットの欄からの承認、オフラインの保存をやめた（2026-11-21）。どれも ccn の口を使っていた。モデルと権限モードの切り替えは、端末に書く作りで戻した（下の「モデルと権限モード」）。チャットの欄からの承認も、端末に書く作りで戻した（下の「承認の欄」、2026-11-22）。
+
+### 承認の欄
+
+アプリが立てたセッションの承認（質問、道具の承認、計画の確認）に、右パネルから答える。処理は `src-tauri/src/dialog.rs`、画面は `src/approval/Approval.tsx` にある。
+
+- 承認の中身は、端末の画面（vt100 で解いたもの）と、待っている道具の input から作る。画面の番号の行を読み、待っている道具と突き合わせる。質問の文と選択肢は、AskUserQuestion の input から読む。
+- 待っている道具の input は、先に状態 hook が PermissionRequest で残したもの（`~/.family-computing/perm/<session_id>.json`、新しい順の8件）を見る。無ければ transcript で結果がまだ無い道具を見る。transcript には、承認の画面が出ている間に道具の行がまだ書かれていないことがあった（2026-11-22、質問と計画の確認の両方で見た）。
+- hook が動くのは安定版の置き場の `fc-report.py` なので、perm のファイルは安定版へ上げた後に書かれる。それまでは transcript だけを見て、読めない質問はターミナルで答える。
+- 道具の承認と計画の確認は、画面に出た行をそのままボタンにする。行は道具と設定で変わる（Yes、Yes, and …、No）。
+- 答えるときは、CLI の承認の画面に人が打つのと同じキーを書く。キーを1つ書くたびに画面を読み直し、次のキーを決める。番号で選ぶ行は、番号と行の文の両方が合うときだけ押す。
+- 画面の承認が、この会話で待っている道具と合わないときは何も書かない。チームメイトや sub-agent の承認がリードの端末に出たときがこれに当たる。欄には理由と「ターミナルを開く」を出す。
+- 計画の確認は、画面だけで決める。id は画面に出た計画の本文から作る。計画の本文の無い ExitPlanMode は「Exit plan mode?」の画面になり、道具の承認と同じに扱う。
+- 計画を承認すると、claude が新しい session id に移ることがあった。一覧は pid で同じ端末として扱うので、承認の欄は新しい id で読み直す。
+- 道具の承認を理由付きで断ると、No の行で Tab を押して理由を打つ。作業は止まらない。理由が空なら No を押し、作業が止まる。
+- 見本（preview）付きの質問は、ここからは答えない。キーの動きを確かめていないためである。
+- 2026-11-22 に v2.1.330 の本物の claude で確かめたキーの動きは、`dialog.rs` の頭に書いた。本物の claude で通しに確かめる試験は `real_claude_answers_through_the_pty`（`#[ignore]`、起動の仕方はその試験のコメントにある）。
+
+### モデルと権限モード
+
+チャット欄の「送信先」の行に、モデルと権限モードの選択を置く。選択はいつでも押せる（2026-11-21、本人の依頼）。決まりは `src/session/control.ts` の `planOf`、端末に書く処理は `src-tauri/src/switch.rs` にある。
+
+- アプリが立てたセッションは、端末に CLI と同じ入力を書いて替える。モデルは `/model` のピッカーを開き、目当ての行で `s`（このセッションだけ）を押す。権限モードは Shift+Tab である。
+- モデルは作業中でもすぐ替える。`/model` は作業中に打っても待たされず、同じターンの次の要求から効く。
+- 権限モードは待機中に替える。Shift+Tab は default、acceptEdits、plan、bypassPermissions、auto の順に回るので、作業中に回すと途中のモードで道具が走りうる。
+- 承認待ちの間は、モデルも権限モードも替えない。端末に書いた入力が承認の画面に入り、Enter が許可になるためである。
+- 今は替えられないときに選んだ値は予約になる。選択は破線の枠で予約の値を出し、下に「承認に答えたら替える」「このターンが終わったら替える」と出す。今の値を選び直すと予約を取り消す。
+- 予約は Rust が持ち、0.5秒ごとに `sessions/<pid>.json` の status を見て当てる。窓が隠れていても当たる。アプリを終えると予約は消える。アプリが立てた claude もアプリと一緒に止まるので、持ち越す先が無い。
+- 今の値は transcript の `permission-mode` の行と、assistant の行の `message.model` から読む。アプリの端末の権限モードは、端末の下の行（「⏸ manual mode on」など）を優先する。待機中に Shift+Tab で替えたモードは、次の文を送るまで transcript に書かれないためである。端末の画面は、出力を vt100（crate、MIT）で解いて読む。作業中に開いたピッカーは行を描き直さず ❯ の1文字だけを書き直すので、出力の生の文字列では読めなかった。
+- `/model <別名>` と、ピッカーで Enter を押すのは、新しいセッションの既定も替える。`~/.claude/settings.json` に model を書き、その行を消しても既定は戻らなかった（2026-11-21 に確かめた）。だからアプリはピッカーの `s` を使う。`s` では「for this session only」と出て、settings.json も既定も変わらなかった。ピッカーの上の段に無いモデル（More models の中など）は、ここからは選べない。
+- dontAsk は Shift+Tab の順に出ないので、端末からは替えられない。bypassPermissions と auto は、そのセッションで使えるときだけ順に出る。順に出なければ、1周して元のモードに戻し、理由を通知に出す。
+- アプリの外で起動したセッション、チームメイト、sub-agent には、外からモデルや権限モードを届ける口を作っていない。選ぶと、代わりの手（そのターミナルで `/model` を打つ、など）を出す。公式の文書に載っている口は無い（2026-11-21 に確かめた）。設定ファイルの model は起動のときに1回だけ読まれる。hook の出力で権限モードを替えられるのは PermissionRequest の `setMode` だけで、その承認を許可するのと一緒にしか使えない。チームメイトのモデルは起動のときに決まる。tmux のチームメイトの `tmuxPaneId`（tmux send-keys で書ける）と、`sessions/<pid>.json` の `messagingSocketPath` は試していない。
 
 ## hook
 
@@ -112,23 +155,24 @@ hook の本体は `hooks/fc-report.py` に置く。2026-11-12 に本人に確か
 
 hook は本物の `claude -p` で試し、頼まれたこと、道具、最後の報告、次の一手が状態ファイルに入ることを確かめた。
 
+in-process のチームメイトと sub-agent の hook は、リードの session_id に `agent_id` が付いて届く。hook はこれをリードの状態ファイルにもお手紙にも書かない。例外は承認で、チームメイトの承認の画面はリードの端末に出るので、リードの承認の並びに足し、終われば外す（2026-11-21 に Claude Code 2.1.330 で確かめた）。チームメイトの様子は、hook ではなく `native/subagents.rs` が meta.json と jsonl から作る。tmux のチームメイトは自分の session_id で届くので、ふつうのセッションと同じに書く。
+
 ## 決まったこと
 
 - hook は A にする。
-- 左クリックの「メッセージの挿入」は、ccn で文を送ることにする。モックに合わせ、送る欄は右のパネルの会話の下に置く。
+- 左クリックの「メッセージの挿入」は、端末の入力欄へ文を貼って送ることにする（2026-11-21 までは ccn で送っていた）。モックに合わせ、送る欄は右のパネルの会話の下に置く。
 - 白を基調にした明るい配色にする。
-- 状態は、作業中（緑）、返事待ち（青）、承認待ち（黄）、完了（灰）、待機の5つにする。承認待ちは ccn の waiting_permission、返事待ちは hook が「人への問いで終わった」と書いたものと、set_status の blocked。
+- 状態は、作業中（緑）、返事待ち（青）、承認待ち（黄）、完了（灰）、待機の5つにする。承認待ちは `sessions/<pid>.json` の status が waiting のもの、返事待ちは hook が「人への問いで終わった」と書いたものと、set_status の blocked。
 - キャラの体は Ninja Adventure Asset Pack（CC0）のドット絵、状態の印は Noto Animated Emoji（CC BY 4.0）の WebP にする（見本ページの案 C）。印の置き方は案 A の位置の2段階目（A2）。親には大人のキャラ6体、子より下には子供のキャラ18体から、名前で決めて当てる。見本は `docs/research/assets/index.html` と `docs/research/assets/balance.html`。
 - 家の絵（屋根、壁、床）は描かない。世帯は淡い色の枠で見分ける。
 - プロダクト名は Claude Town にする（2026-11-12）。数える単位は世帯で、画面の見出しは「5世帯・23人」のように出す。
 - 世帯とカードの名前は、そのセッションが作業しているプロジェクトの名前にする（2026-11-13）。プロジェクトの名前は、リポジトリの本体のディレクトリの名前（例 family-computing）。決め方は `src-tauri/src/naming.rs` と `src/model.ts` の cardNames に同じものを書き、試験の事例は `src/naming-cases.json` にまとめて両方で読む。
   1. git の worktree は、`.git` の gitdir から本体の名前に直す（この機械の町だけ）。`.git` を読めないときは `<名前>.wt/<x>` を <名前> にし、それ以外は cwd の最後の名前にする。
-  2. cwd が振り分けの場所（ホーム、`~/Documents`、`~/Documents/meta`、`~/.local/share/ccn/lobby`、`/`、`/tmp`、`/private/tmp`、`/root`）なら、子孫のプロジェクトで一番多いものにする。振り分けの場所にいる子孫は数えず、同数なら先に始まった子孫の分にする。
-  3. 子孫から分からなければ、エージェントが `python3 scripts/hook.py name <プロジェクトの名前>` で付けた名前にする。それも無ければ cwd の最後の名前（meta など）のままにする。
-  4. cwd が無ければ ccn の題名、それも無ければセッション ID の先頭8字にする。
-- 世帯の名前は、根のカードの名前と同じにする。本人は画面で世帯の名前をダブルクリックして直せて、本人が付けた名前が最優先になる。名前は `~/.family-computing/houses.json` に入る。
-- 振り分けの場所で動く親が、別のプロジェクトで子を作ると（ccn の create_session か Specter の spawn_child）、状態 hook が「そのプロジェクトのディレクトリの名前を `hook.py name` で付けて」と促す。プロジェクトごとに1回だけ促す。Specter の子は ccn に親が残らず、アプリが子孫として数えられないので、この名前で世帯の名前が分かる。
-- キャラの見た目は、右下の「素材」を開いた中の「キャラの見た目」で「いつもの」と「ポケモン」を切り替えられる。使う素材が見た目で変わるので、素材の表示と同じ所に置く。既定は「いつもの」で、選んだ値はこの画面の localStorage に残す。ポケモンでは、世帯の根のセッションの ID から3段進化の系統を1つ決め、親を3段目（最終進化）、子を2段目、孫（孫より下も）を1段目で描く。例えばリザードンの系統なら、親がリザードン、子がリザード、孫がヒトカゲになる。作業中は GIF を動かして小さく跳ねさせ、それ以外は1フレームを止める。状態の印と待機の薄さは「いつもの」と同じ。GIF が読めないときは、その1体だけ「いつもの」の絵に戻す（2026-11-13）。
+  2. cwd があれば、cwd のプロジェクトの名前にする。ホーム、`~/Documents` 直下、`~/.local/share/ccn/lobby`、`/`、`/tmp` も cwd の最後の名前のままにする（子孫の cwd は見ない）。
+  3. cwd が無ければセッションの題名（`sessions/<pid>.json` の name）、それも無ければセッション ID の先頭8字にする。
+- 世帯の名前は、根（親）のカードの名前と同じにする。子のプロジェクトは世帯の名前に影響しない。親が meta なら世帯の名前は meta になる（2026-11-21、#93）。画面からも、エージェント（旧 `hook.py name`、hook の促し）からも付けられない。旧版が `~/.family-computing/houses.json` に書いた名前（by=human、by=agent）は、読まず、消さない。
+- チャットの発言とお手紙の差出人には、発言したセッション自身のカードの名前を出す。
+- キャラの見た目は、右下の「素材」を開いた中の「キャラの見た目」で「いつもの」と「ポケモン」を切り替えられる。使う素材が見た目で変わるので、素材の表示と同じ所に置く。既定は「いつもの」で、選んだ値はこの画面の localStorage に残す。ポケモンでは、世帯の根のセッションの ID から3段進化の系統を1つ決め、親を3段目（最終進化）、子を2段目、孫（孫より下も）を1段目で描く。例えばリザードンの系統なら、親がリザードン、子がリザード、孫がヒトカゲになる。作業中は GIF を動かして小さく跳ねさせ、それ以外は1フレームを止める。絵は2Dのドット絵で、アニメの無い番号（第6世代以降の一部、38番号）は作業中も止め絵のまま跳ねる（2026-11-18、#76）。状態の印と待機の薄さは「いつもの」と同じ。GIF が読めないときは、その1体だけ「いつもの」の絵に戻す（2026-11-13）。
 
 ## 決まっていないこと
 
@@ -140,7 +184,7 @@ hook は本物の `claude -p` で試し、頼まれたこと、道具、最後�
 
 - キャラ: Ninja Adventure Asset Pack（Pixel-boy、AAA。https://pixel-boy.itch.io/ninja-adventure-asset-pack）。CC0 1.0 で、帰属表示は要らない。使うキャラの Walk.png、Idle.png、Dead.png だけを `public/sprites/ninja/` に置いた。色のプロファイルなどの描画に使わない部分は外した（`scripts/strip-sprites.sh`、画素は変えていない）。
 - 状態の印、幽霊、お手紙: Animated emoji: Noto Animated Emoji by Google, licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Source: https://googlefonts.github.io/noto-emoji-animation/ 。状態の印の3種（270b、1f97a、2705）、閉じる演出の幽霊（1f47b）、お手紙の封筒（1f48c）の 512.webp を 64px に縮め、コマを半分に間引いた 64.webp を `public/sprites/noto/` に置いた。作り方は `scripts/make-noto-small.sh` にある。アプリの下の帯の「素材」にも同じ表示を出す。
-- ポケモン（「素材」の中の「キャラの見た目」でポケモンを選んだときだけ）: Pokémon Showdown のアニメ GIF を、PokeAPI/sprites（https://github.com/PokeAPI/sprites）の `sprites/pokemon/other/showdown/<図鑑番号>.gif` から読む。画像はこのリポジトリにもアプリにも入れず、表示中のキャラの分だけ実行時に raw.githubusercontent.com から取得する。URL はブランチ名ではなく、確かめたときのコミットで指す。系統の一覧 `src/kid/pokemon-lines.json` は図鑑番号と英名だけで、`bun run scripts/pokemon-lines.ts` で作り直す。Pokémon © Nintendo / Creatures Inc. / GAME FREAK inc.
+- ポケモン（「素材」の中の「キャラの見た目」でポケモンを選んだときだけ）: 2Dのドット絵を、PokeAPI/sprites（https://github.com/PokeAPI/sprites）の `sprites/pokemon/versions/generation-v/black-white/animated/<図鑑番号>.gif`（ブラック・ホワイトの形のアニメ）から読む。アニメの無い番号は、同じ形の止め絵 `sprites/pokemon/versions/generation-v/black-white/<図鑑番号>.png` を使う。画像はこのリポジトリにもアプリにも入れず、表示中のキャラの分だけ実行時に raw.githubusercontent.com から取得する。URL はブランチ名ではなく、確かめたときのコミットで指す。系統の一覧 `src/kid/pokemon-lines.json` は図鑑番号と英名、止め絵の番号、余白を切る矩形だけで、`bun run scripts/pokemon-lines.ts` で作り直す。Pokémon © Nintendo / Creatures Inc. / GAME FREAK inc.
 - 見本ページの Kenney のプレビュー画像（`docs/research/assets/kenney-toon-characters.png`）: Kenney（https://kenney.nl）。CC0 で、帰属表示は要らない。
 - 見本ページ（`docs/research/assets/`）は、比べたときの素材を全部参照している。絞った後の public には一部しか残っていないので、見本ページの画像は一部が出ない。
 
@@ -192,12 +236,14 @@ scripts/rollback-stable.sh    # 今の版と1つ前の版を入れ替える。�
 
 戻すときも、状態 hook を戻した先の版のタグから写し直す。アプリを入れ替えずに hook だけを写し直すときは `scripts/install-stable-hooks.sh [タグ]` を使う（タグを省くと、いま入っている版のタグから写す）。
 
-作業ツリーの hook を試すときは、手で見本の入力を流す。`FC_STATE_DIR`、`FC_LETTERS`、`FC_HOUSES` を一時の場所に向けると、本物の状態ファイルに書かない。
+作業ツリーの hook を試すときは、手で見本の入力を流す。`FC_STATE_DIR`、`FC_LETTERS` を一時の場所に向けると、本物の状態ファイルに書かない。
 
 ```bash
 echo '{"session_id":"0123abcd-0000-0000-0000-000000000001","hook_event_name":"UserPromptSubmit","prompt":"試し"}' \
-  | FC_STATE_DIR=/tmp/fc-try FC_LETTERS=/tmp/fc-try/letters.jsonl FC_HOUSES=/tmp/fc-try/houses.json python3 hooks/fc-report.py
+  | FC_STATE_DIR=/tmp/fc-try FC_LETTERS=/tmp/fc-try/letters.jsonl python3 hooks/fc-report.py
 ```
+
+hook が書く状態ファイルとお手紙の形は、`python3 -m unittest discover -s hooks -v` で確かめる（`hooks/test_fc_report.py`、標準ライブラリだけ、一時の場所にだけ書く）。
 
 本物のセッションで試すときだけ、`python3 scripts/hook.py install --worktree` で作業ツリーの hook に登録を替える。その間は安定版にも作業ツリーの hook の内容が出るので、済んだら `python3 scripts/hook.py install` で写した先に戻す。2つを同時に登録しないのは、同じ状態ファイルに2つの版の hook が書くと、作業ツリーの hook がまた安定版の表示に混ざるためである。
 
@@ -207,16 +253,51 @@ echo '{"session_id":"0123abcd-0000-0000-0000-000000000001","hook_event_name":"Us
 
 - 状態 hook は1つだけ登録してあり、両版が同じ状態ファイルを読む。登録先は安定版のタグから写した `~/.family-computing/stable/hooks/fc-report.py` なので、作業ツリーの hook を書き換えても、安定版を上げ直すまで両版に出る内容は変わらない。
 - hook が書くファイル（state/、letters.jsonl）と、送信の非常停止（send-disabled）は、両版が `~/.family-computing/` の同じものを読む。非常停止は1か所で両版を止めるために共有にしてある。
-- エージェントが hook（`scripts/hook.py name`）で付けた世帯の名前は、`~/.family-computing/houses.json` に入り、両版が読む。
 
 両版で分けているもの:
 
-- アプリが書くファイル（avatars.json、avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json、houses.json）は、安定版は `~/.family-computing/` に、開発版は `~/.family-computing/dev/` に置く。開発版でキャラの割り当てや世帯の名前を変えても、安定版のファイルは変わらない。
+- アプリが書くファイル（avatars.json、avatars-recent.json）は、安定版は `~/.family-computing/` に、開発版は `~/.family-computing/dev/` に置く。開発版でキャラの割り当てを変えても、安定版のファイルは変わらない。
 - どちらに置くかは、ビルドに入った identifier で決める。安定版の identifier なら今までの場所、それ以外（開発版）なら dev/ にする。環境変数を付け忘れても、開発版が安定版のファイルに書かない。
-- 開発版の世帯の名前は、共有の houses.json を下地に読み、開発版の houses.json を上に重ねる。本人が開発版の画面で付けた名前は開発版の分にだけ書く。開発版で名前を消しても、共有の分にある名前は残って見える。
-- 置き場所を決める関数は `src-tauri/src/lib.rs` の `fc_path` だけにしてある。`FC_APP_HOME` を付けると、アプリが書くファイルの置き場所だけを差し替えられる。`FC_AVATARS` と `FC_HOUSES` は今までどおり使える。
+- 置き場所を決める関数は `src-tauri/src/lib.rs` の `fc_path` だけにしてある。`FC_APP_HOME` を付けると、アプリが書くファイルの置き場所だけを差し替えられる。`FC_AVATARS` は今までどおり使える。`FC_HOUSES` は、`houses.json` を読まなくなったので効かない。
 - 置き場所は `src-tauri/target/debug/family-computing --paths` で確かめられる。identifier と、各ファイルの置き場所を出す。
-- 開発版の dev/ は、初めて起動したときは空なので、キャラは安定版と違う顔ぶれで振り直される。avatars-recent.json、`avatars-peer-<機械>.json`、avatars-custom-ccn.json の3つは、キャラの選び方の変更（feat/char-age）が入った版から使う。
+- 開発版の dev/ は、初めて起動したときは空なので、キャラは安定版と違う顔ぶれで振り直される。avatars-recent.json は、キャラの選び方の変更（feat/char-age）が入った版から使う。ccn を使っていた版が書いた `avatars-peer-<機械>.json`、avatars-custom-ccn.json、`cache/`、town-settings.json は、今の版では読まず、消さない。
+
+## ブラウザ版（PWA）
+
+Claude Town は、ブラウザから開けるインストール可能な PWA としても配る。公開先は https://town.fybe.jp である。アプリからは ccn を外したが、ブラウザ版はまだ ccn を通して動く。扱いを本人が決めるまで、`web/` と、画面のブラウザ版の経路（`src/bridge.ts` の `WEB`、`src/webConv.ts`、`src/webPerm.ts`）は残す。別の機械の町を選ぶ欄は、アプリと同じ画面から消えた。Cloudflare Access（アプリ `claude-town`）が全体を守り、ポリシー `town-owner` が `ceo@fybe.jp` だけを通す。
+
+仕組みは次のとおり。
+
+- 画面は Tauri 版と同じ `src/` である。Tauri の外でビルドした版（`import.meta.env.PROD`）は、`invoke` の代わりに、同じオリジンの `/api` へ HTTP で話す（`src/bridge.ts` の `WEB`）。ccn の行は source が ccn で、コマンドの振り分けはこの行にだけ出る。承認の欄は、ccn の行では ccn の permissions の口で答える。モデルと権限モードの切り替えは、ccn の行では ccn の PATCH で替え、予約は画面が持つ（`src/webReserve.ts`）。
+- ccn は別オリジンからの要求を 403 で断るので、ブラウザは ccn に直接つなげない。`web/` の Worker（Void アプリ）が画面を配り、`/api` と `/n/` を `https://ccn.fybe.jp` に中継する。
+- 中継は、受け取った Access の JWT を `Cf-Access-Token` で渡す（Linked App Token）。ccn の Access アプリ `ccn` に、`claude-town` からの Linked App Token を通すポリシー `town-linked` を足してある。ccn には人（email）の呼び手として届き、サービストークンの秘密は持たない。
+- Service Worker（`public/sw.js`）は何もキャッシュしない。ホーム画面に追加するためだけに置いた。manifest は `public/manifest.webmanifest`、アイコンは `public/app-icon.svg` から `bun run pwa:icons` で作る。
+- デプロイは、既定ブランチへのマージで `.github/workflows/void-deploy.yml` が行う。
+
+会話の表示と承認への返事は、Rust の `conversation` と `answer_permission` と同じ処理を TS に移してある（`src/webConv.ts`、`src/webPerm.ts`）。承認への返事は Rust と同じ確認（まだ承認待ちか、requestId が見せた中身と同じか、質問には全部の答えがあるか）をしてから送る。ただし送信の非常停止（`~/.family-computing/send-disabled`）は手元のファイルなので、ブラウザ版では効かない。会話の「今の動き」の行（`live`）と、保存した会話は移していない。
+
+ブラウザ版で使えない機能は次のとおり。Rust にしか実装が無いものを、TS に移していない。
+
+| 機能 | 状態 |
+| --- | --- |
+| お手紙、プロンプト履歴、スラッシュ補完、ファイルの候補、クリップボードの貼り付け| 動かない |
+| 町の一覧の名前づけ | パスの形だけで決める（Rust は `.git` も読む） |
+
+### スマホ専用の画面
+
+幅が 720px 以下か、タッチが主の入力で幅が 1024px 以下のときだけ、スマホ専用の画面（`src/mobile/`）に切り替わる。Tauri の画面は常に今までの画面である。URL に `?layout=mobile` か `?layout=desktop` を付けると、判定を上書きできる。
+
+- 取得、選択、送信の状態は `App` が持つ。`MobileShell` は並べ方だけを持ち、チャットの中身は `Panel` を `mobile` つきで使う。
+- 一覧、チャットの2画面。一覧の先頭の「あなたの番」に、承認待ちと返事待ちを出す。押すとチャットが全画面で開き、戻る操作（履歴の `popstate`）で一覧に戻る。
+- 入力欄は画面の下に固定する。キーボードが出ると、`visualViewport` の高さ（`--vv-h`）に合わせて縮む。Enter は改行で、送るのは送信ボタンだけである。
+- スマホの見た目の確認は、`bun run dev` を `?layout=mobile` で開き、agent-browser を 390x844、倍率 3 にして行う。モックの ccn（`scripts/mock-ccn-town.ts`）は ccn を外したときに消した。
+
+Void アプリの確認は `web/` で行う。
+
+```sh
+cd web && bun install
+bun run build   # .cloudflare/ に Worker と画面が出る
+```
 
 ## 開発
 
@@ -228,9 +309,11 @@ bun run tauri dev   # 開発版（Claude Town Dev）が起動する
 src-tauri/target/debug/family-computing --snapshot > public/dev-snapshot.json
 bun run dev   # http://localhost:1420/
 
-# 端末の口のモック（中身は bash。FC_MOCK_CMD=claude で claude）。ブラウザは http://localhost:1420/?mock で直接繋ぐ
-bun run scripts/mock-ccn-pty.ts
-FC_CCN_URL=http://127.0.0.1:4399 bun run tauri dev   # Tauri をモックに繋ぐ
+# 合成の ~/.claude で町を出す（本物の記録を読まない。作り方は src-tauri/src/native/mod.rs の testtree）
+FC_CLAUDE_HOME=/tmp/<合成の置き場所> bun run tauri dev
+
+# 新しい世帯で起動する claude を差し替える（課金をかけずに端末の動きだけを見る）
+FC_CLAUDE_BIN=/tmp/<代わりのスクリプト> bun run tauri dev
 
 # 配置計算だけの検証（世帯の中の8ケースと、世帯の並べ方の5条件）
 bun test src/layout
@@ -247,13 +330,9 @@ bun test src/layout
 ~/.local/bin/ct-lock acquire <名前>
 lsof -nP -iTCP:1420 -sTCP:LISTEN   # 何も出なければ空いている
 
-# 本物の ccn に繋ぐ
-VITE_FC_FORCE_VISIBLE=1 FC_PERF_LOG=/tmp/<名前>-perf.jsonl bun tauri dev
-
-# モックの ccn に繋ぐ。アプリが書くファイル（キャラの割り当てなど）は FC_APP_HOME で一時の場所に分ける
-bun run scripts/mock-ccn-town.ts <モックのポート>   # 「ready <ポート> pid <pid>」の pid が自分のものか見る
-VITE_FC_FORCE_VISIBLE=1 FC_CCN_URL=http://127.0.0.1:<モックのポート> FC_APP_HOME=$(mktemp -d) \
-  FC_PERF_LOG=/tmp/<名前>-perf.jsonl bun tauri dev
+# アプリが書くファイル（キャラの割り当てなど）は FC_APP_HOME で一時の場所に分ける。HOME は分けない
+# （HOME を分けると、新しい世帯で起動した claude がログインを失う）
+VITE_FC_FORCE_VISIBLE=1 FC_APP_HOME=$(mktemp -d) FC_PERF_LOG=/tmp/<名前>-perf.jsonl bun tauri dev
 
 ~/.local/bin/ct-lock release <名前>
 ```
@@ -266,4 +345,5 @@ VITE_FC_FORCE_VISIBLE=1 bun tauri dev --config '{"build":{"devUrl":"http://local
 
 - この変数で続くのは取得と時計だけで、描画は続かない。窓が隠れている間は WebKit が requestAnimationFrame を止める（2026-11-13 の実測で fps 0）。起動から隠れたままだと一度も描かれないので、`screencapture -l` で見た目を撮るときは窓を前に出す。
 - 止めるときは、自分が起動した `bun tauri dev` の pid を指定する。安定版と開発版は実行ファイル名が同じなので、名前で止めない。
-- 計測（`scripts/bench.ts`）では付けない。隠した窓の負荷を測る場面（hidden、minimized）の数字が変わる。
+- 軽さの計測（`src/term/bench.ts` の scene）では付けない。隠した窓の負荷を測る場面（hidden、minimized）の数字が変わる。
+- 開発版で「新しい世帯」を押すと、本物の claude が起動し、本物の `~/.claude` に会話が残る。押す確認は捨ての場所（一時のディレクトリ）を置き場所にして行い、済んだら閉じる（power）か、開発版を終了して止める。

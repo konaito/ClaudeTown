@@ -38,8 +38,3 @@ export function packHouseholds(boxes: Box[], containerW: number, gap: number): {
   const height = Math.max(0, ...placed.map((p) => p.y + p.h));
   return { items: placed, width, height };
 }
-
-/** 画面の読み順（上から下、同じ高さなら左から右） */
-export function readingOrder(items: Packed[]): string[] {
-  return [...items].sort((a, b) => a.y - b.y || a.x - b.x).map((p) => p.id);
-}

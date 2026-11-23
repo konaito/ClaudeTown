@@ -1,0 +1,41 @@
+name: Deploy Claude Town (PWA) to Cloudflare
+on:
+  push:
+    branches: [feat/app-v1] # このリポジトリの既定ブランチ
+    paths: ['web/**', 'src/**', 'public/**', 'index.html', 'package.json', 'bun.lock', '.github/workflows/void-deploy.yml']
+
+concurrency:
+  group: void-cloudflare-deploy-${{ github.repository }}-${{ github.ref }}
+  # 走っているデプロイを後の push で中断させない（Void は中断で0%の版を残し、次が superseded で止まる）
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          check-latest: true
+      # 画面（../src）の依存は、リポジトリ直下の node_modules から読む
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit
+      - run: bun install --frozen-lockfile
+        working-directory: web
+      - run: bun run check
+        working-directory: web
+      - name: Deploy
+        working-directory: web
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_WORKERS_SUBDOMAIN: ${{ vars.CLOUDFLARE_WORKERS_SUBDOMAIN }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          # workers_dev が false なので、readiness は Access の裏のカスタムドメインで確かめる
+          CF_ACCESS_READINESS_ORIGIN: ${{ vars.CF_ACCESS_READINESS_ORIGIN }}
+        run: bunx void deploy --platform cloudflare

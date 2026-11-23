@@ -1,0 +1,30 @@
+────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ 入れる版  ☐ データ  ✔ Submit  →
+
+│ Fix Storage GUI（今 /Applications にある v0.2.0、Developer ID
+│ 署名済み）を消して入れ直す。入れ直すのはどれ？
+
+❯ 1. Release の v0.2.0
+     GitHub Releases の最新 dmg（~/Downloads に同じ dmg もある）。今入っているのと同じ版
+  2. 今のブランチをビルド
+     feat/login-redesign（ログイン画面作り直し）を手元で universal ビルドして入れる。ad-hoc
+     署名・未公証になる
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+

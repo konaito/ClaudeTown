@@ -1,0 +1,49 @@
+{
+  "name": "session-4a38e9d3",
+  "createdAt": 1795250038353,
+  "leadAgentId": "team-lead@session-4a38e9d3",
+  "leadSessionId": "4a38e9d3-8cde-4d65-894d-cd8192f6d8d3",
+  "leadProcess": {
+    "pid": 38297,
+    "pidSpace": "MacBooks.local",
+    "claimedAt": 1795250038353
+  },
+  "members": [
+    {
+      "agentId": "team-lead@session-4a38e9d3",
+      "name": "team-lead",
+      "agentType": "team-lead",
+      "joinedAt": 1795250038353,
+      "tmuxPaneId": "leader",
+      "cwd": "/private/tmp/fc-team-obs/inproc1",
+      "subscriptions": [],
+      "backendType": "in-process"
+    },
+    {
+      "agentId": "alpha@session-4a38e9d3",
+      "name": "alpha",
+      "color": "blue",
+      "joinedAt": 1795250179120,
+      "tmuxPaneId": "in-process",
+      "subscriptions": [],
+      "model": "haiku",
+      "prompt": "You are teammate \"alpha\". Create the file /private/tmp/fc-team-obs/inproc1/alpha.txt containing exactly the word ALPHA. Create or modify no other file. Read the file back to verify it. Then reply with a short report: the file path and the content read back. Stop after reporting.",
+      "planModeRequired": false,
+      "cwd": "/private/tmp/fc-team-obs/inproc1",
+      "backendType": "in-process"
+    },
+    {
+      "agentId": "beta@session-4a38e9d3",
+      "name": "beta",
+      "color": "green",
+      "joinedAt": 1795250179629,
+      "tmuxPaneId": "in-process",
+      "subscriptions": [],
+      "model": "haiku",
+      "prompt": "You are teammate \"beta\". Create the file /private/tmp/fc-team-obs/inproc1/beta.txt containing exactly the word BETA. Create or modify no other file. Read the file back to verify it. Then reply with a short report: the file path and the content read back. Stop after reporting.",
+      "planModeRequired": false,
+      "cwd": "/private/tmp/fc-team-obs/inproc1",
+      "backendType": "in-process"
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cardNames, houseNameOf, isDispatchPlace, projectFromPath, targetLabel, type Agent, type Who } from "./model";
+import { accountText, cardNames, houseNameOf, projectFromPath, statusClass, statusLabel, targetLabel, type Agent, type Who } from "./model";
 import cases from "./naming-cases.json";
 
 const ag = (id: string, cwd: string, over: Partial<Agent> = {}): Agent => ({
@@ -16,15 +16,7 @@ describe("cardNames（src/naming-cases.json）", () => {
   }
 });
 
-describe("振り分けの場所とプロジェクトの名前", () => {
-  test("振り分けの場所", () => {
-    for (const p of ["/Users/x/Documents/meta", "/Users/x/Documents/meta/", "/Users/x", "/home/x/.local/share/ccn/lobby", "/tmp", "/private/tmp", "/", "/Users/x/Documents"]) {
-      expect(isDispatchPlace(p)).toBe(true);
-    }
-    for (const p of ["/Users/x/Documents/meta.wt/delegation", "/Users/x/Documents/family-computing", "/tmp/foo", "/Users/x/Documents/meta/sub"]) {
-      expect(isDispatchPlace(p)).toBe(false);
-    }
-  });
+describe("プロジェクトの名前", () => {
   test("worktree はパスの形でも本体の名前", () => {
     expect(projectFromPath("/Users/x/Documents/family-computing.wt/chat")).toBe("family-computing");
     expect(projectFromPath("/a/b/")).toBe("b");
@@ -33,17 +25,16 @@ describe("振り分けの場所とプロジェクトの名前", () => {
 });
 
 describe("houseNameOf", () => {
-  test("根のカードの名前（プロジェクトの名前）", () => {
-    const root = ag("r", "/Users/x/Documents/meta", { name: "family-computing" });
-    expect(houseNameOf(root, [root])).toEqual({ name: "family-computing", by: "project" });
+  test("根のカードの名前（親のプロジェクトの名前）", () => {
+    const root = ag("r", "/Users/x/Documents/family-computing", { name: "family-computing" });
+    expect(houseNameOf(root)).toBe("family-computing");
   });
-  test("本人が付けた名前が最優先", () => {
-    const root = ag("r", "/Users/x/Documents/meta", { name: "family-computing", house: { name: "うち", by: "human" } });
-    expect(houseNameOf(root, [root])).toEqual({ name: "うち", by: "human" });
-  });
-  test("エージェントが付けた名前は、根のカードの名前を通してだけ使う", () => {
-    const root = ag("r", "/Users/x/Documents/family-computing", { name: "family-computing", house: { name: "ファミコン作り", by: "agent" } });
-    expect(houseNameOf(root, [root]).name).toBe("family-computing");
+  test("親が meta なら世帯の名前は meta。子のプロジェクトにはならない", () => {
+    const names = cardNames([
+      { id: "p", cwd: "/Users/x/Documents/meta" },
+      { id: "c", cwd: "/Users/x/Documents/voice-clone", parent: "p" } as Who,
+    ]);
+    expect(houseNameOf(ag("p", "/Users/x/Documents/meta", { name: names.get("p")! }))).toBe("meta");
   });
 });
 
@@ -57,5 +48,25 @@ describe("targetLabel", () => {
     const b = ag("bbbbbbbb-2", "/tmp", { name: "tmp" });
     expect(targetLabel(a, [a, b])).toBe("tmp（aaaaaaaa）");
     expect(targetLabel(b, [a, b])).toBe("tmp（bbbbbbbb）");
+  });
+});
+
+describe("アカウントの表示", () => {
+  test("名前と email があれば「名前（email）」、email が無ければ名前だけ", () => {
+    expect(accountText(ag("a", "/w", { account: "acct-a", accountEmail: "a@example.invalid" }))).toBe("acct-a（a@example.invalid）");
+    expect(accountText(ag("a", "/w", { account: "acct-a" }))).toBe("acct-a");
+  });
+  test("アカウントが無い（古い ccn、選べなかったセッション）なら null", () => {
+    expect(accountText(ag("a", "/w"))).toBeNull();
+    expect(accountText(ag("a", "/w", { account: null, accountEmail: "a@example.invalid" }))).toBeNull();
+  });
+});
+
+describe("起動中の札", () => {
+  test("起動中は様子に関係なく「起動中」と回る輪", () => {
+    expect(statusLabel({ booting: true }, "idle")).toBe("起動中");
+    expect(statusClass({ booting: true }, "idle")).toBe("st st-idle st-boot");
+    expect(statusLabel({}, "idle")).toBe("待機");
+    expect(statusClass({ booting: false }, "working")).toBe("st st-working");
   });
 });

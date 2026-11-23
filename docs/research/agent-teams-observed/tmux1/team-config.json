@@ -1,0 +1,53 @@
+{
+  "name": "session-ccdd10c6",
+  "createdAt": 1795250257538,
+  "leadAgentId": "team-lead@session-ccdd10c6",
+  "leadSessionId": "ccdd10c6-4b19-40ac-8fcd-23888fb4ae8f",
+  "leadProcess": {
+    "pid": 45195,
+    "pidSpace": "MacBooks.local",
+    "claimedAt": 1795250257538
+  },
+  "members": [
+    {
+      "agentId": "team-lead@session-ccdd10c6",
+      "name": "team-lead",
+      "agentType": "team-lead",
+      "joinedAt": 1795250257538,
+      "tmuxPaneId": "leader",
+      "cwd": "/private/tmp/fc-team-obs/tmux1",
+      "subscriptions": [],
+      "backendType": "in-process"
+    },
+    {
+      "agentId": "alpha@session-ccdd10c6",
+      "name": "alpha",
+      "color": "blue",
+      "joinedAt": 1795250274596,
+      "tmuxPaneId": "%3",
+      "subscriptions": [],
+      "agentType": "general-purpose",
+      "model": "haiku",
+      "prompt": "Create a file named alpha.txt in /private/tmp/fc-team-obs/tmux1 whose entire content is the single word ALPHA (no extra lines needed beyond what a normal text file has). Do not touch any other file. Do not use ccn. When done, reply with one line: the path you wrote and the content.",
+      "planModeRequired": false,
+      "cwd": "/private/tmp/fc-team-obs/tmux1",
+      "backendType": "tmux",
+      "isActive": false
+    },
+    {
+      "agentId": "beta@session-ccdd10c6",
+      "name": "beta",
+      "color": "green",
+      "joinedAt": 1795250275160,
+      "tmuxPaneId": "%4",
+      "subscriptions": [],
+      "agentType": "general-purpose",
+      "model": "haiku",
+      "prompt": "Create a file named beta.txt in /private/tmp/fc-team-obs/tmux1 whose entire content is the single word BETA (no extra lines needed beyond what a normal text file has). Do not touch any other file. Do not use ccn. When done, reply with one line: the path you wrote and the content.",
+      "planModeRequired": false,
+      "cwd": "/private/tmp/fc-team-obs/tmux1",
+      "backendType": "tmux",
+      "isActive": false
+    }
+  ]
+}

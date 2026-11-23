@@ -10,10 +10,16 @@ ccn から取れる状態は running / waiting_permission / idle の3つだけ�
   UserPromptSubmit  phase=working、asked=頼まれた文の1行目
   PreToolUse        phase=working、doing=道具の種類と対象（例「コマンド: bun test」）
   PostToolUse       phase=working（承認待ちを解く）
-  PermissionRequest 承認の画面が出る道具を perm_queue に足す（画面の「許可する」は1件のときだけ使える）
+  PermissionRequest 承認の画面が出る道具を perm_queue に足す（画面の「許可する」は1件のときだけ使える）。
+                    道具の input 全体は perm/<session_id>.json に、新しい順の8件まで残す（承認の欄が読む）
   Notification      承認や質問の通知なら phase=needs_you、needs=理由
   Stop              phase=resting か needs_you、said=最後の返事の1行目、next=次の一手
-  SessionEnd        状態ファイルを消す
+  SessionEnd        状態ファイルと perm/<session_id>.json を消す
+
+in-process のチームメイトと sub-agent の入力は、session_id がリードのもので、agent_id が付いて届く。
+これはリードの様子ではないので、リードの状態ファイルにもお手紙にも書かない。例外は承認だけにする。
+チームメイトの承認の画面はリードの端末に出て、人はそこで答えるので、並び（perm_queue）には足して外す。
+tmux のチームメイトは自分の session_id で届き、agent_id は付かないので、ふつうのセッションと同じに書く。
 
 LLM は呼ばない。速さを優先し、どんな失敗でも何も出さずに 0 で終わる（本体の動きを止めない）。
 """
@@ -21,22 +27,18 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import sys
 import time
 from pathlib import Path
 
 STATE_DIR = Path(os.environ.get("FC_STATE_DIR", Path.home() / ".family-computing" / "state"))
 LETTERS = Path(os.environ.get("FC_LETTERS", Path.home() / ".family-computing" / "letters.jsonl"))
+# 承認の画面に出る道具の input 全体（Claude Town の承認の欄が読む、#83）。安定版も読む state/ とは別の置き場にする
+PERM_DIR = Path(os.environ.get("FC_PERM_DIR", Path.home() / ".family-computing" / "perm"))
+PERM_KEEP = 8
 LETTERS_MAX = 1024 * 1024
-HOUSES = Path(os.environ.get("FC_HOUSES", Path.home() / ".family-computing" / "houses.json"))
 # 子を作る道具。ccn の MCP の create_session（親は from 行で ccn に残る）と、Specter の spawn_child（ccn には親が残らない）
 MAKE_CHILD = ("mcp__ccn__create_session", "mcp__specter-agents__spawn_child")
-# 振り分けの場所（依頼を振り分けるだけの場所）。src-tauri/src/naming.rs と src/model.ts の一覧と同じ。
-# ホーム（/Users/<名前> か /home/<名前>）からの相対の分（空はホームそのもの）と、絶対パスの分
-DISPATCH_UNDER_HOME = ["", "Documents", "Documents/meta", ".local/share/ccn/lobby"]
-DISPATCH_ABSOLUTE = ["/", "/tmp", "/private/tmp", "/root"]
-NAME_CMD = f"python3 {Path(__file__).resolve().parent.parent / 'scripts' / 'hook.py'} name"
 KEEP_SEC = 3 * 24 * 3600
 MAX = 90
 
@@ -158,77 +160,6 @@ def write(sid, patch, data):
     os.replace(tmp, p)
 
 
-def is_dispatch_place(cwd):
-    """cwd が振り分けの場所か。パスの形だけで決める（src-tauri/src/naming.rs の is_dispatch_place と同じ）"""
-    segs = [x for x in str(cwd or "").split("/") if x]
-    if "/" + "/".join(segs) in DISPATCH_ABSOLUTE:
-        return True
-    if len(segs) >= 2 and segs[0] in ("Users", "home"):
-        return "/".join(segs[2:]) in DISPATCH_UNDER_HOME
-    return False
-
-
-def project_of(cwd):
-    """cwd のプロジェクトの名前。git の worktree なら本体のディレクトリの名前、`<名前>.wt/<x>` なら <名前>、
-    それ以外は最後の名前（src-tauri/src/naming.rs の project_of と同じ）"""
-    try:
-        dot = Path(cwd) / ".git"
-        if dot.is_file():
-            raw = next((l[len("gitdir:"):].strip() for l in dot.read_text().splitlines() if l.startswith("gitdir:")), "")
-            gitdir = Path(raw) if os.path.isabs(raw) else Path(cwd) / raw
-            common = None
-            if (gitdir / "commondir").is_file():
-                c = (gitdir / "commondir").read_text().strip()
-                common = Path(c) if os.path.isabs(c) else gitdir / c
-            elif gitdir.parent.name == "worktrees":
-                common = gitdir.parent.parent
-            if common is not None:
-                common = Path(os.path.normpath(common))
-                name = common.parent.name if common.name == ".git" else common.name.removesuffix(".git")
-                if name:
-                    return name
-    except Exception:
-        pass
-    segs = [x for x in str(cwd or "").split("/") if x]
-    if len(segs) >= 2 and segs[-2].endswith(".wt") and len(segs[-2]) > 3:
-        return segs[-2][:-3]
-    return segs[-1] if segs else None
-
-
-def house_nudge(sid, own_cwd, child_cwd):
-    """振り分けの場所（meta など）で動く親が、別のプロジェクトで子を作ったら、世帯の名前をそのプロジェクトの
-    ディレクトリの名前にするよう促す文を返す。プロジェクトごとに1回だけ。
-    振り分けの場所でない親は、自分の cwd のプロジェクトがそのまま名前になるので促さない"""
-    own_cwd, child_cwd = (os.path.expanduser(str(c)) if c else c for c in (own_cwd, child_cwd))
-    if not own_cwd or not is_dispatch_place(own_cwd) or not child_cwd or is_dispatch_place(child_cwd):
-        return None
-    project = project_of(child_cwd)
-    if not project:
-        return None
-    try:
-        houses = json.loads(HOUSES.read_text())
-    except Exception:
-        houses = {}
-    cur = houses.get(sid) or {}
-    if cur.get("by") == "human" or cur.get("name") == project:
-        return None
-    nudged = cur_field(sid, "house_nudged_projects") or []
-    if not isinstance(nudged, list) or project in nudged:
-        return None
-    write(sid, {"house_nudged_projects": nudged + [project]}, {})
-    cmd = f"`{NAME_CMD} {shlex.quote(project)}`"
-    head = "Claude Town: この世帯の名前は、作業しているプロジェクトのディレクトリの名前にします。依頼の文の要約は名前にしません。"
-    if cur.get("name"):
-        return (
-            f"{head}今の名前は「{cur.get('name')}」です。子を {project} で動かしました。"
-            f"この世帯で主に作業するのが {project} なら、Bash で {cmd} を1回実行して付け直してください。そうでなければ何もしません。"
-        )
-    return (
-        f"{head}子を {project} で動かしたので、Bash で {cmd} を1回実行してください。"
-        "本人が付けた名前があるときは変わりません。"
-    )
-
-
 def perm_item(name, inp):
     """承認の中身。id は道具の名前と引数から作る（PermissionRequest には tool_use_id が無いため）"""
     inp = inp if isinstance(inp, dict) else {}
@@ -237,6 +168,24 @@ def perm_item(name, inp):
         detail = json.dumps(inp, ensure_ascii=False)
     key = json.dumps({"t": name, "i": inp}, ensure_ascii=False, sort_keys=True)
     return {"tool": name, "summary": describe_tool(name, inp), "detail": str(detail)[:400], "id": "h:" + hashlib.sha1(key.encode()).hexdigest()[:16]}
+
+
+def keep_input(sid, data):
+    """承認の画面に出る道具の名前と input 全体を残す。transcript には、承認の画面が出ている間に道具の行が
+    まだ書かれていないことがあった（2026-11-22、Claude Code 2.1.330）。PermissionRequest は画面が出る前に必ず届く。
+    agent_id はチームメイトと sub-agent の印で、Claude Town はその承認には答えない"""
+    PERM_DIR.mkdir(parents=True, exist_ok=True)
+    p = PERM_DIR / f"{sid}.json"
+    try:
+        items = json.loads(p.read_text()).get("items") or []
+    except Exception:
+        items = []
+    agent = data.get("agent_id")
+    items.append({"tool_name": data.get("tool_name", ""), "tool_input": data.get("tool_input"),
+                  "agent_id": agent if isinstance(agent, str) and agent else None, "at": int(time.time() * 1000)})
+    tmp = p.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({"items": items[-PERM_KEEP:]}, ensure_ascii=False))
+    os.replace(tmp, p)
 
 
 def read_queue(sid):
@@ -352,12 +301,38 @@ def emit_context(event, text):
 
 def sweep():
     now = time.time()
-    for p in STATE_DIR.glob("*.json"):
+    for p in [*STATE_DIR.glob("*.json"), *PERM_DIR.glob("*.json")]:
         try:
             if now - p.stat().st_mtime > KEEP_SEC:
                 p.unlink()
         except Exception:
             pass
+
+
+def from_agent(sid, ev, data):
+    """チームメイトか sub-agent の入力。承認の並びだけを触り、doing、tools、said、asked、お手紙には書かない。
+    2026-11-21 の実機（Claude Code 2.1.330、in-process）では、チームメイトの PermissionRequest と承認後の PostToolUse に
+    agent_id が付き、承認の Notification には付かなかった。承認の画面はリードの端末に出た"""
+    if ev == "PermissionRequest":
+        keep_input(sid, data)
+        q = read_queue(sid)
+        item = perm_item(data.get("tool_name", ""), data.get("tool_input"))
+        if not any(x["id"] == item["id"] for x in q):
+            q.append(item)
+        write_queue(sid, q, data, phase="needs_you", needs=f"承認待ち: {item['summary']}")
+    elif ev in ("PostToolUse", "PostToolUseFailure"):
+        # 並びに無い道具（承認の要らなかった道具）では何も書かない
+        done_id = perm_item(data.get("tool_name", ""), data.get("tool_input"))["id"]
+        q = read_queue(sid)
+        rest = [x for x in q if x["id"] != done_id]
+        if len(rest) == len(q):
+            return
+        if rest:
+            write_queue(sid, rest, data, phase="needs_you", needs=f"承認待ち: {rest[0]['summary']}")
+        else:
+            # 並びが空になったら、リードの番の途中（doing がある）なら working、番の外なら resting に戻す。
+            # リードは自分の番の間は doing を必ず持ち、Stop と SessionStart で None にする
+            write_queue(sid, rest, data, phase="working" if cur_field(sid, "doing") else "resting", needs=None)
 
 
 def main():
@@ -369,6 +344,10 @@ def main():
     if not sid or not re.fullmatch(r"[0-9a-fA-F-]{8,64}", sid):
         return
     ev = data.get("hook_event_name") or (sys.argv[1] if len(sys.argv) > 1 else "")
+    agent = data.get("agent_id")
+    if isinstance(agent, str) and agent:
+        from_agent(sid, ev, data)
+        return
 
     if ev == "UserPromptSubmit":
         prompt = data.get("prompt") or ""
@@ -395,6 +374,7 @@ def main():
         write(sid, {"phase": "working", "doing": describe_tool(name, inp), "needs": None, "tools": n}, data)
     elif ev == "PermissionRequest":
         # 承認の画面が出る道具を、並びの末尾に足す。画面からの許可は、並びがちょうど1件のときだけにする
+        keep_input(sid, data)
         q = read_queue(sid)
         item = perm_item(data.get("tool_name", ""), data.get("tool_input"))
         if not any(x["id"] == item["id"] for x in q):
@@ -413,11 +393,6 @@ def main():
                 pass
         if ev == "PostToolUse" and data.get("tool_name") in MAKE_CHILD:
             write(sid, {"made_child": True}, data)
-            inp = data.get("tool_input") if isinstance(data.get("tool_input"), dict) else {}
-            # cwd を省いた子は、ccn なら受け口、Specter なら親と同じ場所で動く。どちらも振り分けの場所なので促さない
-            nudge = house_nudge(sid, data.get("cwd"), inp.get("cwd"))
-            if nudge:
-                emit_context("PostToolUse", nudge)
     elif ev == "Notification":
         kind = data.get("notification_type") or ""
         msg = data.get("message") or ""
@@ -440,10 +415,11 @@ def main():
         sweep()
         write(sid, {"phase": "resting", "doing": None, "needs": None}, data)
     elif ev == "SessionEnd":
-        try:
-            (STATE_DIR / f"{sid}.json").unlink()
-        except FileNotFoundError:
-            pass
+        for p in (STATE_DIR / f"{sid}.json", PERM_DIR / f"{sid}.json"):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
 
 
 if __name__ == "__main__":

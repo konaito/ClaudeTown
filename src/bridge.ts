@@ -1,22 +1,24 @@
 // Tauri の命令を呼ぶ口。
-// ブラウザで開いたとき（開発中の見た目の確認）は、URL に ?mock があればモックのノード（scripts/mock-ccn-pty.ts、127.0.0.1:4399）に直接繋ぐ。
-// ?mock が無ければ public/dev-*.json を読み、送信はしない。
+// ビルドしたブラウザ版（PWA、town.fybe.jp）は Tauri の外で動き、同じオリジンの /api を web/ の Worker が ccn へ中継する。
+// アプリ（Tauri）は ccn を使わないが、ブラウザ版の扱いは本人が決めるまで今のまま残す（下の WEB の分岐、webConv.ts、webPerm.ts）。
+// 開発中にブラウザで開いたとき（見た目の確認）は、public/dev-*.json を読み、送信はしない。
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { perfCounters } from "./term/perf";
 import { deltaOf } from "./conv";
+import { answerPermission } from "./webPerm";
+import { newConvState, readConversation, type ConvState } from "./webConv";
 import { cardNames, projectFromPath, type ConvItem } from "./model";
 
 const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-// ?mockport=<ポート> で、モック以外の口（本番のノードの前に置いた試験用の中継など）にも繋げる
-const MOCK = !inTauri && typeof location !== "undefined" && location.search.includes("mock")
-  ? `http://127.0.0.1:${new URLSearchParams(location.search).get("mockport") ?? "4399"}/api` : null;
+// ビルドした版（PWA）。Tauri の外で、ccn と同じオリジンの /api に直接つなぐ（ccn は別オリジンからの要求を 403 で断る）。
+// 本番では Worker（web/）が、この道を Access のリンクトークンを付けて ccn に中継する
+const WEB = !inTauri && import.meta.env.PROD && typeof location !== "undefined";
+const API = WEB ? `${location.origin}/api` : null;
 
+export const IS_WEB = WEB;
 const LOADED_AT = Date.now();
-// 見た目の確認用: ?offline を付けると、ccn に届かない状態を真似る。一覧は保存した一覧として出し、会話は読めず、
-// 保存してあった会話（?longconv と同じ仮の会話）を出す。Rust の保存（src-tauri/src/offline.rs）は通らない
-const OFFLINE = !inTauri && !MOCK && typeof location !== "undefined" && location.search.includes("offline");
-const OFFLINE_ERR = `ccn が 502 を返した: {"error":"peer incertotech unreachable: fetch failed","peer":"incertotech"}`;
 
 async function devJson<T>(name: string, fallback: T): Promise<T> {
   const r = await fetch(`/${name}`, { cache: "no-store" });
@@ -24,95 +26,135 @@ async function devJson<T>(name: string, fallback: T): Promise<T> {
   return (await r.json()) as T;
 }
 
-async function mockCall<T>(cmd: string, a: Record<string, unknown> = {}): Promise<T> {
+const WEB_CONVS = new Map<string, ConvState>();
+const WEB_CONV_RUN = new Map<string, Promise<unknown>>();
+
+/** ブラウザ版（PWA）の命令。ccn の口を、同じオリジンの /api（web/ の Worker の中継）で呼ぶ。Rust と同じ形で返す */
+async function webCall<T>(cmd: string, a: Record<string, unknown> = {}): Promise<T> {
+  const base = API!;
   const j = async (path: string, init?: RequestInit) => {
-    const r = await fetch(`${MOCK}${path}`, init);
+    const r = await fetch(`${base}${path}`, { credentials: "same-origin", ...init });
     if (!r.ok) throw new Error(await r.text());
     return r.status === 204 ? null : r.json();
   };
-  const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
-    j(path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  const raw = async (path: string, method: string, body: unknown) => {
+    const r = await fetch(`${base}${path}`, { credentials: "same-origin", method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const t = await r.text();
+    let parsed: unknown = t;
+    try { parsed = JSON.parse(t); } catch { /* 文字列のまま */ }
+    return { status: r.status, body: parsed };
+  };
+  const post = (path: string, body: unknown) =>
+    j(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   switch (cmd) {
     case "snapshot": {
-      // 別の町は、本物のノードと同じく中継の口（/n/<町>/api/...）から取る
-      const list = (a.peer
-        ? await fetch(`${MOCK!.replace(/\/api$/, "")}/n/${a.peer}/api/sessions`).then(async (r) => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
-        : await j("/sessions")) as Record<string, any>[];
+      const list = (await j("/sessions")) as Record<string, any>[];
       const live = list.filter((s) => s.state !== "exited");
       const parentOf = (s: Record<string, any>) => {
         const sid8 = typeof s.parent === "string" && s.parent.startsWith("agent:") ? s.parent.split("/")[1] : null;
         return sid8 ? live.find((x) => x.id.startsWith(sid8))?.id ?? null : null;
       };
+      // 名前は Rust の snapshot と同じ決め方（src/model.ts の cardNames）。.git は読めないので、パスの形だけで決める
+      const names = cardNames(live.map((s) => ({ id: s.id, cwd: s.cwd, title: s.title })));
       return {
-        ccn: MOCK, peer: null, ccn_ok: true, ccn_error: null, fetched_at: Date.now(),
-        // お手紙の試し: public/dev-letters.json（無ければ空）
-        letters: await fetch("/dev-letters.json", { cache: "no-store" }).then((r) => r.json()).catch(() => []),
-        // 名前は Rust の snapshot と同じ決め方（src/model.ts の cardNames）。モックでは .git を読まないので、パスの形だけで決める
-        agents: (() => {
-          const names = cardNames(live.map((s) => ({ id: s.id, cwd: s.cwd, title: s.title, parent: parentOf(s), startedAt: s.startedAt })));
-          return live.map((s) => ({ id: s.id, name: names.get(s.id), project: s.cwd ? projectFromPath(s.cwd) : null, kind: s.kind, state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities }));
-        })(),
+        fetched_at: Date.now(), letters: [], sources: null,
+        agents: live.map((s) => ({ id: s.id, name: names.get(s.id), project: s.cwd ? projectFromPath(s.cwd) : null, kind: s.kind, source: "ccn", state: s.state, cwd: s.cwd, pid: s.pid, startedAt: s.startedAt, canSend: true, parent: parentOf(s), capabilities: s.capabilities, account: s.account ?? null, accountEmail: s.accountEmail ?? null })),
       } as T;
     }
-    case "peers": return [{ name: "mock", url: MOCK, status: "healthy", self: true }, { name: "vm", url: "", status: "healthy", self: false }] as T;
     case "create_session": {
-      const headers: Record<string, string> = a.parent ? { "x-ccn-from": `agent:mock/${String(a.parent).slice(0, 8)}/town` } : {};
-      // Rust の create_session と同じく、空の prompt と name は送らない（本番のノードは name: null を 400 で断る）
-      const body: Record<string, unknown> = { terminal: true, cwd: a.cwd || (new URLSearchParams(location.search).get("cwd") ?? "/tmp"), cols: a.cols ?? 120, rows: a.rows ?? 40 };
-      if (typeof a.prompt === "string" && a.prompt.trim()) body.prompt = a.prompt;
+      // Rust の create_session と同じ引数。ccn は空の name を 400 で断るので送らない
+      const body: Record<string, unknown> = { terminal: true, cols: a.cols ?? 120, rows: a.rows ?? 40 };
+      if (typeof a.cwd === "string" && a.cwd) body.cwd = a.cwd;
       if (typeof a.name === "string" && a.name.trim()) body.name = a.name;
-      return post("/sessions", body, headers) as T;
+      // 設定の既定のモデルと権限モード（src/session/defaults.ts）。ccn は --model と --permission-mode で起動する
+      if (typeof a.model === "string" && a.model) body.model = a.model;
+      if (typeof a.permissionMode === "string" && a.permissionMode) body.permissionMode = a.permissionMode;
+      return post("/sessions", body) as T;
     }
     case "term_input": return post(`/sessions/${a.sessionId}/terminal/input`, { text: a.text }) as T;
     case "term_resize": return post(`/sessions/${a.sessionId}/terminal/resize`, { cols: a.cols, rows: a.rows }) as T;
     case "session_detail": return j(`/sessions/${a.sessionId}`) as T;
+    // 新しい世帯のペイン（#89）の材料。Rust の house_places と同じ形で返す。places は古い ccn に無い（404）ので null にする
+    case "house_places": {
+      const opt = (path: string) => fetch(`${base}${path}`, { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      const [host, sessions, places] = await Promise.all([opt("/host"), j("/sessions"), opt("/places?limit=300")]);
+      return { roots: host?.roots ?? [], lobby: host?.lobby ?? null, sessions, places: places?.places ?? null } as T;
+    }
+    // 場所のリポジトリ名（#99）は .git を読む Rust にしか取れない。ブラウザ版では空にして、ディレクトリ名だけを出す
+    case "place_repos": return {} as T;
     // Rust の send_direct と同じく、貼り付けてから Enter を押す
     case "send_direct": {
       await post(`/sessions/${a.sessionId}/terminal/input`, { text: `\x1b[200~${String(a.text)}\x1b[201~` });
       await new Promise((r) => setTimeout(r, 150));
       return post(`/sessions/${a.sessionId}/terminal/input`, { text: "\r" }) as T;
     }
+    // ブラウザ版は ccn の端末の口へ直接送る（起動の見張りは ccn の send が持つ。ここでは預からない）
+    case "send_or_queue": return webCall<unknown>("send_direct", a).then(() => ({ queued: false }) as T);
+    case "boot_status": return { booted: true, rowSeen: true, startedAt: null, queued: [], done: [] } as T;
+    case "cancel_queued": return [] as T;
     case "interrupt_session": return post(`/sessions/${a.sessionId}/interrupt`, {}) as T;
-    case "teleport_info": return j(`/sessions/${a.sessionId}/teleport`) as T;
-    case "teleport": return post(`/sessions/${a.sessionId}/teleport`, { to: a.to, fork: a.fork, subtree: a.subtree, dryRun: a.dryRun }) as T;
+    // モデルと権限モード（#97）。HTTP の応答を { status, body } で返す（断られた理由は画面が status と code で決める）
+    case "session_controls": return raw(`/sessions/${a.sessionId}/command`, "POST", { text: "" }) as T;
+    case "configure_session": {
+      const body: Record<string, unknown> = {};
+      if (a.model) body.model = a.model;
+      if (a.permissionMode) body.permissionMode = a.permissionMode;
+      if (!Object.keys(body).length) throw new Error("替えるものが無い");
+      return raw(`/sessions/${a.sessionId}`, "PATCH", body) as T;
+    }
+    case "run_command": return raw(`/sessions/${a.sessionId}/command`, "POST", { text: a.text }) as T;
     case "stop_session": return j(`/sessions/${a.sessionId}`, { method: "DELETE" }) as T;
-    case "conversation": return deltaOf([], a.since as number | null) as T;
-    default: console.info("[モックでは実行しない]", cmd, a); return null as T;
+    case "conversation": {
+      // Rust の代わりに、ここで ccn の messages を読んで縮める（src/webConv.ts）。同じ会話への取得は1本ずつ順に通す
+      const key = String(a.sessionId);
+      const st = WEB_CONVS.get(key) ?? newConvState();
+      WEB_CONVS.set(key, st);
+      const run = (WEB_CONV_RUN.get(key) ?? Promise.resolve()).catch(() => {}).then(() =>
+        readConversation(st, (after) => j(`/sessions/${a.sessionId}/messages?after=${after}`), a.since as number | null | undefined));
+      WEB_CONV_RUN.set(key, run);
+      return (await run) as T;
+    }
+    // Rust の代わりに、承認の安全確認をここで行う（src/webPerm.ts）
+    case "answer_permission": return answerPermission((path) => j(path), (path, body) => post(path, body), String(a.sessionId), String(a.choice), (a.expectId as string | null) ?? null, (a.answers as Record<string, string> | null) ?? null, (a.message as string | null) ?? null, (a.suggestion as number | null) ?? null) as T;
+    case "send_message": {
+      if (!String(a.text ?? "").trim()) throw new Error("文が空");
+      const r = await j(`/sessions/${a.sessionId}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: a.text }) });
+      return JSON.stringify(r) as T;
+    }
+    default: console.info("[ブラウザ版では実行しない]", cmd, a); return null as T;
   }
 }
 
 export async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (inTauri) return invoke<T>(cmd, args);
-  // 別の町の一覧（#14）。ブラウザ表示では snapshot の agents で代える
-  if (cmd === "town_agents") {
-    const s = await call<{ ccn_ok: boolean; ccn_error: string | null; agents: unknown[] }>("snapshot", args);
-    if (!s.ccn_ok) throw new Error(s.ccn_error ?? "つながらない");
-    return s.agents as T;
-  }
-  if (MOCK) return mockCall<T>(cmd, args);
-  if (OFFLINE && cmd === "conversation_cache") {
-    return { savedAt: LOADED_AT - 25 * 60 * 1000, ...(() => { const d = deltaOf(fakeConv(), null); return { total: d.total, items: d.items }; })() } as T;
-  }
-  // 時間切れまで待つ様子も見せる（保存した履歴を出したまま「読み込み中」になる）
-  if (OFFLINE && cmd === "conversation") { await new Promise((r) => setTimeout(r, 1500)); throw new Error(OFFLINE_ERR); }
+  if (WEB) return webCall<T>(cmd, args);
   if (cmd === "snapshot") {
-    // 別の町は public/dev-snapshot-<町>.json（`--snapshot --peer <町>` で作る）。無ければ届かない町として扱う
-    const town = args?.peer ? `-${args.peer}` : "";
-    const r = await fetch(`/dev-snapshot${town}.json`, { cache: "no-store" });
-    if (town && (!r.ok || !(r.headers.get("content-type") ?? "").includes("json"))) throw new Error(`dev-snapshot${town}.json が無い`);
+    const r = await fetch("/dev-snapshot.json", { cache: "no-store" });
     if (!r.ok) throw new Error("dev-snapshot.json が無い。`src-tauri/target/debug/family-computing --snapshot > public/dev-snapshot.json` で作る");
-    const s = await r.json();
-    return (OFFLINE ? { ...s, ccn_ok: false, ccn_error: OFFLINE_ERR, cached_at: LOADED_AT - 25 * 60 * 1000 } : s) as T;
+    return (await r.json()) as T;
   }
-  if (cmd === "peers") return devJson<T>("dev-peers.json", [] as T);
+  // 見た目の確認用: public/dev-house-places.json（Rust の house_places の出力）。無ければ空の一覧
+  if (cmd === "house_places") return devJson<T>("dev-house-places.json", { roots: [], lobby: null, sessions: [], places: null } as T);
+  if (cmd === "place_repos") return devJson<T>("dev-place-repos.json", {} as T);
+  // 見た目の確認用: ?approval=<名前> を付けると、承認の欄の中身に public/dev-approval-<名前>.json（Rust の session_detail の出力の形）を返す
+  if (cmd === "session_detail" && location.search.includes("approval=")) {
+    return devJson<T>(`dev-approval-${new URLSearchParams(location.search).get("approval")}.json`, { pending: [] } as T);
+  }
+  // 見た目の確認用: public/dev-session-detail.json（承認待ちの中身。どのセッションにも同じものを返す）。無ければ承認待ちなし
+  if (cmd === "session_detail") return devJson<T>("dev-session-detail.json", null as T);
+  // 見た目の確認用: ?boot を付けると、起動を待って1件預かっている様子を返す（信頼の確認の画面を疑う長さ）
+  if (cmd === "boot_status" && location.search.includes("boot")) return { booted: false, rowSeen: false, startedAt: LOADED_AT - 10_000, queued: [{ text: "起動前に送った文", at: LOADED_AT }], done: [] } as T;
   // ブラウザ表示では本物の会話を読めない。別のセッションの会話を見せて取り違えに見えないよう、仮の1件だけ返す
   // 見た目の確認用: ?longconv を付けると、スクロールが要る長さの仮の会話を返す
   // 見た目の確認用: ?conv を付けると public/dev-conversation.json（`--conversation <id>` の出力の Ok）を返す
+  // 中身が { items, live } のときは live（今の動きと順番待ち）も返す
   if (cmd === "conversation" && location.search.includes("conv") && !location.search.includes("longconv")) {
-    return deltaOf(await devJson("dev-conversation.json", []), args?.since as number | null) as T;
+    const j = await devJson<ConvItem[] | { items: ConvItem[]; live?: unknown }>("dev-conversation.json", []);
+    if (Array.isArray(j)) return deltaOf(j, args?.since as number | null) as T;
+    return { ...deltaOf(j.items, args?.since as number | null), live: j.live ?? null } as T;
   }
   if (cmd === "conversation" && location.search.includes("longconv")) return deltaOf(fakeConv(), args?.since as number | null) as T;
-  if (cmd === "conversation") return deltaOf([{ role: "assistant", text: `（ブラウザ表示の仮の会話）${String(args?.sessionId ?? "").slice(0, 8)} の会話は、Tauri の中で ccn から読む。` }], args?.since as number | null) as T;
+  if (cmd === "conversation") return deltaOf([{ role: "assistant", text: `（ブラウザ表示の仮の会話）${String(args?.sessionId ?? "").slice(0, 8)} の会話は、アプリの中で Claude Code の記録から読む。` }], args?.since as number | null) as T;
   console.info("[ブラウザ表示なので実行しない]", cmd, args);
   return "ブラウザ表示" as T;
 }
@@ -140,25 +182,27 @@ function fakeConv(): ConvItem[] {
 
 /**
  * 端末のイベント。ev は size / replay / data / exit / error / input_error。
- * replay と data は { s }（出力を UTF-8 の文字列に戻したもの）。Tauri では Rust が base64 を外し、16ms ごとにまとめて送る（#9）
+ * replay と data は { s }（出力を UTF-8 の文字列に戻したもの）。Tauri では Rust が PTY の出力を文字列にし、16ms ごとにまとめて送る（#9）
  */
-export type TermEvent = { id: string; ev: string; data: any };
+/** 端末のイベントの中身。ev ごとに入るものが違い、無いこともあるので全部省略可能にしてある */
+export type TermData = { cols?: number; rows?: number; s?: string; reason?: string; code?: number; message?: string };
+export type TermEvent = { id: string; ev: string; data: TermData };
 
 /** 1つのセッションの端末を開き、イベントを受ける。戻り値で閉じる */
-export async function openTerminal(sessionId: string, peer: string | null, on: (e: TermEvent) => void): Promise<() => void> {
+export async function openTerminal(sessionId: string, on: (e: TermEvent) => void): Promise<() => void> {
   if (inTauri) {
-    // このターミナルだけに送る口（Channel）。前は全部のウィンドウへの emit を受けて、セッションの ID で選んでいた
+    // このターミナルだけに送る口（Channel）
     let open = true;
-    const ch = new Channel<{ ev: string; data: any }>((m) => {
+    const ch = new Channel<{ ev: string; data: TermData }>((m) => {
       perfCounters.ipc++;
       perfCounters.bytes += m.data?.s?.length ?? 0;
       if (open) on({ id: sessionId, ev: m.ev, data: m.data });
     });
-    const generation = await invoke<number>("term_open", { sessionId, peer, onEvent: ch });
+    const generation = await invoke<number>("term_open", { sessionId, onEvent: ch });
     return () => { open = false; invoke("term_close", { sessionId, generation }).catch(() => {}); };
   }
-  if (MOCK) {
-    const es = new EventSource(`${MOCK}/sessions/${sessionId}/terminal`);
+  if (WEB) {
+    const es = new EventSource(`${API}/sessions/${sessionId}/terminal`);
     // Tauri と同じ形（{ s }）に直す。文字の途中で切れた分は TextDecoder が次に回す
     const dec = new TextDecoder();
     for (const ev of ["size", "replay", "data", "exit"]) {
@@ -167,10 +211,10 @@ export async function openTerminal(sessionId: string, peer: string | null, on: (
         on({ id: sessionId, ev, data: typeof d?.b64 === "string" ? { s: dec.decode(Uint8Array.from(atob(d.b64), (c) => c.charCodeAt(0)), { stream: true }) } : d });
       });
     }
-    es.onerror = () => on({ id: sessionId, ev: "error", data: { message: "モックに繋がらない" } });
+    es.onerror = () => on({ id: sessionId, ev: "error", data: { message: "ccn に繋がらない" } });
     return () => es.close();
   }
-  on({ id: sessionId, ev: "error", data: { message: "ブラウザ表示ではターミナルを開けない（?mock を付けるとモックに繋ぐ）" } });
+  on({ id: sessionId, ev: "error", data: { message: "ブラウザ表示ではターミナルを開けない" } });
   return () => {};
 }
 
@@ -183,6 +227,13 @@ export async function setFullscreen() {
   } else {
     await document.documentElement.requestFullscreen();
   }
+}
+
+/** 文字列をクリップボードに入れる。アプリでは Tauri の clipboard-manager（Rust 側で書く）を使う。
+ * WebKit の navigator.clipboard は人の操作の中からしか書けず、開発版で計測のコードから呼ぶと NotAllowedError になった（PR #73） */
+export async function copyText(text: string) {
+  if (inTauri) await writeText(text);
+  else await navigator.clipboard.writeText(text);
 }
 
 export type FileDrop = { type: "enter" | "over" | "leave" | "drop"; paths?: string[] };

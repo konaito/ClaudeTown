@@ -5,6 +5,10 @@ import type { ConvItem } from "./model";
 /** 画面に持つ件数。Rust の KEEP_MESSAGES と同じ */
 export const KEEP_CONV = 80;
 
+/** 会話の取得が続けて何回失敗したら、画面に出すか。1回だけの失敗（ファイルの書き換え中、ブラウザ版の通信の揺れ）は次の取り直しで直るので出さない */
+export const CONV_ERR_AFTER = 2;
+export const convFailed = (failures: number): boolean => failures >= CONV_ERR_AFTER;
+
 /** 今の動き（#59）。時刻は ISO の文字列か ms の数 */
 export type LiveTool = { id: string; kind: string; text: string; at: string | number | null };
 export type Live = {
@@ -15,6 +19,8 @@ export type Live = {
   last_at: string | number | null;
   /** 最後に文が届いた時刻（ターンの始まり） */
   turn_at: string | number | null;
+  /** 作業中に打たれて、まだ読まれていない文（順番待ち、古い順）。無ければ来ない */
+  queued?: ConvItem[];
 };
 
 /** reset=true なら持っている分を捨てて items に置き換える。total は次の since に渡す。live は毎回全部が来る */
@@ -87,4 +93,80 @@ export function deltaOf(all: ConvItem[], since: number | null | undefined): Conv
   const items = all.map((x, n) => ({ ...x, n }));
   if (since == null || since > all.length) return { items: items.slice(-KEEP_CONV), total: all.length, reset: true };
   return { items: items.slice(since), total: all.length, reset: false };
+}
+
+/** 送ったばかりの文の仮の項目。after は送り始めたときに持っていた最後の番号で、これより後に届いた発言とだけ比べる */
+export type PendingItem = ConvItem & { after: number };
+
+/**
+ * 画面だけで出す印（チャットからコマンドを実行した、#97）。会話の保存（conversation_cache）には入れない。
+ * after は実行したときに持っていた最後の番号で、それより後の項目（と、番号の無い送ったばかりの項目）の前に置く
+ */
+export function withNotes(items: ConvItem[], notes: PendingItem[]): ConvItem[] {
+  if (!notes.length) return items;
+  const out: ConvItem[] = [];
+  let k = 0;
+  for (const x of items) {
+    while (k < notes.length && (x.n === undefined || x.n > notes[k].after)) out.push(notes[k++]);
+    out.push(x);
+  }
+  while (k < notes.length) out.push(notes[k++]);
+  return out;
+}
+
+/**
+ * -p の子（kind node）の会話には、送った文の user が出ない（#55。ccn の messages は assistant と result だけを返す）。
+ * settlePending では消えないので、送り始めたあとに assistant の返事が出たら「届けた・まだ読まれていない」の印だけ外し、
+ * after の位置に残す（withNotes が置く）。変わらなければ pending をそのまま返す
+ */
+export function answerPending(items: ConvItem[], pending: PendingItem[]): PendingItem[] {
+  if (!pending.some((x) => x.pending)) return pending;
+  let changed = false;
+  const out = pending.map((x) => {
+    if (!x.pending || !items.some((y) => (y.n ?? -1) > x.after && y.role === "assistant")) return x;
+    changed = true;
+    return { ...x, pending: false };
+  });
+  return changed ? out : pending;
+}
+
+/**
+ * 画像のファイルのパス。文の頭か空白の直後で、/ か ~ から始まるもの（空白は \ 付きか、引用符で囲んだもの）。
+ * CLI は読める画像のパスを [Image #3] の添付に置き換える
+ */
+const IMAGE_PATH = /(^|\s)(?:'[/~][^'\n]*\.(?:png|jpe?g|gif|webp)'|"[/~][^"\n]*\.(?:png|jpe?g|gif|webp)"|[/~](?:\\ |[^\s'"])*\.(?:png|jpe?g|gif|webp))(?=\s|$)/gi;
+/**
+ * 比べる形にそろえる。空白の並びを1つにし（端末に貼ると改行や行末の空白が変わる）、画像のパスと [Image #3] の印を除く
+ * （送った文のパスが、会話ではパスのままのことも印になることもある、#69）
+ */
+const canon = (s: string) => s.replace(/\[Image #\d+\]/g, " ").replace(IMAGE_PATH, "$1 ").replace(/\s+/g, " ").trim();
+const sameText = (a: string, b: string) => canon(a) === canon(b);
+
+/**
+ * 会話に出た仮の項目を消す（#69）。送った順に1件ずつ、まだ使っていない user の発言と突き合わせる（同じ「はい」を2回送っても1件ずつ消す）。
+ * 後に送った文が会話に出たら、それより前に送った仮の項目も消す。CLI は届いた順に文を取り込むので、前の文も取り込まれている。
+ * 前の文の形が会話で変わっていて（[Image #1] など）突き合わせられなくても、仮の項目が後の発言より下に残らない。
+ * 変わらなければ pending をそのまま返す
+ */
+export function settlePending(items: ConvItem[], pending: PendingItem[]): PendingItem[] {
+  if (!pending.length) return pending;
+  const used = new Set<number>();
+  let last = -1;
+  pending.forEach((x, i) => {
+    const hit = items.findIndex((y, j) => !used.has(j) && (y.n ?? -1) > x.after && y.role === "user" && sameText(y.text, x.text));
+    if (hit >= 0) { used.add(hit); last = i; }
+  });
+  return last < 0 ? pending : pending.slice(last + 1);
+}
+
+/**
+ * 会話の末尾に出す順番待ちの文。作業中と承認待ちのときだけ出す（止まっているのに残った待ちは出さない）。
+ * このアプリから送った文も同じ待ちに入るので、同じ文の「届けた」の仮の項目は、待ちの項目に置き換える
+ */
+export function withQueued(waiting: PendingItem[], liveQueued: ConvItem[] | undefined, running: boolean): { waiting: PendingItem[]; queued: ConvItem[] } {
+  const q = running ? liveQueued ?? [] : [];
+  if (!q.length) return { waiting, queued: [] };
+  const texts = new Set(q.map((x) => x.text.trim()));
+  const rest = waiting.filter((x) => !texts.has(x.text.trim()));
+  return { waiting: rest.length === waiting.length ? waiting : rest, queued: q.map((x) => ({ ...x, pending: true, queued: true })) };
 }

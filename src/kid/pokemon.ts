@@ -1,7 +1,9 @@
 // ポケモンスキン。3段進化する1つの系統で、親を3段目（最終進化）、子を2段目、孫を1段目で描く。
-// 絵は Pokémon Showdown のアニメ GIF を PokeAPI/sprites が配布しているもの。リポジトリには入れず、
-// 表示中のキャラの分だけ実行時に raw.githubusercontent.com から読む（webview の HTTP キャッシュに残る）。
-// 系統の一覧（pokemon-lines.json）は scripts/pokemon-lines.ts で作った図鑑番号と英名だけ。
+// 絵は2Dのドット絵で、PokeAPI/sprites が配布しているブラック・ホワイトの形の正面の絵を使う。
+// 作業中に動かすアニメ GIF（versions/generation-v/black-white/animated）を主にし、アニメの無い番号（still）だけ
+// 同じ形の止め絵（versions/generation-v/black-white の PNG）にする。アニメは第5世代（#649）までと、後から足された一部の番号にしかない。
+// リポジトリには入れず、表示中のキャラの分だけ実行時に raw.githubusercontent.com から読む（webview の HTTP キャッシュに残る）。
+// 系統の一覧（pokemon-lines.json）は scripts/pokemon-lines.ts で作った図鑑番号と英名、止め絵の番号、余白を切る矩形だけ。
 import { createContext, useContext, useEffect, useState } from "react";
 import LINES from "./pokemon-lines.json";
 import { hash, type Role } from "./Avatar";
@@ -9,14 +11,23 @@ import { hash, type Role } from "./Avatar";
 export type Skin = "default" | "pokemon";
 
 /** 一覧を作ったときの PokeAPI/sprites のコミット。確かめた中身と同じものを読むよう、ブランチ名ではなくコミットで指す */
-const SPRITES = `https://raw.githubusercontent.com/PokeAPI/sprites/${LINES.sha}/sprites/pokemon/other/showdown`;
+const SPRITES = `https://raw.githubusercontent.com/PokeAPI/sprites/${LINES.sha}/sprites/pokemon/versions/generation-v/black-white`;
+/** アニメが無く、止め絵で描く図鑑番号 */
+const STILL = new Set<number>(LINES.still);
+/** 余白のある絵の、不透明な部分の矩形 [x, y, 幅, 高さ, 元の幅, 元の高さ]。全フレームを重ねて測った */
+const CROP = LINES.crop as unknown as Record<string, [number, number, number, number, number, number]>;
 /** [図鑑番号3つ, 英名3つ] の並び */
 const ALL = LINES.lines as unknown as [number[], string[]][];
 /** 親ほど進化した姿にする。lines の並びは1段目・2段目・3段目なので、親が添字2、孫が添字0 */
 const STAGE: Record<Role, number> = { parent: 2, child: 1, grandchild: 0 };
 
 export function spriteUrl(id: number): string {
-  return `${SPRITES}/${id}.gif`;
+  return STILL.has(id) ? `${SPRITES}/${id}.png` : `${SPRITES}/animated/${id}.gif`;
+}
+
+/** 余白を切る矩形。余白の無い絵は null */
+export function cropOf(id: number): [number, number, number, number, number, number] | null {
+  return CROP[id] ?? null;
 }
 
 /** 世帯の根の ID から系統を決める。同じ世帯は同じ系統になる。世帯どうしで系統が被ることはある */
@@ -47,7 +58,7 @@ export const SkinCtx = createContext<{ skin: Skin; rootOf: (id: string) => strin
 export const useSkin = () => useContext(SkinCtx);
 
 // ---------- 止め絵 ----------
-// 作業中でないときは GIF の1フレームを止めて見せる。会話欄では同じ子が発言の数だけ描かれるので、
+// 作業中でないときは GIF の1フレームを止めて見せる（止め絵しか無い番号はその絵）。余白は切ってから ImageBitmap にする。会話欄では同じ子が発言の数だけ描かれるので、
 // 1種につき1回だけ読んで ImageBitmap にし、各 canvas はそれを描くだけにする。
 
 const stills = new Map<number, Promise<ImageBitmap>>();
@@ -60,7 +71,10 @@ export function stillOf(id: number): Promise<ImageBitmap> {
       img.onload = () => ok(img);
       img.onerror = () => ng(new Error(`読めない: ${id}`));
       img.src = spriteUrl(id);
-    }).then((img) => createImageBitmap(img));
+    }).then((img) => {
+      const c = cropOf(id);
+      return c ? createImageBitmap(img, c[0], c[1], c[2], c[3]) : createImageBitmap(img);
+    });
     // 失敗はキャッシュしない（オフラインから戻ったら読み直す）
     p.catch(() => stills.delete(id));
     stills.set(id, p);

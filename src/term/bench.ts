@@ -1,15 +1,21 @@
 // 開発版だけで使う、ターミナルを開くまでの自動の計測（#18）。
 // 開発版の URL に ?bench=new|open|all&n=<回数> を付けると、起動して一覧が読めた3秒後から次を回す。
-// - new: 「＋ 新しい世帯」のボタンを押し、右パネルのチャットの入力欄にフォーカスが入るまでを測る（端末は開かない）。測り終えたら、作ったセッションだけを止める
+// - new: 「新しい世帯」のボタンを押し、右パネルのチャットの入力欄にフォーカスが入るまでを測る（端末は開かない）。測り終えたら、作ったセッションだけを止める
 // - open: 自分で作ったセッション1つを、選び直して右クリックと同じ操作で開き直し、❯ が見えるまでを測る
 // - all: new を n 回、続けて最後に作ったセッションで open を n 回
-// - watch: 40秒、1秒ごとに町の人数と接続の表示を記録する
+// - watch: 40秒、1秒ごとに町の人数と赤い帯を記録する
 // - resize: 新しい世帯の右パネルの境目をドラッグし、claude が新しい幅で描き直すまでを測る（#19）
-// - offline: ?sid=<セッション> のチャットを開き、?secs=<秒>（既定 60）のあいだ1秒ごとに、会話の欄の吹き出しの数、保存した履歴の印、
-//   町の人数、接続の表示、赤い帯を記録する（オフラインのキャッシュ、src-tauri/src/offline.rs。scripts/offline-ccn-proxy.ts と使う）
-// - cpu: ?sid=<セッション> のターミナルを開いたまま30秒、IPC の回数を数える（#8、#9。scripts/mock-ccn-flood.ts と使う）
-// - scene: 軽さの計測（scripts/bench.ts、#2）。場面（scene=idle|hidden|minimized|terminal|talk|town）を用意して ready を書き、
-//   wait（ms）たったら post を書く。CPU とメモリは bench.ts が外から ps で測る。測っている間は、ここでは何も回さない
+// - cpu: ?sid=<セッション> のターミナルを開いたまま30秒、IPC の回数を数える（#8、#9）
+// - order: ?sid=<セッション> のチャットを開き、子が作業中になったら、入力欄から ?a= と ?b= の2通を続けて送る。?secs=<秒>（既定 90）のあいだ1秒ごとに、
+//   会話の欄の吹き出しの並び（自分の文と、仮の吹き出しか）を記録する（#69、送った順と出る順が入れ替わらないか）
+// - drop: ?sid=<セッション> のチャットを開き、?file=<パス> を落としたときと同じドロップの出来事（tauri://drag-drop）を起こす。
+//   入力欄に入ったパスを記録し、?ask= を続けて送る（#69、一時の場所のファイルを写したパスが入り、子が読めるか）
+// - boot: ?cwd=<一時の場所> に新しい世帯を立て、claude の起動を待たずに入力欄から ?text= を送る（起動前に送った文を預かるか）。
+//   1秒ごとに、見出しの札、入力欄の案内、預かった文の吹き出し、出口の案内、届けたの吹き出し、トーストを outerHTML から記録する。
+//   ?answer=1 なら、10秒たっても預かったままのとき、信頼の確認の画面に Yes（↓と Enter）を答える。cwd が一時の場所（/var/folders）のときだけ答える
+// - scene: 軽さの計測（#2）。場面（scene=idle|hidden|minimized|terminal|talk|town）を用意して ready を書き、
+//   wait（ms）たったら post を書く。CPU とメモリは外から ps で測る。測っている間は、ここでは何も回さない。
+//   外から回していた scripts/bench.ts はモックの ccn で町を作っていたので、ccn を外したときに消した（作り直すまで、この場面は手で使う）
 // 結果は perf.ts が1回ごとに perf_log に書く。作るセッションには name に bench-ct-term を付ける。
 // 引数は URL（?bench=…）か、環境変数 VITE_FC_BENCH（"bench=scene&scene=idle" の形）で渡す。
 // 環境変数なら devUrl を変えずに済むので、場面ごとに Rust を組み直さない（devUrl は Rust に埋め込まれる）
@@ -123,7 +129,7 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       const mine0 = `${t.cols}x${t.rows}`;
       for (const [cols, rows] of [[50, 20], [200, 50]]) {
         const r0 = perfCounters.resizes;
-        await call("term_resize", { sessionId: r.id, cols, rows, peer: null });
+        await call("term_resize", { sessionId: r.id, cols, rows });
         await sleep(3000);
         // 窓から離れて戻る（claude はフォーカスの報告を有効にしているので、ESC[O と ESC[I が onData に流れる）
         t.blur();
@@ -145,27 +151,64 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       }
       return;
     }
-    // watch: 40秒、1秒ごとに町の人数と接続の表示を記録する（一覧の取得が失敗しても町が消えないかを見る）
+    // watch: 40秒、1秒ごとに町の人数と赤い帯を記録する（一覧の取得が失敗しても町が消えないかを見る）
     if (mode === "watch") {
       for (let i = 0; i < 40; i++) {
-        await log({ t: i, at: new Date().toISOString().slice(11, 23), town: document.querySelector(".fam-title")?.textContent ?? "", conn: document.querySelector(".conn")?.textContent ?? "", banner: !!document.querySelector(".banner.bad") });
+        await log({ t: i, at: new Date().toISOString().slice(11, 23), town: document.querySelector(".fam-title")?.textContent ?? "", banner: !!document.querySelector(".banner.bad") });
         await sleep(1000);
       }
       return;
     }
-    if (mode === "offline") {
+    if (mode === "order") {
       h().select(params.get("sid"));
-      const secs = Number(params.get("secs") ?? 60);
-      const text = (sel: string) => document.querySelector(sel)?.textContent ?? null;
-      // 会話の欄とグラデーションの上端（印が出ても位置が変わらないか）
-      const top = (sel: string) => { const e = document.querySelector(sel); return e ? Math.round(e.getBoundingClientRect().top) : null; };
+      const secs = Number(params.get("secs") ?? 90);
+      const box = () => document.querySelector<HTMLTextAreaElement>(".panel .composer textarea");
+      // React の入力欄に文を入れて Enter を押す。前の送信が終わって欄が空になるまで待つ（送信中は2通目を受けない）
+      const type = async (body: string) => {
+        for (let i = 0; i < 100 && (!box() || box()!.disabled || box()!.value); i++) await sleep(100);
+        const el = box()!;
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(el, body);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        await sleep(200);
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      };
+      const bubbles = () => [...document.querySelectorAll(".talk .msg.me")].slice(-6).map((e) => ({
+        pending: e.classList.contains("pending"), text: (e.querySelector(".b")?.textContent ?? "").replace(/\s+/g, " ").slice(-40) }));
+      // 作業中の子に続けて送る場面を作る。子が作業中になるまで（最大5分）待ってから送る
+      for (let i = 0; i < 300 && document.querySelector(".panel .p-name .st")?.textContent !== "作業中"; i++) await sleep(1000);
+      await sleep(2000);
+      await type(params.get("a") ?? "一通目");
+      await log({ sent: "a", at: new Date().toISOString().slice(11, 23) });
+      await type(params.get("b") ?? "二通目");
+      await log({ sent: "b", at: new Date().toISOString().slice(11, 23) });
       for (let i = 0; i < secs; i++) {
-        await log({ t: i, at: new Date().toISOString().slice(11, 23), town: text(".fam-title"), conn: text(".conn"), banner: text(".banner.bad"),
-          note: text(".offline-note"), msgs: document.querySelectorAll(".talk .msg, .talk .tool-line").length, empty: !!document.querySelector(".talk .hint.center"),
-          tabs: document.querySelectorAll(".panel .tabs button").length, segTop: top(".panel .seg-top"), scrollTop: top(".panel .seg-scroll"), noteTop: top(".offline-note"),
-          // 一番下からの距離（印の余白が付いても、一番下に留まっているか）と、町の選択肢の数（保存した peers が出るか）
-          bottomGap: (() => { const e = document.querySelector(".panel .seg-scroll"); return e ? Math.round(e.scrollHeight - e.scrollTop - e.clientHeight) : null; })(),
-          towns: document.querySelectorAll("select.node option").length });
+        await log({ t: i, at: new Date().toISOString().slice(11, 23), mood: document.querySelector(".panel .st")?.textContent ?? null, me: bubbles() });
+        await sleep(1000);
+      }
+      return;
+    }
+    if (mode === "drop") {
+      h().select(params.get("sid"));
+      const box = () => document.querySelector<HTMLTextAreaElement>(".panel .composer textarea");
+      for (let i = 0; i < 100 && (!box() || box()!.disabled); i++) await sleep(100);
+      await sleep(1000);
+      const { emit } = await import("@tauri-apps/api/event");
+      await emit("tauri://drag-drop", { paths: [params.get("file") ?? ""], position: { x: 10, y: 10 } });
+      for (let i = 0; i < 50 && !box()!.value; i++) await sleep(100);
+      const dropped = box()!.value;
+      await log({ dropped, error: document.querySelector(".banner.bad, .toast")?.textContent ?? null });
+      if (!dropped) return;
+      const el = box()!;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(el, `${dropped}\n${params.get("ask") ?? ""}`);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      await sleep(200);
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      await sleep(1500);
+      await log({ sent: true, left: box()?.value ?? null });
+      // 送った文が会話に出て、仮の吹き出しが消えるか（CLI がパスを [Image #3] にしても突き合わせられるか）
+      for (let i = 0; i < Number(params.get("secs") ?? 30); i++) {
+        await log({ t: i, me: [...document.querySelectorAll(".talk .msg.me")].slice(-3).map((e) => ({
+          pending: e.classList.contains("pending"), text: (e.querySelector(".b")?.textContent ?? "").replace(/\s+/g, " ").slice(0, 60) })) });
         await sleep(1000);
       }
       return;
@@ -185,6 +228,50 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       await log({ cpu_end: true, ipcPerSec: +((perfCounters.ipc - a.ipc) / 30).toFixed(1), charsPerSec: Math.round((perfCounters.bytes - a.bytes) / 30), fps: +(frames / 30).toFixed(1), renderer: perfCounters.renderer || "dom" });
       return;
     }
+    if (mode === "boot") {
+      const cwd = params.get("cwd") ?? "";
+      const text = params.get("text") ?? "この文には「了解」とだけ返して";
+      const r = await call<{ id: string }>("create_session", { cwd, name: benchName(), cols: 120, rows: 40 });
+      mine.push(r.id);
+      const t0 = Date.now();
+      await log({ created: r.id, cwd });
+      const q = <T extends Element>(sel: string) => document.querySelector<T>(sel);
+      // 一覧に載るまで選び直す（載る前の select は外れる）
+      for (let i = 0; i < 20 && !q(".composer textarea"); i++) { h().select(r.id); await sleep(250); }
+      const look = (tag: string) => log({
+        tag, ms: Date.now() - t0,
+        head: q(".p-head .st")?.outerHTML ?? null,
+        card: [...document.querySelectorAll(".card .st-boot")].length,
+        placeholder: q<HTMLTextAreaElement>(".composer textarea")?.placeholder ?? null,
+        waitBoot: [...document.querySelectorAll(".msg.me.pending")].map((e) => e.querySelector(".meta")?.textContent + "｜" + e.querySelector(".b")?.textContent),
+        bootWait: q(".boot-wait .hint")?.textContent ?? null,
+        kid: [...document.querySelectorAll(".msg.kid .b")].map((e) => e.textContent).slice(-1),
+        toasts: [...document.querySelectorAll(".toast")].map((e) => e.textContent),
+      });
+      await look("before-send");
+      // 入力欄に打って Enter を押したのと同じ（React の制御された textarea なので、値は prototype の setter で入れる）
+      const ta = q<HTMLTextAreaElement>(".composer textarea");
+      if (!ta) throw new Error("入力欄が無い");
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(ta, text);
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      await sleep(200);
+      ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", bubbles: true, cancelable: true }));
+      let answered = false;
+      for (let i = 0; i < 60; i++) {
+        await sleep(1000);
+        await look(`t${i + 1}`);
+        if (params.get("answer") && !answered && Date.now() - t0 > 10_000 && q(".boot-wait") && /^\/(private\/)?var\/folders\//.test(cwd)) {
+          await call("term_input", { sessionId: r.id, text: "\x1b[B" });
+          await sleep(300);
+          await call("term_input", { sessionId: r.id, text: "\r" });
+          answered = true;
+          await log({ answered: true, ms: Date.now() - t0 });
+        }
+        if ([...document.querySelectorAll(".msg.kid .b")].some((e) => e.textContent?.includes("了解"))) break;
+      }
+      await look("end");
+      return;
+    }
     let last: string | null = null;
     if (mode === "new" || mode === "all" || mode === "open") {
       const rounds = mode === "open" ? 1 : n;
@@ -200,7 +287,7 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
         // 最後の1つは open の計測に残す
         if (r.id && (mode === "new" || i < rounds - 1)) {
           h().select(null);
-          await call("stop_session", { sessionId: r.id, peer: null }).catch(() => {});
+          await call("stop_session", { sessionId: r.id }).catch(() => {});
           await sleep(2500);
         }
       }
@@ -215,19 +302,19 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
         await done;
         await sleep(800);
       }
-      // ?type=1: 1字ずつ待たずに term_input を投げ、打った順に届くかを見る（#3）。届いた画面は ccn の replay で確かめる
+      // ?type=1: 1字ずつ待たずに term_input を投げ、打った順に届くかを見る（#3）。届いた画面は replay で確かめる
       if (params.get("type")) {
         const text = "ordercheck-0123456789abcdefghijklmnopqrstuvwxyz";
-        for (const ch of text) call("term_input", { sessionId: last, text: ch, peer: null });
+        for (const ch of text) call("term_input", { sessionId: last, text: ch });
         await sleep(1500);
         await log({ typed: text, id: last });
         await sleep(15000);
-        await call("term_input", { sessionId: last, text: "\x15", peer: null });
+        await call("term_input", { sessionId: last, text: "\x15" });
       }
     }
   } finally {
     h().select(null);
-    for (const id of mine) await call("stop_session", { sessionId: id, peer: null }).catch(() => {});
+    for (const id of mine) await call("stop_session", { sessionId: id }).catch(() => {});
     await log({ done: true, stopped: mine });
   }
 }

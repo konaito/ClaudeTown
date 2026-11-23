@@ -1,7 +1,8 @@
 :root {
   --bg: #ffffff;
   --ink: #2f2d36;
-  --sub: #8a8794;
+  /* 補足の文字。WCAG 1.4.3 の 4.5:1 を、文字が載るいちばん暗い地（#f4f2ee、世帯の淡い色）でも満たす（前の #8a8794 は白で 3.52:1） */
+  --sub: #6c6a75;
   --line: #e9e6e1;
   --tree: #c9cfdc;
   --working: #34b36b;
@@ -10,6 +11,12 @@
   --done: #9aa1ad;
   --idle: #c6c9d1;
   --sel: #4b8bf5;
+  /* 状態の色の、文字に使う濃い版。丸や枠の色（上の --reply など）は変えず、文字だけこちらにする。どれも白で 4.5:1 以上 */
+  --reply-ink: #2a64c4;
+  --approval-ink: #8a5d00;
+  --working-ink: #237a4b;
+  /* 入力欄の枠。WCAG 1.4.11 の 3:1（白で 3.36:1）。押すボタンの枠は文字で分かるので --line のまま */
+  --field: #8f8a96;
   font-family: "Hiragino Maru Gothic ProN", "Hiragino Sans", system-ui, sans-serif;
   color: var(--ink);
   background: var(--bg);
@@ -21,6 +28,8 @@
 html, body, #root { height: 100%; margin: 0; overflow: hidden; }
 button { font: inherit; color: inherit; cursor: pointer; background: none; border: none; padding: 0; }
 button:disabled { opacity: 0.4; cursor: default; }
+:focus-visible { outline: 2px solid var(--reply-ink); outline-offset: 2px; }
+::placeholder { color: var(--sub); opacity: 1; }
 code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding: 1px 5px; border-radius: 4px; font-size: 0.92em; }
 .hint { color: var(--sub); font-size: 12px; }
 .center { text-align: center; }
@@ -33,7 +42,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: 0.01em; }
 .top-mid { display: flex; align-items: center; gap: 10px; }
-.node { appearance: none; font: inherit; font-size: 13px; padding: 6px 30px 6px 16px; border: 1px solid var(--line); border-radius: 10px; background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='14'%3E%3Cpath d='M1 5l4-4 4 4M1 9l4 4 4-4' stroke='%23777' fill='none'/%3E%3C/svg%3E") no-repeat right 10px center; }
+.node { appearance: none; font: inherit; font-size: 13px; padding: 6px 30px 6px 16px; border: 1px solid var(--line); border-radius: 10px; background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23777' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 15 5 5 5-5'/%3E%3Cpath d='m7 9 5-5 5 5'/%3E%3C/svg%3E") no-repeat right 10px center; }
 .conn { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 5px 12px; border-radius: 10px; background: #f6f6f4; }
 .conn i { width: 9px; height: 9px; border-radius: 50%; background: var(--working); }
 .conn.bad i { background: #e5574a; }
@@ -59,17 +68,20 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .next-main.nm-reply { background: #eef4ff; border-color: #cfe0ff; }
 .next-main.nm-done { background: #f4f8f5; border-color: #dcebe1; }
 .next-main.nm-calm { background: #f4f8f5; border-color: #dcebe1; padding: 8px 14px; }
-.next-icon { font-size: 20px; }
+.next-icon { display: inline-flex; color: #b07a00; }
+.nm-reply .next-icon { color: var(--reply); }
+.nm-done .next-icon { color: var(--working); }
+.chip-icon { display: inline-flex; }
 .next-text { font-size: 17px; font-weight: 700; }
 .next-text.calm { font-size: 14px; font-weight: 600; color: #3f6a50; }
 .pane-btn { border: 1px solid var(--line); background: #fff; border-radius: 10px; padding: 6px 12px; font-size: 13px; white-space: nowrap; }
 .pane-btn:hover:not(:disabled) { border-color: #cfcac2; }
 .next-sep { width: 1px; height: 26px; background: var(--line); margin: 0 4px; }
 .next-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 10px; padding: 6px 12px; font-size: 13px; background: #fff; }
-.next-chip span { color: var(--reply); }
+.next-chip span { color: var(--reply-ink); }
 .next-more { font-size: 12px; color: var(--sub); }
 /* 別の町のお便り: 消印のような小さい札と、点線の縁。白地のまま控えめに */
-.postmark { font-size: 10.5px; font-weight: 600; letter-spacing: 0.02em; color: #7a6f95; padding: 1px 6px; border: 1px dashed #b9b0d0; border-radius: 6px; background: #faf8ff; line-height: 1.5; white-space: nowrap; }
+.postmark { font-size: 10.5px; font-weight: 600; letter-spacing: 0.02em; color: #6b6187; padding: 1px 6px; border: 1px dashed #b9b0d0; border-radius: 6px; background: #faf8ff; line-height: 1.5; white-space: nowrap; }
 .next-main.away { border-style: dashed; }
 .next-chip.away { border-style: dashed; border-color: #cfc8e0; }
 .next-unreach { font-size: 11.5px; color: var(--sub); margin-left: auto; }
@@ -88,17 +100,16 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 /* 家族 */
 .fam-head { display: flex; align-items: center; gap: 14px; padding: 12px 22px 4px; }
 .fam-title { display: inline-flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 700; }
-.fam-count { color: var(--sub); }
 .legend { margin-left: auto; display: flex; gap: 14px; font-size: 13px; }
 .lg { display: inline-flex; align-items: center; gap: 5px; }
-.lg i, .st i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+.lg i, .st i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.38); }
 .lg-working i, .st-working i { background: var(--working); }
 .lg-reply i, .st-reply i { background: var(--reply); }
 .lg-approval i, .st-approval i { background: var(--approval); }
 .lg-done i, .st-done i { background: var(--done); }
 .lg-idle i, .st-idle i { background: var(--idle); }
-.lg-reply { color: var(--reply); }
-.lg-approval { color: #c98500; }
+.lg-reply { color: var(--reply-ink); }
+.lg-approval { color: var(--approval-ink); }
 
 .stage {
   flex: 1; min-height: 0; overflow: auto; padding: 6px 18px 24px;
@@ -106,18 +117,17 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .stage-inner { position: relative; margin: 10px auto 0; }
 .slot { position: absolute; }
 
-/* グループ（根のセッション1つとその子孫）。淡い色の角丸の背景で分ける。色は App.tsx の GROUP_TINTS */
-.group { box-sizing: border-box; position: relative; border: 1.5px solid #e3e6ee; border-radius: 18px; padding: 12px 18px 18px; overflow: hidden; }
+/* グループ（根のセッション1つとその子孫）。淡い色の角丸の背景で分ける。色は FamilyCanvas.tsx の GROUP_TINTS。
+   余白は 1 層（--g-pad）で、見出しとカードの左端が同じ。値は src/layout/params.ts の LAYOUT.group で、groupCssVars() が .group に渡す */
+.group { box-sizing: border-box; position: relative; border: var(--g-border) solid #e3e6ee; border-radius: 18px; padding: var(--g-pad); overflow: hidden; }
 .group.has-needs { border-color: #f1d79c; }
-.g-head { display: flex; align-items: baseline; gap: 10px; height: 34px; overflow: hidden; white-space: nowrap; cursor: text; }
+.g-head { display: flex; align-items: baseline; gap: 10px; height: var(--g-head); margin-bottom: var(--g-head-gap); overflow: hidden; white-space: nowrap; cursor: text; }
 .g-name { font-size: 15px; font-weight: 700; color: #3d3a45; }
-.g-name.guess { color: #6f6b78; font-weight: 600; }
 .g-sub { font-size: 12px; color: var(--sub); }
-.g-needs { font-size: 11px; color: #9a6a00; background: #fff3d6; border-radius: 99px; padding: 1px 8px; }
-.g-input { font: inherit; font-size: 15px; font-weight: 700; border: none; border-bottom: 1.5px dashed #b9b2a7; background: transparent; outline: none; width: 12em; }
+.g-needs { font-size: 11px; color: var(--approval-ink); background: #fff3d6; border-radius: 99px; padding: 1px 8px; }
 
 /* 家族の木。座標は src/layout が決め、ここでは置くだけ */
-.canvas { position: relative; margin: 0 auto; }
+.canvas { position: relative; }
 .edges { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
 .edges line { stroke: var(--tree); stroke-width: 2; stroke-linecap: round; }
 .fnode { position: absolute; display: flex; align-items: center; justify-content: center; }
@@ -134,27 +144,39 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .card.m-approval { border-color: #f6dc9f; }
 .card.m-reply:not(.sel) { border-color: #cfe0ff; }
 .card-top { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.role { white-space: nowrap; font-size: 11px; color: #6c6a75; background: #f1efeb; border-radius: 6px; padding: 0 5px; line-height: 18px; }
+.role { flex: none; display: inline-flex; align-items: center; justify-content: center; height: 18px; color: #6c6a75; background: #f1efeb; border-radius: 6px; padding: 0 3px; }
 .task { font-size: 11.5px; border: 1px solid var(--line); border-radius: 99px; padding: 0 9px; line-height: 19px; white-space: nowrap; background: #fff; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .card-main { display: flex; align-items: flex-end; gap: 6px; }
 .card-info { display: flex; flex-direction: column; gap: 2px; padding-bottom: 6px; min-width: 0; }
+/* 起動中（claude が入力を受け付けるまで）。点を回る輪にする。動きを減らす設定では点滅にする */
+.st.st-boot i { background: transparent; border: 1.5px solid var(--idle); border-top-color: var(--working); animation: st-spin 0.9s linear infinite; }
+@keyframes st-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .st.st-boot i { animation: ll-pulse 1.6s ease-in-out infinite; } }
+.boot-wait { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 14px; background: #eef4ff; margin-left: 38px; }
+.boot-wait .hint { margin: 0; }
+.boot-wait-btns { display: flex; flex-wrap: wrap; gap: 8px; }
 .st { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: #5d5b66; white-space: nowrap; }
 .st em { font-style: normal; color: var(--sub); font-size: 10.5px; margin-left: 2px; }
-.st-reply { color: var(--reply); }
-.st-approval { color: #c98500; }
+.st-reply { color: var(--reply-ink); }
+.st-approval { color: var(--approval-ink); }
+.card-info .st { margin-left: 6px; }
 .cname { font-size: 14px; font-weight: 700; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* カードのアカウント（cam のコマンド名）。状態の行の上に小さく出す。カードの箱（176×96）は変えない。
+   左は状態の文字（丸の印の右）にそろえる。そろえないと、キャラの右上の状態の印（✅ など）が1文字目に重なる */
+.cacct { font-size: 10.5px; line-height: 12px; color: var(--sub); padding-left: 20px; box-sizing: border-box; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 孫より下の小さい札。選ぶと同じ大きさのカード（.pop）を上に重ねる */
 .mini {
-  flex: none; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 1px; padding: 4px 6px 5px; border-radius: 10px; box-sizing: border-box; overflow: hidden;
+  /* 箱の高さは src/layout/params.ts の mini.h（62px）。上下の余白を 2px にして、名前の行（13px）を縮めずに入れる。前は名前が 10px に縮み、p や g の下が切れていた */
+  flex: none; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 1px; padding: 2px 6px; border-radius: 10px; box-sizing: border-box; overflow: hidden;
   background: #fff; border: 1.5px solid #ebe8e3;
 }
 .mini:hover { border-color: #d8d3cb; }
 .mini.m-approval { border-color: #f6dc9f; }
 .mini.m-reply { border-color: #cfe0ff; }
 .mini.sel { border-color: var(--sel); }
-.mini-name { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 700; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mini-name .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; display: inline-block; }
+.mini-name { flex: none; line-height: 13px; display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 700; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mini-name .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; display: inline-block; box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.38); }
 .dot.st-working { background: var(--working); } .dot.st-reply { background: var(--reply); } .dot.st-approval { background: var(--approval); }
 .dot.st-done { background: var(--done); } .dot.st-idle { background: var(--idle); }
 .pop { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 31; filter: drop-shadow(0 10px 24px rgba(47, 45, 54, 0.22)); }
@@ -164,7 +186,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 
 .left-foot { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; border-top: 1px solid var(--line); }
 .zoom { display: flex; align-items: center; gap: 2px; }
-.zoom button { border: 1px solid var(--line); background: #fff; border-radius: 8px; min-width: 30px; height: 30px; font-size: 15px; }
+.zoom button { border: 1px solid var(--line); background: #fff; border-radius: 8px; min-width: 30px; height: 30px; font-size: 15px; display: inline-grid; place-items: center; }
 .zoom .zval { min-width: 58px; font-size: 13px; }
 .zoom .fs { margin-left: 8px; }
 
@@ -180,14 +202,19 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .p-id { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .p-name { font-size: 22px; font-weight: 700; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; }
 .p-name .st { font-size: 14px; }
+/* 見出しのアカウント。カードの親子の札（.role）と同じ地の色と角丸の小さい札にする */
+.p-name .acct { font-size: 11px; font-weight: 400; color: #6c6a75; background: #f1efeb; border-radius: 6px; padding: 0 6px; line-height: 18px; white-space: nowrap; }
 .pn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .p-line { font-size: 13px; color: var(--sub); display: flex; flex-wrap: wrap; gap: 4px; }
-.p-line b { margin: 0 4px; font-weight: 400; }
+.p-line > span { display: inline-flex; align-items: center; }
+.p-line-sep { flex: none; margin: 0 2px; color: #b4b0ba; }
 .lnk:hover { color: var(--ink); text-decoration: underline; }
-.p-task { font-size: 13px; display: flex; gap: 6px; align-items: center; color: #4a4853; }
+.p-task { font-size: 13px; display: flex; gap: 6px; align-items: flex-start; color: #4a4853; }
+.p-task-icon { flex: none; margin-top: 2px; }
+.p-task-text { min-width: 0; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .tabs { display: flex; gap: 6px; padding: 0 16px; border-bottom: 1px solid var(--line); }
 .tabs button { padding: 10px 22px; font-size: 14px; color: var(--sub); border-bottom: 2px solid transparent; }
-.tabs button.on { color: var(--reply); border-bottom-color: var(--reply); font-weight: 600; }
+.tabs button.on { color: var(--reply-ink); border-bottom-color: var(--reply-ink); font-weight: 600; }
 
 .talk { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; user-select: text; }
 .msg { display: flex; gap: 8px; max-width: 100%; }
@@ -202,6 +229,25 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .msg.kid .mini-av { flex: none; padding-top: 8px; }
 .msg.kid .b { background: #fff; border: 1px solid var(--line); }
 .tool-line { font-size: 11.5px; color: var(--sub); padding-left: 38px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 道具の結果（#83）。開くまでは今までと同じ1行 */
+.tool-open { white-space: normal; overflow: visible; }
+.tool-open > summary { cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; list-style: none; }
+.tool-open > summary::-webkit-details-marker { display: none; }
+/* 開け閉めの印は lucide の chevron-right。開いたら下へ回す */
+.tl-caret { margin-left: 4px; transition: transform 0.12s; }
+.tool-open[open] > summary .tl-caret { transform: rotate(90deg); }
+/* 文の中に置くアイコン（lucide）。字の並びにそろえる */
+.inline-icon { display: inline-block; vertical-align: -2px; flex: none; }
+.tl-bad { margin-left: 6px; color: #b4473a; font-weight: 600; }
+.tl-list { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 2px; }
+.tl-name { color: var(--sub); }
+.tl-out { margin: 2px 0 0; background: #f7f6f3; border: 1px solid #ebe8e1; border-radius: 6px; padding: 6px 8px; font: 11px/1.45 ui-monospace, Menlo, monospace; color: #3d3b45; white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow: auto; overscroll-behavior: contain; user-select: text; }
+.tl-out.bad { border-color: #efc3bd; background: #fdf4f2; }
+/* 止めた・失敗したターンの印（#83） */
+.turn-event { align-self: center; font-size: 12px; color: var(--sub); background: #f4f2ee; border-radius: 999px; padding: 3px 12px; }
+.turn-event.te-error { color: #b4473a; background: #fdf0ee; }
+.te-at { margin-left: 8px; font-size: 11px; }
+.turn-event .inline-icon { margin-right: 4px; }
 /* 作業中の末尾の1行（#59）。点が明滅し、経過は数字の幅をそろえて揺れないようにする */
 .live-line { font-size: 11.5px; color: var(--sub); padding-left: 38px; min-width: 0; }
 .ll-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -209,21 +255,39 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .ll-label { color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .ll-time { flex: none; font-variant-numeric: tabular-nums; }
 .ll-head { padding-left: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ll-head::before { content: "└ "; }
+.ll-head-icon { margin-right: 3px; }
 @keyframes ll-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
 .md p { margin: 0 0 6px; }
 .md p:last-child { margin-bottom: 0; }
 .md ul, .md ol { margin: 4px 0 6px; padding-left: 20px; }
 .md li { margin: 1px 0; }
 .md-h { font-weight: 700; margin: 6px 0 2px; }
+/* 表。広いときは表だけを横にスクロールする */
+.md-table { margin: 4px 0 6px; overflow-x: auto; overscroll-behavior-x: contain; }
+.md-table table { border-collapse: collapse; font-size: 12.5px; line-height: 1.5; }
+.md-table th, .md-table td { border: 1px solid var(--line); padding: 3px 8px; text-align: left; vertical-align: top; }
+.md-table th { background: #f6f5f2; font-weight: 700; white-space: nowrap; }
 /* メッセージの中のリンク。押すと既定のブラウザで開く（src/links.ts） */
 .ext-link { color: #2f6fd6; text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; cursor: pointer; overflow-wrap: anywhere; }
 .ext-link:hover { color: #1f56b0; }
 .md pre { background: #f6f5f2; border-radius: 8px; padding: 8px; font-size: 12px; overflow-x: auto; white-space: pre-wrap; }
+/* コードブロックの右上のコピー（PR #73）。ボタンは pre の外の帯に置き、横スクロールで動かず、ドラッグの選択にも入らないようにする。
+   帯は sticky にして、長いブロックの途中までスクロールしても、ブロックが見えている間はボタンが上に残る。
+   top の -14px は .talk の padding-top の分。0 だと padding の分だけ下に貼り付き、1行目を覆う */
+.md-code { margin: 4px 0 6px; background: #f6f5f2; border-radius: 8px; }
+.md-copy-bar { position: sticky; top: -14px; z-index: 1; display: flex; justify-content: flex-end; padding: 5px 6px 2px; background: #f6f5f2; border-radius: 8px 8px 0 0; }
+.md-code pre { margin: 0; padding-top: 0; border-radius: 0 0 8px 8px; user-select: text; -webkit-user-select: text; cursor: text; }
+.md-copy { display: inline-flex; align-items: center; gap: 4px; font: inherit; font-size: 11px; line-height: 1; min-height: 24px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--sub); cursor: pointer; user-select: none; -webkit-user-select: none; }
+.md-copy:hover { color: var(--ink); border-color: #d6d2cb; }
+.md-copy.ok { color: var(--working-ink); border-color: #cfe9d7; }
+.md-copy.ng { color: #c0453a; border-color: #f0d2ce; }
 .md ul.md-check { list-style: none; padding: 8px 12px; border: 1px solid #dcefe2; border-radius: 12px; background: #fbfefc; }
-.md ul.md-check li::before { content: "✓"; color: var(--working); font-weight: 700; margin-right: 8px; }
+/* チェックの印は lucide の check（ISC）を mask で描く。色は background の色 */
+.md ul.md-check li::before { content: ""; display: inline-block; width: 14px; height: 14px; margin-right: 8px; vertical-align: -2px; background: var(--working);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / contain no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center / contain no-repeat; }
 .choices { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border-radius: 14px; background: #eef4ff; margin-left: 38px; }
-.choice { border: 1px solid #cfe0ff; background: #fff; border-radius: 10px; padding: 7px 14px; font-size: 13px; }
+.choice { border: 1px solid #cfe0ff; background: #fff; border-radius: 10px; padding: 7px 14px; font-size: 13px; text-align: left; max-width: 100%; }
 .choice:hover:not(:disabled) { border-color: var(--reply); }
 
 .state-scroll { overflow-y: auto; }
@@ -234,16 +298,34 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 
 .composer { border-top: 1px solid var(--line); padding: 10px 14px; display: flex; flex-direction: column; gap: 6px; }
 .composer .to { font-size: 12px; color: var(--sub); }
+/* 送信先の行の右に、モデルと権限モードの切り替え（#97、src/session/）。幅が足りなければ次の行へ折り返す */
+.composer .to { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-height: 22px; }
+.composer .to .to-name { flex: 1 1 120px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px 6px; flex: 0 1 auto; min-width: 0; margin-left: auto; }
+.sc-sel { font: inherit; font-size: 12px; color: var(--ink); background: #fff; border: 1px solid var(--field); border-radius: 7px; min-height: 24px; padding: 2px 4px; max-width: 150px; flex: none; }
+.sc-sel:disabled { color: var(--sub); background: #f7f6f3; }
+/* 替えられない理由は select の下に全文で出す */
+.sc-why { order: 1; flex-basis: 100%; text-align: right; font-size: 11.5px; color: var(--sub); }
+/* 予約中の選択（always-switch）。今の値ではなく、予約した値を出している */
+.sc-sel.sc-pend { border-style: dashed; border-color: var(--reply-ink); }
 .composer .box { position: relative; }
-.composer textarea { width: 100%; min-height: 78px; resize: none; border: 1px solid var(--line); border-radius: 12px; padding: 10px 52px 10px 12px; font: inherit; font-size: 14px; outline: none; }
-.composer textarea:focus { border-color: #b9c9e6; }
+.composer textarea { width: 100%; min-height: 78px; resize: none; border: 1px solid var(--field); border-radius: 12px; padding: 10px 52px 10px 12px; font: inherit; font-size: 14px; outline: none; }
+.composer textarea:focus { border-color: var(--reply-ink); box-shadow: 0 0 0 3px rgb(42 100 196 / 0.18); }
 .send { position: absolute; right: 10px; bottom: 12px; width: 36px; height: 36px; border-radius: 10px; background: var(--reply); color: #fff; display: grid; place-items: center; }
+.send.stop { background: #3d3b45; }
 /* 入力欄の補完、キーの一覧、履歴の検索（src/composer/）。上に重ねて出す */
 .composer .box.shell textarea { border-color: #e7a3c4; }
 .cmp-menu, .cmp-help { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); background: #fff; border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1); z-index: 20; max-height: 260px; overflow: auto; padding: 4px; }
 .cmp-menu button { display: flex; gap: 12px; width: 100%; text-align: left; padding: 5px 8px; border-radius: 8px; font-size: 13px; align-items: baseline; }
 .cmp-menu button.on { background: #eef3fb; }
-.cmp-menu .cm-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; color: var(--ink); }
+/* 補完の候補の印（#97）。使えないものは名前を薄くし、右に「ここでは使えません」と出す */
+.cmp-menu .cm-name.off { color: var(--sub); }
+/* 説明を先に縮め、名前は入らないときだけ縮める */
+.cmp-menu .cm-desc { flex: 1 1 0; }
+.cmp-menu .cm-tag { margin-left: auto; flex: none; font-size: 11px; color: var(--sub); border: 1px solid var(--line); border-radius: 6px; padding: 0 6px; white-space: nowrap; }
+.cmp-menu .cm-tag.off { color: #b4473a; border-color: #f1d4cf; background: #fdf6f4; }
+.composer .hint.bad { color: #b4473a; }
+.cmp-menu .cm-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; }
 .cmp-menu .cm-name em { font-style: normal; color: var(--sub); }
 .cmp-menu .cm-desc { color: var(--sub); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .cmp-help { padding: 8px 10px; display: grid; gap: 3px; font-size: 12px; }
@@ -251,10 +333,11 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .cmp-help kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--ink); }
 .cmp-help span { color: var(--sub); }
 .cmp-search { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--sub); margin-bottom: 6px; }
-.cmp-search input { flex: 1; border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; font: inherit; font-size: 13px; outline: none; }
+.cmp-search input { flex: 1; border: 1px solid var(--field); border-radius: 8px; padding: 4px 8px; font: inherit; font-size: 13px; outline: none; }
+.cmp-search input:focus { border-color: var(--reply-ink); box-shadow: 0 0 0 3px rgb(42 100 196 / 0.18); }
 .cmp-search em { font-style: normal; color: #b4473a; }
 /* ファイルを窓の上に持ってきている間（#64） */
-.cmp-drop { position: absolute; inset: 0 0 4px 0; z-index: 10; display: grid; place-items: center; border: 2px dashed var(--reply); border-radius: 12px; background: rgba(243, 247, 255, 0.94); color: var(--reply); font-size: 13px; pointer-events: none; }
+.cmp-drop { position: absolute; inset: 0 0 4px 0; z-index: 10; display: grid; place-items: center; border: 2px dashed var(--reply); border-radius: 12px; background: rgba(243, 247, 255, 0.94); color: var(--reply-ink); font-size: 13px; pointer-events: none; }
 .cmp-drop.no { border-color: #c4493b; background: rgba(253, 243, 241, 0.94); color: #c4493b; }
 
 .toasts { position: fixed; bottom: 60px; left: 30%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 6px; z-index: 30; align-items: center; }
@@ -262,7 +345,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .toast.bad { background: #c4493b; }
 
 .credits { position: relative; margin-left: 12px; }
-.credit-btn { font-size: 11px; color: var(--sub); text-decoration: underline; }
+.credit-btn { font-size: 11px; color: var(--sub); text-decoration: underline; min-height: 24px; padding: 0 4px; }
 .credit-pop { position: absolute; right: 0; bottom: 26px; width: 380px; background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; font-size: 11.5px; line-height: 1.6; color: var(--ink); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1); z-index: 40; user-select: text; }
 .skin-pick { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--line); font-weight: 600; }
 .skin-pick button { font: inherit; font-weight: 400; padding: 2px 10px; border: 1px solid var(--line); border-radius: 999px; background: #fff; color: var(--sub); cursor: pointer; }
@@ -270,12 +353,25 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 
 /* 承認待ちに答える欄 */
 .approval { border: 1.5px solid #f3d995; background: #fffaf0; border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
-.ap-title { font-weight: 700; color: #8a5d00; }
+.ap-title { font-weight: 700; color: #8a5d00; display: flex; align-items: center; gap: 6px; }
 .ap-tool { font-size: 13px; }
 .ap-detail { margin: 0; background: #fff; border: 1px solid #efe3c4; border-radius: 8px; padding: 8px 10px; font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow: auto; user-select: text; }
 .ap-btns { display: flex; gap: 8px; flex-wrap: wrap; }
-.ap-allow { background: #2f8f5b; color: #fff; border-radius: 10px; padding: 7px 16px; font-weight: 600; }
+.ap-allow { background: var(--working-ink); color: #fff; border-radius: 10px; padding: 7px 16px; font-weight: 600; }
 .ap-deny { background: #fff; color: #b4473a; border: 1.5px solid #efc3bd; border-radius: 10px; padding: 7px 16px; font-weight: 600; }
+/* 質問（AskUserQuestion）と計画の確認（ExitPlanMode）、#83 */
+.ask-q { display: flex; flex-direction: column; gap: 6px; }
+.ask-head { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.ask-chip { font-size: 11px; color: #8a5d00; background: #fdefc8; border-radius: 6px; padding: 1px 6px; }
+.ask-text { font-weight: 600; }
+.ask-opts { display: flex; flex-direction: column; gap: 6px; }
+.ask-opt { display: flex; flex-direction: column; align-items: flex-start; text-align: left; background: #fff; border: 1.5px solid #efe3c4; border-radius: 10px; padding: 7px 10px; }
+.ask-opt.on { border-color: var(--working-ink); background: #eef8f1; }
+.ask-label { font-weight: 600; }
+.ask-desc { font-size: 12px; color: #7a6a4a; }
+.ap-always { background: #fff; color: var(--working-ink); border: 1.5px solid #b9dfc7; border-radius: 10px; padding: 7px 14px; font-weight: 600; }
+.ask-other, .ap-note, .ap-reason { font: inherit; font-size: 13px; background: #fff; border: 1px solid var(--field); border-radius: 8px; padding: 6px 8px; resize: vertical; }
+.ap-plan { margin: 0; background: #fff; border: 1px solid #efe3c4; border-radius: 8px; padding: 8px 12px; font-size: 13px; max-height: 320px; overflow: auto; overscroll-behavior: contain; user-select: text; }
 
 .layout-warn { position: absolute; right: 0; top: -22px; font-size: 11px; color: #b4473a; background: #fdeeee; border-radius: 99px; padding: 1px 8px; }
 
@@ -306,16 +402,17 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 /* 行の高さで割り切れずに残る下端に、xterm.css の既定の黒（.xterm-viewport）が出ないよう白にする */
 .term .xterm .xterm-viewport { background-color: #fff; }
 .term-status { font-size: 12px; color: var(--sub); padding: 6px 12px; border-bottom: 1px solid var(--line); }
-.p-actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+.p-actions { display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
 .ap-float { padding: 8px 12px 0; }
 
 /* 転出の欄 */
 .sheet { margin: 0 14px 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: #fbfaf8; display: flex; flex-direction: column; gap: 8px; }
 .sheet-title { font-weight: 700; font-size: 13.5px; }
-.sheet textarea { width: 100%; min-height: 64px; resize: vertical; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font: inherit; font-size: 13px; outline: none; }
+.sheet textarea { width: 100%; min-height: 64px; resize: vertical; border: 1px solid var(--field); border-radius: 10px; padding: 8px 10px; font: inherit; font-size: 13px; outline: none; }
+.sheet textarea:focus { border-color: var(--reply-ink); box-shadow: 0 0 0 3px rgb(42 100 196 / 0.18); }
 .sheet-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .tp-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 13px; }
-.tp-row select { font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.tp-row select { font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid var(--field); border-radius: 8px; background: #fff; }
 .tp-radio { display: inline-flex; align-items: center; gap: 4px; }
 .tp-info { font-size: 12.5px; display: flex; flex-direction: column; gap: 3px; }
 .tp-result { font-size: 13px; background: var(--working-bg, #ecf8f1); padding: 8px 10px; border-radius: 10px; }
@@ -323,12 +420,9 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 
 /* 新しい世帯 */
 .new-house { margin-left: 6px; }
-.new-house-form { display: inline-flex; align-items: center; gap: 6px; margin-left: 6px; }
-.new-house-form input { font: inherit; font-size: 13px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 10px; width: 16em; outline: none; }
-.new-house-form.big input { width: 24em; font-size: 14px; padding: 8px 12px; }
 .empty { display: flex; flex-direction: column; align-items: center; gap: 12px; }
 .empty p { margin: 0; }
-.sheet-foot .primary, .new-house-form .primary { white-space: nowrap; flex: none; }
+.sheet-foot .primary { white-space: nowrap; flex: none; }
 
 /* スクロールの端のグラデーション（src/ScrollEdgeGradient.tsx）。外側に地とグラデーションを置き、透明なスクロールの容れ物を上に重ねる */
 .seg-wrap { position: relative; display: flex; flex-direction: column; min-height: 0; }
@@ -362,15 +456,19 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
   position: absolute; right: 12px; bottom: calc(var(--ca-size) / -2); z-index: 8; display: flex; gap: 3px;
   opacity: 0; pointer-events: none; transition: opacity 0.12s;
 }
-.fnode:hover .card-acts, .fnode.open .card-acts, .card-acts.always { opacity: 1; pointer-events: auto; }
+.fnode:hover .card-acts, .fnode.open .card-acts, .fnode:focus-within .card-acts, .card-acts.always { opacity: 1; pointer-events: auto; }
+/* 右パネルの見出しに並べるとき（CardActions の place="head"）。縁にまたがらせず、「転出」の下にいつも見える形で置く */
+.card-acts.in-head { --ca-size: 26px; position: static; opacity: 1; pointer-events: auto; gap: 4px; }
+.card-acts.in-head .card-act { border-radius: 7px; }
 .card-act {
   width: var(--ca-size); height: var(--ca-size); padding: 0; box-sizing: border-box; border-radius: 5px;
-  display: grid; place-items: center; font-size: 11px; line-height: 1;
+  display: grid; place-items: center; line-height: 1; color: #4a4853;
   background: #fff; border: 1.5px solid #cfcac2; box-shadow: 0 1px 2px rgba(47, 45, 54, 0.08);
   transition: transform 0.1s, border-color 0.12s, background 0.12s;
 }
 .card-act:hover { border-color: #8f8a96; transform: translateY(-1px); }
-.card-act.ca-kill:hover { border-color: #e5b4ad; background: #fff5f3; }
+.card-act.ca-kill:hover { border-color: #e5b4ad; background: #fff5f3; color: #c4493b; }
+.card-act.ca-restart:hover { border-color: #a9c4e8; background: #f2f7fe; color: #3b6db4; }
 .card-act.off { opacity: 0.4; filter: grayscale(1); cursor: not-allowed; }
 .card-act.off:hover { border-color: #cfcac2; transform: none; background: #fff; }
 .card-act.sending { opacity: 0.6; }
@@ -418,7 +516,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 }
 /* 町が狭いとき（右パネルを広げたとき）に見出しが途中で折れないようにする */
 .fam-head { flex-wrap: wrap; row-gap: 4px; }
-.fam-title, .fam-count, .new-house { white-space: nowrap; }
+.fam-title, .new-house { white-space: nowrap; }
 .legend { flex-wrap: wrap; justify-content: flex-end; row-gap: 2px; }
 .lg { white-space: nowrap; }
 .tp-plan { display: flex; flex-direction: column; gap: 2px; }
@@ -434,6 +532,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
    文字 #2f2d36 と地 #f6e7d6 の明暗差は 11.18:1（WCAG AA の 4.5:1 を満たす） */
 .msg.letter .b { background: #f6e7d6; border-color: #ecd6bd; }
 .msg.letter .meta .to { color: var(--sub); margin-right: 6px; }
+.msg.letter .meta .to .inline-icon { margin-right: 2px; }
 
 /* 転出のゴースト。別の町にいる親か子の影。半透明と点線で、閉じる演出の 👻 と分ける */
 .ghost-card {
@@ -442,16 +541,85 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
   transition: border-color 0.12s;
 }
 /* 地は不透明にして裏のつなぎ線を隠し、中身だけを薄くする */
-.ghost-card > * { opacity: 0.68; transition: opacity 0.12s; }
-.ghost-card:hover > * { opacity: 1; }
+.ghost-card .ghost-av { transition: opacity 0.12s; }
+.ghost-card:hover .ghost-av { opacity: 1; }
 .ghost-card:hover { border-color: #8f88a3; }
 .ghost-card.is-mini { border-radius: 10px; padding: 4px 6px; }
 .ghost-tag { display: inline-flex; align-items: center; gap: 4px; align-self: flex-start; font-size: 11px; color: #5f5873; background: #f1eff6; border-radius: 99px; padding: 1px 8px; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .ghost-body { display: flex; align-items: flex-end; gap: 6px; min-width: 0; }
-.ghost-av { filter: grayscale(0.6); opacity: 0.85; flex: none; }
+.ghost-av { filter: grayscale(0.6); opacity: 0.6; flex: none; }
 .ghost-name { font-size: 13px; font-weight: 700; color: #5f5873; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-bottom: 6px; }
 .ghost-card.is-mini .ghost-name { font-size: 10.5px; padding-bottom: 2px; }
 .edges line.ghost-edge { stroke-dasharray: 5 5; }
 
 /* ウィンドウが見えていない間は、CSS のアニメを全部止める（#6、src/visible.ts が data-hidden を付ける） */
 :root[data-hidden] *, :root[data-hidden] *::before, :root[data-hidden] *::after { animation-play-state: paused !important; }
+
+/* 町の画面の外にあるカードのアニメを止める（#12、src/offscreen.ts が .fnode に data-offscreen を付ける）。
+   閉じる演出（.dying、.kill-*）は止めない。止めると、見えない間に消える処理の時刻とずれる */
+.fnode[data-offscreen]:not(.dying) *, .fnode[data-offscreen]:not(.dying) *::before, .fnode[data-offscreen]:not(.dying) *::after { animation-play-state: paused !important; }
+
+/* ---------- 3枚のペイン（#89） ---------- */
+/* ヘッダー左端の、左のペインの開け閉め。アイコンは lucide の panel-left-close / panel-left-open */
+.side-toggle { display: inline-grid; place-items: center; width: 30px; height: 30px; margin-left: -6px; border-radius: 8px; color: var(--sub); background: transparent; }
+.side-toggle:hover { color: var(--ink); background: #f3f1ed; }
+/* 閉じたペインの側の境目は線を出さない。右（チャット）はセッションを選んで開くので、閉じている間はドラッグもさせない */
+.split-handle.closed::after { background: transparent; }
+.split-handle.side-sep.closed { pointer-events: none; }
+
+/* 左の新しい世帯のペイン */
+.nh { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; background: #faf9f7; }
+.nh-head { padding: 14px 16px 6px; }
+.nh-title { font-size: 13px; font-weight: 600; }
+.nh-top { padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 6px; }
+.nh-new { width: 100%; text-align: left; display: flex; align-items: center; gap: 6px; }
+.nh-sub { padding: 6px 16px 4px; font-size: 11.5px; color: var(--sub); }
+.nh-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 6px 12px; }
+.nh-row { width: 100%; padding: 7px 10px; text-align: left; background: transparent; font-size: 13px; border-radius: 0; border-bottom: 1px solid var(--line); }
+.nh-row:hover:not(:disabled) { background: #f3f1ed; }
+.nh-row:disabled { opacity: 0.55; }
+.nh-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--ink); }
+.nh-repo { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--sub); }
+.nh-time { flex: none; font-size: 11px; color: var(--sub); font-variant-numeric: tabular-nums; }
+/* 2行。1行目に名前（主）と日時、2行目にリポジトリ名（従）。左のペインが200pxでも名前を削らないため、リポジトリ名は別の行に置く */
+.nh-row { display: grid; grid-template-columns: 1fr auto; column-gap: 8px; align-items: baseline; }
+.nh-repo { grid-column: 1; grid-row: 2; }
+.nh-time { grid-column: 2; grid-row: 1; }
+.nh-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-list .nh-row { display: flex; align-items: baseline; gap: 10px; border-bottom: 0; border-radius: 8px; }
+.nh-note { margin: 6px 10px; font-size: 12px; color: var(--sub); }
+.nh-note.bad { color: #c2410c; }
+.nh-resume { padding: 8px 12px 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+.nh-resume .set-input { width: 100%; box-sizing: border-box; font-size: 12px; padding: 5px 8px; }
+.nh-resume .nh-note { margin: 0; }
+
+/* 右のチャットの見出しの ×（選ぶのをやめると右のペインが閉じる） */
+.p-close { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; color: var(--sub); background: transparent; }
+.p-close:hover { color: var(--ink); background: #f3f1ed; }
+
+/* 中央のペインの最上部のヘッダーと世帯の要約（#89）。並びはヘッダー、世帯の要約、お便り */
+.left { container-type: inline-size; }
+.left > .fam-head { padding: 12px 18px 10px; }
+/* 中央のペインが細いときは、ヘッダーの左右を折り返す（3枚にしたので、町の幅は 240px まで細くなる） */
+@container (max-width: 560px) {
+  .left > .top { display: flex; flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; }
+  .left > .top .top-right { margin-left: auto; }
+}
+
+/* 設定の画面（#92）。.modal と .modal-scrim は確認の画面と同じ */
+.set-modal { width: min(460px, 92vw); }
+.set-sec { display: flex; flex-direction: column; gap: 6px; }
+.set-sec .hint { margin: 0; }
+.set-label { font-size: 13px; font-weight: 600; }
+.set-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.set-input { font: inherit; font-size: 13px; padding: 7px 10px; border: 1px solid var(--field); border-radius: 10px; background: #fff; user-select: text; }
+.set-input:focus { outline: none; border-color: var(--reply-ink); box-shadow: 0 0 0 3px rgb(42 100 196 / 0.18); }
+.set-input[aria-invalid="true"] { border-color: #c2410c; }
+.set-bad { margin: 0; font-size: 12px; color: #c2410c; }
+.set-sub { margin-top: 4px; font-size: 11.5px; color: var(--sub); }
+/* 新しい世帯のモデルと権限モード。2つのセレクトを横に並べ、幅が足りなければ折り返す */
+.set-row { display: flex; flex-wrap: wrap; gap: 10px; }
+.set-pair { display: flex; flex-direction: column; gap: 2px; flex: 1 1 160px; }
+.set-pair .set-sub { margin-top: 0; }
+.set-list { max-height: 220px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; padding: 4px; }
+.set-list .nh-row.on { background: #efece7; font-weight: 600; }

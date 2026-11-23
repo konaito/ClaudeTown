@@ -20,53 +20,72 @@ export type Report = {
 export type Agent = {
   id: string;
   name: string;
-  kind: "terminal" | "node";
+  /** terminal は対話の claude（このアプリが立てたものと、端末で起動したもの）。subagent は sub-agent、teammate は agent team のチームメイト。
+   *  どちらも Claude Code の記録から読み、親のセッションの子として出す。pty と node はブラウザ版（PWA）が ccn から読むセッションの種類 */
+  kind: "terminal" | "node" | "pty" | "subagent" | "teammate";
+  /** 一覧の出どころ。app はこのアプリが立てた端末で、送信、停止、端末ができる。native は Claude Code の記録（~/.claude）から読んでいるだけで、
+   *  capabilities が全部 false。ccn はブラウザ版（PWA）だけが持つ、ccn の一覧の行 */
+  source?: "app" | "native" | "ccn";
+  /** アプリが立てた端末で、claude がまだ入力を受け付けるところまで起動していない（信頼の確認の画面を含む）。Rust の town_rows が付ける */
+  booting?: boolean;
   state: "running" | "waiting_permission" | "idle";
   cwd: string;
   /** cwd のプロジェクトの名前（worktree なら本体の名前。Rust が .git を読んで出す）。モックと古い一覧には無い */
   project?: string | null;
   pid?: number;
   startedAt?: number;
-  /** ccn が最後に動きを見た時刻（ms） */
+  /** 最後に動きを見た時刻（ms） */
   lastActivityAt?: number;
   canSend: boolean;
   parent: string | null;
-  /** ccn の parent の生の値（agent:<ノード>/<親の sid8>/<役割> か local） */
-  parentRaw?: string | null;
-  /** 転出のゴースト（src/ghost.ts）。相手の町にいる本物の ID と、親か子か */
-  ghost?: { town: string; realId: string; role: "parent" | "child" } | null;
   capabilities?: { send?: boolean; permissions?: boolean; interrupt?: boolean; stop?: boolean; terminal?: boolean } | null;
   report?: Report | null;
   closeCheck?: { status: "working" | "checking" | "ok" | "ng" | "error"; short?: string | null } | null;
   /** キャラの絵（Rust が町の中で被らないように割り当てる）。hue は色相のずらし（度） */
   avatar?: { char: string; hue: number } | null;
-  /** 世帯の名前（根のセッションだけ意味がある）。by=human は本人がアプリで付けた名前 */
-  house?: { name: string; by: "agent" | "human" } | null;
+  /** このセッションの claude が動いているアカウント（cam のコマンド名と email）。ブラウザ版（PWA）が ccn から読む行にだけある */
+  account?: string | null;
+  accountEmail?: string | null;
 };
+
+/** アカウントの表示（「名前（email）」）。email が無ければ名前だけ。アカウントが分からなければ null */
+export function accountText(a: Agent): string | null {
+  if (!a.account) return null;
+  return a.accountEmail ? `${a.account}（${a.accountEmail}）` : a.account;
+}
 
 export type Snapshot = {
-  ccn: string;
-  peer: string | null;
-  ccn_ok: boolean;
-  ccn_error: string | null;
   agents: Agent[];
-  /** お手紙の最近の記録（この機械の町だけ。src/letters.ts） */
+  /** お手紙の最近の記録（src/letters.ts） */
   letters?: import("./letters").LetterRec[];
   fetched_at: number;
-  /** 一覧を読めず、保存してあった一覧を agents に入れたときの、保存した時刻（ms）。src-tauri/src/offline.rs */
-  cached_at?: number | null;
+  /** 一覧の出どころの件数。native は src-tauri/src/native/mod.rs の Stats、app はこのアプリが立てた端末の数 */
+  sources?: { native: Record<string, unknown>; app: number } | null;
 };
 
-export type Peer = { name: string; url: string; status: string; self: boolean };
-
 export type ConvItem = {
-  role: "user" | "assistant" | "tool"; text: string; from?: string | null; at?: string | number | null; pending?: boolean;
+  /** result は道具の結果（画面は道具の行に付け直し、吹き出しにしない）。event は止めた・失敗したターンの印（#83） */
+  role: "user" | "assistant" | "tool" | "result" | "event"; text: string; from?: string | null; at?: string | number | null; pending?: boolean;
+  /** 作業中に打たれて、まだ読まれていない文（順番待ち）。conversation の live.queued から画面が付ける */
+  queued?: boolean;
+  /** claude の起動を待って、まだ送っていない文（Rust の composer.rs が預かっている）。起動したら送る */
+  waitBoot?: boolean;
   /** 通し番号（このセッションで何件目か。Rust の conversation が付ける）。吹き出しの key に使う。送ったばかりの仮の項目には無い */
   n?: number;
   /** 別のセッションからのお手紙なら、送り手（from-name と、uds のソケットか agent:<ノード>/<sid8>/<役割>） */
   letter?: { fromName?: string | null; fromRaw?: string | null } | null;
   /** 送ったお手紙（role が tool のとき）。宛先は生のまま。create は子を作って最初の文を渡したもの */
   sent?: { to?: string | null; peer?: string | null; summary?: string; text?: string | null; create?: boolean } | null;
+  /** 計画の確認（ExitPlanMode）の本文（role が tool のとき）。承認の欄で、hook の入力が空のときに出す */
+  plan?: string;
+  /** 道具の呼び出しの id（tool_use の id）。role が result のときは、どの道具の結果か */
+  id?: string | null;
+  /** 道具の結果（role が tool のとき）。届いていなければ無い */
+  result?: { text: string; error: boolean };
+  /** role が result のとき、結果が失敗か */
+  error?: boolean;
+  /** role が event のときの種類。command は、チャットからコマンドを実行した印（画面だけで出す、#97） */
+  kind?: "interrupted" | "error" | "command";
 };
 
 /**
@@ -90,6 +109,16 @@ export const MOOD_LABEL: Record<Mood, string> = {
   done: "完了",
   idle: "待機",
 };
+
+/** 様子の札の文。起動中は様子に関係なく「起動中」と出す（起動の前は sessions/<pid>.json が無く、様子は待機になる） */
+export function statusLabel(a: Pick<Agent, "booting">, mood: Mood): string {
+  return a.booting ? "起動中" : MOOD_LABEL[mood];
+}
+
+/** 様子の札の class。起動中は点を回る輪にする（App.css の .st-boot） */
+export function statusClass(a: Pick<Agent, "booting">, mood: Mood): string {
+  return `st st-${mood}${a.booting ? " st-boot" : ""}`;
+}
 
 export const NEEDS_YOU: Mood[] = ["approval", "reply"];
 
@@ -122,12 +151,6 @@ export function sinceText(ms?: number | null): string {
   return `${(s / 3600).toFixed(1)}時間`;
 }
 
-export function clip(s: string, n: number): string {
-  return s.length <= n ? s : s.slice(0, n - 1) + "…";
-}
-
-export type Family = { root: Agent; all: Agent[] };
-
 export function buildTree(agents: Agent[]) {
   const byId = new Map(agents.map((a) => [a.id, a]));
   const childrenOf = new Map<string, Agent[]>();
@@ -157,23 +180,7 @@ export function buildTree(agents: Agent[]) {
 // 同じ規則を src-tauri/src/naming.rs にも書いてある。試験の事例は src/naming-cases.json にまとめ、両方で読む。
 // .git を読んで worktree の本体を出すのは Rust だけ（Agent.project）。ここではパスの形だけで決める。
 
-/** 振り分けの場所のうち、ホーム（/Users/<名前> か /home/<名前>）からの相対の分。空はホームそのもの */
-export const DISPATCH_UNDER_HOME = ["", "Documents", "Documents/meta", ".local/share/ccn/lobby"];
-/** 振り分けの場所のうち、絶対パスの分 */
-export const DISPATCH_ABSOLUTE = ["/", "/tmp", "/private/tmp", "/root"];
-
 const segs = (p: string) => p.split("/").filter(Boolean);
-
-/** cwd が振り分けの場所（依頼を振り分けるだけの場所）か。パスの形だけで決める */
-export function isDispatchPlace(cwd: string): boolean {
-  const s = segs(cwd);
-  if (DISPATCH_ABSOLUTE.includes("/" + s.join("/"))) return true;
-  if (s.length >= 2 && (s[0] === "Users" || s[0] === "home")) {
-    const rest = s.slice(2).join("/");
-    return DISPATCH_UNDER_HOME.includes(rest);
-  }
-  return false;
-}
 
 /** パスの形だけで出すプロジェクトの名前。`<名前>.wt/<x>` なら <名前>、それ以外は最後の名前 */
 export function projectFromPath(cwd: string): string | null {
@@ -190,86 +197,58 @@ export type Who = {
   id: string;
   cwd?: string | null;
   title?: string | null;
-  parent?: string | null;
   /** cwd のプロジェクトの名前（Rust が .git を読んで出す）。無ければパスの形で出す */
   project?: string | null;
-  /** エージェントが hook（scripts/hook.py name）で付けた名前（houses.json の by=agent） */
-  agentName?: string | null;
-  startedAt?: number | null;
 };
 
 /**
- * カードの名前を全員分決める。
- * 1. cwd が無ければ ccn の題名、それも無ければ ID の先頭8字
- * 2. cwd が振り分けの場所でなければ、cwd のプロジェクトの名前
- * 3. 振り分けの場所なら、a. 子孫のプロジェクト（振り分けの場所にいる子孫は数えない）で一番多いもの。同数なら先に始まった子孫の分
- *    b. エージェントが hook で付けた名前、c. cwd の最後の名前
+ * カードの名前を全員分決める。世帯の名前は根のカードの名前なので、親のプロジェクトの名前になる。
+ * 1. cwd が無ければセッションの題名、それも無ければ ID の先頭8字
+ * 2. cwd があれば、cwd のプロジェクトの名前（worktree は本体の名前。~/Documents 直下、ホーム、/tmp なども cwd の最後の名前）。
+ *    子孫の cwd や、エージェントが付けた名前（houses.json）は見ない
  */
 export function cardNames(ws: Who[]): Map<string, string> {
-  const ids = new Set(ws.map((w) => w.id));
-  const kids = new Map<string, Who[]>();
-  for (const w of ws) {
-    if (w.parent && w.parent !== w.id && ids.has(w.parent)) kids.set(w.parent, [...(kids.get(w.parent) ?? []), w]);
-  }
-  for (const v of kids.values()) v.sort((a, b) => (a.startedAt ?? 0) - (b.startedAt ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  const own = (w: Who): string | null => {
-    if (!w.cwd || isDispatchPlace(w.cwd)) return null;
-    return w.project || projectFromPath(w.cwd);
-  };
-  const out = new Map<string, string>();
-  for (const w of ws) {
-    let name: string;
-    if (!w.cwd) name = w.title || w.id.slice(0, 8);
-    else if (!isDispatchPlace(w.cwd)) name = own(w) ?? w.id.slice(0, 8);
-    else {
-      const order: string[] = [];
-      const count = new Map<string, number>();
-      const seen = new Set([w.id]);
-      const queue = [...(kids.get(w.id) ?? [])];
-      for (let i = 0; i < queue.length; i++) {
-        const d = queue[i];
-        if (seen.has(d.id)) continue;
-        seen.add(d.id);
-        const p = own(d);
-        if (p) {
-          if (!count.has(p)) order.push(p);
-          count.set(p, (count.get(p) ?? 0) + 1);
-        }
-        queue.push(...(kids.get(d.id) ?? []));
-      }
-      const best = order.reduce<string | null>((b, p) => (b !== null && count.get(b)! >= count.get(p)! ? b : p), null);
-      name = best ?? (w.agentName?.trim() || null) ?? projectFromPath(w.cwd) ?? "/";
-    }
-    out.set(w.id, name);
-  }
-  return out;
-}
-
-/** cwd のプロジェクトの名前（worktree なら本体の名前）。Rust が出した分が無ければパスの形で出す */
-export function projectOf(a: Agent): string {
-  return a.project || projectFromPath(a.cwd) || a.cwd;
-}
-
-/** 返事の最後の段落が問いで、その中に短い選択肢の行があれば取り出す（ボタンにする） */
-export function choicesOf(text: string): string[] {
-  const paras = text.trim().split(/\n\s*\n/);
-  const tail = paras.slice(-2).join("\n");
-  if (!/[?？]/.test(tail)) return [];
-  const opts: string[] = [];
-  for (const line of tail.split("\n")) {
-    const m = line.match(/^\s*(?:[-*・]|\d+[.)．]|[A-DＡ-Ｄ][:：.)])\s*(.+?)\s*$/);
-    if (m && m[1].length <= 40) opts.push(m[1].replace(/\*\*/g, ""));
-  }
-  return opts.length >= 2 && opts.length <= 5 ? opts : [];
+  return new Map(
+    ws.map((w) => [w.id, !w.cwd ? w.title || w.id.slice(0, 8) : w.project || projectFromPath(w.cwd) || "/"] as [string, string]),
+  );
 }
 
 /**
- * 世帯の名前。本人が画面で付けた名前（by=human）を優先し、無ければ根のカードの名前（cardNames と同じ決め方。
- * Rust の snapshot が name に入れてある）。
+ * 返事の最後の問いに付いた選択肢の行を取り出す（ボタンにする）。選択肢は、問いの行のすぐ後ろ（無ければ、選ぶ言い方の問いに限ってすぐ前）に続く箇条書き。
+ * - と * は後ろに空白があるときだけ箇条書きとみる（「**太字**」の行を箇条書きにしない、2026-11-22）
+ * 長すぎる行が混じったら、黙って落とさずに何も出さない（落とすと残りだけの違う選択肢になる、2026-11-22）
  */
-export function houseNameOf(root: Agent, _all?: Agent[]): { name: string; by: "human" | "project" } {
-  if (root.house?.by === "human" && root.house.name) return { name: root.house.name, by: "human" };
-  return { name: root.name, by: "project" };
+export function choicesOf(text: string): string[] {
+  const lines = text.trim().split("\n").slice(-40);
+  const item = (line: string): string | null => {
+    const m = line.match(/^\s*(?:[-*]\s+|・\s*|\d+[.)．]\s*|[A-DＡ-Ｄ][:：.)]\s*)(.+?)\s*$/);
+    return m ? m[1].replace(/\*\*/g, "").trim() : null;
+  };
+  let q = -1;
+  lines.forEach((l, i) => { if (/[?？]/.test(l) && item(l) === null) q = i; });
+  if (q < 0) return [];
+  // 問いの後ろの段落か前の段落。間の空行は1つまで
+  const block = (from: number, step: 1 | -1): string[] => {
+    const out: string[] = [];
+    let i = from;
+    if (lines[i] !== undefined && !lines[i].trim()) i += step;
+    for (; i >= 0 && i < lines.length; i += step) {
+      const it = item(lines[i]);
+      if (it === null) break;
+      out.push(it);
+    }
+    return step === 1 ? out : out.reverse();
+  };
+  const after = block(q + 1, 1);
+  // 前の箇条書きは、問いが「どれ」「どっち」のように選ぶ言い方のときだけ選択肢にする。はい/いいえの問いの前の箇条書きは報告の一部（2026-11-22）
+  const opts = after.length ? after : /どれ|どっち|どちら|どの|選[んべぶ]/.test(lines[q]) ? block(q - 1, -1) : [];
+  if (opts.some((o) => !o || o.length > 200)) return [];
+  return opts.length >= 2 && opts.length <= 5 ? opts : [];
+}
+
+/** 世帯の名前。根のカードの名前（cardNames と同じ決め方。Rust の snapshot が name に入れてある）。保存された名前は見ない */
+export function houseNameOf(root: Agent): string {
+  return root.name;
 }
 
 /**
