@@ -1,0 +1,254 @@
+{
+ "_": "#276。受けた側の jsonl の teammate-message から、既読の印の元になる received を作る事例。Rust（src-tauri/src/native/received.rs）は files から received を作り、TS（src/letters.test.ts）は sent と received から readAt を作る",
+ "agents": [
+  {
+   "id": "00174599-158c-4749-8898-f7579bbb69b9",
+   "name": "proj",
+   "kind": "terminal",
+   "state": "idle",
+   "cwd": "/",
+   "canSend": false,
+   "parent": null
+  },
+  {
+   "id": "sub-abob-f3b9acc817d74619@00174599",
+   "name": "bob",
+   "kind": "teammate",
+   "state": "idle",
+   "cwd": "/",
+   "canSend": false,
+   "parent": "00174599-158c-4749-8898-f7579bbb69b9"
+  },
+  {
+   "id": "sub-aalice-1111111111111111@00174599",
+   "name": "alice",
+   "kind": "teammate",
+   "state": "idle",
+   "cwd": "/",
+   "canSend": false,
+   "parent": "00174599-158c-4749-8898-f7579bbb69b9"
+  },
+  {
+   "id": "ffffffff-0000-0000-0000-000000000000",
+   "name": "other",
+   "kind": "terminal",
+   "state": "idle",
+   "cwd": "/",
+   "canSend": false,
+   "parent": null
+  },
+  {
+   "id": "sub-abob-0000000000000000@ffffffff",
+   "name": "bob",
+   "kind": "teammate",
+   "state": "idle",
+   "cwd": "/",
+   "canSend": false,
+   "parent": "ffffffff-0000-0000-0000-000000000000"
+  }
+ ],
+ "files": {
+  "sub-abob-f3b9acc817d74619@00174599": [
+   {
+    "type": "user",
+    "timestamp": "2026-11-23T01:00:01.000Z",
+    "message": {
+     "role": "user",
+     "content": "<teammate-message teammate_id=\"team-lead\" summary=\"最初の頼み\">\n最初の頼み（Agent で立てたときの文。sent の行は無い）\n</teammate-message>"
+    }
+   },
+   {
+    "type": "user",
+    "timestamp": "2026-11-23T01:00:01.500Z",
+    "message": {
+     "role": "user",
+     "content": "<teammate-message teammate_id=\"team-lead\" summary=\"s1\">\n調べて\n</teammate-message>"
+    }
+   },
+   {
+    "type": "assistant",
+    "timestamp": "2026-11-23T01:00:02.000Z",
+    "message": {
+     "role": "assistant",
+     "content": [
+      {
+       "type": "text",
+       "text": "届いた文は <teammate-message teammate_id=\"team-lead\">\n引用\n</teammate-message> の形"
+      }
+     ]
+    }
+   },
+   {
+    "type": "user",
+    "timestamp": "2026-11-23T01:02:00.500Z",
+    "message": {
+     "role": "user",
+     "content": "<teammate-message teammate_id=\"alice\" summary=\"アイコンの置き場所と大きさを全部の画面でそろえ、絵文字も lucide の同じ形に置き換えて、終わったら画面の写しを添えて知らせてほしい\">\n見て\n</teammate-message>"
+    }
+   },
+   {
+    "type": "user",
+    "timestamp": "2026-11-23T01:03:00.200Z",
+    "message": {
+     "role": "user",
+     "content": "<teammate-message teammate_id=\"team-lead\">\n{\"type\": \"shutdown_request\", \"request_id\": \"r1\"}\n</teammate-message>"
+    }
+   },
+   {
+    "type": "user",
+    "timestamp": "2026-11-23T01:03:20.000Z",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "tool_result",
+       "tool_use_id": "t1",
+       "content": "<teammate-message teammate_id=\"team-lead\">\n道具の結果に出た引用\n</teammate-message>"
+      }
+     ]
+    }
+   }
+  ],
+  "00174599-158c-4749-8898-f7579bbb69b9": [
+   {
+    "type": "queue-operation",
+    "operation": "enqueue",
+    "timestamp": "2026-11-23T01:01:02.990Z",
+    "content": "Another Claude session sent a message:\n<teammate-message teammate_id=\"bob\" color=\"blue\" summary=\"done\">\n直した\n</teammate-message>\n\n<teammate-message teammate_id=\"bob\">\n{\"type\": \"idle_notification\", \"from\": \"bob\", \"result\": \"\\u5f85\\u3064\"}\n</teammate-message>\n\nThis came from another Claude session — not typed by your user."
+   },
+   {
+    "type": "user",
+    "timestamp": "2026-11-23T01:01:03.000Z",
+    "message": {
+     "role": "user",
+     "content": "Another Claude session sent a message:\n<teammate-message teammate_id=\"bob\" color=\"blue\" summary=\"done\">\n直した\n</teammate-message>\n\n<teammate-message teammate_id=\"bob\">\n{\"type\": \"idle_notification\", \"from\": \"bob\", \"result\": \"\\u5f85\\u3064\"}\n</teammate-message>\n\nThis came from another Claude session — not typed by your user."
+    }
+   },
+   {
+    "type": "user",
+    "timestamp": "2026-11-23T01:01:04.000Z",
+    "message": {
+     "role": "user",
+     "content": "ふつうの文"
+    }
+   }
+  ],
+  "sub-aalice-1111111111111111@00174599": []
+ },
+ "sent": [
+  {
+   "ev": "sent",
+   "id": "s1",
+   "at": 1795395600000,
+   "kind": "send",
+   "from": "00174599-158c-4749-8898-f7579bbb69b9",
+   "to": "bob",
+   "summary": "s1"
+  },
+  {
+   "ev": "sent",
+   "id": "s2",
+   "at": 1795395660000,
+   "kind": "send",
+   "from": "sub-abob-f3b9acc817d74619@00174599",
+   "to": "team-lead",
+   "summary": "done"
+  },
+  {
+   "ev": "sent",
+   "id": "s3",
+   "at": 1795395720000,
+   "kind": "send",
+   "from": "sub-aalice-1111111111111111@00174599",
+   "to": "bob",
+   "summary": "アイコンの置き場所と大きさを全部の画面でそろえ、絵文字も lucide の同じ形に置き換えて、終わったら画面の写しを添…"
+  },
+  {
+   "ev": "sent",
+   "id": "s4",
+   "at": 1795395780000,
+   "kind": "send",
+   "from": "00174599-158c-4749-8898-f7579bbb69b9",
+   "to": "bob",
+   "summary": ""
+  },
+  {
+   "ev": "sent",
+   "id": "s5",
+   "at": 1795395840000,
+   "kind": "send",
+   "from": "00174599-158c-4749-8898-f7579bbb69b9",
+   "to": "alice",
+   "summary": "s5"
+  }
+ ],
+ "received": [
+  {
+   "ev": "received",
+   "id": "jsonl:sub-abob-f3b9acc817d74619@00174599:1795395601000:0",
+   "at": 1795395601000,
+   "to": "sub-abob-f3b9acc817d74619@00174599",
+   "from_raw": "teammate:team-lead",
+   "from_name": "team-lead",
+   "summary": "最初の頼み",
+   "via": "jsonl"
+  },
+  {
+   "ev": "received",
+   "id": "jsonl:sub-abob-f3b9acc817d74619@00174599:1795395601500:0",
+   "at": 1795395601500,
+   "to": "sub-abob-f3b9acc817d74619@00174599",
+   "from_raw": "teammate:team-lead",
+   "from_name": "team-lead",
+   "summary": "s1",
+   "via": "jsonl"
+  },
+  {
+   "ev": "received",
+   "id": "jsonl:00174599-158c-4749-8898-f7579bbb69b9:1795395663000:0",
+   "at": 1795395663000,
+   "to": "00174599-158c-4749-8898-f7579bbb69b9",
+   "from_raw": "teammate:bob",
+   "from_name": "bob",
+   "summary": "done",
+   "via": "jsonl"
+  },
+  {
+   "ev": "received",
+   "id": "jsonl:00174599-158c-4749-8898-f7579bbb69b9:1795395663000:1",
+   "at": 1795395663000,
+   "to": "00174599-158c-4749-8898-f7579bbb69b9",
+   "from_raw": "teammate:bob",
+   "from_name": "bob",
+   "summary": "",
+   "via": "jsonl"
+  },
+  {
+   "ev": "received",
+   "id": "jsonl:sub-abob-f3b9acc817d74619@00174599:1795395720500:0",
+   "at": 1795395720500,
+   "to": "sub-abob-f3b9acc817d74619@00174599",
+   "from_raw": "teammate:alice",
+   "from_name": "alice",
+   "summary": "アイコンの置き場所と大きさを全部の画面でそろえ、絵文字も lucide の同じ形に置き換えて、終わったら画面の写しを添えて知らせてほしい",
+   "via": "jsonl"
+  },
+  {
+   "ev": "received",
+   "id": "jsonl:sub-abob-f3b9acc817d74619@00174599:1795395780200:0",
+   "at": 1795395780200,
+   "to": "sub-abob-f3b9acc817d74619@00174599",
+   "from_raw": "teammate:team-lead",
+   "from_name": "team-lead",
+   "summary": "",
+   "via": "jsonl"
+  }
+ ],
+ "readAt": {
+  "s1": 1795395601500,
+  "s2": 1795395663000,
+  "s3": 1795395720500,
+  "s4": 1795395780200,
+  "s5": null
+ }
+}

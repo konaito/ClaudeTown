@@ -10,6 +10,7 @@
 // lib.rs の agents_from が画面の形に直す。記録から読んだ項目は native に入れる。
 
 pub mod conv;
+pub mod received;
 pub mod sessions;
 pub mod subagents;
 pub mod teams;

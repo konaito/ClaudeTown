@@ -437,7 +437,9 @@ static LAST_SOURCES: Mutex<Option<Value>> = Mutex::new(None);
 
 /// 画面に渡す町を作る。キャラの割り当て、状態ファイル、お手紙はここで足す
 fn snapshot() -> Snapshot {
-    let mut agents = agents_from(town_rows());
+    let rows = town_rows();
+    let readers = native::received::targets(&rows);
+    let mut agents = agents_from(rows);
     // キャラの絵の割り当て。世代（親をたどった深さ）に合う見た目を重み付きの乱数で選び、保存して以後変えない
     let mut order: Vec<&Value> = agents.iter().collect();
     order.sort_by(|a, b| a["startedAt"].as_u64().unwrap_or(0).cmp(&b["startedAt"].as_u64().unwrap_or(0)).then(a["id"].as_str().cmp(&b["id"].as_str())));
@@ -468,7 +470,18 @@ fn snapshot() -> Snapshot {
         }
     }
     let sources = LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    Snapshot { agents, letters: recent_letters(), fetched_at: now_ms(), sources }
+    let now = now_ms();
+    let letters = with_reads(recent_letters(), |since| native::received::recent(&readers, since), now);
+    Snapshot { agents, letters, fetched_at: now, sources }
+}
+
+/// letters.jsonl の記録に、受けた側の jsonl から作った received を足す（#276）。ファイルには書かない。
+/// 窓に sent が1通も無ければ、既読にする相手が無いので jsonl を読まない
+fn with_reads(mut letters: Vec<Value>, read: impl FnOnce(u64) -> Vec<Value>, now: u128) -> Vec<Value> {
+    if letters.iter().any(|l| l["ev"] == "sent") {
+        letters.extend(read(now.saturating_sub(LETTERS_WINDOW_MS) as u64));
+    }
+    letters
 }
 
 static AVATARS_LOCK: Mutex<()> = Mutex::new(());
@@ -641,6 +654,18 @@ pub(crate) static NATIVE_TEST_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jsonl_reads_are_added_only_when_something_was_sent() {
+        let r = json!({"ev": "received", "via": "jsonl"});
+        let called = std::cell::Cell::new(None);
+        let read = |since: u64| { called.set(Some(since)); vec![r.clone()] };
+        assert_eq!(with_reads(vec![json!({"ev": "received"})], read, LETTERS_WINDOW_MS + 5), vec![json!({"ev": "received"})]);
+        assert_eq!(called.get(), None, "sent が無ければ読まない");
+        let read = |since: u64| { called.set(Some(since)); vec![r.clone()] };
+        assert_eq!(with_reads(vec![json!({"ev": "sent"})], read, LETTERS_WINDOW_MS + 5), vec![json!({"ev": "sent"}), r.clone()]);
+        assert_eq!(called.get(), Some(5), "窓の始まりから読む");
+    }
 
     #[test]
     fn letters_read_only_what_was_added() {
