@@ -196,15 +196,34 @@ fn locate(root: &Path, sid: &str, cwd: &str, stats: &mut Stats) -> (PathBuf, boo
 
 /// 最初の user の文の from 行。from 行が無ければ Some(None)、まだ user の行が無ければ None（次の回に読み直す）
 pub fn first_prompt_caller(jsonl: &Path) -> Option<Option<String>> {
-    let f = fs::File::open(jsonl).ok()?;
-    // 先頭の 1MB と 400 行までに無ければ、from 行は無いとみなす
-    let r = BufReader::new(f.take(1 << 20));
-    for (i, line) in r.lines().enumerate() {
-        let Ok(line) = line else { break };
-        if i >= 400 {
+    // 先頭の 1MB と 400 行までに始まる行に無ければ、from 行は無いとみなす。
+    // 1MB をまたぐ行は、64MB までなら最後まで読む（画像を貼った最初の文は 8MB や 16MB になる。#234）。
+    // 頭だけでは isMeta（message の後ろにある）や tool_result を見られないので、行を丸ごと読んで今と同じ規則で見る
+    const HEAD: u64 = 1 << 20;
+    const LINE_CAP: u64 = 64 << 20;
+    let mut r = BufReader::new(fs::File::open(jsonl).ok()?);
+    let mut off = 0u64;
+    let mut buf = Vec::new();
+    for i in 0.. {
+        if i >= 400 || off >= HEAD {
             return Some(None);
         }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        buf.clear();
+        let n = r.by_ref().take(LINE_CAP + 1).read_until(b'\n', &mut buf).ok()? as u64;
+        if n == 0 {
+            return None;
+        }
+        off += n;
+        if n > LINE_CAP {
+            return Some(None);
+        }
+        // 改行の無い最後の行は、読めれば使い、読めなければ書きかけとみなして次の回に読み直す
+        let Ok(v) = serde_json::from_slice::<Value>(&buf) else {
+            if buf.ends_with(b"\n") {
+                continue;
+            }
+            return None;
+        };
         if v["type"] != "user" || v["isMeta"].as_bool() == Some(true) {
             continue;
         }
@@ -391,6 +410,63 @@ mod tests {
         assert_eq!(caller_of("from me@example.com via pro\n本文").as_deref(), Some("me@example.com"));
         assert_eq!(caller_of("from 東京 に行く"), None);
         assert_eq!(caller_of("ふつうの文"), None);
+    }
+
+    /// 1行目が短い非 user の行、2行目が 1MB を超える user の行（#234）
+    fn big_prompt(root: &Path, name: &str, content: &str) -> PathBuf {
+        let p = root.join(name);
+        write(&p, &format!(
+            "{}\n{{\"parentUuid\":null,\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":{content}}},\"uuid\":\"u\"}}\n",
+            r#"{"type":"file-history-snapshot","messageId":"m","snapshot":{}}"#,
+        ));
+        p
+    }
+
+    #[test]
+    fn first_prompt_over_1mb_reads_the_from_line_at_its_head() {
+        let root = tmp("big-prompt");
+        let body = "あ".repeat(700_000); // 2.1MB
+        // 本文が文字列
+        let s = serde_json::to_string(&format!("from agent:node/2222aaaa/role via node\n\n{body}")).unwrap();
+        let p = big_prompt(&root, "str.jsonl", &s);
+        assert!(fs::metadata(&p).unwrap().len() > 2 << 20);
+        assert_eq!(first_prompt_caller(&p), Some(Some("agent:node/2222aaaa/role".into())));
+        // 本文が配列で、文の後ろに大きな画像が続く（貼った画像の付いた最初の文の実際の形）
+        let img = "A".repeat(3 << 20);
+        let a = format!(r#"[{{"type":"text","text":"from me@example.com via pro\n見て"}},{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"{img}"}}}}]"#);
+        let p = big_prompt(&root, "arr.jsonl", &a);
+        assert_eq!(first_prompt_caller(&p), Some(Some("me@example.com".into())));
+        // from 行の無い大きな文は Some(None)（読み直さない）
+        let s = serde_json::to_string(&body).unwrap();
+        assert_eq!(first_prompt_caller(&big_prompt(&root, "plain.jsonl", &s)), Some(None));
+    }
+
+    #[test]
+    fn first_prompt_beyond_1mb_stops_rereading() {
+        let root = tmp("big-other");
+        // 最初の user の行の前に 1MB を超える非 user の行がある。from 行は探せないので Some(None)
+        let p = root.join("other.jsonl");
+        write(&p, &format!(
+            "{{\"type\":\"attachment\",\"data\":\"{}\"}}\n{}\n",
+            "x".repeat(2 << 20),
+            r#"{"type":"user","message":{"content":"from agent:n/1/r via n\nやって"}}"#,
+        ));
+        assert_eq!(first_prompt_caller(&p), Some(None));
+        // まだ user の行が無い短い記録は、今までどおり None（次の回に読み直す）
+        let p = root.join("young.jsonl");
+        write(&p, "{\"type\":\"file-history-snapshot\",\"snapshot\":{}}\n");
+        assert_eq!(first_prompt_caller(&p), None);
+        // 書きかけの user の行で終わっている短い記録も None
+        let p = root.join("half.jsonl");
+        write(&p, "{\"type\":\"file-history-snapshot\",\"snapshot\":{}}\n{\"type\":\"user\",\"message\":{\"content\":\"from a via");
+        assert_eq!(first_prompt_caller(&p), None);
+        // 1MB を超える user の行を書いている途中も None（Some(None) で覚えると、from 行があっても親子がつながらない）
+        let p = root.join("half-big.jsonl");
+        write(&p, &format!(
+            "{{\"type\":\"file-history-snapshot\",\"snapshot\":{{}}}}\n{{\"type\":\"user\",\"message\":{{\"content\":\"from agent:n/1/r via n\\n{}",
+            "x".repeat(2 << 20),
+        ));
+        assert_eq!(first_prompt_caller(&p), None);
     }
 
     #[test]
