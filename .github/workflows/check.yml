@@ -2,11 +2,11 @@ name: Check
 on:
   pull_request:
   push:
-    branches: [feat/app-v1] # このリポジトリの既定ブランチ
+    branches: [main] # このリポジトリの既定ブランチ
 
 concurrency:
   group: check-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  # 同じ PR に後から push したら前の確認を止める。feat/app-v1 への push は1回ずつ最後まで回す
+  # 同じ PR に後から push したら前の確認を止める。main への push は1回ずつ最後まで回す
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
