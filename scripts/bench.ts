@@ -398,11 +398,15 @@ function summarize(file: string) {
   const runs: Run[] = fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
   const out: string[] = [];
   const first = runs[0];
+  // startup だけの記録では CPU を測っていないので、CPU の表と秒数は出さない
+  const cpuRuns = runs.some((r) => r.scene !== "startup");
   out.push(`# 軽さの計測 ${path.basename(file, ".jsonl")}`, "");
-  out.push(`\`scripts/bench.ts\` の結果（${path.basename(file)} から作った表）。1回 ${first?.secs ?? "?"} 秒、ビルドは ${[...new Set(runs.map((r) => r.build))].join("、")}、お手紙の記録は ${[...new Set(runs.map((r) => r.lettersKB))].join("、")}KB。`);
-  out.push("CPU は1コアに対する割合（ps の CPU 時間の差 ÷ 経過時間）。中央値（最小〜最大）。メモリは測り終えたときの RSS。無効の回は数に入れていない。", "");
-  out.push("| 場面 | 有効/回 | 本体 CPU | WebContent CPU | GPU CPU | Networking CPU | 合計 CPU | 本体 RSS | WebContent RSS | GPU RSS | ccn への要求/分 | 起動から町の描画まで |");
-  out.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+  out.push(`\`scripts/bench.ts\` の結果（${path.basename(file)} から作った表）。${cpuRuns ? `1回 ${first?.secs ?? "?"} 秒、` : ""}ビルドは ${[...new Set(runs.map((r) => r.build))].join("、")}、お手紙の記録は ${[...new Set(runs.map((r) => r.lettersKB))].join("、")}KB。`);
+  if (cpuRuns) {
+    out.push("CPU は1コアに対する割合（ps の CPU 時間の差 ÷ 経過時間）。中央値（最小〜最大）。メモリは測り終えたときの RSS。無効の回は数に入れていない。", "");
+    out.push("| 場面 | 有効/回 | 本体 CPU | WebContent CPU | GPU CPU | Networking CPU | 合計 CPU | 本体 RSS | WebContent RSS | GPU RSS | ccn への要求/分 | 起動から町の描画まで |");
+    out.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+  }
   for (const scene of DEFAULT_SCENES) {
     const all = runs.filter((r) => r.scene === scene);
     if (!all.length) continue;
@@ -426,7 +430,7 @@ function summarize(file: string) {
     const ok = boots.filter((r) => r.valid && r.boot);
     const b = (k: keyof NonNullable<Run["boot"]>, unit: string) => cell(ok.map((r) => r.boot![k]).filter((x): x is number => typeof x === "number"), unit);
     out.push("", "## 起動の時間（startup）", "");
-    out.push("Rust の run() の入口からの時間。中央値（最小〜最大）。RSS は Rust の起動の10秒後。");
+    out.push(`Rust の run() の入口からの時間。${ok.length === 1 ? "1回だけ測った値で、ばらつきは分からない" : "中央値（最小〜最大）"}。RSS は Rust の起動の10秒後。無効の回は数に入れていない。`);
     out.push("", "| 有効/回 | 画面の読み込み開始まで | 窓の最初の描画まで | 町の最初の描画まで | 本体 RSS | WebContent RSS |", "| --- | --- | --- | --- | --- | --- |");
     out.push(`| ${ok.length}/${boots.length} | ${b("toNavStartMs", "ms")} | ${b("toShellPaintMs", "ms")} | ${b("toTownPaintMs", "ms")} | ${b("rssAppMB10s", "MB")} | ${b("rssWebContentMB10s", "MB")} |`);
   }
