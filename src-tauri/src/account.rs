@@ -2,7 +2,8 @@
 // `cam usage --json` の best のコマンドで起動する。cam の launcher（~/.cam/bin/<名前>）は `cam sync <名前>` の後に
 // CLAUDE_CONFIG_DIR=~/.cam/profiles/<名前> で claude を起動する。ここも同じにする。
 // 選び方は ccn の src/engine/account.ts（claude-code-nodes）に合わせた。Claude Town が ccn を通さずに起動するようになったときに抜けていた。
-// 選べないとき（cam が無い、落ちる、5秒で返らない、JSON が読めない、best が null）は env を触らず、今まで通りに起動する。
+// 選べないとき（cam が無い、落ちる、上限（USAGE_TIMEOUT）で返らない、JSON が読めない、best が null）は env を触らず、今まで通りに起動する。
+// 上限で止めたときだけは、既定のアカウントで起動したことを画面に知らせる（#249。上限に達したアカウントで立つと、最初の送信まで気づかない）。
 // 例外は新しく立てるときに、cam が「枠の残るコマンドが無い」（choice: none）と答え、次に戻る時刻が先にあるとき。起動をやめて、その時刻を画面に出す（`cam auto` も起動しない）。
 // resume は断らない。アプリを開いたときの立て直しで断ると、前回の端末が画面に何も出ずに戻らなくなる。上限のアカウントで立っても、送るまでは害がない
 use std::io::Read;
@@ -10,8 +11,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// cam usage と cam sync を待つ上限。過ぎたら止めて今まで通りにする
-const TIMEOUT: Duration = Duration::from_secs(5);
+/// cam usage を待つ上限。過ぎたら止めて今まで通りにする。
+/// cam は各アカウントの使用量を並べて `curl -m 5` で取り、取れなければ控え（~/.cam/usage-cache）の値で選ぶ。
+/// その前後に security、jq、awk の時間が足されるので、curl の上限と同じ5秒で止めると控えに落ちる道に届かない（#249）。3秒の余裕を見て8秒にする
+const USAGE_TIMEOUT: Duration = Duration::from_secs(8);
+/// cam sync を待つ上限。ネットワークを使わず、起動のたびに（立て直しでは端末の数だけ）走るので、usage より短くする
+const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 /// 結果を使い回す時間。起動のときの立て直し（台帳の件数だけ続けて起動する）で cam usage を何度も呼ばない。usage の API は 429 を返しやすい（cam の README）
 const TTL: Duration = Duration::from_secs(30);
 
@@ -25,6 +30,8 @@ pub enum Choice {
     None { next: Option<(String, i64)> },
     /// 選ばない。env を触らずに起動する（理由はログに出す）
     Keep(String),
+    /// cam usage が上限で返らなかった。Keep と同じく env を触らずに起動し、画面に知らせる（#249）
+    TimedOut(String),
 }
 
 /// cam のコマンド名の決まり（cam の valid_name、ccn の NAME）
@@ -115,16 +122,23 @@ fn profiles_dir() -> PathBuf {
     }
 }
 
+/// 起動できなかったか、上限で止めたか
+#[derive(Debug)]
+enum RunError {
+    Spawn(String),
+    TimedOut(String),
+}
+
 /// 上限つきで実行し、終わったら標準出力と終了コードを返す。過ぎたら止めて Err
-fn run(cam: &Path, args: &[&str], path: Option<&str>) -> Result<(String, Option<i32>), String> {
+fn run(cam: &Path, args: &[&str], path: Option<&str>, limit: Duration) -> Result<(String, Option<i32>), RunError> {
     let mut cmd = std::process::Command::new(cam);
     cmd.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
     // cam は bash で jq を呼ぶ。Finder から開いたアプリの PATH には無いことがあるので、claude と同じログインシェルの PATH を渡す
     if let Some(p) = path {
         cmd.env("PATH", p);
     }
-    let mut child = cmd.spawn().map_err(|e| format!("cam を起動できなかった: {e}"))?;
-    let mut out = child.stdout.take().ok_or("cam の出力を読めない")?;
+    let mut child = cmd.spawn().map_err(|e| RunError::Spawn(format!("cam を起動できなかった: {e}")))?;
+    let mut out = child.stdout.take().ok_or_else(|| RunError::Spawn("cam の出力を読めない".into()))?;
     let reader = std::thread::spawn(move || {
         let mut s = String::new();
         let _ = out.read_to_string(&mut s);
@@ -134,11 +148,11 @@ fn run(cam: &Path, args: &[&str], path: Option<&str>) -> Result<(String, Option<
     let status = loop {
         match child.try_wait() {
             Ok(Some(st)) => break st,
-            Ok(None) if t0.elapsed() < TIMEOUT => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) if t0.elapsed() < limit => std::thread::sleep(Duration::from_millis(20)),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("cam {} が {}秒で返らなかった", args.join(" "), TIMEOUT.as_secs()));
+                return Err(RunError::TimedOut(format!("cam {} が {}秒で返らなかった", args.join(" "), limit.as_secs())));
             }
         }
     };
@@ -146,8 +160,9 @@ fn run(cam: &Path, args: &[&str], path: Option<&str>) -> Result<(String, Option<
 }
 
 fn pick_uncached(cam: &Path, profiles: &Path, path: Option<&str>) -> Choice {
-    match run(cam, &["usage", "--json"], path) {
-        Err(e) => Choice::Keep(e),
+    match run(cam, &["usage", "--json"], path, USAGE_TIMEOUT) {
+        Err(RunError::Spawn(e)) => Choice::Keep(e),
+        Err(RunError::TimedOut(e)) => Choice::TimedOut(e),
         Ok((_, code)) if code != Some(0) => Choice::Keep(format!("cam usage が {code:?} で終わった")),
         Ok((out, _)) => choose(&out, profiles, |p| p.is_dir()),
     }
@@ -156,7 +171,8 @@ fn pick_uncached(cam: &Path, profiles: &Path, path: Option<&str>) -> Choice {
 /// 使い回しの控え。cam とプロファイルの置き場所が同じときだけ使う
 static CACHE: Mutex<Option<(PathBuf, PathBuf, Instant, Choice)>> = Mutex::new(None);
 
-/// 選ぶ。cam が無ければ Keep。結果は TTL の間使い回す。同時の呼び出しは錠で1回の cam usage にまとめる
+/// 選ぶ。cam が無ければ Keep。結果は TTL の間使い回す（上限で止めた結果も。立て直しで端末ごとに上限まで待たない）。
+/// 同時の呼び出しは錠で1回の cam usage にまとめる
 pub fn pick(path: Option<&str>) -> Choice {
     let Some(cam) = cam_bin(path) else { return Choice::Keep("cam が無い".into()) };
     let profiles = profiles_dir();
@@ -170,11 +186,20 @@ pub fn pick(path: Option<&str>) -> Choice {
     choice
 }
 
-/// 起動の直前の用意。返すのは claude の CLAUDE_CONFIG_DIR の扱い（ConfigDir）。起動をやめるときは Err（refuse が true のときだけ。新しく立てるとき）。
+/// 起動の直前の用意の結果
+#[derive(Debug, PartialEq)]
+pub struct Prepared {
+    /// claude の CLAUDE_CONFIG_DIR の扱い
+    pub dir: ConfigDir,
+    /// アカウントを選べず、既定のアカウントで起動するときの、画面に出す一言（cam usage が上限で返らなかったときだけ。#249）
+    pub fallback: Option<String>,
+}
+
+/// 起動の直前の用意。起動をやめるときは Err（refuse が true のときだけ。新しく立てるとき）。
 /// プロファイルを選んだら launcher と同じく `cam sync <名前>` を掛ける（共有のリンク、MCP、信頼済みフォルダの同期。失敗しても起動は続ける）。
 /// 信頼済みフォルダは cam sync が ~/.claude.json と全プロファイルの和をプロファイルに写すので、ccn のように cwd を書き足すことはしない
 /// （launcher も書かない。Claude Town は信頼の画面を端末で出す）
-pub fn prepare(path: Option<&str>, refuse: bool) -> Result<ConfigDir, String> {
+pub fn prepare(path: Option<&str>, refuse: bool) -> Result<Prepared, String> {
     let choice = pick(path);
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     if let Some(why) = refuse_reason(&choice, now).filter(|_| refuse) {
@@ -184,28 +209,37 @@ pub fn prepare(path: Option<&str>, refuse: bool) -> Result<ConfigDir, String> {
     match choice {
         Choice::Profile { name, dir } => {
             if let Some(cam) = cam_bin(path) {
-                match run(&cam, &["sync", &name], path) {
+                match run(&cam, &["sync", &name], path, SYNC_TIMEOUT) {
                     Ok((_, Some(0))) => {}
                     r => eprintln!("[account] cam sync {name} が通らなかった（起動は続ける）: {r:?}"),
                 }
             }
             eprintln!("[account] {name} で起動する（{}）", dir.display());
-            Ok(ConfigDir::Set(dir))
+            Ok(Prepared { dir: ConfigDir::Set(dir), fallback: None })
         }
         // launcher（~/.cam/bin/<名前>）と同じく cam sync は掛けない
         Choice::Default { name } => {
             eprintln!("[account] {name}（--default のコマンド）で起動する。CLAUDE_CONFIG_DIR を外す");
-            Ok(ConfigDir::Unset)
+            Ok(Prepared { dir: ConfigDir::Unset, fallback: None })
         }
         Choice::None { next } => {
             eprintln!("[account] cam に使えるコマンドが無いが、resume か、戻る時刻が過ぎているか分からないので今まで通り起動する: {next:?}");
-            Ok(ConfigDir::Keep)
+            Ok(Prepared { dir: ConfigDir::Keep, fallback: None })
         }
         Choice::Keep(why) => {
             eprintln!("[account] 今まで通り起動する: {why}");
-            Ok(ConfigDir::Keep)
+            Ok(Prepared { dir: ConfigDir::Keep, fallback: None })
+        }
+        Choice::TimedOut(why) => {
+            eprintln!("[account] 今まで通り起動する: {why}");
+            Ok(Prepared { dir: ConfigDir::Keep, fallback: Some(fallback_text(&why)) })
         }
     }
+}
+
+/// 上限で止めたときに画面に出す一言。結果は TTL（30秒）使い回すので、すぐに立て直すと同じく既定のアカウントで立つ
+fn fallback_text(why: &str) -> String {
+    format!("アカウントを選べず、既定のアカウントで起動した（{why}）。上限に達したアカウントなら、送る前に30秒ほど置いてから立て直す")
 }
 
 #[cfg(test)]
@@ -278,8 +312,23 @@ mod tests {
         }
         assert!(matches!(pick_uncached(&fail, &dir, None), Choice::Keep(_)));
         let t0 = Instant::now();
-        assert!(matches!(pick_uncached(&slow, &dir, None), Choice::Keep(_)));
-        assert!(t0.elapsed() < TIMEOUT + Duration::from_secs(2), "5秒を超えて待った: {:?}", t0.elapsed());
+        // 上限で止めたときは Keep と分ける（画面に知らせる）
+        assert!(matches!(pick_uncached(&slow, &dir, None), Choice::TimedOut(_)));
+        assert!(t0.elapsed() < USAGE_TIMEOUT + Duration::from_secs(2), "上限を超えて待った: {:?}", t0.elapsed());
         assert!(matches!(pick_uncached(&dir.join("missing"), &dir, None), Choice::Keep(_)));
+    }
+
+    /// #249。cam の curl の上限（-m 5）を過ぎてから、控えの値で best を返す cam を待ちきって選ぶ
+    #[test]
+    fn a_cam_answering_after_its_curl_limit_is_waited_for() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("fc-account-late-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("profiles/acct")).unwrap();
+        let late = dir.join("cam");
+        std::fs::write(&late, "#!/bin/sh\nsleep 5.3\necho '{\"best\":\"acct\",\"choice\":\"normal\",\"next_available\":null,\"accounts\":[]}'\n").unwrap();
+        std::fs::set_permissions(&late, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let profiles = dir.join("profiles");
+        assert_eq!(pick_uncached(&late, &profiles, None), Choice::Profile { name: "acct".into(), dir: profiles.join("acct") });
     }
 }
