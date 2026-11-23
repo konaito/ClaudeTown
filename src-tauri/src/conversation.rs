@@ -715,6 +715,7 @@ fn not_found(path: &std::path::Path) -> bool {
     matches!(std::fs::metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
+crate::blocking_command! {
 pub(crate) fn conversation(session_id: String, since: Option<u64>) -> Result<ConvDelta, String> {
     // jsonl の場所は一覧を作るときに登録する。登録が無いのは、起動したばかりで一覧にまだ出ていない、jsonl の無いチームメイト、
     // 終わって一覧から消えたセッション。どれも読めなくて当たり前なので、前に読んだ分を返す
@@ -765,13 +766,11 @@ pub(crate) fn conversation(session_id: String, since: Option<u64>) -> Result<Con
     }
     Ok(c.since(since))
 }
+}
 
-/// 画面から呼ぶ命令の包み。中身の関数は上にある。待つ命令は blocking で別のスレッドへ出す
+/// 画面から呼ぶ命令。中身の関数の定義から crate::blocking_command! が作ったものを並べる
 pub(crate) mod cmd {
-    #[tauri::command]
-    pub async fn conversation(session_id: String, since: Option<u64>) -> Result<super::ConvDelta, String> {
-        crate::blocking(move || super::conversation(session_id, since)).await
-    }
+    pub use super::conversation::*;
 }
 
 #[cfg(test)]

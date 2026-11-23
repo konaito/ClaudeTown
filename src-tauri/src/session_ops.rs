@@ -2,6 +2,7 @@ use super::*;
 
 // ---------- 作る・止める ----------
 
+crate::blocking_command! {
 /// 新しい世帯を立てる。claude をこのアプリの中の端末で起動する（pty.rs）。cwd を省くと ~/Documents/meta（本人の指定）。
 /// cols と rows は、画面のターミナルの今の大きさ。渡せば claude を最初からその大きさで起動し、開いた直後の描き直しを省く（#18）
 /// model と permission_mode は設定の既定（src/session/defaults.ts）。claude の --model と --permission-mode で起動する（pty::start_args）
@@ -14,19 +15,23 @@ pub(crate) fn create_session(cwd: Option<String>, name: Option<String>, cols: Op
     town_kick();
     Ok(r)
 }
+}
 
 /// 場所を設定していないときに新しい世帯を立てる場所（本人の指定）
 pub(crate) fn default_place() -> String {
     home().join("Documents/meta").to_string_lossy().to_string()
 }
 
+crate::blocking_command! {
 /// 新しい世帯のペイン（#89）の「最近使った場所」の材料。形は画面の src/newHouse/places.ts の PlacesInput。
 /// defaultPlace は、画面が設定の場所を持っていないときに、一覧から除く場所（決定 4、2026-11-21）
 pub(crate) fn house_places() -> Result<Value, String> {
     let live: Vec<Value> = town_rows().into_iter().filter(|r| r["kind"] == "terminal").map(|r| json!({ "cwd": r["cwd"], "lastActivityAt": r["lastActivityAt"] })).collect();
     Ok(json!({ "roots": [], "lobby": null, "sessions": live, "places": places::recent(&native::claude_home()), "defaultPlace": default_place() }))
 }
+}
 
+crate::blocking_command! {
 /// このアプリが立てたセッションを止める
 pub(crate) fn stop_session(session_id: String) -> Result<(), String> {
     app_guard(&session_id)?;
@@ -35,12 +40,14 @@ pub(crate) fn stop_session(session_id: String) -> Result<(), String> {
     town_kick();
     Ok(())
 }
+}
 
 // ---------- 再起動（カードの「再起動」） ----------
 
 /// 再起動で、前任の claude が消えるのを待つ上限（SIGHUP で2秒、効かなければ SIGKILL）
 const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
+crate::blocking_command! {
 /// このアプリが立てたセッションを止め、同じ id を `claude --resume` で立て直す。
 /// アカウントは resume のときも cam usage の best で選び直す（account.rs）ので、利用上限で止まったアカウントから枠の残るアカウントへ替わる。
 /// id と会話の jsonl は変わらないので、親（最初の文の from 行）と名前は継がれる。モデルと権限モードは resume では渡さず、会話の記録のまま。
@@ -69,6 +76,7 @@ pub(crate) fn restart_session(session_id: String) -> Result<Value, String> {
     let r = pty::resume(&session_id, &cwd, None, cols, rows, town_kick)?;
     town_kick();
     Ok(r)
+}
 }
 
 // ---------- 立て直す（#152） ----------
@@ -213,6 +221,7 @@ pub(crate) fn restore_entries(
     (log, lost)
 }
 
+crate::blocking_command! {
 /// 画面から、id を指定して Claude Town で開き直す。cwd は会話の記録（jsonl）の行から取る
 pub(crate) fn resume_session(session_id: String, cols: Option<u16>, rows: Option<u16>) -> Result<Value, String> {
     refuse_if_disabled()?;
@@ -231,33 +240,24 @@ pub(crate) fn resume_session(session_id: String, cols: Option<u16>, rows: Option
     town_kick();
     Ok(r)
 }
+}
 
-/// 画面から呼ぶ命令の包み。中身の関数は上にある。待つ命令は blocking で別のスレッドへ出す
+/// 画面から呼ぶ命令。中身の関数の定義から crate::blocking_command! が作ったものを並べる
 pub(crate) mod cmd {
     use serde_json::Value;
 
-    #[tauri::command]
-    pub async fn create_session(cwd: Option<String>, name: Option<String>, cols: Option<u16>, rows: Option<u16>, model: Option<String>, permission_mode: Option<String>) -> Result<Value, String> {
-        crate::blocking(move || super::create_session(cwd, name, cols, rows, model, permission_mode)).await
-    }
-    #[tauri::command]
-    pub async fn resume_session(session_id: String, cols: Option<u16>, rows: Option<u16>) -> Result<Value, String> {
-        crate::blocking(move || super::resume_session(session_id, cols, rows)).await
-    }
-    /// 起動のときの立て直しの結果（#262）。済むまで最大60秒待つ。済んでいなければ done が false で、画面はもう一度呼ぶ
+    pub use super::create_session::*;
+    pub use super::resume_session::*;
+    pub use super::restart_session::*;
+    pub use super::house_places::*;
+    pub use super::stop_session::*;
+
+    /// 起動のときの立て直しの結果（#262）。済むまで最大60秒待つ。済んでいなければ done が false で、画面はもう一度呼ぶ。
+    /// 中身の restore_report は待つ上限を引数で受け、Value を返す（命令は引数なしで Result を返す）。署名が違うので
+    /// crate::blocking_command! では包めず、手で書いたまま残す（#288 の「型違い」）
     #[tauri::command]
     pub async fn restore_report() -> Result<Value, String> {
         crate::blocking(|| Ok(super::restore_report(std::time::Duration::from_secs(60)))).await
-    }
-    #[tauri::command]
-    pub async fn restart_session(session_id: String) -> Result<Value, String> {
-        crate::blocking(move || super::restart_session(session_id)).await
-    }
-    #[tauri::command]
-    pub async fn house_places() -> Result<Value, String> { crate::blocking(super::house_places).await }
-    #[tauri::command]
-    pub async fn stop_session(session_id: String) -> Result<(), String> {
-        crate::blocking(move || super::stop_session(session_id)).await
     }
 }
 
