@@ -251,6 +251,8 @@ echo '{"session_id":"0123abcd-0000-0000-0000-000000000001","hook_event_name":"Us
 
 hook が書く状態ファイルとお手紙の形は、`python3 -m unittest discover -s hooks -v` で確かめる（`hooks/test_fc_report.py`、標準ライブラリだけ、一時の場所にだけ書く）。`scripts/hook.py` が書く登録の形も、同じコマンドで `hooks/test_hook_install.py` が確かめる。
 
+`scripts/native/survey.py`（`~/.claude` の記録の形を数える調べもの）は、`python3 -m unittest discover -s scripts/native -v` で確かめる。合成の置き場所を一時の場所に作って引数に渡すので、本物の `~/.claude` は読まない。
+
 本物のセッションで試すときだけ、`python3 scripts/hook.py install --worktree` で作業ツリーの hook に登録を替える。その間は安定版にも作業ツリーの hook の内容が出るので、済んだら `python3 scripts/hook.py install` で写した先に戻す。2つを同時に登録しないのは、同じ状態ファイルに2つの版の hook が書くと、作業ツリーの hook がまた安定版の表示に混ざるためである。
 
 開発版のアイコンは、安定版のアイコンに帯を重ねて作る。`src-tauri/icons/` を作り直したら `scripts/make-dev-icon.sh` も回してコミットする（ImageMagick が要る）。
