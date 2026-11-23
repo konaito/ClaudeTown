@@ -1,6 +1,7 @@
 // 軽さの計測（#2）。開発版を場面ごとに起動し、本体と WebKit のプロセスの CPU 時間とメモリを外から ps で測る。
 //
 //   bun run scripts/bench.ts [--scenes idle,hidden,minimized,terminal,talk,town] [--runs 3（場面ごとの有効な回の数）] [--secs 60] [--label before]
+//                            [--max-tries 9（1場面に試す回数の上限。既定は runs の3倍）]
 //                            [--renderer webgl|dom] [--letters-kb 56] [--release] [--out docs/perf]
 //   bun run scripts/bench.ts --summarize docs/perf/<日付>-<名前>.jsonl   記録から表（.md）だけを作り直す
 //   bun run scripts/bench.ts --town-check   場面ごとの町を作り、開発版の Rust（--native-list、--snapshot）で件数だけ確かめる。ロックも窓も使わない
@@ -13,6 +14,9 @@
 //              決まった出力を1秒に100かたまり流す。そのターミナルを開く
 //   talk       idle の町に、1000件の発言がある子のセッションを足し、チャットの欄で開く（画面に届くのは Rust が残す80件）
 //   town       30世帯・100人。作業中20、承認待ち5。何も選ばない
+//   startup    起動の時間（#187、#16）。既定の場面には入らず、--scenes startup で選ぶ。idle と同じ町で起動し、CPU は測らない。
+//              Rust の run() の入口から、画面の読み込み開始、窓の最初の描画、町の最初の描画までの時間と、起動の10秒後の RSS を取る。
+//              区間の定義は scripts/lib/startup.ts と docs/perf/README.md にある
 //
 // 1回の測り方
 //   1. ~/.local/bin/ct-lock の列に並んでロックを取る（来た順。上限3時間）。1回ごとに取って放し、次の回はまた列の後ろに並ぶ
@@ -28,19 +32,22 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { buildTown, stopHolders, TOWN_DEFAULTS, type TownOpts } from "./bench-town";
+import { startupSpans, type StartupSpans } from "./lib/startup";
 
 const ROOT = path.resolve(import.meta.dir, "..");
 const argv = process.argv.slice(2);
 const arg = (k: string, d: string) => { const i = argv.indexOf(`--${k}`); return i >= 0 ? argv[i + 1] : d; };
 const flag = (k: string) => argv.includes(`--${k}`);
 
-const ALL = ["idle", "hidden", "minimized", "terminal", "talk", "town"] as const;
+const ALL = ["idle", "hidden", "minimized", "terminal", "talk", "town", "startup"] as const;
 type Scene = (typeof ALL)[number];
-const VISIBLE: Scene[] = ["idle", "terminal", "talk", "town"];
+/** --scenes を付けないときに回す場面。startup は CPU を測らないので入れない（既存の6場面の手順と所要時間を変えない） */
+const DEFAULT_SCENES: Scene[] = ["idle", "hidden", "minimized", "terminal", "talk", "town"];
+const VISIBLE: Scene[] = ["idle", "terminal", "talk", "town", "startup"];
 // 町の形は旧モック（mock-ccn-town.ts）の引数のまま残す。記録の town に同じ文字列が入り、過去の記録と並べられる
 const SMALL_TOWN = ["--households", "4", "--sessions", "10"];
 const MOCK_ARGS: Record<Scene, string[]> = {
-  idle: SMALL_TOWN, hidden: SMALL_TOWN, minimized: SMALL_TOWN,
+  idle: SMALL_TOWN, hidden: SMALL_TOWN, minimized: SMALL_TOWN, startup: SMALL_TOWN,
   terminal: [...SMALL_TOWN, "--flood", "100"],
   talk: [...SMALL_TOWN, "--talk", "1000"],
   town: ["--households", "30", "--sessions", "100", "--running", "20", "--approval", "5"],
@@ -74,7 +81,11 @@ type Run = {
   startupMs: number | null; ipcPerSec: number | null; recompiled: boolean; front: string[];
   /** 町の出どころ。native は合成の ~/.claude（#187 から）。無いのはモックの ccn のころの記録 */
   source?: "native";
+  /** startup の場面だけ。Rust の run() の入口からの時間（scripts/lib/startup.ts）と、起動の10秒後の RSS */
+  boot?: StartupSpans & { rssAppMB10s: number | null; rssWebContentMB10s: number | null };
 };
+/** startup の場面で RSS を取る時点（Rust の起動から）。2026-11-13 の bench-startup.sh と同じ10秒 */
+const BOOT_RSS_AFTER_MS = 10_000;
 
 // ---------- プロセス ----------
 
@@ -232,7 +243,8 @@ async function runOnce(scene: Scene, round: number, o: Opts): Promise<Run> {
     // 開発版
     if (listener(VITE_PORT).length) throw new Error(`ロックを持っているのに ${VITE_PORT} が使われている（pid ${listener(VITE_PORT).join(",")}）。止めずに中断する`);
     const before = new Set(webkitPids());
-    const wait = (o.settle + o.secs) * 1000 + 1500;
+    // startup は CPU を測らないので、画面の待ちは短くてよい
+    const wait = scene === "startup" ? 1000 : (o.settle + o.secs) * 1000 + 1500;
     const bench = new URLSearchParams({ bench: "scene", scene, wait: String(wait), ...(sid ? { sid } : {}), ...(scene === "terminal" ? { cwd: FLOOD_CWD } : {}), ...(o.renderer === "dom" ? { renderer: "dom" } : {}) });
     const env = benchEnv(p, { FC_PERF_LOG: perf, FC_BENCH_TOP: "1", VITE_FC_BENCH: bench.toString() });
     const out = fs.openSync(devLog, "w");
@@ -263,6 +275,22 @@ async function runOnce(scene: Scene, round: number, o: Opts): Promise<Run> {
     // 見えるはずの場面で、始めから描かれていなければ測らない（本人が全画面のアプリを前面にしているときなど。ロックを早く返す）
     const shown = VISIBLE.includes(scene);
     if (shown && (ready.vis !== "visible" || (ready.fps ?? 0) < 20)) throw new Error(`始めに描かれていない（${ready.vis}、${ready.fps} fps）。測らずに打ち切った。前面のアプリ: ${run.front.join("、")}`);
+
+    // 起動の時間（#187）。区間は ready の行に載っているので、起動の10秒後の RSS を取って終える。CPU は測らない
+    if (scene === "startup") {
+      const { spans, bad } = startupSpans(proc, ready);
+      const p0 = proc?.procStartMs ?? Date.now();
+      while (Date.now() < p0 + BOOT_RSS_AFTER_MS) {
+        if (!alive()) throw new Error("開発版が終わった");
+        await sleep(Math.min(500, Math.max(0, p0 + BOOT_RSS_AFTER_MS - Date.now())));
+      }
+      const r = (pid: number) => rssMB(pid) || null;
+      run.boot = { ...spans, rssAppMB10s: r(app), rssWebContentMB10s: r(watch.WebContent) };
+      run.startupMs = spans.toTownPaintMs;
+      run.valid = bad.length === 0;
+      run.reason = bad.join("。") || null;
+      return run;
+    }
     // 見えるはずの場面で途中で隠れたら、そこで打ち切る
     const hiddenSince = async (ms: number) => {
       const end = Date.now() + ms;
@@ -375,7 +403,7 @@ function summarize(file: string) {
   out.push("CPU は1コアに対する割合（ps の CPU 時間の差 ÷ 経過時間）。中央値（最小〜最大）。メモリは測り終えたときの RSS。無効の回は数に入れていない。", "");
   out.push("| 場面 | 有効/回 | 本体 CPU | WebContent CPU | GPU CPU | Networking CPU | 合計 CPU | 本体 RSS | WebContent RSS | GPU RSS | ccn への要求/分 | 起動から町の描画まで |");
   out.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
-  for (const scene of ALL) {
+  for (const scene of DEFAULT_SCENES) {
     const all = runs.filter((r) => r.scene === scene);
     if (!all.length) continue;
     const ok = all.filter((r) => r.valid);
@@ -391,6 +419,16 @@ function summarize(file: string) {
     if (!ok.length) continue;
     const keys = [...new Set(ok.flatMap((r) => Object.keys(r.httpPerMin)))].sort();
     out.push(`- ${scene}: ${keys.map((k) => `${k} ${median(ok.map((r) => r.httpPerMin[k] ?? 0))}`).join("、") || "なし"}`);
+  }
+  // 起動の時間（#187）。CPU の表とは別にする。区間の定義は docs/perf/README.md
+  const boots = runs.filter((r) => r.scene === "startup");
+  if (boots.length) {
+    const ok = boots.filter((r) => r.valid && r.boot);
+    const b = (k: keyof NonNullable<Run["boot"]>, unit: string) => cell(ok.map((r) => r.boot![k]).filter((x): x is number => typeof x === "number"), unit);
+    out.push("", "## 起動の時間（startup）", "");
+    out.push("Rust の run() の入口からの時間。中央値（最小〜最大）。RSS は Rust の起動の10秒後。");
+    out.push("", "| 有効/回 | 画面の読み込み開始まで | 窓の最初の描画まで | 町の最初の描画まで | 本体 RSS | WebContent RSS |", "| --- | --- | --- | --- | --- | --- |");
+    out.push(`| ${ok.length}/${boots.length} | ${b("toNavStartMs", "ms")} | ${b("toShellPaintMs", "ms")} | ${b("toTownPaintMs", "ms")} | ${b("rssAppMB10s", "MB")} | ${b("rssWebContentMB10s", "MB")} |`);
   }
   const extra = runs.filter((r) => r.scene === "terminal" && r.valid);
   if (extra.length) out.push("", `terminal の描き方: ${[...new Set(extra.map((r) => r.renderer))].join("、")}。画面に届いた IPC は ${cell(extra.map((r) => r.ipcPerSec ?? NaN).filter((x) => !isNaN(x)), " 回/秒")}。`);
@@ -415,7 +453,7 @@ if (flag("summarize")) {
 }
 if (flag("town-check")) process.exit(townCheck() ? 0 : 1);
 
-const scenes = arg("scenes", ALL.join(",")).split(",").map((s) => s.trim()) as Scene[];
+const scenes = arg("scenes", DEFAULT_SCENES.join(",")).split(",").map((s) => s.trim()) as Scene[];
 for (const s of scenes) if (!ALL.includes(s)) { console.error(`知らない場面: ${s}（${ALL.join("、")}）`); process.exit(2); }
 const o: Opts = {
   label: arg("label", "bench"), secs: Number(arg("secs", "60")), settle: Number(arg("settle", "5")), renderer: arg("renderer", "webgl"),

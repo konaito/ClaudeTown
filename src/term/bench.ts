@@ -13,10 +13,10 @@
 // - boot: ?cwd=<一時の場所> に新しい世帯を立て、claude の起動を待たずに入力欄から ?text= を送る（起動前に送った文を預かるか）。
 //   1秒ごとに、見出しの札、入力欄の案内、預かった文の吹き出し、出口の案内、届けたの吹き出し、トーストを outerHTML から記録する。
 //   ?answer=1 なら、10秒たっても預かったままのとき、信頼の確認の画面に Yes（↓と Enter）を答える。cwd が一時の場所（/var/folders）のときだけ答える
-// - scene: 軽さの計測（#2）。場面（scene=idle|hidden|minimized|terminal|talk|town）を用意して ready を書き、
+// - scene: 軽さの計測（#2）。場面（scene=idle|hidden|minimized|terminal|talk|town|startup）を用意して ready を書き、
 //   wait（ms）たったら post を書く。CPU とメモリは外から ps で測る。測っている間は、ここでは何も回さない。
 //   外から回すのは scripts/bench.ts（合成の ~/.claude で町を作る、#187）。terminal は ?sid= が無ければ ?cwd= に新しい世帯を立て
-//   （FC_CLAUDE_BIN の代役が決まった出力を流す）、そのターミナルを開く
+//   （FC_CLAUDE_BIN の代役が決まった出力を流す）、そのターミナルを開く。startup は idle と同じで、起動の時刻だけを使う（#187）
 // 結果は perf.ts が1回ごとに perf_log に書く。作るセッションには name に bench-ct-term を付ける。
 // 引数は URL（?bench=…）か、環境変数 VITE_FC_BENCH（"bench=scene&scene=idle" の形）で渡す。
 // 環境変数なら devUrl を変えずに済むので、場面ごとに Rust を組み直さない（devUrl は Rust に埋め込まれる）
@@ -40,6 +40,11 @@ export function useBench(h: { ready: boolean; select: (id: string | null) => voi
   const latest = useRef(h);
   latest.current = h;
   const started = useRef(false);
+  // 窓の最初の描画の時刻（#187）。App の最初のコミット（町の枠だけで、一覧はまだ）の後の最初の requestAnimationFrame。
+  // 窓が隠れていると rAF が止まり、0 のまま残る
+  useEffect(() => {
+    if (mode === "scene" && !shellPaintedAt) requestAnimationFrame(() => { if (!shellPaintedAt) shellPaintedAt = Date.now(); });
+  }, []);
   useEffect(() => {
     if (!mode || !h.ready || started.current) return;
     started.current = true;
@@ -50,6 +55,7 @@ export function useBench(h: { ready: boolean; select: (id: string | null) => voi
 }
 
 let paintedAt = 0;
+let shellPaintedAt = 0;
 
 /** ms のあいだ requestAnimationFrame が何回呼ばれたか（1秒あたり）。窓が隠れていれば 0 になる */
 async function fps(ms: number) {
@@ -99,7 +105,7 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
       // 数える区間と割る秒数をそろえる（#216）。順序は sceneWindow.ts にある
       const wait = Number(params.get("wait") ?? 65000);
       const post = await measureScene({ now: Date.now, counts: () => ({ ipc: perfCounters.ipc, bytes: perfCounters.bytes }), sleep, fps }, wait,
-        async (f) => log({ ready: true, scene, at: Date.now(), paintedAt, vis: document.visibilityState, focus: document.hasFocus(), fps: await f(), renderer: perfCounters.renderer || null }),
+        async (f) => log({ ready: true, scene, at: Date.now(), paintedAt, shellPaintedAt, navStartMs: Math.round(performance.timeOrigin), vis: document.visibilityState, focus: document.hasFocus(), fps: await f(), renderer: perfCounters.renderer || null }),
         () => ({ post: true, scene, at: Date.now(), vis: document.visibilityState, visEvents: vis }));
       await log(post);
       document.removeEventListener("visibilitychange", onVis);
