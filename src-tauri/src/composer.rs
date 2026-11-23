@@ -5,7 +5,7 @@
 // - file_suggestions(cwd, query): @ の候補にするファイルとフォルダ
 // - send_direct(session_id, text): このアプリが立てた端末（pty.rs）の入力欄へ貼って Enter を押す
 // - send_or_queue / cancel_queued / boot_status: チャット欄の送信。claude の起動前に送った文は預かり、起動したら送る
-// - interrupt_session(session_id): 端末に Esc を書いて、claude の今のターンを止める
+// - interrupt_session(session_id): 端末に Esc を書いて、claude の今のターンを止める。書き込みが詰まっている端末では書かずに stuck を返す（#240）
 
 use serde::Serialize;
 use serde_json::Value;
@@ -720,10 +720,19 @@ pub fn send_socket(session_id: String, text: String) -> Result<(), String> {
     c.write_all(socket_line(&text).as_bytes()).map_err(|e| format!("受信ソケットに書けなかった: {e}"))
 }
 
-/// 今のターンを止める。端末で Esc を押したのと同じ
-pub fn interrupt_session(session_id: String) -> Result<(), String> {
+/// 端末への書き込みがこれだけ戻らなければ、claude は入力を読んでいないと見る（#240 の 2）。3秒は仮置き
+pub const STUCK_AFTER: Duration = Duration::from_secs(3);
+
+/// 今のターンを止める。端末で Esc を押したのと同じ。
+/// 前の書き込みが STUCK_AFTER 以上戻っていない（claude が入力を読まず、PTY の入力の欄が埋まっている）ときは、Esc を後ろに並べずに
+/// { stuck: true, stuckMs } を返す。画面はそれを見て、claude を止めて同じ id で立て直すか（session_ops.rs の restart_session）を本人に聞く。
+/// 書けたときは { stuck: false }
+pub fn interrupt_session(session_id: String) -> Result<Value, String> {
     super::refuse_if_disabled()?;
-    super::pty::write(&session_id, "\x1b")
+    Ok(match super::pty::write_unless_stuck(&session_id, "\x1b", STUCK_AFTER)? {
+        None => serde_json::json!({ "stuck": false }),
+        Some(d) => serde_json::json!({ "stuck": true, "stuckMs": d.as_millis() as u64 }),
+    })
 }
 
 /// 画面から呼ぶ命令の包み。中身の関数は上にある。待つ命令は blocking で別のスレッドへ出す
@@ -760,7 +769,7 @@ pub(crate) mod cmd {
         crate::blocking(move || Ok(super::boot_status(&session_id))).await
     }
     #[tauri::command]
-    pub async fn interrupt_session(session_id: String) -> Result<(), String> {
+    pub async fn interrupt_session(session_id: String) -> Result<serde_json::Value, String> {
         crate::app_guard(&session_id)?;
         crate::blocking(move || super::interrupt_session(session_id)).await
     }

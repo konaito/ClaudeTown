@@ -462,7 +462,7 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
     drop(pair.slave);
     let pid = child.process_id().ok_or("claude の pid が取れなかった")?;
     let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let writer = timed(pid, pair.master.take_writer().map_err(|e| e.to_string())?);
     let killer = child.clone_killer();
     let started_at = crate::now_ms() as u64;
     with(|m| {
@@ -551,6 +551,103 @@ pub fn utf8_stream(carry: &mut Vec<u8>, bytes: &[u8]) -> String {
 fn replay_text(out: &[u8]) -> String {
     let start = out.iter().position(|b| (b & 0xC0) != 0x80).unwrap_or(out.len());
     String::from_utf8_lossy(&out[start..]).into_owned()
+}
+
+// ---------- 書き込みの詰まり（#240 の 2） ----------
+
+/// 書き口の包み。今の write（または flush）が戻らないまま何ミリ秒たったかを、書き口の錠の外から読めるようにする。
+/// 詰まった書き手は書き口の錠を持ったまま戻らないので、錠の中に置くと読めない。write_all は write を何度も呼ぶので、少しずつでも書けていれば時刻は毎回新しくなる
+struct Timed {
+    inner: Box<dyn Write + Send>,
+    /// 今の write を始めた時刻（STALL_BASE からのミリ秒に1を足した値）。書いていなければ 0
+    since: Arc<std::sync::atomic::AtomicU64>,
+}
+
+// OnceLock は完全な名前で書く。#202（#175）が login_path の OnceLock を外すと、use から OnceLock が消えるため
+static STALL_BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+fn stall_clock() -> u64 {
+    STALL_BASE.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+impl Timed {
+    fn timing<T>(&mut self, f: impl FnOnce(&mut Box<dyn Write + Send>) -> std::io::Result<T>) -> std::io::Result<T> {
+        self.since.store(stall_clock(), Ordering::SeqCst);
+        let r = f(&mut self.inner);
+        self.since.store(0, Ordering::SeqCst);
+        r
+    }
+}
+
+impl Write for Timed {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.timing(|w| w.write(buf))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.timing(|w| w.flush())
+    }
+}
+
+/// 端末ごとの「今の write を始めた時刻」。キーは pid。Proc には持たせない（Proc の欄は #168 の serial が触る）。
+/// 値は Weak で持つので、端末が台帳から外れて書き口が落ちれば読めなくなる。死んだ分は次に登録するときに捨てる
+static STALLS: Mutex<Option<HashMap<u32, std::sync::Weak<std::sync::atomic::AtomicU64>>>> = Mutex::new(None);
+
+fn timed(pid: u32, inner: Box<dyn Write + Send>) -> Box<dyn Write + Send> {
+    let since = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut g = STALLS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = g.get_or_insert_with(HashMap::new);
+    map.retain(|_, w| w.strong_count() > 0);
+    map.insert(pid, Arc::downgrade(&since));
+    Box::new(Timed { inner, since })
+}
+
+/// この端末への書き込みが、戻らないままどれだけたったか。書いていなければ None
+pub fn stalled_for(id: &str) -> Option<Duration> {
+    let pid = pid_of_id(id)?;
+    let since = STALLS.lock().unwrap_or_else(|e| e.into_inner()).as_ref()?.get(&pid)?.upgrade()?.load(Ordering::SeqCst);
+    (since != 0).then(|| Duration::from_millis(stall_clock().saturating_sub(since)))
+}
+
+/// 詰まった書き込みの後ろで、並んだまま待つ上限。少しずつ書けている（詰まってはいない）長い書き込みの後ろでも、これより長くは待たない
+const QUEUE_LIMIT: Duration = Duration::from_secs(10);
+
+/// 書く。ただし、この端末の書き込みが stuck_after 以上戻っていなければ、後ろに並ばずに Ok(Some(戻っていない時間)) を返す。
+/// 並んで待つ間に、前の書き込みが stuck_after を超えたときも同じにする。そのときは並んでいた分を書かない（claude が読み始めたときに、遅れて届かないようにする）。
+/// 書けたら Ok(None)。止めるボタンの Esc（composer.rs の interrupt_session）が使う
+pub fn write_unless_stuck(id: &str, text: &str, stuck_after: Duration) -> Result<Option<Duration>, String> {
+    let w = with(|m| pid_of(m, id).and_then(|pid| m.get(&pid)).map(|p| p.writer.clone())).ok_or("このセッションの端末はこのアプリに無い")?;
+    if let Some(d) = stalled_for(id).filter(|d| *d >= stuck_after) {
+        return Ok(Some(d));
+    }
+    let give_up = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let (give_up, text) = (give_up.clone(), text.to_string());
+        std::thread::spawn(move || {
+            let mut w = w.lock().unwrap_or_else(|e| e.into_inner());
+            if give_up.load(Ordering::SeqCst) {
+                return;
+            }
+            let _ = tx.send(w.write_all(text.as_bytes()).and_then(|_| w.flush()).map_err(|e| format!("ターミナルに書けなかった: {e}")));
+        });
+    }
+    let t0 = Instant::now();
+    loop {
+        match rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(r) => return r.map(|_| None),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err("ターミナルの書き手が止まった".into()),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        let stuck = stalled_for(id).filter(|d| *d >= stuck_after);
+        if stuck.is_some() || !owns(id) || t0.elapsed() >= QUEUE_LIMIT {
+            give_up.store(true, Ordering::SeqCst);
+            return match stuck {
+                Some(d) => Ok(Some(d)),
+                None if !owns(id) => Err("このセッションの端末は終わった".into()),
+                None => Err(format!("前の書き込みが続いていて、{}秒待っても書けなかった", QUEUE_LIMIT.as_secs())),
+            };
+        }
+    }
 }
 
 // ---------- 画面からの操作 ----------
