@@ -104,7 +104,7 @@ export default function App() {
   const flights = useMemo(() => flightsOf(snap?.letters ?? [], agents), [snap, agents]);
   // ブラウザ版の ccn の行で予約したモデルと権限モードを、替えられるようになったら替える（always-switch）。アプリの端末の予約は Rust が当てる（switch.rs）
   useCcnReservations(agents, supportFor, (m) => toast(m), (m) => toast(m, true));
-  const letterMarks = useLetterMarks(flights);
+  const letterMarks = useLetterMarks(flights, snap !== null);
   const { panelSend, cardSend } = useCardSend(toast);
   const counts = useMemo(() => {
     const c: Record<Mood, number> = { approval: 0, reply: 0, working: 0, done: 0, idle: 0 };
