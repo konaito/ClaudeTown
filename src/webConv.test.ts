@@ -34,6 +34,12 @@ describe("simplify", () => {
     expect(simplify(ptyUser("<command-name>/login</command-name>\n            <command-message>login</command-message>\n            <command-args></command-args>"))[0].text).toBe("/login");
     expect(simplify(ptyUser("<command-message>surf</command-message>\n<command-name>/surf</command-name>\n<command-args>https://a.example/x <b>強</b></command-args>"))[0].text).toBe("/surf https://a.example/x <b>強</b>");
   });
+  test("! のシェルの入力は「!コマンド」の吹き出しにし、出力は出さない（#254）", () => {
+    expect(simplify(ptyUser("<bash-input>ls</bash-input>"))).toEqual([{ role: "user", text: "!ls", from: null, at: 1000, letter: null }]);
+    expect(simplify(nodeUser("<bash-input> git status</bash-input>"))[0].text).toBe("! git status");
+    expect(simplify(ptyUser("<bash-input>  </bash-input>"))).toEqual([]);
+    expect(simplify(ptyUser("<bash-stdout>a</bash-stdout><bash-stderr></bash-stderr>"))).toEqual([]);
+  });
   test("from 行は from に分け、agent: なら letter にする", () => {
     const out = simplify(ptyUser("from agent:n1/abcd1234/child via n1\n\n本文"));
     expect(out[0]).toMatchObject({ text: "本文", from: "from agent:n1/abcd1234/child via n1", letter: { fromName: null, fromRaw: "n1/abcd1234/child" } });

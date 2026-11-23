@@ -29,9 +29,39 @@ const MODE_LABELS: [(&str, &str); 5] = [
 ];
 const SHIFT_TAB: &str = "\x1b[Z";
 
-/// 画面の中で最後に出た権限モード（下の行）
+/// 下の行の権限モード。入力欄より下だけを見る（#250）。下の行が承認の画面などで隠れていれば None。
+/// 画面全体から探すと、会話の本文や承認の画面にある「plan mode on」のような文をモードと読む
 pub fn last_mode(text: &str) -> Option<&'static str> {
-    MODE_LABELS.iter().filter_map(|(l, v)| text.rfind(l).map(|i| (i, *v))).max_by_key(|(i, _)| *i).map(|(_, v)| v)
+    let below = below_input(text)?;
+    MODE_LABELS.iter().filter_map(|(l, v)| below.rfind(l).map(|i| (i, *v))).max_by_key(|(i, _)| *i).map(|(_, v)| v)
+}
+
+/// 入力欄の枠線（「────」）。─ で始まり、大半が ─ の行。名前の入った枠線（「──── create-hi-txt-file ─」）も入れる。╌ の線は承認の画面の中の線なので入れない
+fn is_box_rule(line: &str) -> bool {
+    let t = line.trim();
+    let n = t.chars().count();
+    n >= 20 && t.starts_with('─') && t.chars().filter(|c| *c == '─').count() * 2 > n
+}
+
+/// 入力欄より下の行（ステータス行と下の行）。2026-11-23 に v2.1.330 を tmux で撮った画面（switch_fixtures）では、
+/// 枠線、❯ で始まる入力欄（複数行もある）、枠線、ステータス行、モードの行の順に出る。
+/// 下から、続く2本の枠線の間の最初の行が ❯ で始まる箱を探す。承認の画面のカーソルの行（「❯ 1. Yes」）は入力欄としない。
+/// 箱が無ければ None（下の行が隠れている）。枠線が1本も無い文字列（画面でない1行）は、空でない最後の行だけを見る
+fn below_input(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let rules: Vec<usize> = (0..lines.len()).filter(|&i| is_box_rule(lines[i])).collect();
+    if rules.is_empty() {
+        return lines.iter().rev().find(|l| !l.trim().is_empty()).map(|l| l.to_string());
+    }
+    let input = |l: &str| {
+        l.trim_start().strip_prefix('❯').is_some_and(|r| {
+            let r = r.trim_start();
+            let d = r.chars().take_while(|c| c.is_ascii_digit()).count();
+            !(d > 0 && r[d..].starts_with('.'))
+        })
+    };
+    let (_, bottom) = rules.windows(2).rev().map(|w| (w[0], w[1])).find(|&(top, bottom)| top + 1 < bottom && input(lines[top + 1]))?;
+    Some(lines[bottom + 1..].join("\n"))
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -66,9 +96,17 @@ fn live(id: &str) -> Option<(String, bool)> {
     let row = super::native::sessions::fresh_row(&super::native::claude_home(), pid);
     let state = row.as_ref().and_then(|r| r["state"].as_str()).unwrap_or("").to_string();
     let status = match state.as_str() { "running" => "busy", "waiting_permission" => "waiting", "idle" => "idle", _ => "" }.to_string();
-    let hooked = super::fc_path(super::Scope::Shared, &format!("state/{id}.json")).exists();
-    let ready = super::composer::check_direct(row.as_ref(), hooked, started, super::now_ms() as u64).is_ok() || status == "waiting";
+    let state_file = super::fc_path(super::Scope::Shared, &format!("state/{id}.json"));
+    let ready = ready_of(row.as_ref(), &state_file, started, super::now_ms() as u64, &status);
     Some((status, ready))
+}
+
+/// 入力を受け付けるところまで起動したか（live の中身。試験のために端末から切り離してある）。
+/// 状態ファイルは、この起動の後に書かれたものだけを印にする（composer の gate と同じ hooked_since）。
+/// claude --resume で立て直すと前の起動のファイルが残っているので、あるかどうかだけで決めると、読み込み中の claude に書く（#181）
+fn ready_of(row: Option<&Value>, state_file: &Path, started: u64, now: u64, status: &str) -> bool {
+    let hooked = super::composer::hooked_since(state_file, started);
+    super::composer::check_direct(row, hooked, started, now).is_ok() || status == "waiting"
 }
 
 /// 当てる直前に承認待ちになっていたときの印。予約に戻して、次の回に当て直す
@@ -222,21 +260,31 @@ pub fn picker_cursor(screen: &str) -> Option<String> {
 
 const UP: &str = "\x1b[A";
 const DOWN: &str = "\x1b[B";
-const PICKER: &str = "Select model";
+pub(crate) const PICKER: &str = "Select model";
 const CONFIRM: &str = "Switch model?";
 
 /// /model でピッカーを開き、目当ての行へ矢印で動かして s を押す（このセッションだけ替える）。
 /// `/model <別名>` と Enter は新しいセッションの既定まで替えるので使わない（2026-11-21、v2.1.330 で確かめた）。
-/// 会話があると「Switch model?」の確認が出る。出たときだけ Enter を送る。ピッカーと確認が閉じ、「Set model to <名前>」が見えたら成功
-fn set_model(id: &str, model: &str) -> Result<(), String> {
+/// 会話があると「Switch model?」の確認が出る。出たときだけ Enter を送る。ピッカーと確認が閉じ、「Set model to <名前>」が見えたら成功。
+/// ピッカーを閉じるまで端末の錠（pty::serial）を持ち、チャット欄の送信と承認への答えのキーを間に入れない（#168）
+pub(crate) fn set_model(id: &str, model: &str) -> Result<(), String> {
+    super::pty::serial(id, || set_model_locked(id, model))
+}
+
+/// 錠を待つ間に状態が変わる（見張りが live を読んだ後に、承認待ちになるなど）ので、錠の中で読み直す。当てられなければ予約に戻す
+fn still_applicable(id: &str, what: &str) -> bool {
+    live(id).is_some_and(|(st, ready)| can_apply(what, &st, ready)) && super::composer::blocked_now(id).is_none()
+}
+
+fn set_model_locked(id: &str, model: &str) -> Result<(), String> {
     let name = picker_name(model).ok_or(format!("{model} は /model のピッカーの上の段に無いので、ここからは替えられない"))?;
     // 承認の画面に入力が入らないよう、貼る前と Enter の前に今の状態を読み直す（send_direct と同じ穴）
-    if waiting(id) {
+    if !still_applicable(id, "model") {
         return Err(RETRY.into());
     }
     super::pty::write(id, "\x1b[200~/model\x1b[201~")?;
     std::thread::sleep(Duration::from_millis(150));
-    if waiting(id) {
+    if waiting(id) || super::composer::blocked_now(id).is_some() {
         return Err("貼った直後に承認の画面が出たので Enter を送らなかった。ターミナルの入力欄に /model が残っているかもしれない".into());
     }
     super::pty::write(id, "\r")?;
@@ -258,6 +306,8 @@ fn set_model(id: &str, model: &str) -> Result<(), String> {
     }
     if cur.as_deref() != Some(name) {
         super::pty::write(id, "\x1b")?;
+        // 閉じたのを見てから錠を放す。見ずに戻ると、待っていた送信が閉じかけのピッカーを読んで断る
+        wait_screen(id, 1.5, |s| !s.contains(PICKER)).ok_or("ピッカーに Esc を送ったが、閉じなかった。ターミナルで様子を見る")?;
         return Err(format!("/model のピッカーに {name} の行が見つからなかったので、閉じた"));
     }
     super::pty::write(id, "s")?;
@@ -271,8 +321,16 @@ fn set_model(id: &str, model: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Shift+Tab を、下の行が目当てのモードになるまで送る。1周して元に戻ったら、目当ては順に無い（元のモードのまま）
+/// Shift+Tab を、下の行が目当てのモードになるまで送る。1周して元に戻ったら、目当ては順に無い（元のモードのまま）。
+/// 回し終えるまで端末の錠（pty::serial）を持つ（#168）。承認の画面で Shift+Tab を押すと承認の操作になるので、錠の中で状態を読み直す
 fn set_mode(id: &str, mode: &str) -> Result<(), String> {
+    super::pty::serial(id, || set_mode_locked(id, mode))
+}
+
+fn set_mode_locked(id: &str, mode: &str) -> Result<(), String> {
+    if !still_applicable(id, "mode") {
+        return Err(RETRY.into());
+    }
     let screen = super::pty::screen_text(id).ok_or("このセッションの端末はこのアプリに無い")?;
     let start = last_mode(&screen).ok_or("今の権限モードが端末の表示から読めなかった")?;
     if start == mode {
@@ -403,6 +461,44 @@ mod tests {
         assert_eq!(last_mode("nothing"), None);
     }
 
+    /// 会話の本文に「plan mode on」があり、下の行は manual。dialog.rs の IDLE（2026-11-22、vt100 で解いた画面）の上に本文を足した
+    const IDLE_WITH_PLAN_TEXT: &str = "❯ plan mode on にするにはどうする？\n\n⏺ Shift+Tab を2回押すと、下の行が ⏸ plan mode on になる。\n────────────────────────────────────────\n❯ \n────────────────────────────────────────\n  ⏸ manual mode on · ? for shortcuts\n\n";
+    /// 同じ本文の下に道具の承認の画面が出て、入力欄と下の行が隠れた画面。承認の画面は dialog.rs の BASH（2026-11-22、tmux で撮った画面）
+    const DIALOG_WITH_PLAN_TEXT: &str = "❯ plan mode on にするにはどうする？\n\n⏺ Shift+Tab を2回押すと、下の行が ⏸ plan mode on になる。\n\n⏺ Bash(echo probe-ok > probe2.txt)\n  ⎿  Waiting…\n────────────────────────────────────────\n Bash command\n Tip: auto mode handles these prompts for you — choose \"switch to auto mode\" below\n Write probe-ok into probe2.txt\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n echo probe-ok > probe2.txt\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and always allow access to /private/tmp/fc-ask-probe from this project\n   3. Yes, and switch to auto mode · auto mode handles these prompts for you\n   4. No\n Esc to cancel · Tab to amend\n\n\n";
+
+    // 2026-11-23 に v2.1.330 の claude（haiku）を tmux（100x40）で動かし、capture-pane で撮った実物の画面。
+    // 入力欄の上下に枠線、その下にステータス行（このプロファイルの statusLine）、いちばん下にモードの行が出る
+    const REAL_IDLE: &str = include_str!("switch_fixtures/idle_bypass.txt");
+    /// 入力欄に「plan mode on と打ちかけ」を打った（送っていない）
+    const REAL_TYPED: &str = include_str!("switch_fixtures/typed_plan_text.txt");
+    /// 幅を 44 に縮めた。入力欄の上に「ctrl+y to paste deleted text」が出る
+    const REAL_NARROW: &str = include_str!("switch_fixtures/narrow_plan.txt");
+    /// 会話の本文に「plan mode on」があり、下の行は manual
+    const REAL_BODY: &str = include_str!("switch_fixtures/body_plan_text_manual.txt");
+    /// 本文と質問の画面に「plan mode on」があり、質問の画面で入力欄と下の行が隠れている
+    const REAL_ASK: &str = include_str!("switch_fixtures/ask_plan_text.txt");
+
+    #[test]
+    fn last_mode_reads_only_the_line_under_the_input_box() {
+        assert_eq!(last_mode(REAL_IDLE), Some("bypassPermissions"));
+        assert_eq!(last_mode(REAL_TYPED), Some("bypassPermissions"));
+        assert_eq!(last_mode(REAL_NARROW), Some("plan"));
+        assert_eq!(last_mode(REAL_BODY), Some("default"));
+        assert_eq!(last_mode(IDLE_WITH_PLAN_TEXT), Some("default"));
+        // docs/research/pty-measure.md の 40 行の画面の下の5行（枠線、入力欄、枠線、ステータス行、モードの行）
+        let measured = "⏺ 1\n────────────────────────────────────────\n❯ \n────────────────────────────────────────\n  work:✗ main\n  ⏵⏵ auto mode on (shift+tab to cycle)";
+        assert_eq!(last_mode(measured), Some("auto"));
+        // 下の行が隠れていると、本文の「plan mode on」をモードとして読まない（#250）
+        assert_eq!(last_mode(REAL_ASK), None);
+        assert_eq!(last_mode(DIALOG_WITH_PLAN_TEXT), None);
+        // 承認の画面のコマンド（╌ の間）に文言があっても読まない
+        assert_eq!(last_mode(&DIALOG_WITH_PLAN_TEXT.replace("echo probe-ok > probe2.txt\n╌", "echo 'accept edits on' > probe2.txt\n╌")), None);
+        // dialog_fixtures の実物の質問の画面（下の行が隠れている）
+        for s in [include_str!("dialog_fixtures/ask_quote_q1.txt"), include_str!("dialog_fixtures/ask_quote_q2.txt"), include_str!("dialog_fixtures/ask_quote_review.txt")] {
+            assert_eq!(last_mode(s), None);
+        }
+    }
+
     #[test]
     fn picker_rows_are_read_from_the_screen() {
         // 2026-11-21 に pyte で解いた画面の形
@@ -454,5 +550,26 @@ mod tests {
         let len = std::fs::metadata(&p).unwrap().len();
         assert_eq!(from_transcript(&p, len), (None, None));
         assert_eq!(from_transcript(&dir.join("none.jsonl"), 0), (None, None));
+    }
+
+    #[test]
+    fn stale_state_file_does_not_make_it_ready() {
+        // claude --resume で立て直すと、前の起動の state/<id>.json が残っている（#181）。起動の印を出さないまま 3.5 秒たっても、ready にしない
+        let dir = std::env::temp_dir().join(format!("fc-switch-ready-{}-{}", std::process::id(), fastrand::u64(..)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("state.json");
+        std::fs::write(&f, "{}").unwrap();
+        let now = super::super::now_ms() as u64;
+        let started = now - 3_500;
+        let old = std::time::UNIX_EPOCH + Duration::from_millis(started - 60_000);
+        std::fs::File::options().write(true).open(&f).unwrap().set_modified(old).unwrap();
+        assert!(!ready_of(None, &f, started, now, "idle"), "前の起動の状態ファイルで起動したとみなした");
+        // この起動の後に書かれたら、起動から3秒で ready
+        std::fs::File::options().write(true).open(&f).unwrap().set_modified(std::time::UNIX_EPOCH + Duration::from_millis(started + 500)).unwrap();
+        assert!(ready_of(None, &f, started, now, "idle"));
+        assert!(!ready_of(None, &f, started, started + 2_000, "idle"), "起動から3秒は待つ");
+        // 状態ファイルが無くても、承認待ちなら ready（承認待ちは起動の後にしか出ない）
+        assert!(ready_of(None, &dir.join("none.json"), started, now, "waiting"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

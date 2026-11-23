@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Haiku 5.5 · Claude Team
+ ▝▝   ▝▝   /private/tmp/fix250-probe.hnKY/work
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                              Advisor Tool (experimental) is on and may use more tokens · /advisor
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Try "write a test for <filepath>"
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  work
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

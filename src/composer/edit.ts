@@ -6,7 +6,8 @@ export type Sel = { text: string; start: number; end: number };
 /** 置き換える範囲と、入れる文。カーソルは入れた文の後ろに置く。killed は Ctrl+Y で貼れるように取っておく文 */
 export type Edit = { from: number; to: number; insert: string; caret?: number; killed?: string };
 
-const lineStart = (t: string, i: number) => t.lastIndexOf("\n", i - 1) + 1;
+// i が 0 のとき lastIndexOf("\n", -1) は位置0から探すので、文が改行で始まると次の行の頭を返してしまう（#215）
+const lineStart = (t: string, i: number) => (i <= 0 ? 0 : t.lastIndexOf("\n", i - 1) + 1);
 const lineEnd = (t: string, i: number) => { const n = t.indexOf("\n", i); return n < 0 ? t.length : n; };
 
 /** Ctrl+A: 今の行（改行で区切った行）の先頭へ */
@@ -92,8 +93,11 @@ export function backslashNewline(s: Sel): Edit | null {
   return { from: s.start - 1, to: s.start, insert: "\n" };
 }
 
-/** 補完の種類と、置き換える範囲。/ は文の頭か空白の後、@ はどこでも空白の後 */
-export type Token = { kind: "slash" | "file"; query: string; from: number; to: number; atStart: boolean };
+/**
+ * 補完の種類と、置き換える範囲。/ は文の頭か空白の後、@ はどこでも空白の後。
+ * quoted は @"..." の語（空白を含むパス、#257）。このときの query は " の中身
+ */
+export type Token = { kind: "slash" | "file"; query: string; from: number; to: number; atStart: boolean; quoted?: true };
 
 /** CLI のスラッシュコマンドとして送る文か。最初の語に2つ目の / があればファイルのパス（貼り付けやドロップで入れたもの）とみなす（#64） */
 export function isSlashCommand(text: string): boolean {
@@ -103,6 +107,14 @@ export function isSlashCommand(text: string): boolean {
 export function tokenAt(s: Sel): Token | null {
   if (s.start !== s.end) return null;
   const before = s.text.slice(0, s.start);
+  // @"..." の中にカーソルがある。CLI と同じく、閉じる " が同じ行にあればそこまでを置き換える
+  const q = /(^|\s)@"([^"\n]*)$/.exec(before);
+  if (q) {
+    const from = before.length - q[2].length - 2;
+    const rest = s.text.slice(s.start);
+    const tail = /^[^"\n]*"/.exec(rest)?.[0] ?? /^\S*/.exec(rest)![0];
+    return { kind: "file", query: q[2], from, to: s.start + tail.length, atStart: from === 0, quoted: true };
+  }
   const m = /(^|\s)([/@])([^\s]*)$/.exec(before);
   if (!m) return null;
   const from = before.length - m[3].length - 1;
@@ -115,6 +127,22 @@ export function tokenAt(s: Sel): Token | null {
   // 語の中に / があるのはファイルのパス。コマンドの補完を出さない
   if (kind === "slash" && s.text.slice(from + 1, to).includes("/")) return null;
   return { kind, query: m[3], from, to, atStart: from === 0 };
+}
+
+/**
+ * @ の候補 f を選んだあとの文とカーソル（#257）。
+ * 空白を含むパスは @"a b.txt" と囲む。CLI 2.1.330 が空白を含むパスを1つのパスとして読むのはこの形だけで、
+ * @a b.txt と @a\ b.txt は a を読む。" を含むパスはこの形で書けないので囲まない。
+ * フォルダは続けて中を選べるように空白を付けない。囲んだフォルダは、閉じる " の前にカーソルを置く
+ */
+export function acceptFile(text: string, t: Token, f: string): { text: string; caret: number } {
+  const dir = f.endsWith("/");
+  const quote = (t.quoted || /\s/.test(f)) && !f.includes('"');
+  const body = quote ? `@"${f}"` : `@${f}`;
+  const head = text.slice(0, t.from);
+  const rest = text.slice(t.to);
+  if (dir) return { text: head + body + rest, caret: head.length + body.length - (quote ? 1 : 0) };
+  return { text: `${head}${body} ${rest.replace(/^[ \t]+/, "")}`, caret: head.length + body.length + 1 };
 }
 
 /** / の候補を並べる。名前の頭が合うもの、名前に含むもの、説明に含むものの順 */

@@ -84,8 +84,10 @@ for f in glob.glob(os.path.join(root, "sessions", "*.json")):
 types = collections.Counter()
 sizes = []
 subs = collections.Counter()
+bad_live = collections.Counter()
 for d in live:
-    enc = "".join(c if c.isalnum() else "-" for c in d["cwd"])
+    # src-tauri/src/native/sessions.rs の project_dir_name と同じ。str.isalnum は「あ」も True にするので、ASCII に絞る
+    enc = "".join(c if c.isascii() and c.isalnum() else "-" for c in d["cwd"])
     base = os.path.join(P, enc, d["sessionId"])
     p = base + ".jsonl"
     if not os.path.exists(p):
@@ -102,10 +104,18 @@ for d in live:
                     continue
                 types[o.get("type")] += 1
     for m in glob.glob(os.path.join(base, "subagents", "**", "*.meta.json"), recursive=True):
-        meta = json.load(open(m))
+        try:
+            meta = json.load(open(m))
+        except Exception:
+            bad_live["meta: JSON でない"] += 1
+            continue
+        if not isinstance(meta, dict):
+            bad_live["meta: object でない"] += 1
+            continue
         j = m[:-len(".meta.json")] + ".jsonl"
         mt = os.stat(j).st_mtime if os.path.exists(j) else 0
         subs[("finished" if "finished" in meta else "finishedなし", "直近10分" if now - mt < 600 else "10分より前")] += 1
 print("生きているセッション", len(live), "jsonl の大きさ(MB)", sorted(round(s / 1e6, 1) for s in sizes), f"{time.time()-t3:.2f}s")
 print("  行の type", dict(types))
 print("  sub-agent", dict(subs))
+print("  想定外", dict(bad_live))

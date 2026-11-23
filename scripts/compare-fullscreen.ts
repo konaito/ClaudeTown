@@ -4,16 +4,26 @@
 // 比べるのは、何も付けない起動（default）と、CLAUDE_CODE_NO_FLICKER=1 を付けた起動（fullscreen）。
 // /tui fullscreen は設定を保存して以後の全部のセッションを変えるので使わない（公式の説明 terminal-config の「Switch to fullscreen rendering」）。
 // 出力は <置き場所>/<方式>.jsonl に {t, b64} で残す。
+//
+// 走らせる前に知っておくこと（#211）。
+// - 本物の claude（haiku）を2本起動する。依頼を1回ずつ送るので、そのぶんの課金がかかる。
+// - 会話の記録は本物の ~/.claude に残る（HOME は分けていない）。
+// - ~/.claude/settings.json に登録してある状態の hook も動き、本物の ~/.family-computing/state を書く。
+//   動いている間は、本人の安定版の町に2つの世帯が出る。
+// - 起動する場所は既定で mkdtemp の捨ての場所。FC_CMP_CWD で変えられるが、変わるのは起動する場所だけ。
+//   捨ての場所では claude が最初にフォルダーを信頼するかを聞くことがある。そのときは答えが出ず、answered は false になる。
+// - 入力欄が30秒で開かなかった回は依頼を送らず、valid: false として summary.json に残す。
 import { Terminal } from "@xterm/headless";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { answered as answeredIn, PROMPT } from "./lib/answered";
 import { sleep } from "./lib/common";
 
 const out = process.argv[2] ?? "/tmp/ct-term-fullscreen";
 mkdirSync(out, { recursive: true });
-const cwd = process.env.FC_CMP_CWD ?? join(homedir(), "Documents/meta");
-const PROMPT = "ツールは使わずに答えて。1から40まで、1行に1つずつ、数字と短い一言を書いて。";
+const cwd = process.env.FC_CMP_CWD ?? mkdtempSync(join(tmpdir(), "ct-cmp-"));
+console.error(`起動する場所: ${cwd}`);
 const COLS = 100, ROWS = 30, NARROW = 70;
 
 function env(extra: Record<string, string>) {
@@ -76,10 +86,18 @@ async function run(name: string, extra: Record<string, string>) {
   });
   // 入力欄が読み始める（ESC[?2004h）まで待つ。早く書くと Enter が捨てられる（2026-11 に ccn の #26 で確かめた）
   for (let i = 0; i < 300 && !text.includes("\x1b[?2004h"); i++) await sleep(100);
+  if (!text.includes("\x1b[?2004h")) {
+    // 入力欄が開かなかった回は、計測に使えないので依頼を送らずに無効として残す
+    proc.kill();
+    await proc.exited;
+    writeFileSync(join(out, `${name}.jsonl`), rec.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    return { name, valid: false, reason: "入力欄が30秒で開かなかった", answered: false };
+  }
   await sleep(1000);
   const cpu0 = await cpuOf(proc.pid);
   phase = "answer";
   const a0 = performance.now();
+  const sentAt = text.length;
   proc.terminal!.write(PROMPT);
   await sleep(300);
   proc.terminal!.write("\r");
@@ -88,7 +106,8 @@ async function run(name: string, extra: Record<string, string>) {
   while (performance.now() - last < 6000 && performance.now() - a0 < 120000) await sleep(200);
   const answerMs = Math.round(last - a0);
   const cpu1 = await cpuOf(proc.pid);
-  const answered = /40/.test(text);
+  // 依頼を送った後の出力だけを見る。依頼文にも 40 が入っているので、行頭の 40 を探す
+  const answered = answeredIn(text.slice(sentAt));
   // 幅を変えて、3秒後の画面を見る
   phase = "resize";
   const before = rules(t);
@@ -103,7 +122,7 @@ async function run(name: string, extra: Record<string, string>) {
   const all = rec.reduce((a, r) => a + Buffer.from(r.b64, "base64").length, 0);
   const seq = (s: string) => text.split(s).length - 1;
   return {
-    name, answered, answerMs,
+    name, valid: true, answered, answerMs,
     answerBytes: counts.answer.bytes, answerChunks: counts.answer.chunks,
     chunksPerSec: +(counts.answer.chunks / (answerMs / 1000)).toFixed(1), bytesPerSec: Math.round(counts.answer.bytes / (answerMs / 1000)),
     claudeCpuSec: +(cpu1 - cpu0).toFixed(2),

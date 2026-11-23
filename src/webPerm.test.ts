@@ -20,10 +20,22 @@ describe("answerPermission", () => {
     await expect(p).rejects.toThrow("中身が変わった");
     expect(sent).toEqual([]);
   });
-  test("拒否は requestId が違っても送れる", async () => {
-    const { p, sent } = run(detail(), "deny", null);
+  test("拒否も requestId が合うときだけ送る", async () => {
+    const { p, sent } = run(detail(), "deny", "r1");
     expect(await p).toBe("拒否した（Bash）");
-    expect(sent[0][1]).toMatchObject({ behavior: "deny" });
+    expect(sent).toEqual([["/sessions/s1/permissions/r1", { behavior: "deny", message: DENY_DEFAULT }]]);
+    for (const e of ["old", null]) {
+      const x = run(detail(), "deny", e);
+      await expect(x.p).rejects.toThrow("中身が変わった");
+      expect(x.sent).toEqual([]);
+    }
+  });
+  test("見せた承認 r1 が済んで r2 が待ちに入ったら、拒否も理由も r2 に送らない（#226）", async () => {
+    const d = detail({ pending: [{ requestId: "r2", toolName: "Bash", input: { command: "rm -rf x" } }] });
+    const sent: unknown[] = [];
+    const p = answerPermission(async () => d, async (path, body) => { sent.push([path, body]); return null; }, "s1", "deny", "r1", null, "A の理由");
+    await expect(p).rejects.toThrow("中身が変わった");
+    expect(sent).toEqual([]);
   });
   test("質問は、全部に答えがあるときだけ updatedInput の answers で送る", async () => {
     const input = { questions: [{ question: "色は？", options: [{ label: "赤" }] }, { question: "数は？", multiSelect: true, options: [] }] };
@@ -43,9 +55,9 @@ describe("answerPermission", () => {
     expect(await a.p).toBe("計画を承認した");
     expect(a.sent[0][1]).toEqual({ behavior: "allow" });
     const sent: unknown[] = [];
-    await answerPermission(async () => d, async (_p, b) => { sent.push(b); return null; }, "s1", "deny", null, null, "テストも");
+    await answerPermission(async () => d, async (_p, b) => { sent.push(b); return null; }, "s1", "deny", "r1", null, "テストも");
     expect(sent).toEqual([{ behavior: "deny", message: "テストも" }]);
-    const dflt = run(d, "deny", null);
+    const dflt = run(d, "deny", "r1");
     await dflt.p;
     expect(dflt.sent[0][1]).toEqual({ behavior: "deny", message: PLAN_DENY_DEFAULT });
   });
@@ -81,12 +93,12 @@ describe("常に許可", () => {
   test("addDirectories、無い番号、拒否、中身の変わった要求には付けない", async () => {
     await expect(go("allow", "r1", 1).p).rejects.toThrow("提案に無い");
     await expect(go("allow", "r1", 5).p).rejects.toThrow("提案に無い");
-    await expect(go("deny", null, 0).p).rejects.toThrow("付けない");
+    await expect(go("deny", "r1", 0).p).rejects.toThrow("付けない");
     await expect(go("allow", "old", 0).p).rejects.toThrow("変わった");
   });
 });
 
-// src-tauri/src/permission.rs の shared_cases と同じ事例
+// 承認の返事の決まりの事例。Rust 側の同じ処理（permission.rs）は消え、今はこの試験だけが読む
 describe("承認の返事の組み立て（src/perm-cases.json）", () => {
   type A = { first: Pending; choice: string; expectId: string | null; answers: Record<string, string> | null; message: string | null; suggestion: number | null };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

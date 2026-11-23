@@ -64,7 +64,7 @@ ManGreen だけは Faceset.png が無いので、Idle.png の体の絵で付け�
 | `~/.family-computing/avatars-recent.json` | 世代ごとの直近の6体 |
 | `~/.family-computing/avatars-peer-<機械>.json` | 別の機械の町の割り当て。直近の6体は `-recent` を付けた名前に置く |
 
-`avatars.json` の形は、乱数にする前の版と同じにしてある。安定版と開発版は同じファイルを読み書きする。古い版は読めない形のファイルを空とみなして全員を振り直すので、この形に項目を足さない。
+`avatars.json` の形は、乱数にする前の版と同じにしてある。開発版は 72eeddd（2026-11-12、#23）から、アプリが書くこれらのファイルを `~/.family-computing/dev/` に置き、安定版とは別のファイルを読み書きする（`src-tauri/src/lib.rs` の `place`）。古い版は読めない形のファイルを空とみなして全員を振り直すので、この形に項目を足さない。
 
 環境変数 `FC_AVATARS` に別のパスを渡すと、保存先を差し替えられる。`FC_CCN_URL` で別のノード（モックなど）に向けたのに `FC_AVATARS` が無いときは、`avatars-custom-ccn.json` に分ける。本物の `avatars.json` を使うと、モックにいない本物のセッションの割り当てが消え、乱数なので元に戻らない。
 

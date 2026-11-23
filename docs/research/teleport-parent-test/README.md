@@ -17,7 +17,7 @@
 
 ## 試したことと保存した一覧
 
-各段階の `<段階>-A.json` と `<段階>-B.json` は、id、title、state、parent、kind、cwd、awaitingFirst に絞った一覧。`.full.json` は GET /api/sessions の全体。id は `ids-*.txt` にある。
+各段階の `<段階>-A.json` と `<段階>-B.json` は、id、title、state、parent、kind、cwd、awaitingFirst に絞った一覧。`.full.json` は GET /api/sessions の全体。id は `ids-*.txt` にある。`.full.json` と `ids-*.txt` は、`snap.sh` が書いた試験の場所（`/private/tmp/ccn-tp/out`）にだけ置き、このリポジトリには写していない。
 
 | 段階 | 内容 |
 | --- | --- |

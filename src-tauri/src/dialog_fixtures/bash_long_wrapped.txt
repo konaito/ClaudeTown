@@ -1,0 +1,50 @@
+ ▐▛███▛█   Claude Code v2.1.330
+▝▜██████▀  Haiku 5.5 · Claude Team
+ ▝▝   ▝▝   /private/tmp/fc169-probe
+
+
+❯ Run exactly this single bash command, verbatim, with the Bash tool and nothing else: cd
+  /private/tmp/fc169-probe && echo first-segment-0123456789-abcdefghijklmnopqrstuvwxyz
+  second-segment-0123456789-abcdefghijklmnopqrstuvwxyz
+  third-segment-0123456789-abcdefghijklmnopqrstuvwxyz fourth-segment-0123456789 >
+  long-output-file.txt && wc -c long-output-file.txt
+
+⏺ Bash(echo first-segment-0123456789-abcdefghijklmnopqrstuvwxyz
+      second-segment-0123456789-abcdefghijklmnopqrstuvwxyz
+      third-segment-0123456789-abcdefghijklmnopqrstuvwxy…)
+  ⎿  Waiting…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+ Tip: auto mode handles these prompts for you — choose "switch to auto mode" below
+ Write long echo output to file and count bytes
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ │ echo first-segment-0123456789-abcdefghijklmnopqrstuvwxyz
+ │ second-segment-0123456789-abcdefghijklmnopqrstuvwxyz
+ │ third-segment-0123456789-abcdefghijklmnopqrstuvwxyz fourth-segment-0123456789 >
+ │ long-output-file.txt && wc -c long-output-file.txt
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to /private/tmp/fc169-probe from this project
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

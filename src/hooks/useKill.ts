@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { call as invoke } from "../bridge";
 import type { Agent, buildTree } from "../model";
 import { kickTown } from "../town";
-import { canStop } from "../abilities";
+import { closedDescendants, killPlan } from "../killPlan";
 
 /** 閉じる演出の長さ（ms）。CSS の kill-* と合わせる */
 const KILL_MS = 1150;
@@ -22,31 +22,47 @@ export function useKill(h: {
   const [killAsk, setKillAsk] = useState<Agent | null>(null);
   /** a とその子孫を、葉から順に止める。倒れる演出も葉から少しずつずらして出す。全部止まったら true */
   const kill = useCallback(async (a: Agent) => {
-    const order: Agent[] = [];
-    const walk = (x: Agent) => { for (const k of tree.childrenOf.get(x.id) ?? []) walk(k); order.push(x); };
-    walk(a);
-    const targets = order.filter(canStop);
-    const skipped = order.filter((x) => !canStop(x));
-    setDying((m) => { const n = new Map(m); targets.forEach((x, i) => n.set(x.id, i * KILL_STAGGER)); return n; });
-    if (selected && targets.some((x) => x.id === selected)) setSelected(null);
+    // 止める順と残す分は killPlan（#183）。sub-agent と in-process のチームメイトは止めず、親の claude と一緒に終わる
+    const { stop: targets, keep: skipped, ride } = killPlan(tree.childrenOf, a);
+    const delay = new Map(targets.map((x, i) => [x.id, i * KILL_STAGGER]));
+    // 外で起動して残す親に乗っている子は、親と一緒に残るので触らない
+    const riding = ride.filter((r) => delay.has(r.with.id));
+    setDying((m) => {
+      const n = new Map(m);
+      for (const [id, at] of delay) n.set(id, at);
+      // 一緒に終わる子も、親と同じ時に倒れる演出を出す
+      for (const r of riding) n.set(r.agent.id, delay.get(r.with.id) ?? 0);
+      return n;
+    });
+    const gone = new Set([...targets.map((x) => x.id), ...riding.map((r) => r.agent.id)]);
+    if (selected && gone.has(selected)) setSelected(null);
     const failed: Agent[] = [];
     for (const x of targets) {
       try { await invoke("stop_session", { sessionId: x.id }); }
       catch { failed.push(x); }
     }
     const ok = targets.filter((x) => !failed.includes(x));
+    const okIds = new Set(ok.map((x) => x.id));
+    const ended = [...ok, ...riding.filter((r) => okIds.has(r.with.id)).map((r) => r.agent)];
+    const stuck = [...failed, ...riding.filter((r) => !okIds.has(r.with.id)).map((r) => r.agent)];
     // 一覧から消えたのをすぐ拾う。見張りは変化が無いと間隔を延ばしているため（#5）
     kickTown();
     // 止まらなかった分は演出を戻す。止まった分は演出が終わったら隠す
-    setDying((m) => { const n = new Map(m); for (const x of failed) n.delete(x.id); return n; });
+    setDying((m) => { const n = new Map(m); for (const x of stuck) n.delete(x.id); return n; });
     const last = (targets.length - 1) * KILL_STAGGER + KILL_MS;
     setTimeout(() => {
-      setHidden((hh) => { const n = new Map(hh); for (const x of ok) n.set(x.id, Date.now()); return n; });
-      setDying((m) => { const n = new Map(m); for (const x of ok) n.delete(x.id); return n; });
+      setHidden((hh) => { const n = new Map(hh); for (const x of ended) n.set(x.id, Date.now()); return n; });
+      setDying((m) => { const n = new Map(m); for (const x of ended) n.delete(x.id); return n; });
     }, last);
+    const closed = closedDescendants(a, ride, ok);
     if (failed.length) toast(`止められなかった: ${failed.map((x) => x.name).join("、")}`, true);
-    else toast(`${a.name}${order.length > 1 ? ` と子孫 ${order.length - 1} 人` : ""}を閉じた`);
-    if (skipped.length) toast(`Claude Town の外で起動したので、ここからは止められない。残した: ${skipped.map((x) => x.name).join("、")}`, true);
+    else toast(`${a.name}${closed ? ` と子孫 ${closed} 人` : ""}を閉じた`);
+    // 残す分のうち、kind が teammate なのは tmux のチームメイト（in-process のチームメイトは killPlan が ride に入れる）。
+    // 外で起動した claude ではないので、理由を分ける。リードが止まった後にプロセスが残るかは未確認なので「止めていない」とだけ言う
+    const mates = skipped.filter((x) => x.kind === "teammate");
+    const outside = skipped.filter((x) => x.kind !== "teammate");
+    if (outside.length) toast(`Claude Town の外で起動したので、ここからは止められない。残した: ${outside.map((x) => x.name).join("、")}`, true);
+    if (mates.length) toast(`tmux で動くチームメイトは、ここからは止められない。止めていない: ${mates.map((x) => x.name).join("、")}`, true);
     return failed.length === 0 && skipped.length === 0;
   }, [tree, selected, toast]);
   const askKill = useCallback((a: Agent, instant: boolean) => { if (instant) kill(a); else setKillAsk(a); }, [kill]);
