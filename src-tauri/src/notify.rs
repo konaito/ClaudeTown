@@ -21,7 +21,9 @@ use super::*;
 //
 // 通知は tauri-plugin-notification（macOS では notify-rust → mac-notification-sys の NSUserNotificationCenter）で出す。
 // - 音は sound に NSUserNotificationDefaultSoundName を渡すと既定の音になる（mac-notification-sys の objc/notify.m）。渡さなければ鳴らない
-// - 押した知らせは on_action に "tap" で来る（2.6.0 から）。show の時点で handler が登録済みのときだけ追跡するので、最初の通知より前に登録する
+// - 押した知らせは on_action に "tap" で来る（2.6.0 から）。show の時点で handler が登録済みのときだけ追跡するので、最初の通知より前に登録する。
+//   通知の extra に子のセッション ID を入れておくと、押した知らせの notification().extra() で読み戻せる（プラグインの desktop.rs の wait と performed）。
+//   押されたら窓を前に出し、画面へ OPEN_EVENT でセッション ID を送って、その子のチャットを開く（2026-11-23、本人が押して窓だけ開いたため）
 // - `bun tauri dev` の実行ファイル（tauri::is_dev()）では、通知は com.apple.Terminal の名義で出る（プラグインの desktop.rs）。
 //   2026-11-23 にこの機械の開発版で出すと、usernoted が要求を断った（「Denying message 3 from connection <LegacyConnection identifier:
 //   com.apple.Terminal>」）。ターミナルの通知を許可すれば出るかは確かめていない。開発版は FC_NOTIFY=1 のときだけ出す（wanted）
@@ -33,6 +35,10 @@ const FORGET_AFTER: u32 = 30;
 const BODY_MAX: usize = 120;
 /// 既定の通知の音（NSUserNotificationDefaultSoundName）
 const SOUND: &str = "NSUserNotificationDefaultSoundName";
+/// 押した通知の子のチャットを開く合図。画面（src/App.tsx）が受けて、その子を選びチャットを開く。中身はセッション ID
+pub(crate) const OPEN_EVENT: &str = "notify-open";
+/// 通知の extra に入れる、子のセッション ID の鍵
+const EXTRA_ID: &str = "sessionId";
 /// 見張り（watch.rs）が最後に一覧を渡してから、これより長く経ったら止まったとみなし、このスレッドが一覧を作る
 const WATCH_STALE: Duration = Duration::from_secs(12);
 
@@ -184,7 +190,7 @@ fn bring_front(app: &tauri::AppHandle) {
 
 fn show(app: &tauri::AppHandle, n: &Notice, via: &str) {
     use tauri_plugin_notification::NotificationExt;
-    let mut b = app.notification().builder().title(&n.title).sound(SOUND);
+    let mut b = app.notification().builder().title(&n.title).sound(SOUND).extra(EXTRA_ID, &n.id);
     if !n.body.is_empty() {
         b = b.body(&n.body);
     }
@@ -199,7 +205,26 @@ fn wanted(app_id: &str, flag: Option<&str>) -> bool {
     app_id == STABLE_ID || flag == Some("1")
 }
 
-/// アプリの setup で呼ぶ。押した通知で窓を前に出す口を登録し、通知を出す口を入れ、隠れている間の見張りを始める
+/// 押した通知の子のセッション ID（extra に入れた値）。押したのが通知そのもの（tap）でなければ None
+pub(crate) fn tapped_id(p: &tauri_plugin_notification::ActionPerformed) -> Option<String> {
+    if p.action_id() != "tap" {
+        return None;
+    }
+    p.notification()?.extra().get(EXTRA_ID)?.as_str().filter(|s| !s.is_empty()).map(String::from)
+}
+
+/// 押された通知で窓を前に出し、その子のチャットを開く合図を画面に送る
+fn on_tap(app: &tauri::AppHandle, p: &tauri_plugin_notification::ActionPerformed) {
+    use tauri::Emitter;
+    bring_front(app);
+    let id = tapped_id(p);
+    perf_log(json!({ "notifyAction": p.action_id(), "id": id, "at": now_ms() as u64 }).to_string());
+    if let Some(id) = id {
+        let _ = app.emit(OPEN_EVENT, id);
+    }
+}
+
+/// アプリの setup で呼ぶ。押した通知で窓を前に出してその子のチャットを開く口を登録し、通知を出す口を入れ、隠れている間の見張りを始める
 pub(crate) fn start(app: &tauri::AppHandle) {
     use tauri_plugin_notification::NotificationExt;
     if !wanted(&app.config().identifier, std::env::var("FC_NOTIFY").ok().as_deref()) {
@@ -207,10 +232,7 @@ pub(crate) fn start(app: &tauri::AppHandle) {
     }
     let _ = STARTED_AT.set(now_ms() as u64);
     let h = app.clone();
-    let _ = app.notification().on_action(move |a| {
-        bring_front(&h);
-        perf_log(json!({ "notifyAction": a.action_id(), "at": now_ms() as u64 }).to_string());
-    });
+    let _ = app.notification().on_action(move |p| on_tap(&h, p));
     if APP.set(app.clone()).is_ok() {
         let _ = std::thread::Builder::new().name("mail-notify".into()).spawn(hidden_loop);
     }
@@ -347,6 +369,17 @@ mod tests {
         assert!(!wanted("jp.fybe.family-computing.dev", None));
         assert!(!wanted("jp.fybe.family-computing.dev", Some("0")));
         assert!(wanted("jp.fybe.family-computing.dev", Some("1")));
+    }
+
+    #[test]
+    fn tap_carries_the_session_id() {
+        // プラグインが押した知らせとして渡す形（desktop.rs の performed: actionId と、show のときの通知の中身）
+        let performed = |action: &str, extra: Value| -> tauri_plugin_notification::ActionPerformed {
+            serde_json::from_value(json!({ "actionId": action, "inputValue": null, "notification": { "id": 1, "title": "t", "extra": extra } })).unwrap()
+        };
+        assert_eq!(tapped_id(&performed("tap", json!({ EXTRA_ID: "abc" }))).as_deref(), Some("abc"));
+        assert_eq!(tapped_id(&performed("tap", json!({}))), None);
+        assert_eq!(tapped_id(&performed("snooze", json!({ EXTRA_ID: "abc" }))), None);
     }
 
     #[test]
