@@ -4,6 +4,7 @@
 // - create_session / stop_session / restart_session: 新しい世帯の claude をこのアプリの中の端末で起動する、止める、止めて枠の残るアカウントで立て直す（pty.rs）
 // - term_open / term_close / term_input / term_resize: このアプリが立てた端末を読み書きし、開いた画面の Channel へ流す
 // - house_places: 新しい世帯のペインの「最近の場所」の材料（places.rs）
+// - restore_report: 起動のときの端末の立て直しで、戻らなかった端末の一覧（session_ops.rs、#262）
 // - prompt_history / slash_commands / file_suggestions / send_direct / interrupt_session: チャットの入力欄を CLI と同じ動きにする（composer.rs）
 // - session_settings / switch_session / cancel_switch: モデルと権限モードを読む、替える、予約を取り消す（switch.rs）
 // ファイルを読む命令は spawn_blocking で動かし、メインスレッドを止めない（下の「画面から呼ぶ命令」）。
@@ -107,6 +108,12 @@ fn place(home: &std::path::Path, hook: &HookDirs, app_id: Option<&str>, app_home
         },
     };
     dir.join(name)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 試験のスレッドごとの hook の id の並びの置き場所（ids_dir）
+    static TEST_IDS_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 /// 2つ目の起動を止めるか（#176）。止めるときは tauri-plugin-single-instance を使う。
@@ -277,14 +284,109 @@ fn app_caps() -> Value {
     json!({ "send": true, "permissions": true, "interrupt": true, "stop": true, "terminal": true, "events": false })
 }
 
+/// from 行の呼び手 "agent:<ノード>/<sid8>/<役割>" の sid8。claude-code-nodes の identity/agent-name.ts の parseAgent と同じ規則で、
+/// 2つ目の区切りが16進の8文字で、後ろに役割があるときだけ返す。ccn は session id が分からないと "agent:<ノード>/<役割>" を付けるので、
+/// 役割や空の文字列を sid8 として読むと、たまたま前が合う id（空ならどの id でも）を親にしてしまう
+fn agent_sid8(caller: &str) -> Option<&str> {
+    let (node, rest) = caller.strip_prefix("agent:")?.split_once('/')?;
+    let (sid, role) = rest.split_once('/')?;
+    let hex8 = sid.len() == 8 && sid.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    (!node.is_empty() && hex8 && !role.is_empty()).then_some(sid)
+}
+
+/// 親をたどって自分に戻る輪を切る。輪の中で最も早く始まったセッション（同じなら id の小さいほう）を根にする。
+/// 画面（src/model.ts の buildTree）は根から世帯を作るので、輪のままだと輪の中のセッションが町から消え、lineage も止まらない。
+/// 親が /clear した後に子から届いた文が、親の新しい記録の最初の from 行になると、前の id から親を引き直したとき（#248）に輪ができる
+fn break_cycles(rows: &[Value], parents: &mut [Option<String>]) {
+    let index: HashMap<&str, usize> = rows.iter().enumerate().filter_map(|(i, s)| Some((s["id"].as_str()?, i))).collect();
+    let key = |i: usize| (rows[i]["startedAt"].as_u64().unwrap_or(u64::MAX), rows[i]["id"].as_str().unwrap_or_default());
+    for start in 0..rows.len() {
+        let mut path = vec![start];
+        while let Some(next) = parents[*path.last().expect("空にしない")].as_deref().and_then(|p| index.get(p)).copied() {
+            if let Some(pos) = path.iter().position(|&i| i == next) {
+                if let Some(root) = path[pos..].iter().copied().min_by_key(|&i| key(i)) {
+                    parents[root] = None;
+                }
+                break;
+            }
+            path.push(next);
+        }
+    }
+}
+
+/// hook（hooks/fc-report.py）が、claude のプロセスごとに名乗った id の並び（古い順）を書く置き場所（#266）。中は ids/<pid>.json。
+/// 試すときは FC_IDS_DIR で差し替える（hook と同じ変数）
+fn ids_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        TEST_IDS_DIR.with(|h| h.borrow().clone()).unwrap_or_else(|| PathBuf::from("/nonexistent/fc-ids"))
+    }
+    #[cfg(not(test))]
+    std::env::var("FC_IDS_DIR").ok().filter(|s| !s.is_empty()).map(Into::into).unwrap_or_else(|| fc_path(Scope::Shared, "ids"))
+}
+
+/// 生きている端末の行の id ごとに、同じプロセスが前に名乗った id（新しい順）。/clear で id が変わっても pid は変わらない（#248、#266）。
+/// hook の並びは、最後の id が同じ pid の今の行の id と合うときだけ使う（pid の使い回しや、hook が書き損ねた古い並びを当てない）。
+/// このアプリが立てた端末は、台帳の ids も足す
+fn earlier_ids(rows: &[Value], dir: &std::path::Path) -> HashMap<String, Vec<String>> {
+    let id_of_pid: HashMap<u64, &str> = rows.iter().filter(|r| r["kind"] == "terminal")
+        .filter_map(|r| Some((r["pid"].as_u64()?, r["id"].as_str()?))).collect();
+    let live: HashSet<&str> = rows.iter().filter_map(|r| r["id"].as_str()).collect();
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let Some(v) = read_json(&e.path()) else { continue };
+        let (Some(pid), Some(ids)) = (v["pid"].as_u64(), v["ids"].as_array()) else { continue };
+        let ids: Vec<&str> = ids.iter().filter_map(Value::as_str).collect();
+        let Some((cur, prev)) = ids.split_last() else { continue };
+        if id_of_pid.get(&pid) == Some(cur) {
+            out.entry(cur.to_string()).or_default().extend(prev.iter().rev().map(|s| s.to_string()));
+        }
+    }
+    for p in pty::list().into_iter().filter(|p| live.contains(p.cur.as_str())) {
+        out.entry(p.cur.clone()).or_default().extend(p.ids.into_iter().rev().filter(|i| *i != p.cur));
+    }
+    for (cur, prev) in out.iter_mut() {
+        let mut seen = HashSet::new();
+        prev.retain(|i| i != cur && seen.insert(i.clone()));
+    }
+    out
+}
+
+/// 前の id の記録の最初の文の from 行の呼び手（#266）。前の id の記録にはもう行が増えないので、from 行が無いことも含めて覚え、
+/// snapshot のたびに projects/ を探し直さない
+static EARLIER_CALLER: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
+
+fn caller_of_earlier(id: &str) -> Option<String> {
+    let mut g = EARLIER_CALLER.lock().unwrap_or_else(|e| e.into_inner());
+    let known = g.get_or_insert_with(HashMap::new);
+    if let Some(c) = known.get(id) {
+        return c.clone();
+    }
+    // 記録が無い、または user の行が無いなら、その id は人や親の文を受けずに終わった（/clear だけ打ったなど）
+    let found = native::sessions::find_jsonl(&native::claude_home(), id).and_then(|p| native::sessions::first_prompt_caller(&p).flatten());
+    if known.len() >= 4096 {
+        known.clear();
+    }
+    known.insert(id.to_string(), found.clone());
+    found
+}
+
 /// 一覧の行を、画面に渡すセッションの形に直す。hook の報告と close-check の判定を足す。キャラの割り当ては足さない
 fn agents_from(rows: Vec<Value>) -> Vec<Value> {
     let live_ids: HashSet<String> = rows.iter().filter_map(|s| s["id"].as_str().map(String::from)).collect();
-    // 別のプロダクト（ccn など）が子に付ける from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）から親を引く。Claude Code の記録の1行目にある
+    // 親が /clear や計画の承認で id を変えると、前に立てた子の from 行は前の id を指したまま残る（#248）。
+    // 同じ pid の前の id（アプリの端末は台帳の ids、ほかは hook の並び）に当たれば、そのプロセスの今の id を親にする（#266）
+    let earlier = earlier_ids(&rows, &ids_dir());
+    // 別のプロダクト（ccn など）が子に付ける from 行の呼び手（"agent:<ノード>/<sid8>/<役割>"）から親を引く。Claude Code の記録の1行目にある。
+    // 子が /clear すると今の記録に from 行が無いので、同じプロセスの前の id の記録の from 行を使う（#266）
     let parent_from_line = |s: &Value| -> Option<String> {
-        let p = s["parent"].as_str()?;
-        let sid8 = p.strip_prefix("agent:")?.split('/').nth(1)?;
+        let caller = match s["parent"].as_str() {
+            Some(c) => c.to_string(),
+            None => earlier.get(s["id"].as_str()?)?.iter().find_map(|prev| caller_of_earlier(prev))?,
+        };
+        let sid8 = agent_sid8(&caller)?;
         live_ids.iter().find(|id| id.starts_with(sid8)).cloned()
+            .or_else(|| earlier.iter().find(|(_, prev)| prev.iter().any(|i| i.starts_with(sid8))).map(|(cur, _)| cur.clone()))
     };
 
     // 名前は、そのセッションが作業しているプロジェクトの名前（src-tauri/src/naming.rs）
@@ -300,12 +402,16 @@ fn agents_from(rows: Vec<Value>) -> Vec<Value> {
     }).collect();
     let name_of = naming::card_names(&whos);
     let project_of: HashMap<&str, Option<&String>> = whos.iter().map(|w| (w.id.as_str(), w.project.as_ref())).collect();
-    let mut agents = vec![];
-    for s in &rows {
-        let id = s["id"].as_str().unwrap_or_default().to_string();
-        // sub-agent とチームメイトは置き場所で決めた親（#96）。ほかは from 行の呼び手。親が生きていなければ根として扱う
+    // sub-agent とチームメイトは置き場所で決めた親（#96）。ほかは from 行の呼び手。親が生きていなければ根として扱う
+    let mut parents: Vec<Option<String>> = rows.iter().map(|s| {
+        let id = s["id"].as_str().unwrap_or_default();
         let native_parent = s["native"]["parentId"].as_str().filter(|p| live_ids.contains(*p)).map(String::from);
-        let parent = native_parent.or_else(|| parent_from_line(s)).filter(|p| *p != id);
+        native_parent.or_else(|| parent_from_line(s)).filter(|p| p != id)
+    }).collect();
+    break_cycles(&rows, &mut parents);
+    let mut agents = vec![];
+    for (s, parent) in rows.iter().zip(parents) {
+        let id = s["id"].as_str().unwrap_or_default().to_string();
         // sub-agent と in-process のチームメイトは、リードと同じ session id で hook が届くので、hook の報告を使わない。
         // 様子は meta.json の説明と jsonl の末尾から作る。tmux のチームメイトは自分の session id を持つので hook の報告を読む
         let from_meta = s["native"]["report"].is_object();
@@ -353,7 +459,9 @@ static LAST_SOURCES: Mutex<Option<Value>> = Mutex::new(None);
 
 /// 画面に渡す町を作る。キャラの割り当て、状態ファイル、お手紙はここで足す
 fn snapshot() -> Snapshot {
-    let mut agents = agents_from(town_rows());
+    let rows = town_rows();
+    let readers = native::received::targets(&rows);
+    let mut agents = agents_from(rows);
     // キャラの絵の割り当て。世代（親をたどった深さ）に合う見た目を重み付きの乱数で選び、保存して以後変えない
     let mut order: Vec<&Value> = agents.iter().collect();
     order.sort_by(|a, b| a["startedAt"].as_u64().unwrap_or(0).cmp(&b["startedAt"].as_u64().unwrap_or(0)).then(a["id"].as_str().cmp(&b["id"].as_str())));
@@ -384,7 +492,18 @@ fn snapshot() -> Snapshot {
         }
     }
     let sources = LAST_SOURCES.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    Snapshot { agents, letters: recent_letters(), fetched_at: now_ms(), sources }
+    let now = now_ms();
+    let letters = with_reads(recent_letters(), |since| native::received::recent(&readers, since), now);
+    Snapshot { agents, letters, fetched_at: now, sources }
+}
+
+/// letters.jsonl の記録に、受けた側の jsonl から作った received を足す（#276）。ファイルには書かない。
+/// 窓に sent が1通も無ければ、既読にする相手が無いので jsonl を読まない
+fn with_reads(mut letters: Vec<Value>, read: impl FnOnce(u64) -> Vec<Value>, now: u128) -> Vec<Value> {
+    if letters.iter().any(|l| l["ev"] == "sent") {
+        letters.extend(read(now.saturating_sub(LETTERS_WINDOW_MS) as u64));
+    }
+    letters
 }
 
 static AVATARS_LOCK: Mutex<()> = Mutex::new(());
@@ -517,6 +636,9 @@ pub fn run() {
             // 前回開いていた端末を立て直す（#152）。ログインシェルに PATH を聞くので（最大5秒）、別のスレッドで
             if std::env::var("FC_NO_RESTORE").is_err() {
                 std::thread::spawn(session_ops::restore_terminals);
+            } else {
+                // 立て直さないときも、画面の restore_report が待ち続けないよう、空で済ませる（#262）
+                session_ops::finish_restore(vec![]);
             }
             // 開発の計測用（src/term/bench.ts、scripts/bench.ts）: 窓が裏にあると WebKit が描画を止め、描画の負荷を測れないので、
             // 最前面に出し、どのデスクトップにも出す（本人が別のデスクトップに移っても隠れないように）。
@@ -535,7 +657,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             cmd::snapshot, conversation::cmd::conversation,
-            session_ops::cmd::create_session, session_ops::cmd::resume_session, session_ops::cmd::stop_session, session_ops::cmd::restart_session, session_ops::cmd::house_places, repo::cmd::place_repos,
+            session_ops::cmd::create_session, session_ops::cmd::resume_session, session_ops::cmd::stop_session, session_ops::cmd::restart_session, session_ops::cmd::house_places, session_ops::cmd::restore_report, repo::cmd::place_repos,
             term_open, term_close, term_input, term_resize,
             perf_log, perf_ping, perf_window, town_watch, town_unwatch, town_kick,
             composer::cmd::prompt_history, composer::cmd::slash_commands, composer::cmd::file_suggestions, composer::cmd::send_direct, composer::cmd::send_or_queue, composer::cmd::cancel_queued, composer::cmd::boot_status, composer::cmd::interrupt_session, attach::cmd::paste_clipboard, attach::cmd::stage_files,
@@ -557,6 +679,18 @@ pub(crate) static NATIVE_TEST_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jsonl_reads_are_added_only_when_something_was_sent() {
+        let r = json!({"ev": "received", "via": "jsonl"});
+        let called = std::cell::Cell::new(None);
+        let read = |since: u64| { called.set(Some(since)); vec![r.clone()] };
+        assert_eq!(with_reads(vec![json!({"ev": "received"})], read, LETTERS_WINDOW_MS + 5), vec![json!({"ev": "received"})]);
+        assert_eq!(called.get(), None, "sent が無ければ読まない");
+        let read = |since: u64| { called.set(Some(since)); vec![r.clone()] };
+        assert_eq!(with_reads(vec![json!({"ev": "sent"})], read, LETTERS_WINDOW_MS + 5), vec![json!({"ev": "sent"}), r.clone()]);
+        assert_eq!(called.get(), Some(5), "窓の始まりから読む");
+    }
 
     #[test]
     fn letters_read_only_what_was_added() {
@@ -836,6 +970,112 @@ mod tests {
         assert_eq!(d.items.len(), 1);
         assert_eq!(LAST_SOURCES.lock().unwrap().as_ref().unwrap()["app"], 0);
         native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+    }
+
+    /// hook（fc-report.py）が pid ごとに残した id の並び（ids/<pid>.json）で、/clear の前の id を引く（#266）。
+    /// 1. 子が /clear すると、新しい記録に from 行が無い。前の id の記録の from 行から親を引く
+    /// 2. アプリの外で起動した親が /clear すると、子の from 行は前の id を指したまま。並びの今の id を親にする
+    ///
+    /// 並びの最後の id が、同じ pid の今の行の id と合わないもの（pid の使い回し、古い並び）は使わない
+    #[test]
+    fn hook_id_chains_keep_parents_across_clear() {
+        use native::testtree::*;
+        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = tmp("hook-id-chains");
+        let ids_dir = root.join("fc-ids");
+        let a = "a1a1a1a1-0000-4000-8000-0000000000a1";
+        let b_old = "b0b0b0b0-0000-4000-8000-0000000000b0";
+        let b_new = "b1b1b1b1-0000-4000-8000-0000000000b1";
+        let p_old = "c0c0c0c0-0000-4000-8000-0000000000c0";
+        let p_new = "c1c1c1c1-0000-4000-8000-0000000000c1";
+        let d = "d1d1d1d1-0000-4000-8000-0000000000d1";
+        let e_old = "e0e0e0e0-0000-4000-8000-0000000000e0";
+        let e = "e1e1e1e1-0000-4000-8000-0000000000e1";
+        let jsonl = |sid: &str, first: &str| {
+            write(&root.join(format!("projects/-tmp-x/{sid}.jsonl")), &format!("{{\"type\":\"user\",\"message\":{{\"content\":\"{first}\"}}}}\n"));
+        };
+        // B は A の子として立ち（b_old の from 行）、/clear して b_new になった。b_new の記録に from 行は無い
+        jsonl(b_old, &format!("from agent:n/{}/r via n\\n\\nやって", &a[..8]));
+        jsonl(b_new, "続き");
+        write(&ids_dir.join("200.json"), &json!({ "pid": 200, "ids": [b_old, b_new] }).to_string());
+        // 親 P はアプリの外で起動し、/clear して p_new になった。子 D の from 行は p_old を指す
+        write(&ids_dir.join("300.json"), &json!({ "pid": 300, "ids": [p_old, p_new] }).to_string());
+        // E の並びは pid 401 のもの。E の今の pid は 400 なので使わない（e_old の from 行は A を指す）
+        jsonl(e_old, &format!("from agent:n/{}/r via n\\n\\nやって", &a[..8]));
+        write(&ids_dir.join("401.json"), &json!({ "pid": 401, "ids": [e_old, e] }).to_string());
+        let row = |id: &str, pid: u64, parent: Option<String>| json!({ "id": id, "kind": "terminal", "pid": pid, "startedAt": pid, "parent": parent });
+        let rows = vec![
+            row(a, 100, None),
+            row(b_new, 200, None),
+            row(p_new, 300, None),
+            row(d, 310, Some(format!("agent:n/{}/r", &p_old[..8]))),
+            row(e, 400, None),
+        ];
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        TEST_IDS_DIR.with(|h| *h.borrow_mut() = Some(ids_dir.clone()));
+        let agents = agents_from(rows);
+        TEST_IDS_DIR.with(|h| *h.borrow_mut() = None);
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        let by = |id: &str| agents.iter().find(|x| x["id"] == id).cloned().unwrap_or(Value::Null);
+        assert_eq!(by(b_new)["parent"], a, "子の前の id の from 行から親を引けていない");
+        assert_eq!(by(d)["parent"], p_new, "親の前の id を指す from 行から、親の今の id を引けていない");
+        assert_eq!(by(e)["parent"], Value::Null, "pid の合わない並びを使っている");
+        assert_eq!(by(a)["parent"], Value::Null);
+        assert_eq!(by(p_new)["parent"], Value::Null);
+    }
+
+    /// 前の id の記録は、from 行が無いことも覚えて、2回目は読まない（snapshot のたびに projects/ を探し直さない）
+    #[test]
+    fn caller_of_earlier_reads_once() {
+        use native::testtree::*;
+        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = tmp("caller-of-earlier");
+        let none = "f0f0f0f0-0000-4000-8000-0000000000f0";
+        let some = "f1f1f1f1-0000-4000-8000-0000000000f1";
+        let p_none = root.join(format!("projects/-tmp-x/{none}.jsonl"));
+        let p_some = root.join(format!("projects/-tmp-x/{some}.jsonl"));
+        // none は /clear だけで終わった記録（user の行が無い）
+        write(&p_none, "{\"type\":\"system\"}\n");
+        write(&p_some, "{\"type\":\"user\",\"message\":{\"content\":\"from agent:n/0123abcd/r via n\\n\\nやって\"}}\n");
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        assert_eq!(caller_of_earlier(none), None);
+        assert_eq!(caller_of_earlier(some).as_deref(), Some("agent:n/0123abcd/r"));
+        // 記録を書き換えても、覚えた値を返す
+        write(&p_none, "{\"type\":\"user\",\"message\":{\"content\":\"from agent:n/aaaaaaaa/r via n\\n\\nやって\"}}\n");
+        fs::remove_file(&p_some).unwrap();
+        assert_eq!(caller_of_earlier(none), None);
+        assert_eq!(caller_of_earlier(some).as_deref(), Some("agent:n/0123abcd/r"));
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+    }
+
+    #[test]
+    fn break_cycles_makes_the_earliest_the_root() {
+        let rows = vec![
+            json!({ "id": "x", "startedAt": 1 }), json!({ "id": "a", "startedAt": 2 }), json!({ "id": "k", "startedAt": 3 }),
+            json!({ "id": "s", "startedAt": 9 }), json!({ "id": "t" }),
+        ];
+        // x と a は輪。k は輪にぶら下がる。s は自分を指す（agents_from は先に外すが、ここでも止まる）。t は根
+        let mut p = vec![Some("a".to_string()), Some("x".to_string()), Some("a".to_string()), Some("s".to_string()), None];
+        break_cycles(&rows, &mut p);
+        assert_eq!(p, vec![None, Some("x".to_string()), Some("a".to_string()), None, None]);
+        // 親が一覧に無い（生きていない）ものは、そのまま残す
+        let mut q = vec![Some("gone".to_string()), None, None, None, None];
+        break_cycles(&rows, &mut q);
+        assert_eq!(q[0].as_deref(), Some("gone"));
+    }
+
+    #[test]
+    fn agent_sid8_follows_ccn_parse_agent() {
+        // claude-code-nodes の test/identity/agent-name.test.ts と同じ形
+        assert_eq!(agent_sid8("agent:vm/0123abcd/lead"), Some("0123abcd"));
+        assert_eq!(agent_sid8("agent:vm/0123abcd/a/b"), Some("0123abcd"));
+        assert_eq!(agent_sid8("agent:vm/lead"), None);
+        assert_eq!(agent_sid8("agent:vm/a2a2/r"), None);
+        assert_eq!(agent_sid8("agent:n//r"), None);
+        assert_eq!(agent_sid8("agent:vm/0123abcd/"), None);
+        assert_eq!(agent_sid8("agent:/0123abcd/r"), None);
+        assert_eq!(agent_sid8("agent:vm/0123ABCD/r"), None);
+        assert_eq!(agent_sid8("someone@example.com"), None);
     }
 
     #[test]

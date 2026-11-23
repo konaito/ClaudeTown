@@ -48,8 +48,10 @@ class HookCase(unittest.TestCase):
         self.letters = self.dir / "letters.jsonl"
 
     def env(self, **extra):
-        env = {k: v for k, v in os.environ.items() if k not in ("CLOSE_CHECK_CHILD", "FC_REPORT_OFF")}
-        env.update(FC_STATE_DIR=str(self.state), FC_LETTERS=str(self.letters), FC_PERM_DIR=str(self.dir / "perm"), **extra)
+        # CLAUDE_PID は試験を走らせている claude のもの。ids/ の試験は自分で渡す
+        env = {k: v for k, v in os.environ.items() if k not in ("CLOSE_CHECK_CHILD", "FC_REPORT_OFF", "CLAUDE_PID")}
+        env.update(FC_STATE_DIR=str(self.state), FC_LETTERS=str(self.letters), FC_PERM_DIR=str(self.dir / "perm"),
+                   FC_IDS_DIR=str(self.dir / "ids"), **extra)
         return env
 
     def run_hook(self, event, sid=SID, env=None, **fields):
@@ -300,14 +302,19 @@ class TeammateInputs(HookCase):
         self.assertEqual([x["tool"] for x in st["perm_queue"]], ["Write"])
         self.assertEqual((st["phase"], st["needs"]), ("needs_you", "承認待ち: 書く: a/b.txt"))
 
-    def test_mate_writes_no_letters(self):
+    def test_letters_are_from_the_teammate_row_and_no_made_child(self):
+        # 送った記録の from は、町のチームメイトの行の id（src-tauri/src/native/subagents.rs の sub_id）にする（#271）
         self.run_hook("SessionStart")
         self.run_hook("PostToolUse", tool_name="SendMessage", tool_input={"to": "team-lead", "summary": "報告", "message": "x"},
                       tool_response={"success": True}, **MATE)
         self.run_hook("PostToolUse", tool_name="mcp__ccn__create_session", tool_input={"prompt": "x"},
                       tool_response=json.dumps({"id": CHILD_ID}), **MATE)
         self.run_hook("UserPromptSubmit", prompt='<cross-session-message from="abc">x</cross-session-message>', **MATE)
-        self.assertFalse(self.letters.exists())
+        recs = [json.loads(l) for l in self.letters.read_text().splitlines()]
+        self.assertEqual([(r["ev"], r["kind"], r["from"]) for r in recs],
+                         [("sent", "send", "sub-abeta-584d11236f35ece0@0123abcd"), ("sent", "ccn_create", "sub-abeta-584d11236f35ece0@0123abcd")])
+        self.assertNotIn("made_child", self.read())
+        self.assertNotIn("asked", self.read())
 
     def test_empty_agent_id_is_lead(self):
         self.run_hook("UserPromptSubmit", prompt="a", agent_id="")
@@ -373,6 +380,42 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TeamLetters(HookCase):
+    """agent team のお手紙（#271）。2026-11-23 に Claude Code 2.1.330 の haiku で、リードとチームメイト1体（bob）に
+    SendMessage を1回ずつ往復させ、hook に届いた入力を写した。本文と要約は伏せ、transcript_path と cwd は置き換えた。
+    in-process でも tmux でも、チームメイトの文（<teammate-message>）を受けたときの UserPromptSubmit は出なかった（受けた記録は hook からは作れない）"""
+
+    INPROC = "00174599-158c-4749-8898-f7579bbb69b9"
+    TMUX_LEAD = "3cca167e-7c2a-40ab-9f0a-3aedd36600e0"
+    TMUX_MATE = "20586fac-fe61-4e64-9dc7-85a8a12e7783"
+
+    def send(self, sid, to, sender, target, **extra):
+        payload = {
+            "session_id": sid, "transcript_path": "/tmp/x", "cwd": "/tmp/x", "permission_mode": "bypassPermissions",
+            "effort": {"level": "medium"}, "hook_event_name": "PostToolUse", "tool_name": "SendMessage",
+            "tool_input": {"to": to, "summary": "（要約は伏せる）", "message": "（本文は伏せる）"},
+            "tool_response": {"success": True, "message": "（伏せる）", "msg_id": "cfb787bf-b9e7-4d7f-9e2d-b5eaeccc0d69",
+                              "routing": {"sender": sender, "senderColor": "blue", "target": target, "summary": "（伏せる）", "content": "（伏せる）"}},
+            "tool_use_id": "toolu_01J5zJMtkkyQBdxi7o39eaQq", **extra,
+        }
+        r = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), env=self.env(), capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def lines(self):
+        return [(r["ev"], r["from"], r["to"]) for r in map(json.loads, self.letters.read_text().splitlines())]
+
+    def test_in_process(self):
+        self.send(self.INPROC, "team-lead", "bob", "@team-lead", prompt_id="0785c4a0-fdbe-4f26-b3ea-f497cdb21784",
+                  agent_id="abob-f3b9acc817d74619", agent_type="bob")
+        self.send(self.INPROC, "bob", "team-lead", "@bob", prompt_id="0785c4a0-fdbe-4f26-b3ea-f497cdb21784")
+        self.assertEqual(self.lines(), [("sent", "sub-abob-f3b9acc817d74619@00174599", "team-lead"), ("sent", self.INPROC, "bob")])
+
+    def test_tmux(self):
+        self.send(self.TMUX_MATE, "team-lead", "bob", "@team-lead")
+        self.send(self.TMUX_LEAD, "bob", "team-lead", "@bob", prompt_id="86e2a104-4531-4a4d-a3ac-bfc82b22761f")
+        self.assertEqual(self.lines(), [("sent", self.TMUX_MATE, "team-lead"), ("sent", self.TMUX_LEAD, "bob")])
+
+
 class PermInputTest(HookCase):
     """承認の画面に出る道具の input 全体を perm/<session_id>.json に残す（Claude Town の承認の欄、#83）。
     transcript には、承認の画面が出ている間に道具の行がまだ書かれていないことがあった（2026-11-22、v2.1.330）"""
@@ -411,3 +454,83 @@ class PermInputTest(HookCase):
         self.run_hook("PermissionRequest", tool_name="Bash", tool_input={"command": "ls"})
         self.run_hook("SessionEnd")
         self.assertFalse((self.dir / "perm" / f"{SID}.json").exists())
+
+
+class IdChain(HookCase):
+    """claude のプロセス（CLAUDE_PID）ごとに、名乗った id の並びを ids/<pid>.json に残す（#266）。
+    2026-11-23 の実機（Claude Code 2.1.330）で /clear を打つと、同じ CLAUDE_PID で SessionEnd（reason=clear、前の id）と
+    SessionStart（source=clear、新しい id）が届いた。どちらの入力にも、もう一方の id は無い"""
+
+    # sweep は死んだ pid の並びを消すので、生きている pid（この試験のプロセス）を使う
+    PID = str(os.getpid())
+
+    def ids(self, pid=PID):
+        p = self.dir / "ids" / f"{pid}.json"
+        return json.loads(p.read_text()) if p.exists() else None
+
+    def hook(self, event, sid=SID, pid=PID, **fields):
+        return self.run_hook(event, sid=sid, env=self.env(CLAUDE_PID=pid), **fields)
+
+    def test_clear_links_the_old_and_new_ids(self):
+        self.hook("SessionStart", source="startup")
+        self.hook("UserPromptSubmit", prompt="やって")
+        self.hook("SessionEnd", reason="clear")
+        self.hook("SessionStart", sid=SID2, source="clear")
+        self.hook("UserPromptSubmit", sid=SID2, prompt="続き")
+        self.assertEqual(self.ids(), {"pid": int(self.PID), "ids": [SID, SID2], "updated_at": self.ids()["updated_at"]})
+        self.assertIsInstance(self.ids()["updated_at"], int)
+
+    def test_an_id_change_without_session_start_is_kept(self):
+        # 計画の承認で id が変わるときに SessionStart が届くかは確かめられていない。どのイベントでも今の id が違えば足す
+        self.hook("SessionStart", source="startup")
+        self.hook("UserPromptSubmit", sid=SID2, prompt="続き")
+        self.assertEqual(self.ids()["ids"], [SID, SID2])
+
+    def test_startup_and_resume_start_over(self):
+        # pid は使い回されるので、新しいプロセス（startup、--resume）では並びを作り直す
+        self.hook("SessionStart", source="startup")
+        self.hook("SessionStart", sid=SID2, source="clear")
+        self.hook("SessionStart", sid=SID2, source="startup")
+        self.assertEqual(self.ids()["ids"], [SID2])
+        self.hook("SessionStart", sid=SID, source="resume")
+        self.assertEqual(self.ids()["ids"], [SID])
+
+    def test_compact_keeps_the_chain(self):
+        self.hook("SessionStart", source="startup")
+        self.hook("SessionStart", sid=SID2, source="clear")
+        self.hook("SessionStart", sid=SID2, source="compact")
+        self.assertEqual(self.ids()["ids"], [SID, SID2])
+
+    def test_session_end_keeps_it(self):
+        # 終わったプロセスの並びは、次の SessionStart の sweep が pid を見て消す
+        self.hook("SessionStart", source="startup")
+        self.hook("SessionEnd", reason="clear")
+        self.hook("SessionEnd", reason="prompt_input_exit")
+        self.assertEqual(self.ids()["ids"], [SID])
+
+    def test_without_claude_pid_writes_nothing(self):
+        self.run_hook("SessionStart", source="startup")
+        self.assertFalse((self.dir / "ids").exists())
+
+    def test_teammate_inputs_do_not_touch_it(self):
+        self.hook("SessionStart", source="startup")
+        self.hook("PreToolUse", sid=SID2, tool_name="Bash", tool_input={"command": "ls"}, **MATE)
+        self.assertEqual(self.ids()["ids"], [SID])
+
+    def test_session_start_sweeps_dead_pids(self):
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        (self.dir / "ids").mkdir()
+        (self.dir / "ids" / f"{dead.pid}.json").write_text(json.dumps({"pid": dead.pid, "ids": [SID2]}))
+        live = self.dir / "ids" / f"{os.getppid()}.json"
+        live.write_text(json.dumps({"pid": os.getppid(), "ids": [SID2]}))
+        self.hook("SessionStart", source="startup")
+        self.assertFalse((self.dir / "ids" / f"{dead.pid}.json").exists())
+        self.assertTrue(live.exists())
+
+    def test_state_files_keep_their_shape(self):
+        # 安定版も読む state/<id>.json には新しいキーを足さない
+        self.hook("SessionStart", source="startup")
+        self.hook("SessionStart", sid=SID2, source="clear")
+        self.assertEqual(sorted(p.name for p in self.state.glob("*.json")), sorted([f"{SID}.json", f"{SID2}.json"]))
+        self.assertEqual(set(self.read(SID2)), {"phase", "doing", "needs", "session_id", "cwd", "updated_at"})

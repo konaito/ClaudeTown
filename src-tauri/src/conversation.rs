@@ -476,6 +476,29 @@ fn has_letter(text: &str) -> bool {
 /// - teammate-message teammate_id=…、agent-message from=…: 送り手はチームメイトの名前。src/letters.ts の resolvePeer がチームの中で引けるように、
 ///   生の値は teammate:<名前> にする
 fn letters(text: &str, at: &Value) -> Option<Vec<Value>> {
+    let out = wrapped(text)?.into_iter().filter_map(|w| {
+        let body = if w.tag == "teammate-message" { teammate_body(w.body) } else { Some(w.body.to_string()) };
+        body.filter(|b| !b.is_empty())
+            .map(|body| json!({ "role": "user", "text": body, "from": null, "at": at, "letter": { "fromName": w.name, "fromRaw": w.raw } }))
+    }).collect();
+    Some(out)
+}
+
+/// お手紙の包みの1通
+struct Wrapped<'a> {
+    tag: &'static str,
+    /// 送り手の名前（cross-session-message は from-name、チームメイトは名前）
+    name: Option<String>,
+    /// 送り手の生の値（cross-session-message は from、チームメイトは teammate:<名前>）
+    raw: Option<String>,
+    /// 包みの summary 属性（SendMessage の summary）
+    summary: Option<String>,
+    /// 包みの内側（前後の空白を外したもの）
+    body: &'a str,
+}
+
+/// お手紙の包みで始まる文を、包みごとに分ける。包みで始まらなければ None。本文で出さないもの（shutdown_request など）も残す
+fn wrapped(text: &str) -> Option<Vec<Wrapped<'_>>> {
     let mut out = vec![];
     let mut rest = text;
     let mut found = false;
@@ -497,13 +520,40 @@ fn letters(text: &str, at: &Value) -> Option<Vec<Value>> {
                 (Some(who.clone()), Some(format!("teammate:{who}")))
             }
         };
-        let body = body.trim();
-        let body = if tag == "teammate-message" { teammate_body(body) } else { Some(body.to_string()) };
-        if let Some(body) = body.filter(|b| !b.is_empty()) {
-            out.push(json!({ "role": "user", "text": body, "from": null, "at": at, "letter": { "fromName": name, "fromRaw": raw } }));
-        }
+        out.push(Wrapped { tag, name, raw, summary: attr("summary"), body: body.trim() });
     }
     found.then_some(out)
+}
+
+/// ターミナルのセッションに付く前置き（Another Claude session sent a message…:）と、後ろの英語の注記を外す
+fn strip_peer_note(text: &str) -> &str {
+    // 作業中に届いた文は「… sent a message while you were working:」になる（#253）
+    match text.strip_prefix("Another Claude session sent a message").and_then(|r| r.split_once(':')).filter(|(head, _)| !head.contains('\n')) {
+        // 2.1.330 からは、本文の後ろに英語の注記（This came from another Claude session — …）が付く（#156）
+        Some((_, r)) => r.trim_start().split("\n\nThis came from another Claude session").next().unwrap_or("").trim_end(),
+        None => text,
+    }
+}
+
+/// 受けた文のお手紙の包みの、送り手と summary
+pub(crate) struct LetterHead {
+    /// 送り手の名前
+    pub name: Option<String>,
+    /// 送り手の生の値（チームメイトは teammate:<名前>）
+    pub raw: Option<String>,
+    /// 包みの summary 属性
+    pub summary: Option<String>,
+}
+
+/// normalize した jsonl の1行が人の番の文（user の行で、道具の結果でない）なら、その文に入っているお手紙の包みの送り手を返す。
+/// 会話に出さない包み（shutdown_request、空の idle_notification）も返す。受けた側の既読の印を作るのに使う（native/received.rs、#276）
+pub(crate) fn letters_in(m: &Value) -> Vec<LetterHead> {
+    let content = &m["message"]["content"];
+    if m["type"] != "user" || content.as_array().is_some_and(|a| a.iter().any(|c| c["type"] == "tool_result")) {
+        return vec![];
+    }
+    let text = user_text(content);
+    wrapped(strip_peer_note(&text)).unwrap_or_default().into_iter().map(|w| LetterHead { name: w.name, raw: w.raw, summary: w.summary }).collect()
 }
 
 /// チームメイトの文の本文。決まった形の連絡は JSON の1行で来る（2.1.330 の ~/.claude/projects で数えた、#253）。
@@ -555,13 +605,8 @@ pub(crate) fn simplify(m: &Value) -> Vec<Value> {
             // 貼り付けの包み（<pasted_content>）は外してから見る。外さないと `<` で始まり、下の除外で落ちる（#69）
             let text = user_text(content);
             let text = text.as_str();
-            // ターミナルのセッションには、お手紙の前に「Another Claude session sent a message:」の1行が付く。
-            // 作業中に届いた文は「… sent a message while you were working:」になる（#253）
-            let text = match text.strip_prefix("Another Claude session sent a message").and_then(|r| r.split_once(':')).filter(|(head, _)| !head.contains('\n')) {
-                // 2.1.330 からは、本文の後ろに英語の注記（This came from another Claude session — …）が付く（#156）
-                Some((_, r)) => r.trim_start().split("\n\nThis came from another Claude session").next().unwrap_or("").trim_end(),
-                None => text,
-            };
+            // ターミナルのセッションには、お手紙の前に「Another Claude session sent a message:」の1行が付く
+            let text = strip_peer_note(text);
             // 別のセッションとチームメイトからのお手紙は、包みの内側の本文だけ出す
             if let Some(letters) = letters(text, &at) {
                 return letters;

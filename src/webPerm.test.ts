@@ -3,7 +3,9 @@ import { allowedSuggestion, answerPermission, DENY_DEFAULT, permissionBody, PLAN
 import permCases from "./perm-cases.json";
 
 const detail = (o: Record<string, unknown> = {}) => ({ state: "waiting_permission", capabilities: { permissions: true }, pending: [{ requestId: "r1", toolName: "Bash", input: {} }], ...o });
-const run = (d: unknown, choice: string, expect: string | null) => {
+// webPerm.ts の Detail は export していないので、answerPermission の引数の型から引く
+type Detail = Awaited<ReturnType<Parameters<typeof answerPermission>[0]>>;
+const run = (d: Detail, choice: string, expect: string | null) => {
   const sent: [string, unknown][] = [];
   const p = answerPermission(async () => d, async (path, body) => { sent.push([path, body]); return null; }, "s1", choice, expect);
   return { p, sent };

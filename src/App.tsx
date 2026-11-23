@@ -23,6 +23,7 @@ import { useKill } from "./hooks/useKill";
 import { useRestart } from "./hooks/useRestart";
 import { useCardSend } from "./hooks/useCardSend";
 import { useQueuedWatch } from "./hooks/useQueuedWatch";
+import { useRestoreNotice } from "./hooks/useRestoreNotice";
 import { supportFor } from "./session/SessionControls";
 import { useCcnReservations } from "./webReserve";
 import { Stage } from "./canvas/Stage";
@@ -111,6 +112,8 @@ export default function App() {
   // 起動を待って預けた文が送れなかったら、パネルを開いていなくても知らせる（#184）
   const listed = useCallback((id: string) => treeRef.current.byId.has(id), []);
   useQueuedWatch(toast, listed);
+  // 起動のときの端末の立て直しで戻らなかった端末を知らせる（#262）
+  useRestoreNotice(toast);
   const counts = useMemo(() => {
     const c: Record<Mood, number> = { approval: 0, reply: 0, working: 0, done: 0, idle: 0 };
     for (const a of agents) c[moodOf(a)]++;
@@ -133,6 +136,8 @@ export default function App() {
     if (!r?.id) return;
     // ログインシェルが PATH を返さず、アプリの PATH（/usr/bin:/bin:/usr/sbin:/sbin）で立てた（#175）。次に立てるときは聞き直す
     if (r.pathFallback) toast("ログインシェルの PATH を取れなかったので、この claude は最小の PATH で動いている。bun や gh が見つからないときは立て直す", true);
+    // cam usage が上限で返らず、既定のアカウントで立てた（#249）。上限に達したアカウントだと、最初の送信まで気づかない
+    if (r.accountFallback) toast(r.accountFallback, true);
     setFresh({
       // 名前は一覧と同じ決め方（cardNames）。一覧に載ったときに名前が変わって見えないようにする
       id: r.id, name: cardNames([{ id: r.id, cwd: r.cwd ?? "" }]).get(r.id) ?? r.id.slice(0, 8), kind: "terminal", state: "running", cwd: r.cwd ?? "", canSend: true, parent: null,

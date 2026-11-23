@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { flightsOf, resolve, resolvePeer, type LetterRec } from "./letters";
 import type { Agent } from "./model";
+import cases from "./teammate-read-cases.json";
 
 const ag = (id: string, name: string, pid?: number, parent: string | null = null): Agent => ({
   id, name, pid, parent, kind: "terminal", state: "idle", cwd: "/", canSend: true,
@@ -125,5 +126,55 @@ describe("会話を開いているセッションを起点にした結び付け�
     expect(resolvePeer("uds:/tmp/cc-socks/86003.sock", "meta-fc", B, team)).toBe(KO);
     expect(resolvePeer("konaito-pro/cccccccc/x", null, B, team)).toBe(MAGO);
     expect(resolvePeer("main", "main", ag(OYA, "meta-fc"), town)).toBeNull();
+  });
+});
+
+describe("agent teams の送った記録（#271。2026-11-23 に Claude Code 2.1.330 で hook が書いた行）", () => {
+  const mate = (id: string, name: string, parent: string): Agent => ({ ...ag(id, name, undefined, parent), kind: "teammate" });
+  // in-process: チームメイトの行の id は subagents.rs の sub_id。hook も同じ形で from を書く
+  const L1 = "00174599-158c-4749-8898-f7579bbb69b9";
+  const BOB1 = "sub-abob-f3b9acc817d74619@00174599";
+  // tmux: チームメイトは自分のセッション ID の行（teams.rs）
+  const L2 = "3cca167e-7c2a-40ab-9f0a-3aedd36600e0";
+  const BOB2 = "20586fac-fe61-4e64-9dc7-85a8a12e7783";
+  // 別のチームにも bob がいる
+  const OTHER = mate("sub-abob-0000000000000000@ffffffff", "bob", "ffffffff-0000-0000-0000-000000000000");
+  const team = [ag(L1, "cwd"), mate(BOB1, "bob", L1), ag(L2, "cwd"), mate(BOB2, "bob", L2), OTHER];
+
+  test("in-process: チームメイト→team-lead と、リード→チームメイト", () => {
+    const f = flightsOf([
+      sent("f1", BOB1, "team-lead", 1000),
+      sent("f2", L1, "bob", 2000),
+    ], team);
+    expect(f.map((x) => [x.from, x.to])).toEqual([[BOB1, L1], [L1, BOB1]]);
+  });
+
+  test("tmux: チームメイト→team-lead と、リード→チームメイト", () => {
+    const f = flightsOf([
+      sent("f55a54659cec", BOB2, "team-lead", 1795374902248),
+      sent("2af50b8ce620", L2, "bob", 1795374905206),
+    ], team);
+    expect(f.map((x) => [x.from, x.to])).toEqual([[BOB2, L2], [L2, BOB2]]);
+  });
+});
+
+describe("受けた側の jsonl の teammate-message で既読にする（#276。src/teammate-read-cases.json を Rust の native/received.rs と同じに読む）", () => {
+  const c = cases as unknown as { agents: Agent[]; sent: LetterRec[]; received: LetterRec[]; readAt: Record<string, number | null> };
+
+  test("sent と、受けた側の jsonl から作った received を対にして、readAt を付ける", () => {
+    const f = flightsOf([...c.sent, ...c.received], c.agents);
+    expect(Object.fromEntries(f.map((x) => [x.id, x.readAt]))).toEqual(c.readAt);
+  });
+
+  test("対になる sent の無い jsonl の received（idle_notification など）は、封筒にしない", () => {
+    const f = flightsOf(c.received, c.agents);
+    expect(f).toEqual([]);
+  });
+
+  test("hook の received が先に対を取ったら、jsonl の received は余って捨てる（二重に既読にしない）", () => {
+    const [L, BOB] = [c.agents[0].id, c.agents[1].id];
+    const hook = recv("h1", BOB, 1795395600800, { from_raw: L });
+    const f = flightsOf([c.sent[0], hook, c.received[0]], c.agents);
+    expect(f.map((x) => [x.id, x.readAt])).toEqual([["s1", 1795395600800]]);
   });
 });

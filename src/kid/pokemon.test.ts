@@ -40,7 +40,8 @@ describe("ポケモンスキンの割り当て", () => {
 });
 
 describe("ポケモンスキンの絵（2Dのドット絵）", () => {
-  const ids = [...new Set(LINES.lines.flatMap(([ids]) => ids))];
+  // JSON の推論型は number[] | string[] の和になるので、src/kid/pokemon.ts の ALL と同じ形を付ける
+  const ids = [...new Set((LINES.lines as unknown as [number[], string[]][]).flatMap(([ids]) => ids))];
   const base = `https://raw.githubusercontent.com/PokeAPI/sprites/${LINES.sha}/sprites/pokemon/versions/generation-v/black-white`;
   test("全番号が、コミットで指したブラック・ホワイトのアニメか止め絵の URL になる", () => {
     expect(ids.length).toBe(348);

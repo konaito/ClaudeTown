@@ -110,6 +110,8 @@ pub fn note_ids(rows: &[(String, u32)]) {
 pub struct Info {
     pub id: String,
     pub ids: Vec<String>,
+    /// 今の id（sessions/<pid>.json に今出ている id）
+    pub cur: String,
     pub pid: u32,
     pub cwd: String,
     pub started_at: u64,
@@ -117,7 +119,7 @@ pub struct Info {
 
 pub fn list() -> Vec<Info> {
     with(|m| {
-        let mut v: Vec<Info> = m.values().map(|p| Info { id: p.ids[0].clone(), ids: p.ids.clone(), pid: p.pid, cwd: p.cwd.clone(), started_at: p.started_at }).collect();
+        let mut v: Vec<Info> = m.values().map(|p| Info { id: p.ids[0].clone(), ids: p.ids.clone(), cur: p.cur.clone(), pid: p.pid, cwd: p.cwd.clone(), started_at: p.started_at }).collect();
         v.sort_by_key(|i| i.started_at);
         v
     })
@@ -426,7 +428,8 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
     let bin = claude_bin(path.as_deref())?;
     // どのアカウントで起動するか（cam usage の best。account.rs）。resume も同じ選び方にする（会話の記録 projects と sessions は、cam が全プロファイルで ~/.claude のものを共有している）。
     // 全部のアカウントが上限のとき起動をやめるのは、新しく立てるときだけ（resume を断ると、アプリを開いたときの立て直しで端末が黙って戻らない）
-    let config_dir = crate::account::prepare(path.as_deref(), resume.is_none())?;
+    let prepared = crate::account::prepare(path.as_deref(), resume.is_none())?;
+    let config_dir = prepared.dir;
     let id = resume.map(String::from).unwrap_or_else(new_uuid);
     let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
     let pair = native_pty_system().openpty(size).map_err(|e| format!("端末を開けなかった: {e}"))?;
@@ -487,7 +490,8 @@ fn launch(cwd: &str, resume: Option<&str>, name: Option<&str>, start: &[String],
         notice();
     });
     // pathFallback は、ログインシェルの PATH を取れず、アプリの PATH で立てた印。画面がトーストで知らせる（#175）
-    Ok(json!({ "id": id, "pid": pid, "cwd": cwd, "pathFallback": path.is_none() }))
+    // accountFallback は、cam usage が上限で返らず、アカウントを選ばずに既定のまま立てたときの一言。画面がトーストで知らせる（#249）
+    Ok(json!({ "id": id, "pid": pid, "cwd": cwd, "pathFallback": path.is_none(), "accountFallback": prepared.fallback }))
 }
 
 fn read_loop(pid: u32, mut reader: Box<dyn Read + Send>) {
@@ -771,6 +775,65 @@ mod tests {
         assert_ne!(u, new_uuid());
     }
 
+    /// 親がアプリの端末で、/clear や計画の承認で id が変わっても、前の id を指す from 行の子は親から外れない（#248）。
+    /// from 行の sid8 は ccn の形（agent:<ノード>/<16進8文字>/<役割>）のときだけ読む。sid8 が無い形は親を引かない
+    #[test]
+    fn a_child_keeps_its_parent_after_the_parent_id_changes() {
+        use crate::native::testtree::*;
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fc-pty-parent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("claude");
+        std::fs::write(&bin, "#!/bin/sh\nexec cat\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
+        let r = spawn(dir.to_str().unwrap(), None, &[], 80, 24, || {}).unwrap();
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+        // 親 A: 起動のときの id は a_old。/clear の後、sessions/<pid>.json には a_new が出ている
+        let a_old = r["id"].as_str().unwrap().to_string();
+        let pa = r["pid"].as_u64().unwrap();
+        let a_new = "a2a2a2a2-0000-4000-8000-0000000000a2";
+        // 子 B は A の前の id を from 行に持つ。C と D は sid8 の無い from 行（ccn の agent:<ノード>/<役割> と、空の sid8）
+        let b = "b2b2b2b2-0000-4000-8000-0000000000b2";
+        let c = "c2c2c2c2-0000-4000-8000-0000000000c2";
+        let d = "d2d2d2d2-0000-4000-8000-0000000000d2";
+        let root = tmp("parent-id-change");
+        let sess = |pid: u64, sid: &str, cwd: &str| {
+            write(&root.join(format!("sessions/{pid}.json")), &json!({ "pid": pid, "sessionId": sid, "cwd": cwd, "startedAt": 5,
+                "kind": "interactive", "status": "idle" }).to_string());
+        };
+        let from = |sid: &str, cwd: &str, caller: &str| {
+            write(&root.join(format!("projects/{}/{sid}.jsonl", enc(cwd))), &format!("{{\"type\":\"user\",\"message\":{{\"content\":\"from {caller} via n\\n\\nやって\"}}}}\n"));
+        };
+        sess(pa, a_new, "/tmp/合成/a");
+        // A の /clear の後の最初の文が B からの文だと、A の親は B になる。B の親を A の今の id に引き直すと輪になるので、早く始まった A を根にする
+        from(a_new, "/tmp/合成/a", &format!("agent:n/{}/r", &b[..8]));
+        // 生きている pid を3つ使う（launchd、この試験のプロセス、cargo）
+        sess(1, b, "/tmp/合成/b");
+        from(b, "/tmp/合成/b", &format!("agent:n/{}/r", &a_old[..8]));
+        sess(std::process::id() as u64, c, "/tmp/合成/c");
+        from(c, "/tmp/合成/c", "agent:n/a2a2/r");
+        sess(std::os::unix::process::parent_id() as u64, d, "/tmp/合成/d");
+        from(d, "/tmp/合成/d", "agent:n//r");
+        crate::native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        let agents = crate::agents_from(crate::town_rows());
+        crate::native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        let by = |id: &str| agents.iter().find(|x| x["id"] == id).cloned().unwrap_or(Value::Null);
+        kill(&a_old).unwrap();
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(3) && owns(&a_old) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!owns(&a_old), "代役の端末が台帳に残っている");
+        assert_eq!(by(a_new)["source"], "app", "A は台帳で a_old と同じ端末");
+        assert_eq!(by(b)["parent"], a_new, "前の id を指す from 行から、親の今の id を引けていない");
+        assert_eq!(by(a_new)["parent"], Value::Null, "親子が輪になっている");
+        assert_eq!(by(c)["parent"], Value::Null, "役割を sid8 として読んでいる");
+        assert_eq!(by(d)["parent"], Value::Null, "空の sid8 がどの id にも当たっている");
+    }
+
     #[test]
     fn utf8_stream_keeps_split_characters() {
         let mut carry = vec![];
@@ -936,13 +999,18 @@ mod tests {
     /// 偽の cam と偽の claude を置いた試験用のディレクトリ。cam usage --json は usage を返し、sync は呼ばれた名前を sync.log に足す。
     /// claude は自分の環境を env.txt に書いてから寝る
     fn fake_cam_dir(tag: &str, usage: &str) -> PathBuf {
+        fake_cam_dir_after(tag, usage, "0")
+    }
+
+    /// fake_cam_dir の cam usage が、delay 秒（sleep の引数）待ってから usage を返すもの
+    fn fake_cam_dir_after(tag: &str, usage: &str, delay: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("fc-pty-cam-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("profiles/acct")).unwrap();
         std::fs::write(dir.join("usage.json"), usage).unwrap();
         let cam = format!(
-            "#!/bin/sh\ncase \"$1\" in\n  usage) cat '{d}/usage.json' ;;\n  sync) echo \"$2\" >> '{d}/sync.log' ;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n  usage) sleep {delay}; cat '{d}/usage.json' ;;\n  sync) echo \"$2\" >> '{d}/sync.log' ;;\nesac\n",
             d = dir.display()
         );
         let claude = format!("#!/bin/sh\nenv > '{d}/env.txt.tmp' && mv '{d}/env.txt.tmp' '{d}/env.txt'\nexec sleep 30\n", d = dir.display());
@@ -961,6 +1029,11 @@ mod tests {
 
     /// resume が Some なら、その id で resume として起動する
     fn launched_config_dir_as(dir: &std::path::Path, resume_id: Option<&str>) -> Result<Option<String>, String> {
+        launched(dir, resume_id).map(|(c, _)| c)
+    }
+
+    /// launched_config_dir_as の中身。起動の応答も返す
+    fn launched(dir: &std::path::Path, resume_id: Option<&str>) -> Result<(Option<String>, Value), String> {
         // 町の一覧を数える試験（lib.rs）に、この端末が混ざらないようにする。錠は端末が台帳から消えるまで持つ。
         // 取る順は lib.rs と composer.rs と同じ NATIVE_TEST_LOCK、BIN_LOCK（逆に取ると互いに待って止まる）
         let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -982,7 +1055,8 @@ mod tests {
             std::env::remove_var("FC_CAM_PROFILES");
             match &prev { Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v), None => std::env::remove_var("CLAUDE_CONFIG_DIR") }
         }
-        let id = r?["id"].as_str().unwrap().to_string();
+        let r = r?;
+        let id = r["id"].as_str().unwrap().to_string();
         let t0 = Instant::now();
         let env = loop {
             if let Ok(s) = std::fs::read_to_string(dir.join("env.txt")) { break s; }
@@ -994,7 +1068,7 @@ mod tests {
             assert!(t0.elapsed() < Duration::from_secs(10), "止めた端末が台帳から消えない");
             std::thread::sleep(Duration::from_millis(20));
         }
-        Ok(env.lines().find_map(|l| l.strip_prefix("CLAUDE_CONFIG_DIR=")).map(String::from))
+        Ok((env.lines().find_map(|l| l.strip_prefix("CLAUDE_CONFIG_DIR=")).map(String::from), r))
     }
 
     /// cam usage の best のプロファイルで起動する。パスは launcher（~/.cam/bin/<名前>）と同じ <profiles>/<名前> の文字列のまま。
@@ -1007,11 +1081,36 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("sync.log")).unwrap_or_default(), "acct\n", "起動の前に cam sync <名前> を掛ける");
     }
 
+    /// #249。本物の cam は各アカウントの使用量を curl -m 5 で取り、取れなければ控え（usage-cache）の値で選ぶ。
+    /// curl の上限を過ぎてから best を返す cam（5.3秒）でも、待って best のプロファイルで起動する
+    #[test]
+    fn launch_waits_for_a_cam_that_answers_after_its_curl_limit() {
+        let dir = fake_cam_dir_after("late", r#"{"best":"acct","choice":"normal","next_available":null,"accounts":[]}"#, "5.3");
+        let want = format!("{}/acct", dir.join("profiles").display());
+        let (got, r) = launched(&dir, None).unwrap();
+        assert_eq!(got.as_deref(), Some(want.as_str()));
+        assert_eq!(r["accountFallback"], Value::Null, "選べたときは知らせない");
+    }
+
+    /// #249。cam usage が上限（8秒）を過ぎても返らなければ、env を触らずに起動し、応答に知らせる一言を付ける（画面がトーストで出す）
+    #[test]
+    fn launch_tells_the_screen_when_cam_usage_times_out() {
+        let dir = fake_cam_dir_after("hang", r#"{"best":"acct","choice":"normal","next_available":null,"accounts":[]}"#, "30");
+        let (got, r) = launched(&dir, None).unwrap();
+        assert_eq!(got.as_deref(), Some("/nowhere/inherited"));
+        let note = r["accountFallback"].as_str().unwrap_or_default();
+        assert!(note.contains("既定のアカウント"), "{r}");
+        assert!(!dir.join("sync.log").exists());
+    }
+
     /// 選べないとき（choice: unknown）は env を触らない。アプリの環境の値のまま起動する
     #[test]
     fn launch_keeps_the_env_when_cam_cannot_choose() {
         let dir = fake_cam_dir("unknown", r#"{"best":null,"choice":"unknown","next_available":null,"accounts":[]}"#);
-        assert_eq!(launched_config_dir(&dir).unwrap().as_deref(), Some("/nowhere/inherited"));
+        let (got, r) = launched(&dir, None).unwrap();
+        assert_eq!(got.as_deref(), Some("/nowhere/inherited"));
+        // cam が答えて選ばなかったときは知らせない（cam の無い機械や --default のコマンドで毎回トーストを出さない）
+        assert_eq!(r["accountFallback"], Value::Null);
         assert!(!dir.join("sync.log").exists());
     }
 

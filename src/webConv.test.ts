@@ -102,7 +102,7 @@ describe("readConversation", () => {
     const d = await readConversation(s, fakeCcn(() => 450, () => "e"), null);
     expect(d.total).toBe(450);
     expect(d.items.length).toBe(KEEP_CONV);
-    expect(d.items.at(-1)?.text).toBe("m449");
+    expect(d.items[d.items.length - 1]?.text).toBe("m449");
   });
   test("epoch が変わったら頭から読み直し、reset で置き換える（n は減らない）", async () => {
     let epoch = "e1";
