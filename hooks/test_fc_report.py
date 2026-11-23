@@ -300,14 +300,19 @@ class TeammateInputs(HookCase):
         self.assertEqual([x["tool"] for x in st["perm_queue"]], ["Write"])
         self.assertEqual((st["phase"], st["needs"]), ("needs_you", "承認待ち: 書く: a/b.txt"))
 
-    def test_mate_writes_no_letters(self):
+    def test_letters_are_from_the_teammate_row_and_no_made_child(self):
+        # 送った記録の from は、町のチームメイトの行の id（src-tauri/src/native/subagents.rs の sub_id）にする（#271）
         self.run_hook("SessionStart")
         self.run_hook("PostToolUse", tool_name="SendMessage", tool_input={"to": "team-lead", "summary": "報告", "message": "x"},
                       tool_response={"success": True}, **MATE)
         self.run_hook("PostToolUse", tool_name="mcp__ccn__create_session", tool_input={"prompt": "x"},
                       tool_response=json.dumps({"id": CHILD_ID}), **MATE)
         self.run_hook("UserPromptSubmit", prompt='<cross-session-message from="abc">x</cross-session-message>', **MATE)
-        self.assertFalse(self.letters.exists())
+        recs = [json.loads(l) for l in self.letters.read_text().splitlines()]
+        self.assertEqual([(r["ev"], r["kind"], r["from"]) for r in recs],
+                         [("sent", "send", "sub-abeta-584d11236f35ece0@0123abcd"), ("sent", "ccn_create", "sub-abeta-584d11236f35ece0@0123abcd")])
+        self.assertNotIn("made_child", self.read())
+        self.assertNotIn("asked", self.read())
 
     def test_empty_agent_id_is_lead(self):
         self.run_hook("UserPromptSubmit", prompt="a", agent_id="")
@@ -371,6 +376,42 @@ class LettersShape(HookCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TeamLetters(HookCase):
+    """agent team のお手紙（#271）。2026-11-23 に Claude Code 2.1.330 の haiku で、リードとチームメイト1体（bob）に
+    SendMessage を1回ずつ往復させ、hook に届いた入力を写した。本文と要約は伏せ、transcript_path と cwd は置き換えた。
+    in-process でも tmux でも、チームメイトの文（<teammate-message>）を受けたときの UserPromptSubmit は出なかった（受けた記録は hook からは作れない）"""
+
+    INPROC = "00174599-158c-4749-8898-f7579bbb69b9"
+    TMUX_LEAD = "3cca167e-7c2a-40ab-9f0a-3aedd36600e0"
+    TMUX_MATE = "20586fac-fe61-4e64-9dc7-85a8a12e7783"
+
+    def send(self, sid, to, sender, target, **extra):
+        payload = {
+            "session_id": sid, "transcript_path": "/tmp/x", "cwd": "/tmp/x", "permission_mode": "bypassPermissions",
+            "effort": {"level": "medium"}, "hook_event_name": "PostToolUse", "tool_name": "SendMessage",
+            "tool_input": {"to": to, "summary": "（要約は伏せる）", "message": "（本文は伏せる）"},
+            "tool_response": {"success": True, "message": "（伏せる）", "msg_id": "cfb787bf-b9e7-4d7f-9e2d-b5eaeccc0d69",
+                              "routing": {"sender": sender, "senderColor": "blue", "target": target, "summary": "（伏せる）", "content": "（伏せる）"}},
+            "tool_use_id": "toolu_01J5zJMtkkyQBdxi7o39eaQq", **extra,
+        }
+        r = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), env=self.env(), capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def lines(self):
+        return [(r["ev"], r["from"], r["to"]) for r in map(json.loads, self.letters.read_text().splitlines())]
+
+    def test_in_process(self):
+        self.send(self.INPROC, "team-lead", "bob", "@team-lead", prompt_id="0785c4a0-fdbe-4f26-b3ea-f497cdb21784",
+                  agent_id="abob-f3b9acc817d74619", agent_type="bob")
+        self.send(self.INPROC, "bob", "team-lead", "@bob", prompt_id="0785c4a0-fdbe-4f26-b3ea-f497cdb21784")
+        self.assertEqual(self.lines(), [("sent", "sub-abob-f3b9acc817d74619@00174599", "team-lead"), ("sent", self.INPROC, "bob")])
+
+    def test_tmux(self):
+        self.send(self.TMUX_MATE, "team-lead", "bob", "@team-lead")
+        self.send(self.TMUX_LEAD, "bob", "team-lead", "@bob", prompt_id="86e2a104-4531-4a4d-a3ac-bfc82b22761f")
+        self.assertEqual(self.lines(), [("sent", self.TMUX_MATE, "team-lead"), ("sent", self.TMUX_LEAD, "bob")])
 
 
 class PermInputTest(HookCase):
