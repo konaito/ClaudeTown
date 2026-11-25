@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { accountText, cardNames, houseNameOf, moodOf, projectFromPath, statusClass, statusLabel, targetLabel, type Agent, type Report, type Who } from "./model";
+import { accountText, cardNames, houseNameOf, moodOf, projectFromPath, statusClass, statusLabel, targetLabel, taskOf, type Agent, type Report, type Who } from "./model";
 import cases from "./naming-cases.json";
 import reportCases from "./report-cases.json";
 
@@ -61,6 +61,23 @@ describe("アカウントの表示", () => {
   test("アカウントが無い（古い ccn、選べなかったセッション）なら null", () => {
     expect(accountText(ag("a", "/w"))).toBeNull();
     expect(accountText(ag("a", "/w", { account: null, accountEmail: "a@example.invalid" }))).toBeNull();
+  });
+});
+
+// 完了のカードは、状態の行（statusLabel）が「完了」を出す。上の札（taskOf）は作業の題を出し、「完了」を2回出さない（#302）
+describe("完了のカードの上の札（#302）", () => {
+  test("題（asked）があれば題を出し、「完了」は状態の行だけ", () => {
+    const a = ag("a", "/w", { report: { asked: "カードの寄りを直して", said: "直した" } });
+    expect(taskOf(a, "done")).toBe("カードの寄りを直して");
+    expect(statusLabel(a, "done")).toBe("完了");
+  });
+  test("題が無ければ、待機と同じ既定の文（親は「全体をまとめる」、子は「おてつだい」）", () => {
+    for (const a of [ag("p", "/w"), ag("c", "/w", { parent: "p" })]) {
+      expect(taskOf(a, "done")).not.toBe("完了");
+      expect(taskOf(a, "done")).toBe(taskOf(a, "idle"));
+    }
+    expect(taskOf(ag("p", "/w"), "done")).toBe("全体をまとめる");
+    expect(taskOf(ag("c", "/w", { parent: "p" }), "done")).toBe("おてつだい");
   });
 });
 

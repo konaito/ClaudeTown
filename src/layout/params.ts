@@ -31,8 +31,10 @@ export const LAYOUT = {
    * headGap は見出しとカードの間で、同じ階層の要素の間として pad と同じ値にする。
    * border は 1。1.5 だと Chromium が 1 に丸めて描き、枠の外寸の計算と 1px ずれた（agent-browser の DPR 2 で computed が 1px）。
    * gap は世帯どうしの間。pad（16）より広く、枠が別の塊に見える最小の 24 にした（旧 28 から 4 だけ詰める）。
+   * 最小の幅は持たない。幅は中身に合わせ、左右の余白を同じにする（#302。旧 minW 240 では、カード1枚の世帯の右に 30px たまった）。
+   * 見出しが中身より広いときは、枠を広げず、名前を省略記号で切る（App.css の .g-head > .g-name）。
    */
-  group: { pad: 16, head: 24, headGap: 16, border: 1, minW: 240, gap: 24 },
+  group: { pad: 16, head: 24, headGap: 16, border: 1, gap: 24 },
   /** 新しい座標へ移るアニメーションの時間（ms） */
   moveMs: 350,
 };
@@ -43,11 +45,11 @@ export function groupInsetOf(): { x: number; headY: number; cardsY: number } {
   return { x: G.border + G.pad, headY: G.border + G.pad, cardsY: G.border + G.pad + G.head + G.headGap };
 }
 
-/** 世帯モジュールの外寸（並べ方に渡す大きさ）。配置の幅と高さに、世帯の枠の線・余白・見出しを足す。描くときもこの大きさにする */
+/** 世帯モジュールの外寸（並べ方に渡す大きさ）。配置の幅と高さに、世帯の枠の線・余白・見出しを足す。描くときもこの大きさにする。左右の余白は同じ */
 export function groupSizeOf(m: { width: number; height: number }): { w: number; h: number } {
   const G = LAYOUT.group;
   const i = groupInsetOf();
-  return { w: Math.ceil(Math.max(G.minW, m.width + i.x * 2)), h: Math.ceil(i.cardsY + m.height + G.pad + G.border) };
+  return { w: Math.ceil(m.width + i.x * 2), h: Math.ceil(i.cardsY + m.height + G.pad + G.border) };
 }
 
 /** 世帯の枠（.group）の CSS が読む変数。余白を CSS に数字で書かず、LAYOUT.group と同じ値を使う */
