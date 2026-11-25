@@ -137,12 +137,14 @@ export function statusClass(a: Pick<Agent, "booting">, mood: Mood): string {
 
 export const NEEDS_YOU: Mood[] = ["approval", "reply"];
 
-/** カードの1行ラベル。その子がいま何の係かを短く */
+/**
+ * カードの1行ラベル。その子がいま何の係かを短く。
+ * 完了のときも作業の題を出す。「完了」は様子の札（statusLabel）だけが出す（#302）
+ */
 export function taskOf(a: Agent, mood: Mood): string {
   const r = a.report;
   if (mood === "approval") return "承認を待っています";
   if (mood === "reply") return r?.next ?? r?.needs ?? "返事を待っています";
-  if (mood === "done") return "完了";
   return r?.asked ?? (a.parent ? "おてつだい" : "全体をまとめる");
 }
 

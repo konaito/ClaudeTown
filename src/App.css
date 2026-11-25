@@ -125,6 +125,9 @@ code { font-family: ui-monospace, Menlo, monospace; background: #f3f1ed; padding
 .g-name { font-size: 15px; font-weight: 700; color: #3d3a45; }
 .g-sub { font-size: 12px; color: var(--sub); }
 .g-needs { font-size: 11px; color: var(--approval-ink); background: #fff3d6; border-radius: 99px; padding: 1px 8px; }
+/* 枠の幅は中身に合わせる（#302）。見出しが中身より広いときは名前を省略記号で切り、人数と「あなたの番」は縮めない */
+.g-head > .g-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.g-head > .g-sub, .g-head > .g-needs { flex: none; }
 
 /* 家族の木。座標は src/layout が決め、ここでは置くだけ */
 .canvas { position: relative; }

@@ -223,7 +223,8 @@ describe("家族の木の配置", () => {
   };
   // 本人の条件のまま書く: |xA-xB| >= w+m か |yA-yB| >= h+m
   const apart = (a: Placed, b: Placed) => Math.abs(a.x - b.x) >= 176 + 8 || Math.abs(a.y - b.y) >= 96 + 8;
-  const SIZE: Record<number, { w: number; h: number }> = { 1: { w: 240, h: 274 }, 2: { w: 394, h: 274 }, 3: { w: 578, h: 274 } };
+  // 子1人の枠の幅は中身（176）+ 余白 16×2 + 線 1×2。#302 で最小の幅 240 をやめた
+  const SIZE: Record<number, { w: number; h: number }> = { 1: { w: 210, h: 274 }, 2: { w: 394, h: 274 }, 3: { w: 578, h: 274 } };
 
   for (const n of [1, 2, 3]) {
     test(`12-${n}. 子${n}人: 本人が決めた固定の座標に、兄弟の順で置く。どのカードの組も重ならない`, () => {

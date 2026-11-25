@@ -23,7 +23,7 @@ export function Group({ root, count, size, hasNeeds, children }: {
     <section className={`group ${hasNeeds ? "has-needs" : ""}`}
       style={{ ...groupCssVars(), width: size.w, height: size.h, background: GROUP_TINTS[tint], borderColor: hasNeeds ? undefined : GROUP_LINES[tint] }}>
       <div className="g-head" title="親のプロジェクトのディレクトリの名前">
-        <span className="g-name">{houseNameOf(root)}</span>
+        <span className="g-name" title={houseNameOf(root)}>{houseNameOf(root)}</span>
         <span className="g-sub">{count}人</span>
         {hasNeeds && <span className="g-needs">あなたの番</span>}
       </div>
