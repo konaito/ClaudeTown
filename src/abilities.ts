@@ -7,10 +7,11 @@
 /** capabilities を持ちうるもの。Agent と、ブラウザ版の ccn の GET /sessions/<id> の応答（型が未確認のフィールドは unknown）の両方を受ける */
 export type HasCaps = { capabilities?: { send?: unknown; permissions?: unknown; interrupt?: unknown; stop?: unknown; terminal?: unknown } | null } | null | undefined;
 
-/** ここから止められるか（閉じるの前提）。アプリが立てたセッションだけ */
+/** ここから止められるか（閉じるの前提）。アプリが立てたセッションと、外で起動した対話セッション（pid に SIGHUP を送る、#309） */
 export const canStop = (a: HasCaps): boolean => a?.capabilities?.stop === true;
 
-/** 止めて立て直せるか（再起動の前提）。アプリが立てた端末だけ。ブラウザ版の ccn の行は、アプリの端末ではないので対象外 */
+/** 止めて立て直せるか（再起動の前提）。止められるセッション全部。外で起動したものは、立て直すとアプリの端末に移る（#309）。
+ *  ブラウザ版の ccn の行は、アプリの端末で立て直せないので対象外 */
 export const canRestart = (a: (HasCaps & { source?: string }) | null | undefined): boolean => canStop(a) && a?.source !== "ccn";
 
 /** 作業中のターンを割り込んで止められるか */

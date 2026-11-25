@@ -62,9 +62,9 @@ export const CardActions = memo(function CardActions({ agent, place = "card" }: 
       {CARD_ACTIONS.map((act) => {
         const off = act.kind === "kill" ? !canStop : act.kind === "restart" ? !canRestart : !canSend;
         const title = act.kind === "kill"
-          ? (canStop ? `${act.name}: このセッションを止める。子孫がいれば一緒に止める（⌘ を押しながらで確認なし）` : "閉じられない: Claude Town の外で起動したセッション")
+          ? (canStop ? `${act.name}: このセッションを止める。子孫がいれば一緒に止める（⌘ を押しながらで確認なし）` : "閉じられない: ここから止める口が無いセッション（sub-agent、チームメイト）")
           : act.kind === "restart"
-          ? (canRestart ? `${act.name}: 止めて、枠の残るアカウントで同じ会話を続ける（利用上限で止まったとき）` : "再起動できない: Claude Town の外で起動したセッション")
+          ? (canRestart ? `${act.name}: 止めて、枠の残るアカウントで同じ会話を続ける（利用上限で止まったとき）${agent.source === "native" ? "。Claude Town の端末に移る" : ""}` : "再起動できない: ここから止める口が無いセッション（sub-agent、チームメイト）")
           : (canSend ? `${act.name}: 「${act.text}」を送る` : `${act.name}を送れない: Claude Town の外で起動したセッション`);
         const fx = flash?.key === act.key ? (flash.ok ? "sent" : "failed") : sending === act.key || (act.kind === "restart" && restart.busy.has(agent.id)) ? "sending" : "";
         return (

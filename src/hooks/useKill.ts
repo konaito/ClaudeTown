@@ -25,7 +25,7 @@ export function useKill(h: {
     // 止める順と残す分は killPlan（#183）。sub-agent と in-process のチームメイトは止めず、親の claude と一緒に終わる
     const { stop: targets, keep: skipped, ride } = killPlan(tree.childrenOf, a);
     const delay = new Map(targets.map((x, i) => [x.id, i * KILL_STAGGER]));
-    // 外で起動して残す親に乗っている子は、親と一緒に残るので触らない
+    // 止められずに残す親に乗っている子は、親と一緒に残るので触らない
     const riding = ride.filter((r) => delay.has(r.with.id));
     setDying((m) => {
       const n = new Map(m);
@@ -37,9 +37,11 @@ export function useKill(h: {
     const gone = new Set([...targets.map((x) => x.id), ...riding.map((r) => r.agent.id)]);
     if (selected && gone.has(selected)) setSelected(null);
     const failed: Agent[] = [];
+    // 止められなかった理由。外で起動したセッションは、記録の起動時刻が今のプロセスと合わないと断られる（#309）
+    const why = new Map<string, string>();
     for (const x of targets) {
       try { await invoke("stop_session", { sessionId: x.id }); }
-      catch { failed.push(x); }
+      catch (e) { failed.push(x); why.set(x.id, String(e)); }
     }
     const ok = targets.filter((x) => !failed.includes(x));
     const okIds = new Set(ok.map((x) => x.id));
@@ -55,13 +57,13 @@ export function useKill(h: {
       setDying((m) => { const n = new Map(m); for (const x of ended) n.delete(x.id); return n; });
     }, last);
     const closed = closedDescendants(a, ride, ok);
-    if (failed.length) toast(`止められなかった: ${failed.map((x) => x.name).join("、")}`, true);
+    if (failed.length) toast(`止められなかった: ${failed.map((x) => `${x.name}（${why.get(x.id)}）`).join("、")}`, true);
     else toast(`${a.name}${closed ? ` と子孫 ${closed} 人` : ""}を閉じた`);
     // 残す分のうち、kind が teammate なのは tmux のチームメイト（in-process のチームメイトは killPlan が ride に入れる）。
-    // 外で起動した claude ではないので、理由を分ける。リードが止まった後にプロセスが残るかは未確認なので「止めていない」とだけ言う
+    // ほかの残した分とは理由が違うので、分けて出す。リードが止まった後にプロセスが残るかは未確認なので「止めていない」とだけ言う
     const mates = skipped.filter((x) => x.kind === "teammate");
     const outside = skipped.filter((x) => x.kind !== "teammate");
-    if (outside.length) toast(`Claude Town の外で起動したので、ここからは止められない。残した: ${outside.map((x) => x.name).join("、")}`, true);
+    if (outside.length) toast(`ここからは止められないので残した: ${outside.map((x) => x.name).join("、")}`, true);
     if (mates.length) toast(`tmux で動くチームメイトは、ここからは止められない。止めていない: ${mates.map((x) => x.name).join("、")}`, true);
     return failed.length === 0 && skipped.length === 0;
   }, [tree, selected, toast]);

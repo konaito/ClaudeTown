@@ -39,7 +39,10 @@ describe("canRestart", () => {
   test("アプリが立てた端末（stop が true）は再起動できる", () => {
     expect(canRestart({ capabilities: NEW_HOUSE_CAPS })).toBe(true);
   });
-  test("止められないセッション（外で起動、記録から読むだけ）は再起動できない", () => {
+  test("外で起動した対話セッション（stop が true、source が native）は再起動できる（#309）", () => {
+    expect(canRestart({ capabilities: { send: true, stop: true }, source: "native" })).toBe(true);
+  });
+  test("止められないセッション（sub-agent、チームメイト、記録から読むだけ）は再起動できない", () => {
     expect(canRestart({ capabilities: NO_CAPS })).toBe(false);
     expect(canRestart({ capabilities: null })).toBe(false);
     expect(canRestart(null)).toBe(false);
