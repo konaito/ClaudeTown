@@ -238,6 +238,8 @@ export function Composer({ agent, text, setText, busy, running, booting = false,
     const ctrl = e.ctrlKey && !e.metaKey && !e.altKey;
     const alt = e.altKey && !e.ctrlKey && !e.metaKey;
     const plain = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+    // 押しっぱなしの繰り返しの Enter では送らない（#304）。1回の押下で同じ文が続けて送られるのを防ぐ
+    if (k === "Enter" && e.repeat) { e.preventDefault(); return; }
     const key: Key = { e, k, ctrl, alt, plain, stop: () => e.preventDefault() };
     if (k !== "Escape") lastEsc.current = 0;
     if (!(ctrl && k === "y") && !(alt && e.code === "KeyY")) yank.current = null;

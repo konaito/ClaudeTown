@@ -7,5 +7,6 @@ export type SendFrom = "composer" | "choice" | "card";
  * 送るのを待つ間（Rust の paste_enter の 150ms と IPC の往復）に打ち足した文も残す
  */
 export function clearsDraft(from: SendFrom, sent: string, draftNow: string): boolean {
-  return from === "composer" && draftNow === sent;
+  // / の補完で Enter を押した文は、入力欄が「/名前 」、送る文が trimEnd した「/名前」になる（#304）。末尾の空白は比べない
+  return from === "composer" && draftNow.trimEnd() === sent.trimEnd();
 }
