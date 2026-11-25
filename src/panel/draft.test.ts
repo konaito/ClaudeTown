@@ -16,4 +16,12 @@ describe("送れた後に入力欄を空にするか（#182）", () => {
     expect(clearsDraft("composer", "直して", "次の")).toBe(false);
     expect(clearsDraft("composer", "直して", "直して。それと")).toBe(false);
   });
+  // #304: / の補完で Enter を押すと、入力欄は「/名前 」（末尾に空白）になり、送る文は trimEnd した「/名前」になる。
+  // 末尾の空白で食い違うと入力欄が空にならず、次の Enter で同じ文がもう一度送られた
+  test("/ の補完で選んだ文は、末尾の空白が違っても入力欄を空にする（#304）", () => {
+    expect(clearsDraft("composer", "/ui-consistency", "/ui-consistency ")).toBe(true);
+  });
+  test("末尾の空白だけの違いでも、打ち足した文は残す（#304）", () => {
+    expect(clearsDraft("composer", "/ui-consistency", "/ui-consistency foo")).toBe(false);
+  });
 });
