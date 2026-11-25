@@ -36,14 +36,23 @@ pub(crate) fn house_places() -> Result<Value, String> {
 }
 
 crate::blocking_command! {
-/// このアプリが立てたセッションを止める
+/// セッションを止める。このアプリが立てたものは端末ごと止める（pty::kill）。
+/// Claude Town の外で起動したものは、claude の pid に SIGHUP を送る（native::sessions::hangup、#309）。起動した端末はシェルに戻る
 pub(crate) fn stop_session(session_id: String) -> Result<(), String> {
-    app_guard(&session_id)?;
     refuse_if_disabled()?;
-    pty::kill(&session_id)?;
+    stop_any(&session_id)?;
     town_kick();
     Ok(())
 }
+}
+
+/// このアプリが立てたセッションなら pty::kill、そうでなければ外で起動した claude として SIGHUP で止める（#309）
+fn stop_any(session_id: &str) -> Result<(), String> {
+    if pty::owns(session_id) {
+        pty::kill(session_id)
+    } else {
+        native::sessions::hangup(&native::claude_home(), session_id).map(|_| ())
+    }
 }
 
 // ---------- 再起動（カードの「再起動」） ----------
@@ -52,12 +61,12 @@ pub(crate) fn stop_session(session_id: String) -> Result<(), String> {
 const RESTART_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 crate::blocking_command! {
-/// このアプリが立てたセッションを止め、同じ id を `claude --resume` で立て直す。
+/// セッションを止め、同じ id を `claude --resume` で、このアプリの端末に立て直す。
+/// Claude Town の外で起動したものも止めて立て直す（#309）。立て直した後は、このアプリの端末で動く（起動した端末はシェルに戻る）。
 /// アカウントは resume のときも cam usage の best で選び直す（account.rs）ので、利用上限で止まったアカウントから枠の残るアカウントへ替わる。
 /// id と会話の jsonl は変わらないので、親（最初の文の from 行）と名前は継がれる。モデルと権限モードは resume では渡さず、会話の記録のまま。
 /// ccn の引き継ぎ（succeed）は使わない。ccn は 2026-11-21 にアプリから外した
 pub(crate) fn restart_session(session_id: String) -> Result<Value, String> {
-    app_guard(&session_id)?;
     refuse_if_disabled()?;
     let root = native::claude_home();
     // 止める前に、立て直せるかを確かめる（止めてから立て直せないと、会話が閉じたままになる）
@@ -67,7 +76,7 @@ pub(crate) fn restart_session(session_id: String) -> Result<Value, String> {
         return Err(format!("場所が無いか、ディレクトリではない: {cwd}"));
     }
     let (cols, rows) = pty::size_of(&session_id).unwrap_or((120, 40));
-    pty::kill(&session_id)?;
+    stop_any(&session_id)?;
     let t0 = std::time::Instant::now();
     // このアプリの台帳から消え、claude の sessions/<pid>.json の pid も終わるまで待つ
     while pty::pid_of_id(&session_id).is_some() || native::sessions::live_pid_of(&root, &session_id).is_some() {
@@ -269,11 +278,16 @@ pub(crate) mod cmd {
 mod tests {
     use super::*;
 
-    /// このアプリが立てていないセッションは、止める前に断る（外で動いている claude を止めない）
+    /// 外で起動したセッションも再起動できる（#309）が、会話の記録が無ければ止める前に断る（止めてから立て直せないと、会話が閉じたままになる）
     #[test]
-    fn restart_refuses_sessions_the_app_did_not_start() {
+    fn restart_refuses_before_stopping_when_there_is_no_jsonl() {
+        let root = std::env::temp_dir().join(format!("fc-restart-nolog-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
         let e = restart_session("55555555-5555-4555-8555-555555555555".into()).unwrap_err();
-        assert_eq!(e, native::READ_ONLY);
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        assert!(e.contains("jsonl"), "{e}");
     }
 
     /// 立て直す前の確かめ（#152）。jsonl が無いもの、よそで同じ id が動いているもの、場所が無いものは飛ばす
@@ -439,6 +453,87 @@ mod real_restart {
         assert_eq!(r2["id"].as_str(), Some(id.as_str()));
         assert_ne!(pid1, pid2);
         assert!(!alive1);
+    }
+
+    /// Claude Town の外で起動した claude（script(1) の端末で動かす）を1往復させ、id と pid を返す（#309）。
+    /// 環境は空にして渡す。この試験を走らせるセッションの CLAUDE_CODE_* を継ぐと、子のセッション扱いで sessions/<pid>.json が書かれない
+    // 返した Child は呼び手が wait する。途中の unwrap で落ちたときは、試験ごと終わる（script は claude と一緒に終わる）
+    #[allow(clippy::zombie_processes)]
+    fn outside_claude(cwd: &str, config_dir: &str) -> (std::process::Child, String, u32) {
+        use std::io::Write;
+        let home = std::env::var("HOME").unwrap();
+        let mut script = std::process::Command::new("/usr/bin/script")
+            .args(["-q", "/dev/null", &format!("{home}/.local/bin/claude"), "--model", "haiku"])
+            .current_dir(cwd).env_clear()
+            .envs([("HOME", home.as_str()), ("PATH", &std::env::var("PATH").unwrap()), ("TERM", "xterm-256color"), ("LANG", "ja_JP.UTF-8"), ("CLAUDE_CONFIG_DIR", config_dir)])
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .spawn().unwrap();
+        std::thread::sleep(Duration::from_secs(8));
+        let input = script.stdin.as_mut().unwrap();
+        input.write_all("ok とだけ返して".as_bytes()).unwrap();
+        input.flush().unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+        input.write_all(b"\r").unwrap();
+        input.flush().unwrap();
+        let root = native::claude_home();
+        let t0 = Instant::now();
+        loop {
+            let out = std::process::Command::new("/usr/bin/pgrep").args(["-P", &script.id().to_string()]).output().unwrap();
+            let pid: Option<u32> = String::from_utf8_lossy(&out.stdout).lines().next().and_then(|l| l.trim().parse().ok());
+            let rec = pid.and_then(|p| std::fs::read_to_string(root.join(format!("sessions/{p}.json"))).ok());
+            let id = rec.and_then(|s| serde_json::from_str::<Value>(&s).ok()).and_then(|v| v["sessionId"].as_str().map(String::from));
+            if let (Some(pid), Some(id)) = (pid, id)
+                && native::sessions::find_jsonl(&root, &id).is_some() {
+                    std::thread::sleep(Duration::from_secs(8));
+                    return (script, id, pid);
+                }
+            if t0.elapsed() >= Duration::from_secs(90) {
+                let _ = script.kill();
+                let _ = script.wait();
+                panic!("外の claude の記録ができなかった");
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    /// 外で起動した本物の claude を、町の行と同じ id で止め、別の1体を再起動してアプリの端末に移す（#309）。2往復分の API を使う。
+    /// env -u CLAUDE_CONFIG_DIR FC_CAM_BIN=$HOME/.cam/bin/cam FC_RESTART_CWD=<信頼済みの捨てのディレクトリ> FC_OUTSIDE_CONFIG_DIR=<CLAUDE_CONFIG_DIR> \
+    ///   cargo test --lib real_outside -- --ignored --nocapture --test-threads=1
+    #[test]
+    #[ignore]
+    fn real_outside_stop_and_restart() {
+        let cwd = std::env::var("FC_RESTART_CWD").expect("FC_RESTART_CWD");
+        let conf = std::env::var("FC_OUTSIDE_CONFIG_DIR").expect("FC_OUTSIDE_CONFIG_DIR");
+        let root = native::claude_home();
+        // 止める
+        let (mut s1, id1, pid1) = outside_claude(&cwd, &conf);
+        let row = crate::town_rows().into_iter().find(|r| r["id"] == id1.as_str()).expect("町の一覧に出る");
+        println!("止める前: id {id1} pid {pid1} source {} capabilities {}", row["source"], row["capabilities"]);
+        assert_eq!(row["capabilities"]["stop"], true);
+        let t0 = Instant::now();
+        stop_session(id1.clone()).unwrap();
+        while unsafe { libc::kill(pid1 as i32, 0) } == 0 && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let took = t0.elapsed().as_secs_f32();
+        let rec_left = root.join(format!("sessions/{pid1}.json")).exists();
+        println!("止めた後: pid {pid1} 生存 {} 所要 {took:.2}s sessions/{pid1}.json 残り {rec_left}", unsafe { libc::kill(pid1 as i32, 0) } == 0);
+        let _ = s1.wait();
+        assert!(took < 3.0, "SIGHUP で3秒以内に終わらなかった（SIGKILL に頼った）");
+        assert!(!rec_left);
+        // 再起動する
+        let (mut s2, id2, pid2) = outside_claude(&cwd, &conf);
+        let r = restart_session(id2.clone()).unwrap();
+        let pid3 = r["pid"].as_u64().unwrap() as u32;
+        let _ = s2.wait();
+        std::thread::sleep(Duration::from_secs(6));
+        let row = crate::town_rows().into_iter().find(|r| r["id"] == id2.as_str()).expect("再起動の後も町の一覧に出る");
+        println!("再起動: id {id2} pid {pid2} → {pid3} 前任の生存 {} 後の source {} 所有 {}", unsafe { libc::kill(pid2 as i32, 0) } == 0, row["source"], pty::owns(&id2));
+        pty::kill(&id2).unwrap();
+        assert_eq!(r["id"].as_str(), Some(id2.as_str()));
+        assert_ne!(pid2, pid3);
+        assert!(unsafe { libc::kill(pid2 as i32, 0) } != 0);
+        assert_eq!(row["source"], "app");
     }
 }
 

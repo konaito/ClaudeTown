@@ -1,7 +1,8 @@
 // family-computing の裏側。画面から呼ばれる命令:
 // - snapshot: この機械の Claude Code の記録（native/）、このアプリが立てた端末（pty.rs）、hook の報告、close-check の判定を1つにまとめる
 // - conversation(session_id, since): セッションの jsonl を差分で読み、画面に出す形（発言と道具の1行）に縮め、画面がまだ持っていない分だけ返す
-// - create_session / stop_session / restart_session: 新しい世帯の claude をこのアプリの中の端末で起動する、止める、止めて枠の残るアカウントで立て直す（pty.rs）
+// - create_session / stop_session / restart_session: 新しい世帯の claude をこのアプリの中の端末で起動する、止める、止めて枠の残るアカウントで立て直す（pty.rs）。
+//   止めると立て直すは、Claude Town の外で起動したセッションにもできる（native/sessions.rs の hangup、#309）
 // - term_open / term_close / term_input / term_resize: このアプリが立てた端末を読み書きし、開いた画面の Channel へ流す
 // - house_places: 新しい世帯のペインの「最近の場所」の材料（places.rs）
 // - restore_report: 起動のときの端末の立て直しで、戻らなかった端末の一覧（session_ops.rs、#262）
@@ -952,6 +953,8 @@ mod tests {
         assert_eq!(me["canSend"], true);
         assert_eq!(me["capabilities"]["interrupt"], false);
         assert_eq!(me["capabilities"]["terminal"], false);
+        // 外で起動したセッションも、pid への SIGHUP で止められる（#309）
+        assert_eq!(me["capabilities"]["stop"], true);
     }
 
     #[test]
@@ -991,6 +994,9 @@ mod tests {
         assert_eq!(by(&x1)["parent"], a);
         assert_eq!(by(&x1)["name"], "Explore");
         assert_eq!(by(&x1)["report"]["asked"], "探す");
+        // 外で起動したセッションは止められる（#309）。sub-agent は親の claude の中で動くので、ここからは止めない
+        assert_eq!(by(b)["capabilities"]["stop"], true);
+        assert_eq!(by(&x1)["capabilities"]["stop"], false);
         assert_eq!(agents.len(), 3);
         // 操作は、このアプリが立てていないものを全部断る
         assert!(app_guard(a).is_err());

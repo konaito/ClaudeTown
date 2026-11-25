@@ -59,6 +59,15 @@ pub fn caps_with_send(send: bool) -> Value {
     json!({ "send": send, "permissions": false, "interrupt": false, "stop": false, "terminal": false, "events": false })
 }
 
+/// Claude Town の外で起動した対話セッション（sessions/<pid>.json の行）でできること。
+/// 文の送信は受信ソケットがあるときだけ（#156）。止めるのは pid への SIGHUP でできる（sessions::hangup、#309）。
+/// 止められるので、画面は再起動（止めて、このアプリの端末で resume）も出す
+pub fn outside_caps(send: bool) -> Value {
+    let mut c = caps_with_send(send);
+    c["stop"] = json!(true);
+    c
+}
+
 /// 一覧を作った結果。stats は報告と画面の確認用の件数
 #[derive(Default, Debug)]
 pub struct NativeList {

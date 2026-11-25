@@ -9,7 +9,7 @@ export const inProcess = (a: Agent): boolean => (a.kind === "subagent" || a.kind
 export type KillPlan = {
   /** 止める分。葉から順 */
   stop: Agent[];
-  /** 止めずに残す分（外で起動した claude と、tmux のチームメイト）。in-process の子は入れない */
+  /** 止めずに残す分（tmux のチームメイトなど、止める口の無いもの）。in-process の子は入れない。外で起動した claude は止める（#309） */
   keep: Agent[];
   /** 親の claude と一緒に終わる in-process の子と、その親（with）。with が止まれば終わり、止まらなければ残る */
   ride: { agent: Agent; with: Agent }[];
