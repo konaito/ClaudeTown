@@ -2,6 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { createVisibility, forceVisibleFlag } from "./visible";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// cond が成り立つまで待つ。limit ms たっても成り立たなければ、そのまま戻る（後の expect で落ちて回数が出る）。
+// 「間隔ごとに呼ぶ」の試験は、決まった時間だけ待つと、CI のランナーが混んでタイマーが遅れたときに落ちる（#308）
+const until = async (cond: () => boolean, limit = 2000) => {
+  const end = Date.now() + limit;
+  while (!cond() && Date.now() < end) await wait(5);
+};
 
 describe("pollWhileVisible（#6）", () => {
   test("見えている間は始めにすぐ1回呼び、間隔ごとに呼ぶ", async () => {
@@ -9,7 +15,7 @@ describe("pollWhileVisible（#6）", () => {
     let n = 0;
     const stop = v.poll(() => { n++; }, 20);
     expect(n).toBe(1);
-    await wait(70);
+    await until(() => n >= 3);
     stop();
     expect(n).toBeGreaterThanOrEqual(3);
   });
@@ -127,7 +133,8 @@ describe("見えている扱い（VITE_FC_FORCE_VISIBLE、#62）", () => {
     const stop = v.poll(() => { n++; }, 20);
     const p = v.backoff(() => { m++; return true; }, 20, 20);
     v.set(false);
-    await wait(70);
+    // 隠れたと受けた後も、両方が3回以上呼ばれるまで待つ。止まっていれば上限まで待って下で落ちる
+    await until(() => n >= 3 && m >= 3);
     expect(v.isVisible()).toBe(true);
     expect(n).toBeGreaterThanOrEqual(3);
     expect(m).toBeGreaterThanOrEqual(3);
