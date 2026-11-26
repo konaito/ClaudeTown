@@ -72,6 +72,9 @@ pub fn outside_caps(send: bool) -> Value {
 #[derive(Default, Debug)]
 pub struct NativeList {
     pub sessions: Vec<Value>,
+    /// 生きている対話セッションの (id, pid) の全部。同じ id を1行にまとめる前のもの（#331）。
+    /// アプリの端末の台帳（pty::note_ids）は、まとめて落とした行の pid でも今の id を知る必要がある
+    pub pids: Vec<(String, u32)>,
     pub subagents: Vec<Value>,
     pub stats: Stats,
 }
@@ -86,6 +89,8 @@ pub struct Stats {
     /// jsonl が規則の場所に無く、projects/*/ を探して見つけた数と、見つからなかった数
     pub jsonl_searched: usize,
     pub jsonl_missing: usize,
+    /// 同じ sessionId の記録が2つ以上あり、1行にまとめて落とした行の数（#331、sessions::merge_same_id）
+    pub dup_merged: usize,
     /// sub-agent の数（全部、出した数、畳んだ数、上限で落とした数、meta.json が無かった数）
     pub sub_total: usize,
     pub sub_shown: usize,
@@ -123,16 +128,21 @@ pub fn path_of(id: &str) -> Option<PathBuf> {
 /// 操作の命令で、このアプリが立てていないセッションを断るときの文
 pub const READ_ONLY: &str = "このセッションは Claude Town の外で起動したもので、Claude Code の記録から読んでいるだけなので、ここからは操作できない。起動した端末で操作して";
 
-/// 一覧を作る。生きているセッションと、その下の sub-agent とチームメイト
-pub fn list(root: &Path, now: u64) -> NativeList {
+/// 一覧を作る。生きているセッションと、その下の sub-agent とチームメイト。
+/// 同じ id の記録が2つ以上あれば1行にまとめる（#331）。app_pids は、このアプリが立てた端末の pid（まとめるときに残す行を決める）
+pub fn list(root: &Path, now: u64, app_pids: &std::collections::HashSet<u32>) -> NativeList {
     let t0 = std::time::Instant::now();
     let mut stats = Stats::default();
-    let live = sessions::live(root, &mut stats);
+    // sub-agent とチームメイトはセッションごとに読むので、まとめる前に読むと、それらの行も同じ id で2つになる
+    let all = sessions::live(root, &mut stats);
+    let pids: Vec<(String, u32)> = all.iter().map(|s| (s.id.clone(), s.pid)).collect();
+    let live = sessions::merge_same_id(all, app_pids, &mut stats);
     let mut out = NativeList::default();
     // tmux のチームメイトは sessions/<pid>.json を作らない（2回の実測）。もし作る版が来たら、同じ id のセッションの行は
     // 親の分かるチームメイトの行で置き換える
     let mates = teams::tmux_rows(root, &live, now, &mut stats);
     let mate_ids: std::collections::HashSet<&str> = mates.iter().filter_map(|r| r["id"].as_str()).collect();
+    out.pids = pids.into_iter().filter(|(id, _)| !mate_ids.contains(id.as_str())).collect();
     for s in &live {
         out.subagents.extend(subagents::of_session(s, now, &mut stats));
         if !mate_ids.contains(s.id.as_str()) {

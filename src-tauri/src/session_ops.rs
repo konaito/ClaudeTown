@@ -46,12 +46,21 @@ pub(crate) fn stop_session(session_id: String) -> Result<(), String> {
 }
 }
 
-/// このアプリが立てたセッションなら pty::kill、そうでなければ外で起動した claude として SIGHUP で止める（#309）
+/// このアプリが立てたセッションなら pty::kill、そうでなければ外で起動した claude として SIGHUP で止める（#309）。
+/// 同じ id を2か所以上で開いていれば（#331）、全部止める。町のカードは id ごとに1枚なので、1つ残すとカードが消えず、
+/// 画面は10秒後に「止まらなかった」と出す（src/hooks/useHidden.ts）
 fn stop_any(session_id: &str) -> Result<(), String> {
+    let root = native::claude_home();
     if pty::owns(session_id) {
-        pty::kill(session_id)
+        let mine = pty::pid_of_id(session_id);
+        pty::kill(session_id)?;
+        // よそで開いている分。無ければ Err になるが、アプリの端末は止めたので成功として返す
+        if let Ok(pids) = native::sessions::hangup(&root, session_id, mine) {
+            eprintln!("[stop] 同じ id をよそでも開いていたので止めた: {session_id} pid {pids:?}");
+        }
+        Ok(())
     } else {
-        native::sessions::hangup(&native::claude_home(), session_id).map(|_| ())
+        native::sessions::hangup(&root, session_id, None).map(|_| ())
     }
 }
 
@@ -74,6 +83,11 @@ pub(crate) fn restart_session(session_id: String) -> Result<Value, String> {
     let cwd = native::sessions::resume_cwd(&jsonl).ok_or("会話の記録から場所（cwd）が読めなかった")?;
     if !std::path::Path::new(&cwd).is_dir() {
         return Err(format!("場所が無いか、ディレクトリではない: {cwd}"));
+    }
+    // 同じ id を2か所以上のプロセスが名乗っている（#331）と、1つ止めてももう1つが残り、下の待ちで失敗する。止める前に断る
+    let n = native::sessions::live_pids_of(&root, &session_id).len();
+    if n >= 2 {
+        return Err(format!("同じセッションが{n}か所で開いているので、再起動しなかった。ほかの端末で開いている分を閉じてから再起動して"));
     }
     let (cols, rows) = pty::size_of(&session_id).unwrap_or((120, 40));
     stop_any(&session_id)?;
@@ -288,6 +302,121 @@ mod tests {
         let e = restart_session("55555555-5555-4555-8555-555555555555".into()).unwrap_err();
         native::TEST_HOME.with(|h| *h.borrow_mut() = None);
         assert!(e.contains("jsonl"), "{e}");
+    }
+
+    /// 同じ id を外の2つのプロセスが名乗っている（#331）。町のカードは1枚なので、停止は2つとも止める。
+    /// 1つだけ止めると id が一覧に残り、画面は10秒後に「止まらなかった」と出す（src/hooks/useHidden.ts）
+    #[test]
+    fn stop_hangs_up_every_process_with_the_id() {
+        let root = std::env::temp_dir().join(format!("fc-stop-dup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        let id = "77777777-7777-4777-8777-777777777777";
+        let mut kids: Vec<std::process::Child> = (0..2).map(|_| std::process::Command::new("/bin/sleep").arg("60").spawn().unwrap()).collect();
+        for (i, k) in kids.iter().enumerate() {
+            let pid = k.id();
+            let out = std::process::Command::new("/bin/ps").env("LC_ALL", "C").env("TZ", "UTC").args(["-o", "lstart=", "-p", &pid.to_string()]).output().unwrap();
+            let start = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            fs::write(root.join(format!("sessions/{pid}.json")), json!({ "pid": pid, "sessionId": id, "cwd": "/x", "startedAt": 1_000 + i as u64,
+                "kind": "interactive", "status": "idle", "procStart": start }).to_string()).unwrap();
+        }
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        let r = stop_any(id);
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        let t0 = std::time::Instant::now();
+        let mut ended = vec![false, false];
+        while t0.elapsed() < std::time::Duration::from_secs(2) && ended.iter().any(|e| !e) {
+            for (e, k) in ended.iter_mut().zip(kids.iter_mut()) {
+                *e = *e || k.try_wait().unwrap().is_some();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        for k in kids.iter_mut() {
+            let _ = (k.kill(), k.wait());
+        }
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(r, Ok(()));
+        assert_eq!(ended, vec![true, true], "2つとも止める");
+    }
+
+    /// #328 の形: アプリの端末で開いているセッションを、外の端末でも開いた。停止はアプリの端末と外の claude の両方を止める（#331）
+    #[test]
+    fn stop_ends_the_app_terminal_and_the_outside_copy() {
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = crate::NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _bin = pty::BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("fc-stop-app-dup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        let bin = root.join("claude");
+        fs::write(&bin, "#!/bin/sh\nexec cat\n").unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
+        let r = pty::spawn(root.to_str().unwrap(), None, &[], 80, 24, || {});
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+        let r = r.unwrap();
+        let id = r["id"].as_str().unwrap().to_string();
+        let app_pid = r["pid"].as_u64().unwrap() as u32;
+        let mut outside = std::process::Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        for pid in [app_pid, outside.id()] {
+            let out = std::process::Command::new("/bin/ps").env("LC_ALL", "C").env("TZ", "UTC").args(["-o", "lstart=", "-p", &pid.to_string()]).output().unwrap();
+            let start = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            fs::write(root.join(format!("sessions/{pid}.json")), json!({ "pid": pid, "sessionId": id, "cwd": "/x", "startedAt": 1_000,
+                "kind": "interactive", "status": "idle", "procStart": start }).to_string()).unwrap();
+        }
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        let res = stop_any(&id);
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        let t0 = std::time::Instant::now();
+        let mut outside_ended = false;
+        while t0.elapsed() < std::time::Duration::from_secs(3) && !(outside_ended && !pty::owns(&id)) {
+            outside_ended = outside_ended || outside.try_wait().unwrap().is_some();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let app_ended = !pty::owns(&id);
+        let _ = (outside.kill(), outside.wait());
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(res, Ok(()));
+        assert!(app_ended, "アプリの端末が止まらない");
+        assert!(outside_ended, "外の claude が止まらない");
+    }
+
+    /// 同じ id を2つのプロセスが名乗っている（#331）と、1つ止めてももう1つが残り、立て直しを待ちきれずに失敗する。
+    /// 止めてから失敗すると端末が1つ消えるだけなので、止める前に断る
+    #[test]
+    fn restart_refuses_before_stopping_when_two_processes_share_the_id() {
+        let root = std::env::temp_dir().join(format!("fc-restart-dup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let place = root.join("place");
+        fs::create_dir_all(&place).unwrap();
+        let cwd = place.to_string_lossy().to_string();
+        let id = "66666666-6666-4666-8666-666666666666";
+        let proj = root.join("projects").join(native::sessions::project_dir_name(&cwd));
+        fs::create_dir_all(&proj).unwrap();
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        fs::write(proj.join(format!("{id}.jsonl")), format!("{{\"type\":\"user\",\"cwd\":{}}}\n", serde_json::to_string(&cwd).unwrap())).unwrap();
+        let mut kids: Vec<std::process::Child> = (0..2).map(|_| std::process::Command::new("/bin/sleep").arg("60").spawn().unwrap()).collect();
+        for (i, k) in kids.iter().enumerate() {
+            let pid = k.id();
+            // 止める前の確かめ（起動時刻）が通るように、claude と同じ形の procStart を書く
+            let out = std::process::Command::new("/bin/ps").env("LC_ALL", "C").env("TZ", "UTC").args(["-o", "lstart=", "-p", &pid.to_string()]).output().unwrap();
+            let start = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            fs::write(root.join(format!("sessions/{pid}.json")), json!({ "pid": pid, "sessionId": id, "cwd": cwd, "startedAt": 1_000 + i as u64,
+                "kind": "interactive", "status": "idle", "procStart": start }).to_string()).unwrap();
+        }
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        let r = restart_session(id.into());
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        // SIGHUP を受けた sleep は終わる。断ったなら2つとも生きている
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let alive: Vec<bool> = kids.iter_mut().map(|k| k.try_wait().unwrap().is_none()).collect();
+        for k in kids.iter_mut() {
+            let _ = (k.kill(), k.wait());
+        }
+        let _ = fs::remove_dir_all(&root);
+        let e = r.unwrap_err();
+        assert_eq!(alive, vec![true, true], "止める前に断る: {e}");
+        assert!(e.contains("2か所"), "{e}");
     }
 
     /// 立て直す前の確かめ（#152）。jsonl が無いもの、よそで同じ id が動いているもの、場所が無いものは飛ばす

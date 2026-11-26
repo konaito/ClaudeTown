@@ -278,28 +278,50 @@ pub fn find_jsonl(root: &Path, id: &str) -> Option<PathBuf> {
     fs::read_dir(root.join("projects")).ok()?.flatten().map(|d| d.path().join(&name)).find(|p| p.is_file())
 }
 
-/// id を名乗っている、生きているプロセスの pid（sessions/<pid>.json を今読む）。無ければ None。
-/// resume すると同じ id を新しい pid が名乗るので、起動時刻の合わない古い記録は飛ばして次を見る
-pub fn live_pid_of(root: &Path, id: &str) -> Option<u32> {
-    let cands: Vec<(u32, Option<String>)> = fs::read_dir(root.join("sessions")).ok()?.flatten().filter_map(|e| {
-        let v: Value = serde_json::from_str(&fs::read_to_string(e.path()).ok()?).ok()?;
-        let pid = v["pid"].as_u64()? as u32;
-        (v["sessionId"].as_str() == Some(id)).then(|| (pid, proc_start_of(&v)))
-    }).collect();
-    let ok = alive_as_recorded(&cands);
-    cands.iter().zip(ok).find(|(_, a)| *a).map(|(c, _)| c.0)
+/// 同じ id を名乗る記録が2つ以上あるとき（同じセッションを2か所で開いた。#328、#331）に、どれを先に選ぶかの並び。
+/// 新しく開いたほう（startedAt が大きい）を先にし、同じなら pid の大きいほう。町の一覧で残す行（merge_same_id）と、
+/// 外で起動したセッションへの送信と停止の行き先（live_pid_of、verified_pid_of）を、この並びでそろえる
+fn newer_first(a: (u64, u32), b: (u64, u32)) -> std::cmp::Ordering {
+    b.cmp(&a)
 }
 
-/// id を名乗っている claude の pid のうち、記録の起動時刻（procStart）が今のプロセスと一致するもの。止める前の確かめに使う（#309）。
-/// live_pid_of と違い、起動時刻を比べられない記録は選ばない。pid が別のプロセスに使い回されていても見分けられないので、信号を送らない
-pub fn verified_pid_of(root: &Path, id: &str) -> Option<u32> {
-    let cands: Vec<(u32, String)> = fs::read_dir(root.join("sessions")).ok()?.flatten().filter_map(|e| {
+/// sessionId が id の記録の（pid、startedAt、v）。読めない記録は飛ばす。newer_first の順
+fn records_of(root: &Path, id: &str) -> Vec<(u32, u64, Value)> {
+    let Ok(rd) = fs::read_dir(root.join("sessions")) else { return vec![] };
+    let mut v: Vec<(u32, u64, Value)> = rd.flatten().filter_map(|e| {
         let v: Value = serde_json::from_str(&fs::read_to_string(e.path()).ok()?).ok()?;
         (v["sessionId"].as_str() == Some(id)).then_some(())?;
-        Some((v["pid"].as_u64()? as u32, proc_start_of(&v)?))
+        Some((v["pid"].as_u64()? as u32, v["startedAt"].as_u64().unwrap_or(0), v))
     }).collect();
+    v.sort_by(|a, b| newer_first((a.1, a.0), (b.1, b.0)));
+    v
+}
+
+/// id を名乗っている、生きているプロセスの pid の全部（sessions/<pid>.json を今読む）。newer_first の順。
+/// resume すると同じ id を新しい pid が名乗るので、起動時刻の合わない古い記録は数えない
+pub fn live_pids_of(root: &Path, id: &str) -> Vec<u32> {
+    let cands: Vec<(u32, Option<String>)> = records_of(root, id).into_iter().map(|(pid, _, v)| (pid, proc_start_of(&v))).collect();
+    let ok = alive_as_recorded(&cands);
+    cands.iter().zip(ok).filter(|(_, a)| *a).map(|(c, _)| c.0).collect()
+}
+
+/// id を名乗っている、生きているプロセスの pid（2つ以上あれば newer_first の先頭）。無ければ None
+pub fn live_pid_of(root: &Path, id: &str) -> Option<u32> {
+    live_pids_of(root, id).into_iter().next()
+}
+
+/// id を名乗っている claude の pid のうち、記録の起動時刻（procStart）が今のプロセスと一致するもの全部。止める前の確かめに使う（#309）。
+/// live_pids_of と違い、起動時刻を比べられない記録は選ばない。pid が別のプロセスに使い回されていても見分けられないので、信号を送らない。
+/// 並びは newer_first（先頭が町の一覧に残した行の pid）
+pub fn verified_pids_of(root: &Path, id: &str) -> Vec<u32> {
+    let cands: Vec<(u32, String)> = records_of(root, id).into_iter().filter_map(|(pid, _, v)| Some((pid, proc_start_of(&v)?))).collect();
     let now = ps_lstart(&cands.iter().map(|c| c.0).collect::<Vec<_>>());
-    cands.into_iter().find(|(pid, want)| now.get(pid) == Some(want)).map(|c| c.0)
+    cands.into_iter().filter(|(pid, want)| now.get(pid) == Some(want)).map(|c| c.0).collect()
+}
+
+/// verified_pids_of の先頭。無ければ None
+pub fn verified_pid_of(root: &Path, id: &str) -> Option<u32> {
+    verified_pids_of(root, id).into_iter().next()
 }
 
 /// SIGHUP を送ってから、終わっていなければ SIGKILL を送るまで待つ長さ。
@@ -308,21 +330,36 @@ const HANGUP_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Claude Town の外で起動したセッションを止める（#309）。claude の pid に SIGHUP を送る。このアプリが立てた端末と同じ止め方（pty::kill）。
 /// 受信ソケットに /exit を送っても、ただの文として届くので使わない（composer.rs の socket_refusal）。
-/// HANGUP_WAIT たっても同じプロセスが残っていれば SIGKILL を送る。どちらも送る直前に起動時刻を確かめる。返すのは止めた pid
-pub fn hangup(root: &Path, id: &str) -> Result<u32, String> {
-    let pid = verified_pid_of(root, id).ok_or("止める claude が見つからなかった（もう終わったか、記録の起動時刻が今のプロセスと合わない）")?;
-    if unsafe { libc::kill(pid as i32, libc::SIGHUP) } != 0 {
-        return Err(format!("止められなかった: {}", std::io::Error::last_os_error()));
+/// 同じ id を2か所以上で開いていれば（#331）、全部に送る。町のカードは id ごとに1枚なので、1つ残すとカードが消えない。
+/// skip の pid には送らない（このアプリの端末で、pty::kill で止めるもの）。
+/// HANGUP_WAIT たっても同じプロセスが残っていれば SIGKILL を送る。どちらも送る直前に起動時刻を確かめる。返すのは止めた pid（1つも無ければ Err）
+pub fn hangup(root: &Path, id: &str, skip: Option<u32>) -> Result<Vec<u32>, String> {
+    let pids: Vec<u32> = verified_pids_of(root, id).into_iter().filter(|p| Some(*p) != skip).collect();
+    if pids.is_empty() {
+        return Err("止める claude が見つからなかった（もう終わったか、記録の起動時刻が今のプロセスと合わない）".into());
     }
-    let (root, id) = (root.to_path_buf(), id.to_string());
+    let mut sent = vec![];
+    let mut failed = vec![];
+    for pid in pids {
+        if unsafe { libc::kill(pid as i32, libc::SIGHUP) } == 0 {
+            sent.push(pid);
+        } else {
+            failed.push(format!("pid {pid}: {}", std::io::Error::last_os_error()));
+        }
+    }
+    if !failed.is_empty() {
+        return Err(format!("止められなかった: {}", failed.join("、")));
+    }
+    let (root, id, watch) = (root.to_path_buf(), id.to_string(), sent.clone());
     std::thread::spawn(move || {
         std::thread::sleep(HANGUP_WAIT);
-        if verified_pid_of(&root, &id) == Some(pid) {
+        let left = verified_pids_of(&root, &id);
+        for pid in watch.into_iter().filter(|p| left.contains(p)) {
             eprintln!("[native] SIGHUP で終わらなかったので SIGKILL を送る pid {pid}");
             unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         }
     });
-    Ok(pid)
+    Ok(sent)
 }
 
 /// id を名乗るプロセスが消えるのを、limit まで待つ。消えた（もともと無い）なら true。
@@ -429,6 +466,47 @@ pub fn live(root: &Path, stats: &mut Stats) -> Vec<Session> {
     out
 }
 
+/// 様子の急ぎの順（承認待ち、作業中、待機）
+fn urgency(state: &str) -> u8 {
+    match state {
+        "waiting_permission" => 2,
+        "running" => 1,
+        _ => 0,
+    }
+}
+
+/// 同じ id の行を1つにまとめる（#331）。同じセッションを2か所で開く（Claude Town の端末と、外の端末の `claude -r <id>`）と、
+/// sessions/ に同じ sessionId の記録が2つできる（#328）。画面、状態ファイル、avatars.json、操作の命令はどれも id を鍵にしているので、
+/// 町の一覧では1つの id を1行にする。
+/// - 残す行（pid、cwd、受信ソケット）は、このアプリが立てた端末の pid（app_pids）があればそれ、無ければ newer_first の先頭。
+///   操作の行き先と同じにする（アプリの端末は pty、外は live_pid_of と verified_pid_of）
+/// - 様子は、どれかが承認待ちなら承認待ち、どれかが作業中なら作業中（#329 の通知と同じ考え方）。開始は早いほう、最後の動きは遅いほう
+/// - まとめた行の数は stats.dup_merged に数える
+pub fn merge_same_id(live: Vec<Session>, app_pids: &std::collections::HashSet<u32>, stats: &mut Stats) -> Vec<Session> {
+    let mut groups: Vec<Vec<Session>> = vec![];
+    for s in live {
+        match groups.iter_mut().find(|g| g[0].id == s.id) {
+            Some(g) => g.push(s),
+            None => groups.push(vec![s]),
+        }
+    }
+    groups.into_iter().map(|mut g| {
+        if g.len() == 1 {
+            return g.pop().expect("1件ある");
+        }
+        stats.dup_merged += g.len() - 1;
+        g.sort_by(|a, b| app_pids.contains(&b.pid).cmp(&app_pids.contains(&a.pid)).then(newer_first((a.started_at, a.pid), (b.started_at, b.pid))));
+        let state = g.iter().map(|s| s.state).max_by_key(|s| urgency(s)).expect("1件以上");
+        let started_at = g.iter().map(|s| s.started_at).min().expect("1件以上");
+        let updated_at = g.iter().map(|s| s.updated_at).max().expect("1件以上");
+        let title = g.iter().find_map(|s| s.title.clone());
+        let mut keep = g.swap_remove(0);
+        (keep.state, keep.started_at, keep.updated_at) = (state, started_at, updated_at);
+        keep.title = keep.title.or(title);
+        keep
+    }).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,7 +556,7 @@ mod tests {
         let start = ps_lstart(&[pid]).remove(&pid).expect("ps で起動時刻が取れる");
         let id = "eeeeeeee-0000-4000-8000-00000000000e";
         record_stub(&root, pid, id, Some(&start));
-        assert_eq!(hangup(&root, id), Ok(pid));
+        assert_eq!(hangup(&root, id, None), Ok(vec![pid]));
         assert!(exits_within(&mut child, std::time::Duration::from_secs(3)), "SIGHUP で終わらなかった");
         assert!(root.join("hup").exists(), "SIGHUP が届かなかった");
     }
@@ -492,7 +570,7 @@ mod tests {
             let pid = child.id();
             let id = "ffffffff-0000-4000-8000-00000000000f";
             record_stub(&root, pid, id, start);
-            assert!(hangup(&root, id).is_err(), "{name}: 断らなかった");
+            assert!(hangup(&root, id, None).is_err(), "{name}: 断らなかった");
             let ended = exits_within(&mut child, std::time::Duration::from_millis(500));
             let _ = child.kill();
             let _ = child.wait();
@@ -690,5 +768,56 @@ mod tests {
             "pid": 1, "sessionId": sid, "cwd": "/tmp/合成/r", "status": "idle", "procStart": "Sat Jan  1 00:00:00 2000"
         }).to_string());
         assert_eq!(live_pid_of(&root, sid), Some(std::process::id()));
+    }
+
+    #[test]
+    fn same_id_outside_twice_sends_and_stops_the_row_shown_in_town() {
+        // #331: 外の端末2つで同じ id を開いた。町に残す行、送信のソケット、停止の pid を、新しく開いたほうにそろえる
+        let root = tmp("dup-target");
+        let id = "abcdabcd-0000-4000-8000-00000000abcd";
+        let mut a = hup_stub(&tmp("dup-target-a"));
+        let mut b = hup_stub(&tmp("dup-target-b"));
+        let sock = |p: u32| root.join(format!("sock-{p}"));
+        // 古いほう（a）を後から書いても、読む順に左右されない
+        for (c, started) in [(&b, 3_000u64), (&a, 1_000u64)] {
+            let pid = c.id();
+            write(&sock(pid), "");
+            let start = ps_lstart(&[pid]).remove(&pid).expect("ps で起動時刻が取れる");
+            write(&root.join(format!("sessions/{pid}.json")), &json!({ "pid": pid, "sessionId": id, "cwd": "/tmp/合成/dup", "startedAt": started,
+                "kind": "interactive", "status": "idle", "procStart": start, "messagingSocketPath": sock(pid) }).to_string());
+        }
+        let mut st = Stats::default();
+        let rows = merge_same_id(live(&root, &mut st), &Default::default(), &mut st);
+        let shown = rows.iter().find(|s| s.id == id).map(|s| s.pid);
+        let (sent, stopped, pids) = (live_socket_of(&root, id), verified_pid_of(&root, id), live_pids_of(&root, id));
+        let _ = (a.kill(), b.kill(), a.wait(), b.wait());
+        assert_eq!(rows.len(), 1);
+        assert_eq!(st.dup_merged, 1);
+        assert_eq!(shown, Some(b.id()));
+        assert_eq!(sent, Some(sock(b.id())));
+        assert_eq!(stopped, Some(b.id()));
+        assert_eq!(pids, vec![b.id(), a.id()]);
+    }
+
+    #[test]
+    fn merge_same_id_prefers_the_app_terminal_and_the_most_urgent_state() {
+        let s = |pid: u32, started: u64, state: &'static str, updated: u64, title: Option<&str>| Session {
+            pid, id: "x".into(), cwd: format!("/p{pid}"), started_at: started, state, updated_at: updated, title: title.map(String::from),
+            kind: "interactive".into(), jsonl: PathBuf::from("/x.jsonl"), parent_raw: None, socket: None,
+        };
+        let other = Session { id: "y".into(), ..s(9, 2_000, "idle", 2_000, None) };
+        let rows = vec![s(1, 1_000, "running", 5_000, None), other.clone(), s(2, 3_000, "waiting_permission", 4_000, Some("題"))];
+        let mut st = Stats::default();
+        // アプリの端末（pid 1）が古くても残す。様子は承認待ち、題は持っている行から
+        let out = merge_same_id(rows.clone(), &[1u32].into_iter().collect(), &mut st);
+        assert_eq!(out.iter().map(|r| (r.id.as_str(), r.pid)).collect::<Vec<_>>(), vec![("x", 1), ("y", 9)]);
+        let x = &out[0];
+        assert_eq!((x.state, x.started_at, x.updated_at, x.cwd.as_str(), x.title.as_deref()), ("waiting_permission", 1_000, 5_000, "/p1", Some("題")));
+        assert_eq!(st.dup_merged, 1);
+        // アプリの端末が無ければ、新しく開いたほう（pid 2）
+        let out = merge_same_id(rows, &Default::default(), &mut Stats::default());
+        assert_eq!(out[0].pid, 2);
+        // 1つしか無い id は触らない
+        assert_eq!(merge_same_id(vec![other.clone()], &Default::default(), &mut Stats::default())[0].started_at, 2_000);
     }
 }
