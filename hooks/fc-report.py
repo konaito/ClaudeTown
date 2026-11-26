@@ -181,7 +181,7 @@ def perm_item(name, inp):
 def keep_input(sid, data):
     """承認の画面に出る道具の名前と input 全体を残す。transcript には、承認の画面が出ている間に道具の行が
     まだ書かれていないことがあった（2026-11-22、Claude Code 2.1.330）。PermissionRequest は画面が出る前に必ず届く。
-    agent_id はチームメイトと sub-agent の印で、Claude Town はその承認には答えない"""
+    agent_id はチームメイトと sub-agent の印。Claude Town は、承認の画面の見出しにその名前が出たチームメイトの承認にだけ答える（#317）"""
     PERM_DIR.mkdir(parents=True, exist_ok=True)
     p = PERM_DIR / f"{sid}.json"
     try:

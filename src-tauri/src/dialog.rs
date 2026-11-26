@@ -521,16 +521,52 @@ pub struct HookItem {
     pub agent_id: Option<String>,
     #[serde(default)]
     pub at: u64,
+    /// agent_id の持ち主の名前（subagents/agent-<agent_id>.meta.json の name）。ファイルには無く、読むときに足す（mate_name）
+    #[serde(skip)]
+    pub agent_name: Option<String>,
 }
 
 pub fn hook_items(text: &str) -> Vec<HookItem> {
     serde_json::from_str::<Value>(text).ok().and_then(|v| serde_json::from_value(v["items"].clone()).ok()).unwrap_or_default()
 }
 
+/// 道具の承認の本文の見出し（1行目）を、承認の種類と依頼元のチームメイトの名前に分ける。
+/// in-process のチームメイトの承認はリードの端末に出て、見出しが「Bash command · from the list-kun agent」になる（2026-11-26、v2.1.332 で見た）
+pub fn split_head(line: &str) -> (&str, Option<&str>) {
+    match line.rsplit_once(" · from the ").and_then(|(h, r)| r.strip_suffix(" agent").map(|n| (h, n.trim()))) {
+        Some((h, n)) if !n.is_empty() && !n.contains(char::is_whitespace) => (h.trim_end(), Some(n)),
+        _ => (line, None),
+    }
+}
+
+/// 道具の承認の本文の、見出しの行（字下げと行頭の「│ 」を外したもの）と、依頼元のチームメイトの名前
+pub fn mate_of(body: &str) -> Option<String> {
+    let head = body.lines().map(|l| { let t = l.trim(); t.strip_prefix('│').map(str::trim_start).unwrap_or(t) }).find(|l| !l.is_empty())?;
+    split_head(head).1.map(String::from)
+}
+
+/// hook が ask を返した承認の本文にある、hook の理由（「Hook PreToolUse:Bash requires confirmation for this command:」から、行頭の「│ 」の続く行まで）
+pub fn hook_note(body: &str) -> Option<String> {
+    let lines: Vec<&str> = body.lines().map(str::trim).collect();
+    let bare = |l: &&str| -> String { l.strip_prefix('│').map(str::trim_start).unwrap_or(l).to_string() };
+    let i = lines.iter().position(|l| bare(l).starts_with("Hook PreToolUse"))?;
+    // 2行目からは、端末の幅で折り返した1つの文としてつなぐ。英字と数字の境目は空白を戻し、和文どうしは詰める
+    let mut reason = String::new();
+    for l in lines[i + 1..].iter().take_while(|l| l.starts_with('│')).map(bare) {
+        if reason.chars().last().is_some_and(|c| c.is_ascii_graphic()) || l.chars().next().is_some_and(|c| c.is_ascii_graphic()) {
+            reason.push(' ');
+        }
+        reason.push_str(&l);
+    }
+    Some(format!("{}\n{}", bare(&lines[i]), reason.trim()))
+}
+
 /// 画面の承認と、待っている道具を突き合わせる。合えばその道具の (id, 名前, input) と、承認の種類（ask、plan、tool）を返す。
 /// 道具の元は2つで、先に hook が PermissionRequest で残したもの（新しい順）、次に transcript で結果がまだ無い道具を見る。
 /// transcript には、承認の画面が出ている間に道具の行がまだ書かれていないことがあった（2026-11-22、v2.1.330 で質問と計画の確認の両方）。
 /// hook の分は古いものが残りうるので、画面の質問の文や道具の対象が合うものだけを使う。チームメイトと sub-agent の承認（agent_id 付き）には答えない。
+/// 例外は、見出しに「from the <名前> agent」が付いた道具の承認で、同じ名前のチームメイトの hook の記録とだけ比べて答える（#317）。
+/// チームメイトの道具はリードの transcript に無いので、このときは transcript の分を見ない
 /// 計画の確認だけは画面で決め、id は画面の計画の本文から作る（途中で道具の元が増えても id が変わらないように）
 pub fn match_tool(d: &Dialog, hook: &[HookItem], open: &[Tool]) -> Result<(Tool, &'static str), String> {
     // (id, 名前, input, チームメイトか) を、hook の新しい順、transcript の新しい順に並べる
@@ -553,6 +589,18 @@ pub fn match_tool(d: &Dialog, hook: &[HookItem], open: &[Tool]) -> Result<(Tool,
             pick(f, "確かめの画面の質問の中身が読めない").map(|t| (t, "ask"))
         }
         Dialog::Choice { rows, body, prompt } => {
+            // チームメイトの承認なら、候補をそのチームメイトの hook の記録に絞り、答えてよいもの（false）にする
+            let mate = mate_of(body);
+            let (cands, n_hook) = match &mate {
+                Some(n) => {
+                    let c: Vec<(Tool, bool)> = hook.iter().rev()
+                        .filter(|h| h.agent_id.is_some() && h.agent_name.as_deref() == Some(n.as_str()))
+                        .map(|h| ((format!("hook:{}", h.at), h.tool_name.clone(), h.tool_input.clone()), false)).collect();
+                    let k = c.len();
+                    (c, k)
+                }
+                None => (cands, hook.len()),
+            };
             let input_of = |name: &str| cands.iter().find(|(t, _)| t.1 == name).map(|(t, _)| t.2.clone()).unwrap_or_else(|| json!({}));
             if rows.iter().any(|r| r.label.starts_with("Tell Claude what to change")) || body.contains("Here is Claude's plan") {
                 use std::hash::{Hash, Hasher};
@@ -574,7 +622,7 @@ pub fn match_tool(d: &Dialog, hook: &[HookItem], open: &[Tool]) -> Result<(Tool,
             const FILE_TOOLS: [&str; 5] = ["Write", "Edit", "MultiEdit", "Read", "NotebookEdit"];
             let head_at = lines.iter().position(|l| !l.is_empty());
             let content_row = |l: &str| { let d = l.chars().take_while(char::is_ascii_digit).count(); d > 0 && l[d..].starts_with(char::is_whitespace) };
-            let (only, area): (Option<&[&str]>, &[&str]) = match head_at.map(|i| (i, lines[i])) {
+            let (only, area): (Option<&[&str]>, &[&str]) = match head_at.map(|i| (i, split_head(lines[i]).0)) {
                 Some((_, "Bash command")) => (Some(&["Bash"]), &lines[..]),
                 Some((i, "Create file" | "Edit file")) => {
                     let end = lines[i + 1..].iter().position(|l| content_row(l)).map_or(lines.len(), |k| i + 1 + k);
@@ -583,12 +631,12 @@ pub fn match_tool(d: &Dialog, hook: &[HookItem], open: &[Tool]) -> Result<(Tool,
                 _ => (None, &lines[..]),
             };
             let b = norm(&area.join("\n"));
-            // cands の hook.len() 番目からが transcript の分
+            // cands の n_hook 番目からが transcript の分
             struct Scored<'a> { c: &'a (Tool, bool), st: (usize, bool), full: String, open: bool }
             let scored: Vec<Scored> = cands.iter().enumerate()
                 .filter(|(_, (t, _))| !matches!(t.1.as_str(), "AskUserQuestion" | "ExitPlanMode" | "Agent" | "Task"))
                 .filter(|(_, (t, _))| only.is_none_or(|o| o.contains(&t.1.as_str())))
-                .filter_map(|(i, c)| hint_of(&c.0 .1, &c.0 .2).and_then(|h| strength(&h, &b).map(|st| Scored { c, st, full: h.full, open: i >= hook.len() })))
+                .filter_map(|(i, c)| hint_of(&c.0 .1, &c.0 .2).and_then(|h| strength(&h, &b).map(|st| Scored { c, st, full: h.full, open: i >= n_hook })))
                 .collect();
             let best = scored.iter().map(|x| x.st).max();
             let top_all: Vec<&Scored> = scored.iter().filter(|x| Some(x.st) == best).collect();
@@ -621,7 +669,8 @@ pub fn match_tool(d: &Dialog, hook: &[HookItem], open: &[Tool]) -> Result<(Tool,
                 }
             }
             let top: Vec<&(Tool, bool)> = top.into_iter().map(|x| x.c).collect();
-            pick(top.first().copied(), "画面の承認が、待っている道具と合わない（ここで読めない道具かもしれない）").map(|t| (t, "tool"))
+            let none = if mate.is_some() { "画面のチームメイトの承認が、そのチームメイトの hook の記録と合わない" } else { "画面の承認が、待っている道具と合わない（ここで読めない道具かもしれない）" };
+            pick(top.first().copied(), none).map(|t| (t, "tool"))
         }
     }
 }
@@ -658,12 +707,35 @@ fn waiting(id: &str) -> bool {
         .is_some_and(|r| r["state"].as_str() == Some("waiting_permission"))
 }
 
+/// チームメイトと sub-agent の名前。agent_id の meta.json（projects/<dir>/<sid>/subagents/agent-<agent_id>.meta.json）の name を読む。
+/// agent_id の形（「a」＋名前＋「-」＋16進）から名前を推しはからない
+fn mate_name(sid: &str, agent_id: &str) -> Option<String> {
+    let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !ok(sid) || !ok(agent_id) {
+        return None;
+    }
+    let file = format!("{sid}/subagents/agent-{agent_id}.meta.json");
+    let read = |p: std::path::PathBuf| std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["name"].as_str().map(String::from));
+    if let Some(n) = super::native::path_of(sid).and_then(|j| j.parent().map(|d| d.to_path_buf())).and_then(|dir| read(dir.join(&file))) {
+        return Some(n);
+    }
+    std::fs::read_dir(super::native::claude_home().join("projects")).ok()?.filter_map(|e| e.ok()).find_map(|e| read(e.path().join(&file)))
+}
+
 /// 画面の承認と待っている道具。合わなければ、ここから答えられない理由
 fn current(id: &str) -> Result<(Dialog, Tool, &'static str), String> {
     let screen = super::pty::screen_text(id).ok_or("このセッションの端末はこのアプリに無い")?;
     let d = parse(&screen).ok_or("端末に承認の画面が見えない")?;
     let open = transcript_tail(id).map(|t| open_tools(&t)).unwrap_or_default();
-    let mut hook: Vec<HookItem> = super::pty::ids_of(id).iter().flat_map(|sid| std::fs::read_to_string(perm_dir().join(format!("{sid}.json"))).map(|t| hook_items(&t)).unwrap_or_default()).collect();
+    // hook の記録は、この端末が名乗った session id ごとのファイルにある。チームメイトの名前は、記録のあった id の下の meta.json から引く
+    let mut hook: Vec<HookItem> = Vec::new();
+    for sid in super::pty::ids_of(id) {
+        let Ok(t) = std::fs::read_to_string(perm_dir().join(format!("{sid}.json"))) else { continue };
+        hook.extend(hook_items(&t).into_iter().map(|mut h| {
+            h.agent_name = h.agent_id.as_deref().and_then(|a| mate_name(&sid, a));
+            h
+        }));
+    }
     hook.sort_by_key(|h| h.at);
     let (t, kind) = match_tool(&d, &hook, &open)?;
     Ok((d, t, kind))
@@ -676,9 +748,9 @@ pub fn detail(id: &str) -> Value {
     }
     match current(id) {
         Ok((d, (tid, name, input), kind)) => {
-            let (options, plan) = match &d {
-                Dialog::Choice { rows, body, .. } => (json!(rows), plan_on_screen(body)),
-                _ => (json!([]), String::new()),
+            let (options, plan, mate, note) = match &d {
+                Dialog::Choice { rows, body, .. } => (json!(rows), plan_on_screen(body), mate_of(body), hook_note(body)),
+                _ => (json!([]), String::new(), None, None),
             };
             let mut blocked = Value::Null;
             if kind == "ask" {
@@ -689,7 +761,7 @@ pub fn detail(id: &str) -> Value {
                     blocked = json!("見本（preview）付きの質問は、ここからは答えられない");
                 }
             }
-            json!({ "pending": [{ "requestId": tid, "toolName": name, "input": input, "kind": kind, "options": options, "screenPlan": plan, "blocked": blocked }] })
+            json!({ "pending": [{ "requestId": tid, "toolName": name, "input": input, "kind": kind, "options": options, "screenPlan": plan, "blocked": blocked, "agentName": mate, "hookNote": note }] })
         }
         Err(e) => json!({ "pending": [], "blocked": e }),
     }
@@ -844,7 +916,7 @@ mod tests {
             {"question": "アプリのデータも消す？（Application Support・Caches・WebKit の io.github.konaito.fixstoragegui / fix-storage-gui と、keyring に入れている鍵やログイン情報）", "header": "データ", "multiSelect": false,
              "options": [{"label": "全部消す（初回起動状態）", "description": "x"}, {"label": "アプリ本体だけ", "description": "x"}, {"label": "キーチェーン以外を消す", "description": "x"}]}
         ]});
-        vec![HookItem { tool_name: "AskUserQuestion".into(), tool_input: input, agent_id: None, at: 1 }]
+        vec![HookItem { tool_name: "AskUserQuestion".into(), tool_input: input, agent_id: None, at: 1, agent_name: None }]
     }
 
     #[test]
@@ -1292,7 +1364,51 @@ mod tests {
     }
 
     fn hk(tool: &str, input: Value, agent: Option<&str>, at: u64) -> HookItem {
-        HookItem { tool_name: tool.into(), tool_input: input, agent_id: agent.map(Into::into), at }
+        HookItem { tool_name: tool.into(), tool_input: input, agent_id: agent.map(Into::into), at, agent_name: None }
+    }
+
+    /// in-process のチームメイトの Bash に PreToolUse の hook が ask を返し、リードの端末に出た承認の画面（2026-11-26、v2.1.332 の本物の claude を pty::spawn で動かして書き出した）
+    const MATE_BASH: &str = include_str!("dialog_fixtures/mate_bash_hook_ask.txt");
+
+    fn mate_hk(cmd: &str, agent_id: &str, name: &str, at: u64) -> HookItem {
+        HookItem { agent_name: Some(name.into()), ..hk("Bash", json!({ "command": cmd }), Some(agent_id), at) }
+    }
+
+    #[test]
+    fn reads_the_teammate_on_the_heading() {
+        assert_eq!(split_head("Bash command · from the list-kun agent"), ("Bash command", Some("list-kun")));
+        assert_eq!(split_head("Bash command"), ("Bash command", None));
+        assert_eq!(split_head("Create file · from the a b agent"), ("Create file · from the a b agent", None));
+        let Some(Dialog::Choice { body, rows, .. }) = parse(MATE_BASH) else { panic!("承認の画面として読めない") };
+        assert_eq!(rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["Yes", "No"]);
+        assert_eq!(mate_of(&body).as_deref(), Some("probe-mate"));
+        assert_eq!(hook_note(&body).as_deref(), Some("Hook PreToolUse:Bash requires confirmation for this command:\nprobe: 本人が確認すること [settings]"));
+        // 本人の画面（2026-11-26 のスクリーンショット）の折り返しを書き起こしたもの。本物の vt100 の画面ではない
+        let wrapped = " Bash command · from the list-kun agent\n │ Hook PreToolUse:Bash requires confirmation for this command:\n │ `bunx void deploy`: /Users/konaito/Documents/list-kun は\n │ void.lock.json が未コミット（初回デプロイ）。手元の void deploy\n │ は初回だけ許可する。本人が確認すること [settings]\n settings.json to update hooks";
+        assert_eq!(hook_note(wrapped).as_deref(), Some("Hook PreToolUse:Bash requires confirmation for this command:\n`bunx void deploy`: /Users/konaito/Documents/list-kun は void.lock.json が未コミット（初回デプロイ）。手元の void deploy は初回だけ許可する。本人が確認すること [settings]"));
+        let Some(Dialog::Choice { body, .. }) = parse(BASH) else { panic!() };
+        assert_eq!(mate_of(&body), None);
+        assert_eq!(hook_note(&body), None);
+    }
+
+    #[test]
+    fn teammate_approval_matches_only_that_teammates_record() {
+        let d = parse(MATE_BASH).unwrap();
+        let cmd = "echo mate-probe > mate.txt";
+        // 見出しのチームメイトの記録なら答える
+        let (t, kind) = match_tool(&d, &[mate_hk(cmd, "aprobe-mate-c2fe", "probe-mate", 5)], &[]).unwrap();
+        assert_eq!((t.0.as_str(), t.1.as_str(), kind), ("hook:5", "Bash", "tool"));
+        // リードの同じ command の記録や、transcript で待っているリードの道具は使わない
+        let lead = hk("Bash", json!({ "command": cmd }), None, 9);
+        let open = vec![("t1".to_string(), "Bash".to_string(), json!({ "command": cmd }))];
+        assert_eq!(match_tool(&d, &[mate_hk(cmd, "aprobe-mate-c2fe", "probe-mate", 5), lead.clone()], &open).unwrap().0.0, "hook:5");
+        assert!(match_tool(&d, &[lead], &open).is_err());
+        // 別のチームメイトの記録と、名前の引けなかった記録には答えない
+        assert!(match_tool(&d, &[mate_hk(cmd, "aother-1", "other", 5)], &[]).is_err());
+        assert!(match_tool(&d, &[hk("Bash", json!({ "command": cmd }), Some("aprobe-mate-c2fe"), 5)], &[]).is_err());
+        // 同じチームメイトの別の command の古い記録より、画面の command と合う記録を取る
+        let old = mate_hk("echo mate > other.txt", "aprobe-mate-c2fe", "probe-mate", 7);
+        assert_eq!(match_tool(&d, &[mate_hk(cmd, "aprobe-mate-c2fe", "probe-mate", 5), old], &[]).unwrap().0.0, "hook:5");
     }
 
     #[test]
@@ -1479,6 +1595,112 @@ mod tests {
         eprintln!("deny: {:?}", answer(&now_id(), p["requestId"].as_str().unwrap(), &Act::Deny { reason: None }));
         until(20, "承認の結果", &|| std::fs::read_dir(&proj).unwrap().filter_map(|e| e.ok())
             .any(|e| std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains(&id) && t.contains("User has approved your plan"))));
+        crate::pty::kill(&id).unwrap();
+    }
+
+    /// in-process のチームメイトの承認がリードの端末に出たとき、リードの承認の欄から答える（#317）。
+    /// 準備は real_claude_answers_through_the_pty と同じ。FC_E2E_DIR/.claude/settings.json には、ほかに
+    /// env の CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1、teammateMode の in-process、command に mate-probe を含む Bash に ask を返す PreToolUse の hook を書いておく。
+    /// FC_MATE_SCREEN を渡すと、承認の画面をそのファイルに書く（dialog_fixtures/mate_bash_hook_ask.txt はこれで書いた）。
+    /// 包みのスクリプトと FC_PERM_DIR などの変数は real_claude_answers_through_the_pty と同じ。cargo test --lib real_claude_answers_a_teammate -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_claude_answers_a_teammate_approval() {
+        let dir = std::env::var("FC_E2E_DIR").expect("FC_E2E_DIR");
+        let _ = std::fs::remove_file(format!("{dir}/mate.txt"));
+        let r = crate::pty::spawn(&dir, None, &[], 140, 45, || {}).unwrap();
+        let id = r["id"].as_str().unwrap().to_string();
+        let screen = || crate::pty::screen_text(&id).unwrap_or_default();
+        let until = |sec: u64, what: &str, f: &dyn Fn() -> bool| {
+            let t0 = Instant::now();
+            while !f() {
+                assert!(t0.elapsed() < Duration::from_secs(sec), "{what} が {sec} 秒で来なかった。画面:\n{}", screen());
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        };
+        until(30, "入力欄", &|| screen().contains("? for shortcuts") || screen().contains("mode on"));
+        std::thread::sleep(Duration::from_secs(2));
+        let t = "Use the Agent tool with name \"probe-mate\" to start a teammate. Its only task: run exactly this bash command once: echo mate-probe > mate.txt . Do nothing else yourself.";
+        crate::pty::write(&id, &format!("\x1b[200~{t}\x1b[201~")).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        crate::pty::write(&id, "\r").unwrap();
+        until(180, "チームメイトの承認", &|| screen().contains("from the probe-mate agent") && parse(&screen()).is_some());
+        std::thread::sleep(Duration::from_secs(1));
+        if let Ok(f) = std::env::var("FC_MATE_SCREEN") {
+            std::fs::write(f, screen()).unwrap();
+        }
+        let t0 = Instant::now();
+        let p = loop {
+            let d = detail(&id);
+            if d["pending"][0]["kind"] == "tool" {
+                break d["pending"][0].clone();
+            }
+            assert!(t0.elapsed() < Duration::from_secs(10), "承認の欄に出ない: waiting={} detail={d}\n画面:\n{}", waiting(&id), screen());
+            std::thread::sleep(Duration::from_millis(300));
+        };
+        eprintln!("pending: {p}");
+        assert_eq!(p["agentName"], "probe-mate");
+        let yes = p["options"].as_array().unwrap().iter().find(|r| r["label"] == "Yes").unwrap().clone();
+        eprintln!("allow: {:?}", answer(&id, p["requestId"].as_str().unwrap(), &Act::Option { n: yes["n"].as_u64().unwrap() as u32, label: "Yes".into() }));
+        until(60, "チームメイトの Bash の結果", &|| std::fs::read_to_string(format!("{dir}/mate.txt")).is_ok_and(|s| s.contains("mate-probe")));
+        crate::pty::kill(&id).unwrap();
+    }
+
+    /// チームメイトの承認を、理由を付けて断る → 理由に従った次の承認を、理由なしで断る（#317）。準備は real_claude_answers_a_teammate_approval と同じ
+    #[test]
+    #[ignore]
+    fn real_claude_denies_a_teammate_approval() {
+        let dir = std::env::var("FC_E2E_DIR").expect("FC_E2E_DIR");
+        for f in ["mate.txt", "mate2.txt"] {
+            let _ = std::fs::remove_file(format!("{dir}/{f}"));
+        }
+        let r = crate::pty::spawn(&dir, None, &[], 140, 45, || {}).unwrap();
+        let id = r["id"].as_str().unwrap().to_string();
+        let screen = || crate::pty::screen_text(&id).unwrap_or_default();
+        let until = |sec: u64, what: &str, f: &dyn Fn() -> bool| {
+            let t0 = Instant::now();
+            while !f() {
+                assert!(t0.elapsed() < Duration::from_secs(sec), "{what} が {sec} 秒で来なかった。画面:\n{}", screen());
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        };
+        let mate_pending = |cmd: &str| -> Value {
+            let t0 = Instant::now();
+            loop {
+                let d = detail(&id);
+                let p = &d["pending"][0];
+                if p["agentName"] == "probe-mate" && p["input"]["command"].as_str().is_some_and(|c| c.contains(cmd)) {
+                    return p.clone();
+                }
+                assert!(t0.elapsed() < Duration::from_secs(180), "{cmd} の承認が出ない: detail={d}\n画面:\n{}", screen());
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        };
+        until(30, "入力欄", &|| screen().contains("? for shortcuts") || screen().contains("mode on"));
+        std::thread::sleep(Duration::from_secs(2));
+        let t = "Use the Agent tool with name \"probe-mate\" to start a teammate. Its task: run exactly this bash command once: echo mate-probe > mate.txt . If the command is rejected with feedback, follow the feedback once. If rejected without feedback, stop. Do nothing else yourself.";
+        crate::pty::write(&id, &format!("\x1b[200~{t}\x1b[201~")).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        crate::pty::write(&id, "\r").unwrap();
+        // 1. 理由を付けて断る
+        let p = mate_pending("mate.txt");
+        eprintln!("deny with reason: {:?}", answer(&id, p["requestId"].as_str().unwrap(), &Act::Deny { reason: Some("代わりに echo mate-probe-two > mate2.txt を実行して".into()) }));
+        // 2. 理由に従った次の承認を、理由なしで断る
+        let p = mate_pending("mate2.txt");
+        eprintln!("deny: {:?}", answer(&id, p["requestId"].as_str().unwrap(), &Act::Deny { reason: None }));
+        std::thread::sleep(Duration::from_secs(5));
+        eprintln!("断った後の画面:\n{}", screen());
+        assert!(parse(&screen()).is_none(), "承認の画面が残っている");
+        assert!(!std::path::Path::new(&format!("{dir}/mate.txt")).exists() && !std::path::Path::new(&format!("{dir}/mate2.txt")).exists());
+        // 理由はチームメイトの会話に届く
+        let proj = crate::native::claude_home().join("projects").join(dir.replace(['/', '.'], "-"));
+        let sub = std::fs::read_dir(proj.join(&id).join("subagents")).unwrap().filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().ends_with(".jsonl")).unwrap().path();
+        let log = std::fs::read_to_string(&sub).unwrap();
+        assert!(log.contains("mate-probe-two"), "理由がチームメイトに届いていない: {}", sub.display());
+        for l in log.lines().filter(|l| l.contains("tool_result")) {
+            eprintln!("mate tool_result: {}", &l.chars().take(400).collect::<String>());
+        }
         crate::pty::kill(&id).unwrap();
     }
 

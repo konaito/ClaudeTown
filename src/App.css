@@ -447,6 +447,7 @@ code { font-family: ui-monospace, Menlo, monospace; background: var(--muted); pa
 .approval { border: 1.5px solid var(--approval-box-line); background: var(--approval-box-bg); border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
 .ap-title { font-weight: 700; color: var(--approval-ink); display: flex; align-items: center; gap: 6px; }
 .ap-tool { font-size: 13px; }
+.ap-hook { margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
 .ap-detail { margin: 0; background: var(--bg); border: 1px solid var(--approval-item-line); border-radius: 8px; padding: 8px 10px; font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 160px; overflow: auto; user-select: text; }
 .ap-btns { display: flex; gap: 8px; flex-wrap: wrap; }
 .ap-allow { background: var(--working-ink); color: var(--bg); border-radius: 10px; padding: 7px 16px; font-weight: 600; }
