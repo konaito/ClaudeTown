@@ -7,7 +7,7 @@ import { SendHorizontal, Square } from "lucide-react";
 import { ICON, STROKE } from "../icons";
 import type { Agent } from "../model";
 import { usePaste, REMOTE_FILES } from "./usePaste";
-import { useCompletion } from "./useCompletion";
+import { skills, useCompletion } from "./useCompletion";
 import { useHistory } from "./useHistory";
 import { useHistorySearch } from "./useHistorySearch";
 import { routeOf } from "./route";
@@ -82,6 +82,8 @@ export function Composer({ agent, text, setText, busy, running, booting = false,
     if (!body.trim() || busy || !agent.canSend) return;
     const ok = await onSubmit(body);
     if (ok) { remember(body); histSt.current = { index: -1, draft: "" }; setHelp(false); setTimeout(loadHistory, 1500); }
+    // /reload-skills はセッションの claude に届けたうえで、こちらの / の候補も読み直す（#315）
+    if (ok && local && agent.cwd && /^\/reload-skills(\s|$)/.test(body.trim())) void skills.refresh(agent.cwd);
   };
 
   const { search, startSearch, searchMatch, runSearch, endSearch, onSearchKey } = useHistorySearch({ searchList, text, ta, replaceAll, submit, loadAll });
