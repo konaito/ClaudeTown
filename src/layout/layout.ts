@@ -298,48 +298,68 @@ function packClone(st: PackState): PackState {
 const packArea = (st: PackState) => q2((st.maxX - st.minX + FRAME.w) * (st.maxY - st.minY + FRAME.h));
 
 /**
- * c を置ける位置を、良い順に最大 limit 個返す。良さは、置いた後の世帯の枠の面積、s、親からの紐の長さ、鏡像の向き、座標の順で比べる。
+ * n を置けるか。measure と同じ判定で、置いた分だけを見る。
+ * - ほかの箱と、縦か横に gap 以上離れる（measure の重なりは接していても通るので、置くときに余白を課す）
+ * - 親からの紐が、ほかの箱（余白の半分だけ膨らませる）を通らない。既にある紐が、新しい箱を通らない
+ * - 親からの紐が、既にある紐と交わらない。同じ世代を角度の順に並べたとき、枝が混ざらない
+ */
+function packFits(st: PackState, n: Placed, gap: number): boolean {
+  const p = st.byId.get(n.parent!)!;
+  const margin = gap / 2;
+  if (st.out.some((b) => Math.abs(b.x - n.x) < (b.w + n.w) / 2 + gap - EPS && Math.abs(b.y - n.y) < (b.h + n.h) / 2 + gap - EPS)) return false;
+  if (st.out.some((b) => b !== p && segHitsRect(p, n, b, margin))) return false;
+  if (st.edges.some(([a, b]) => segHitsRect(a, b, n, margin))) return false;
+  if (st.edges.some(([a, b]) => a !== p && b !== p && segCross(p, n, a, b))) return false;
+  return !interleaves([...st.out.filter((x) => x.depth === n.depth), n]);
+}
+
+/**
+ * c を置ける位置を、良い順に最大 limit 個返す。良さは、置いた後の世帯の枠の面積、s、兄弟の左右の偏り、親からの紐の長さ、鏡像の向き、座標の順で比べる。
  * 候補の座標は、親の近くの箱の縁に接する位置、縁をそろえる位置、親を中心に半分の幅ずつずらした位置の組み合わせから作る。
  * 親の近くで見つからなければ、範囲を広げてもう一度探す。
  */
-function packCandidates(st: PackState, c: LNode, base: number, side: number, gap: number, limit: number): Placed[] {
+function packCandidates(st: PackState, c: LNode, base: number, side: number, gap: number, limit: number, ring?: number): Placed[] {
   const p = st.byId.get(c.parent!)!;
   const depth = p.depth + 1;
-  const margin = gap / 2;
   const found: Placed[] = [];
   let checked = 0;
-  for (const reach of [1.5, 3, 5]) {
-    const rx = p.w / 2 + reach * (c.w + gap), ry = p.h / 2 + reach * (c.h + gap);
-    const near = st.out.filter((b) => Math.abs(b.x - p.x) <= rx + b.w / 2 && Math.abs(b.y - p.y) <= ry + b.h / 2);
-    const xs = new Set<number>(), ys = new Set<number>();
-    for (const b of near) {
-      for (const v of [b.x, b.x - b.w / 2 - gap - c.w / 2, b.x + b.w / 2 + gap + c.w / 2, b.x - b.w / 2 + c.w / 2, b.x + b.w / 2 - c.w / 2]) if (Math.abs(v - p.x) <= rx) xs.add(q2(v));
-      for (const v of [b.y, b.y - b.h / 2 - gap - c.h / 2, b.y + b.h / 2 + gap + c.h / 2, b.y - b.h / 2 + c.h / 2, b.y + b.h / 2 - c.h / 2]) if (Math.abs(v - p.y) <= ry) ys.add(q2(v));
+  // 兄弟の左右の偏り（親の中心からの x の差の合計）。面積と s が同じなら、偏りが小さくなる位置を選び、左右対称に近づける
+  const bal0 = st.out.reduce((a, x) => (x.parent === p.id ? a + x.x - p.x : a), 0);
+  // ring を渡すと、親の中心から半径 ring の円の上を PACK_RING_STEP ずつ回った位置だけを候補にする
+  for (const reach of ring === undefined ? [1.5, 3, 5] : [0]) {
+    const pts: [number, number][] = [];
+    if (ring !== undefined) {
+      for (let j = 0; j * PACK_RING_STEP < 2 * Math.PI - 1e-9; j++) pts.push([q2(p.x + ring * Math.sin(j * PACK_RING_STEP)), q2(p.y + ring * Math.cos(j * PACK_RING_STEP))]);
+    } else {
+      const rx = p.w / 2 + reach * (c.w + gap), ry = p.h / 2 + reach * (c.h + gap);
+      const near = st.out.filter((b) => Math.abs(b.x - p.x) <= rx + b.w / 2 && Math.abs(b.y - p.y) <= ry + b.h / 2);
+      const xs = new Set<number>(), ys = new Set<number>();
+      for (const b of near) {
+        for (const v of [b.x, b.x - b.w / 2 - gap - c.w / 2, b.x + b.w / 2 + gap + c.w / 2, b.x - b.w / 2 + c.w / 2, b.x + b.w / 2 - c.w / 2]) if (Math.abs(v - p.x) <= rx) xs.add(q2(v));
+        for (const v of [b.y, b.y - b.h / 2 - gap - c.h / 2, b.y + b.h / 2 + gap + c.h / 2, b.y - b.h / 2 + c.h / 2, b.y + b.h / 2 - c.h / 2]) if (Math.abs(v - p.y) <= ry) ys.add(q2(v));
+      }
+      for (let k = 1; k <= 2 * reach; k++) {
+        xs.add(q2(p.x - (k * (c.w + gap)) / 2)); xs.add(q2(p.x + (k * (c.w + gap)) / 2));
+        ys.add(q2(p.y - (k * (c.h + gap)) / 2)); ys.add(q2(p.y + (k * (c.h + gap)) / 2));
+      }
+      for (const x of xs) for (const y of ys) pts.push([x, y]);
     }
-    for (let k = 1; k <= 2 * reach; k++) {
-      xs.add(q2(p.x - (k * (c.w + gap)) / 2)); xs.add(q2(p.x + (k * (c.w + gap)) / 2));
-      ys.add(q2(p.y - (k * (c.h + gap)) / 2)); ys.add(q2(p.y + (k * (c.h + gap)) / 2));
-    }
-    const cands: { x: number; y: number; area: number; s: number; len: number; turn?: number }[] = [];
-    for (const x of xs) for (const y of ys) {
+    const cands: { x: number; y: number; area: number; s: number; bal: number; len: number; turn?: number }[] = [];
+    for (const [x, y] of pts) {
       // 親の箱に重なる位置は、検査の前に落とす
       if (Math.abs(x - p.x) < (p.w + c.w) / 2 + gap - EPS && Math.abs(y - p.y) < (p.h + c.h) / 2 + gap - EPS) continue;
       const w = Math.max(st.maxX, x + c.w / 2) - Math.min(st.minX, x - c.w / 2);
       const h = Math.max(st.maxY, y + c.h / 2) - Math.min(st.minY, y - c.h / 2);
-      cands.push({ x, y, area: q2((w + FRAME.w) * (h + FRAME.h)), s: q2(Math.max(w / LAYOUT.view.w, h / LAYOUT.view.h) * 1000), len: q2(Math.hypot(x - p.x, y - p.y)) });
+      cands.push({ x, y, area: q2((w + FRAME.w) * (h + FRAME.h)), s: q2(Math.max(w / LAYOUT.view.w, h / LAYOUT.view.h) * 1000), bal: q2(Math.abs(bal0 + x - p.x)), len: q2(Math.hypot(x - p.x, y - p.y)) });
     }
     // 鏡像の向きは、面積、s、紐の長さが同じときだけ要るので、そのときに出す
     const turn = (k: (typeof cands)[number]) => (k.turn ??= q2((unwrapAround(Math.atan2(k.x, k.y), base) - base) * side));
-    cands.sort((a, b) => a.area - b.area || a.s - b.s || a.len - b.len || turn(a) - turn(b) || a.x * side - b.x * side || a.y - b.y);
+    cands.sort((a, b) => a.area - b.area || a.s - b.s || a.bal - b.bal || a.len - b.len || turn(a) - turn(b) || a.x * side - b.x * side || a.y - b.y);
     for (const k of cands) {
       // 調べる数に上限を置く。良い順に並べてあるので、上限より後ろの位置は面積が大きく、選ばれても扇形の置き方に負けやすい
       if (++checked > PACK_MAX_CHECK) return found;
       const n: Placed = { id: c.id, parent: p.id, depth, x: k.x, y: k.y, w: c.w, h: c.h, angle: unwrapAround(Math.atan2(k.x, k.y), base) };
-      if (st.out.some((b) => Math.abs(b.x - n.x) < (b.w + n.w) / 2 + gap - EPS && Math.abs(b.y - n.y) < (b.h + n.h) / 2 + gap - EPS)) continue;
-      if (st.out.some((b) => b !== p && segHitsRect(p, n, b, margin))) continue;
-      if (st.edges.some(([a, b]) => segHitsRect(a, b, n, margin))) continue;
-      if (st.edges.some(([a, b]) => a !== p && b !== p && segCross(p, n, a, b))) continue;
-      if (interleaves([...st.out.filter((x) => x.depth === depth), n])) continue;
+      if (!packFits(st, n, gap)) continue;
       found.push(n);
       if (found.length >= limit) return found;
     }
@@ -349,79 +369,105 @@ function packCandidates(st: PackState, c: LNode, base: number, side: number, gap
 }
 
 /** 先読みで、兄弟の1人目の位置を試す数 */
-const PACK_LOOKAHEAD = 6;
+const PACK_LOOKAHEAD = 3;
 /** 1人の置き場所を探すときに検査する位置の数の上限。layoutOf は描画の中で同期に呼ばれるので、置けない枝で時間を使い切らない */
 const PACK_MAX_CHECK = 200;
+/** 兄弟を親の周りの円の上に並べるときの、角度の刻み（3度）と、試す半径の数 */
+const PACK_RING_STEP = Math.PI / 60;
+const PACK_RINGS = 10;
 
 /**
  * 子1〜8人の世帯で、孫より下を、親の周りの空いた所に詰めて置く（2026-11-26、docs/design/geometric-layout.md の「孫を詰めて置く」）。
- * 子は slots の位置に置き、孫より下を order の順に1人ずつ、packCandidates の一番良い位置に置く。
- * 置ける位置は、次をすべて満たすもの。measure と同じ判定で、置いた分だけを見る。
- * - ほかの箱と、縦か横に gap 以上離れる（measure の重なりは接していても通るので、置くときに余白を課す）
- * - 親からの紐が、ほかの箱（余白の半分だけ膨らませる）を通らない。既にある紐が、新しい箱を通らない
- * - 親からの紐が、既にある紐と交わらない。同じ世代を角度の順に並べたとき、枝が混ざらない
- * 1人ずつ一番良い位置を選ぶと、兄弟の1人目が親の真下を取り、2人目以降が横に広がることがある。
- * そこで兄弟の1人目だけは、良い順に PACK_LOOKAHEAD 個の位置を試し、それぞれで残りの兄弟を置いてみて、
- * 兄弟を置き終えたときの面積（同じなら紐の長さの合計）が一番小さい位置を選ぶ。
+ * 子は slots の位置に置き、孫より下を、同じ親の兄弟ごとにまとめて置く。兄弟の置き方は次の2通りを試し、
+ * 兄弟を置き終えたときの世帯の枠の面積（同じなら兄弟の左右の偏り、紐の長さの合計の順）が一番小さいものを選ぶ。
+ * - 詰める: 1人ずつ、packCandidates の一番良い位置に置く。1人目だけは良い順に PACK_LOOKAHEAD 個の位置を試し、それぞれで残りを置いてみる。
+ *   1人ずつ一番良い位置を選ぶと、1人目が親の真下を取り、2人目以降が横に広がることがあるためである。
+ * - 円に並べる: 親の中心から同じ半径の円の上に、1人ずつ一番良い位置を選んで置く。半径は小さいほうから PACK_RINGS 通り試し、2つ置けたら止める。
+ *   親のすぐ周りを埋めると、外側の孫への紐が内側の孫の箱を通って置けなくなる。同じ半径に並べれば、紐はほかの兄弟の箱を通りにくい。
+ * 置ける位置は packFits で決める。
  * fanned に入れた枝（子の番号）は詰めずに、扇形の置き方 fan（solveGrid の結果）の座標に置き、ほかの枝をその周りに詰める。
- * 誰かを置けなかったら、その枝の番号を failed で返す。呼ぶ側はその枝を fanned に足してやり直す。
- * order は "bfs"（孫を全員置いてからひ孫）か "dfs"（孫1人ごとに、その下を続けて置く）。
+ * どちらでも置けない兄弟があったら、その枝を fan の座標に置き換え、今の箱と紐に収まればそのまま続ける。
+ * 収まらなければ、その枝の番号を failed で返す。呼ぶ側はその枝を fanned に足してやり直す。
+ * order は "bfs"（孫の兄弟を全部置いてからひ孫の兄弟）か "dfs"（孫の兄弟を置くごとに、その下を続けて置く）。
  * 角度（angle）は、根から見た向きを、その枝の子の向きから ±π の範囲で表す。measure の枝の混ざりはこの角度の順で数える。
  */
-function packGrid(t: Tree, slots: { x: number; y: number }[], gap: number, order: "bfs" | "dfs", fan: Placed[], fanned: Set<number>, skipFanned = false): { nodes: Placed[] } | { failed: number } {
+function packGrid(t: Tree, slots: { x: number; y: number }[], gap: number, order: "bfs" | "dfs", fan: Placed[], fanned: Set<number>): { nodes: Placed[] } | { failed: number } {
   const ks = t.kids.get(t.root.id) ?? [];
   const r = placedRoot(t);
-  const st: PackState = { out: [], byId: new Map(), edges: [], minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
+  let st: PackState = { out: [], byId: new Map(), edges: [], minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
   packAdd(st, r);
   const branchAngle = new Map<string, number>();
   const branchSide = new Map<string, number>();
+  const branchOf = new Map<string, number>();
   ks.forEach((k, i) => {
     const th = Math.atan2(slots[i].x, slots[i].y);
     packAdd(st, { id: k.id, parent: t.root.id, depth: 1, x: slots[i].x, y: slots[i].y, w: k.w, h: k.h, angle: th });
     // 鏡像の向き: 左の列の子の枝は、右の列の子の枝を左右に裏返した選び方をする
     const side = slots[i].x < 0 ? -1 : 1;
-    const walk = (n: LNode) => { branchAngle.set(n.id, th); branchSide.set(n.id, side); for (const c of t.kids.get(n.id) ?? []) walk(c); };
+    const walk = (n: LNode) => { branchAngle.set(n.id, th); branchSide.set(n.id, side); branchOf.set(n.id, i); for (const c of t.kids.get(n.id) ?? []) walk(c); };
     walk(k);
   });
   // 扇形に回した枝は、扇形の置き方（solveGrid）の座標をそのまま置く。親が先に入るよう、深さの順に足す
-  const branchOf = new Map<string, number>();
-  ks.forEach((k, i) => { const walk = (n: LNode) => { branchOf.set(n.id, i); for (const c of t.kids.get(n.id) ?? []) walk(c); }; walk(k); });
-  // skipFanned のときは、扇形に回した枝の孫より下を置かず、先読みもしない（1本だけで詰められるかを安く見る）
-  if (!skipFanned) for (const n of [...fan].filter((x) => x.depth >= 2 && fanned.has(branchOf.get(x.id)!)).sort((a, b) => a.depth - b.depth)) packAdd(st, n);
-  const queue: LNode[] = [];
+  for (const n of fan.filter((x) => x.depth >= 2 && fanned.has(branchOf.get(x.id)!)).sort((a, b) => a.depth - b.depth)) packAdd(st, n);
   const packed = ks.filter((_, i) => !fanned.has(i));
+  // 兄弟をまとめて置く順。親の並び
+  const parents: LNode[] = [];
   if (order === "bfs") {
     let level = packed;
     while (level.length) {
       const next: LNode[] = [];
-      for (const n of level) for (const c of t.kids.get(n.id) ?? []) { queue.push(c); next.push(c); }
+      for (const n of level) { if (t.kids.get(n.id)?.length) parents.push(n); next.push(...(t.kids.get(n.id) ?? [])); }
       level = next;
     }
   } else {
-    const walk = (n: LNode) => { for (const c of t.kids.get(n.id) ?? []) { queue.push(c); walk(c); } };
+    const walk = (n: LNode) => { const cs = t.kids.get(n.id) ?? []; if (cs.length) parents.push(n); for (const c of cs) walk(c); };
     for (const k of packed) walk(k);
   }
-  const best = (s: PackState, c: LNode) => packCandidates(s, c, branchAngle.get(c.id)!, branchSide.get(c.id)!, gap, 1)[0] ?? null;
-  for (const c of queue) {
-    const sibs = t.kids.get(c.parent!)!;
-    let pick: Placed | null = null;
-    if (!skipFanned && sibs.length > 1 && sibs[0] === c) {
-      // 兄弟の1人目: 位置を試し、残りの兄弟を置き終えた面積で比べる
-      let bestScore: [number, number] | null = null;
-      for (const first of packCandidates(st, c, branchAngle.get(c.id)!, branchSide.get(c.id)!, gap, PACK_LOOKAHEAD)) {
-        const trial = packClone(st);
-        packAdd(trial, first);
-        let ok = true;
-        for (const s2 of sibs.slice(1)) { const n = best(trial, s2); if (!n) { ok = false; break; } packAdd(trial, n); }
-        if (!ok) continue;
-        const len = q2(sibs.reduce((a, s2) => { const n = trial.byId.get(s2.id)!; const p = trial.byId.get(s2.parent!)!; return a + Math.hypot(n.x - p.x, n.y - p.y); }, 0));
-        const score: [number, number] = [packArea(trial), len];
-        if (!bestScore || score[0] < bestScore[0] || (score[0] === bestScore[0] && score[1] < bestScore[1])) { bestScore = score; pick = first; }
-      }
+  const cand = (s: PackState, c: LNode, limit: number, ring?: number) => packCandidates(s, c, branchAngle.get(c.id)!, branchSide.get(c.id)!, gap, limit, ring);
+  /** 兄弟を1人ずつ一番良い位置に置く。置けなければ null */
+  const greedy = (s: PackState, sibs: LNode[], ring?: number) => {
+    for (const c of sibs) { const n = cand(s, c, 1, ring)[0]; if (!n) return null; packAdd(s, n); }
+    return s;
+  };
+  // 扇形の座標に置き換えた枝。残りの親の兄弟は置かない
+  const done = new Set<number>();
+  for (const parent of parents) {
+    if (done.has(branchOf.get(parent.id)!)) continue;
+    const sibs = t.kids.get(parent.id)!;
+    const options: PackState[] = [];
+    for (const first of cand(st, sibs[0], sibs.length > 1 ? PACK_LOOKAHEAD : 1)) {
+      const trial = packClone(st);
+      packAdd(trial, first);
+      const done = greedy(trial, sibs.slice(1));
+      if (done) options.push(done);
     }
-    if (!pick) pick = best(st, c);
-    if (!pick) return { failed: branchOf.get(c.id)! };
-    packAdd(st, pick);
+    const p = st.byId.get(parent.id)!;
+    const big = sibs.reduce((a, c) => Math.max(a, c.h), 0);
+    let rings = 0;
+    for (let k = 0; k < PACK_RINGS && rings < 2; k++) {
+      const done = greedy(packClone(st), sibs, p.h / 2 + gap + big / 2 + (k * (big + gap)) / 2);
+      if (done) { options.push(done); rings++; }
+    }
+    if (!options.length) {
+      // この枝を扇形の座標に置き換えて続けられるか見る。置いた詰めの分を外し、扇形の座標が今の箱と紐に収まれば、やり直さずに続ける
+      const i = branchOf.get(parent.id)!;
+      const keep = st.out.filter((x) => x.depth < 2 || branchOf.get(x.id) !== i);
+      const next: PackState = { out: [], byId: new Map(), edges: [], minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
+      for (const x of keep) packAdd(next, x);
+      let ok = true;
+      for (const x of fan.filter((y) => y.depth >= 2 && branchOf.get(y.id) === i).sort((a, b) => a.depth - b.depth)) {
+        if (!packFits(next, x, gap)) { ok = false; break; }
+        packAdd(next, x);
+      }
+      if (!ok) return { failed: i };
+      st = next;
+      done.add(i);
+      continue;
+    }
+    const len = (s: PackState) => q2(sibs.reduce((a, c) => { const n = s.byId.get(c.id)!; return a + Math.hypot(n.x - p.x, n.y - p.y); }, 0));
+    const bal = (s: PackState) => q2(Math.abs(sibs.reduce((a, c) => a + s.byId.get(c.id)!.x - p.x, 0)));
+    const key = (s: PackState) => [packArea(s), bal(s), len(s)];
+    st = options.reduce((a, b) => { const ka = key(a), kb = key(b); return kb[0] < ka[0] || (kb[0] === ka[0] && (kb[1] < ka[1] || (kb[1] === ka[1] && kb[2] < ka[2]))) ? b : a; });
   }
   return { nodes: st.out };
 }
@@ -457,6 +503,8 @@ function segCross(p1: Placed, p2: Placed, p3: Placed, p4: Placed): boolean {
 function segHitsRect(a: Placed, b: Placed, r: Placed, margin: number): boolean {
   const hw = r.w / 2 + margin, hh = r.h / 2 + margin;
   const x0 = r.x - hw, x1 = r.x + hw, y0 = r.y - hh, y1 = r.y + hh;
+  // 線分の外接矩形が箱から離れていれば通らない（詰めて置くときに何度も呼ぶので、先に安く落とす）
+  if (Math.max(a.x, b.x) < x0 || Math.min(a.x, b.x) > x1 || Math.max(a.y, b.y) < y0 || Math.min(a.y, b.y) > y1) return false;
   let t0 = 0, t1 = 1;
   const dx = b.x - a.x, dy = b.y - a.y;
   const clip = (p: number, q: number) => {
@@ -600,22 +648,11 @@ export function layoutFamily(input: LNode[], opt: LayoutOptions = {}): LayoutRes
     const grid: GridCandidate[] = [];
     const f = solveGrid(t, slots, gap, radialGap, view);
     if (t.byId.size > kidCount + 1) {
-      const alone = new Set<number>();
       // ひ孫がいなければ、孫から先に置く順と枝ごとに置く順は同じなので、bfs だけを試す
       const orders = Math.max(...t.depth.values()) > 2 ? (["bfs", "dfs"] as const) : (["bfs"] as const);
       for (const order of orders) {
         // 詰め切れない枝は扇形に回してやり直す。全部の枝を扇形に回したら、扇形の候補と同じなので止める
         const fanned = new Set<number>();
-        // 1本だけ詰めても置けない枝は、ほかの枝があっても置けないので、最初から扇形に回す（やり直しの回数を減らす）
-        if (order === "bfs") {
-          const kids = t.kids.get(t.root.id)!;
-          kids.forEach((k, i) => {
-            if (!t.kids.get(k.id)?.length) return;
-            const others = new Set(kids.map((_, j) => j).filter((j) => j !== i));
-            if ("failed" in packGrid(t, slots, gap, order, [], others, true)) alone.add(i);
-          });
-        }
-        for (const i of alone) fanned.add(i);
         while (fanned.size < kidCount) {
           const r = packGrid(t, slots, gap, order, f.nodes, fanned);
           if ("nodes" in r) { grid.push({ name: order, nodes: r.nodes, m: measure(r.nodes, view, gap / 2) }); break; }
