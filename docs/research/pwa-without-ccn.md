@@ -6,9 +6,9 @@
 
 ## 結論
 
-- 推す案は、案C の「アプリから Worker の Durable Object へ WebSocket を張る」形である。理由は「6. 推す案と理由」に書いた。
-- 案C には、確かめていない前提が2つある。サービストークンを付けた WebSocket の upgrade が Access を通るか。Void の WebSocket の部屋で、アプリとブラウザの間を中継できるか。
-- そこで実装の1本目の issue は、この2つを試して決めることにする。通らなければ案A（Cloudflare Tunnel とアプリの HTTP の口）に移る。
+- 推す案は、案C の「アプリから Worker の Durable Object へ WebSocket を張る」形である。理由は「3. 推す案と理由」に書いた。
+- 案C には、確かめていない前提がある。主なものは2つで、サービストークンを付けた WebSocket の upgrade が Access を通るか、Void の WebSocket の部屋でアプリとブラウザの間を中継できるか、である。ほかは「6. 確かめていないこと」に並べた。
+- そこで実装の1本目の issue は、これらを試して決めることにする。通らなければ案A（Cloudflare Tunnel とアプリの HTTP の口）に移る。
 - ブラウザ版の口は、ccn の REST の形をまねない。Tauri の invoke と同じ「命令名と引数」で受け、アプリの同じ Rust の関数を呼ぶ。こうすると `src/webConv.ts`、`src/webPerm.ts`、`src/webReserve.ts` が要らなくなる。
 - ccn から消すのは、Access アプリ `ccn` のポリシー `town-linked` だけである。ccn そのものと、ほかのポリシーは ccn が使うので残す。
 
@@ -53,7 +53,7 @@
 | run_command | `POST /sessions/<id>/command` | 端末へ貼って送る（send_or_queue）。アプリと同じ | `usePanelSend.ts` の ccn の枝 |
 | send_message | `POST /sessions/<id>/messages` | `send_or_queue` か `send_direct`。アプリと同じ | `sendVia.ts` の ccn の枝 |
 
-置き換えた後は、アプリと同じ確認が通る。たとえば `answer_dialog`、`switch_session`、`term_input` は `refuse_if_disabled`（lib.rs 182行）を通る。今の PWA では効かない送信の非常停止（`~/.family-computing/send-disabled`）が、ブラウザ版にも効くようになる。
+置き換えた後は、アプリと同じ確認が通る。たとえば `answer_dialog`、`switch_session`、`term_input` は `refuse_if_disabled`（lib.rs 182行）を通る。今の PWA は送信の非常停止（`~/.family-computing/send-disabled`）を見ない。置き換えた後は、ブラウザ版からの送信も非常停止で止まる。
 
 ### 1-3. Channel で流し続けるもの
 
@@ -95,6 +95,7 @@
 - アプリが town.fybe.jp の WebSocket の道（例: `/relay`）へ外向きにつなぐ。Access のサービストークン（`CF-Access-Client-Id`、`CF-Access-Client-Secret`）を付ける。
 - Worker の Durable Object が、アプリの接続とブラウザの接続を同じ部屋に持つ。ブラウザが送った `{ id, cmd, args }` をアプリへ渡し、アプリの返事を id で送り手のブラウザに返す。端末の出力も同じ接続で流す。
 - Mac 側に待ち受けの口が無い。cloudflared も、新しいホスト名も、新しい Access アプリも要らない。`claude-town` にサービストークンのポリシーを1つ足す。
+- `claude-town` には、デプロイの確認に使うサービストークンのポリシー `town-void-deploy` が既にある（cf で読んだ）。`/relay` で通すのは、アプリ用のサービストークンの `common_name` 1つだけにする。email の無い JWT をまとめて通すと、デプロイ用のトークンでもアプリとして部屋に入れてしまう。
 - Void は `.ws.ts` の道で WebSocket の部屋（`defineRoom`）を作れる。部屋は Durable Object で、Void の実装は `state.acceptWebSocket`（休眠の API）を使っている（void 1.11.0 の `dist/server-CfUbeOjx.mjs` 249行）。
 
 ### 比べた表
@@ -104,7 +105,7 @@
 | Mac で常駐するもの | cloudflared が要る。今は ccn の LaunchAgent が動かしている。ccn を外すなら、アプリが子として起動するか、別に入れる | 案A と同じく cloudflared が要る | アプリだけ。README 7行目の「ほかに常駐するプログラムは要らない」を保てる |
 | Mac 側の待ち受け | `127.0.0.1` の口か unix socket。アプリが JWT を確かめる | 案A と同じ口。アプリが共有の秘密を確かめる | 無い（外向きの接続だけ） |
 | ブラウザの認証 | 今と同じ（`claude-town` の Access と `01.access.ts`） | 今と同じ | 今と同じ。WebSocket の upgrade でも Origin を確かめる（下の注1） |
-| アプリの認証 | Linked App Token（今の ccn と同じ形。本番で動いている組み合わせ） | 共有の秘密のヘッダー | サービストークン。JWT に email が無く `common_name` が入る（公式の application-token のページ）。`01.access.ts` は今 `/__void/` 以外でこれを断るので、`/relay` の例外を足す |
+| アプリの認証 | Linked App Token（今の ccn と同じ形。本番に同じ設定がある。cf で読んだ） | 共有の秘密のヘッダー | サービストークン。JWT に email が無く `common_name` が入る（公式の application-token のページ）。`01.access.ts` は今 `/__void/` 以外でこれを断るので、`/relay` でアプリ用の `common_name` 1つだけを通す例外を足す |
 | 端末の流れ | SSE（今の ccn と同じ道。本番のコードが前提にしている。今日の動作は未確認）。Tunnel は WebSocket も通す（公式の Tunnel の FAQ） | 未確認（docs に記述が無い） | 同じ WebSocket に流す |
 | 安定版と開発版の同時起動 | 同じトンネルを2つが動かすと、要求はどちらに行くか決まらない（公式の tunnel-availability のページ）。開発版はトンネルを起動しない | 案A と同じ | 部屋に入れるアプリは1つにし、新しい接続が来たら古い方を閉じる。開発版は既定ではつながない |
 | Mac が寝ている、アプリを閉じている | Tunnel が error 1033 を返す。Worker が「Mac のアプリにつながらない」に直す。寝ているのか閉じているのかは区別できない | fetch が投げる。案A と同じ | Durable Object が「アプリの接続が無い」と分かる。最後につながっていた時刻を出せる。寝ているのか閉じているのかは区別できない |
@@ -113,17 +114,19 @@
 | 作業量（推定） | 小さい。Rust の HTTP の口（axum）、JWT の確認、cloudflared の起動と止め方。web/ はほぼそのまま | 案A に近い。beta の挙動を確かめる分が増える | 中くらい。Rust の WebSocket の接続と再接続、部屋の Worker、bridge.ts の WebSocket の呼び出し |
 | 確かめていないこと | 少ない | WebSocket と SSE、beta の変更 | サービストークンで WebSocket の upgrade が通るか。Void の部屋で中継が書けるか。部屋の接続ごとの印（アプリかブラウザか）を休眠をまたいで保てるか |
 
-注1: ブラウザは別のオリジンのページからも、クッキー付きで WebSocket を開ける。今の `web/lib/origin.ts` は GET を確かめないので、WebSocket の upgrade（GET）は素通りする。案C では、upgrade の要求の Origin が town.fybe.jp でなければ断る。Void の docs も、`onBeforeConnect` で Origin を自分で確かめるよう書いている。
+注1: ブラウザは別のオリジンのページからも、クッキー付きで WebSocket を開ける。今の `web/lib/origin.ts` は GET を確かめないので、WebSocket の upgrade（GET）は確かめずに通る。案C では、upgrade の要求の Origin が town.fybe.jp でなければ断る。Void の docs も、`onBeforeConnect` で Origin を自分で確かめるよう書いている。
 
 ### 案C の費用の試算
 
 以下は AI の仮定で組んだ試算で、実測ではない。仮定は、スマホで1日1時間開き、そのうち15分は端末を開いている、である。
 
 - 公式の値（Durable Objects の pricing のページ）は次のとおり。Paid は要求が月100万回まで込みで、その後は100万回ごとに0.15ドル。時間は月40万 GB-s まで込み。Free は要求が1日10万回、時間が1日1万3千 GB-s。受けた WebSocket のメッセージは20通で1回と数え、送るメッセージは数えない。休眠の間は時間を数えない。
-- 一覧: 今の PWA は2秒ごとに snapshot を呼ぶ（`src/town.ts`）。1時間で1,800通、20で割って90回。
+- 部屋が受けるのは、ブラウザからの要求と、アプリからの返事の両方である。
+- 一覧: 今の PWA は2秒ごとに snapshot を呼ぶ（`src/town.ts`）。1時間で要求と返事が3,600通、20で割って180回。
+- 会話: 開いた会話は、作業中なら1秒ごと、それ以外は2.5〜10秒ごとに読む（`panel/useConversation.ts`）。1時間ずっと1秒ごととすると7,200通、20で割って360回。
 - 端末: Rust は16msに1回までにまとめて送る（terminal.rs の `TERM_FLUSH`）。出力が続くと最大で毎秒約60通になる。15分で54,000通、20で割って2,700回。
 - 時間: 開いている1時間ずっと起きているとすると、128MB で 450 GB-s/日。
-- 合計は1日約3,000回と 450 GB-s で、Free の1日の枠にも収まる。Paid なら月の込みの範囲に収まる。
+- 合計は1日約3,300回と 450 GB-s で、Free の1日の枠にも収まる。Paid なら月の込みの範囲に収まる。
 - アカウントが Workers の Free か Paid かは、`cf` で読めなかった（未確認）。
 - アプリの接続を見張るための ping を30秒ごとに送ると、1日2,880通（144回）になる。Void の部屋が自動の応答（`setWebSocketAutoResponse`）を使えるかは未確認。
 - cloudflare-do-safety に合わせ、alarm と setTimeout は使わない。アプリが最後につながっていた時刻は、要求が来たときに保存した値と比べて決める。
@@ -132,12 +135,16 @@
 
 案C を推す。ただし1本目の issue で前提を試し、通らなければ案A にする。
 
-理由は次の4つである。
+強い理由は2つである。
 
-1. 常駐するものが増えない。README 7行目は、アプリが Claude Code の記録と hook だけで動くと書いている。案A と案B は cloudflared が要り、ccn を外すとその入れ方と起動の仕方を別に決めることになる（README、ccn の `src/join/services.ts`）。
-2. Mac に待ち受けの口ができない。外から呼べる命令には create_session と term_input がある。案A では、`127.0.0.1` の口を同じ Mac のほかのプロセスからも呼べる。JWT の確認を1か所でも漏らすと、手元のどのプログラムからでも claude を起動できる（コードからの推論）。
-3. 安定版と開発版を分けやすい。Tunnel は、同じトンネルを2つのプロセスが動かすと行き先を決められない（公式の tunnel-availability のページ）。案C は、部屋に入れるアプリを Worker の側で1つに決められる。
-4. アプリにつながっていないことを、Worker が自分で分かる。今の PWA は ccn に届かないと「ccn に繋がらない」としか出せない（bridge.ts の `es.onerror`）。
+1. 常駐するものが増えない。README 7行目は、アプリが Claude Code の記録と hook だけで動くと書いている。案A と案B は cloudflared が要る。今は ccn の LaunchAgent が cloudflared を動かしているので、ccn を外すと、その入れ方と起動の仕方を別に決めることになる（README、ccn の `src/join/services.ts`）。
+2. Cloudflare に作るものが少ない。案C はサービストークンと `claude-town` のポリシー1つで済む。案A はトンネル、DNS、Access アプリ、Linked App Token のポリシーが要る。
+
+差の小さい理由もある。
+
+- 待ち受けの口: 案A でも unix socket にすれば、TCP の待ち受けは無く、ブラウザのページからも届かない。同じユーザーのプロセスは、もともと claude を直接起動できる。案C との差が大きいのは、案A を `127.0.0.1` で受ける形にした場合だけである。
+- 安定版と開発版: 案A でも「開発版はトンネルを起動しない」で分けられる。案C は、部屋に入れるアプリを1つにする決まりを Worker の側に置ける。差は、決まりを置く場所である。
+- つながらないときの表示: 案A でも Worker は error 1033 で「つながらない」と分かる。案C との差は、最後につながっていた時刻を出せることだけである。
 
 案A を残す理由もある。案A は、今の ccn と同じ組み合わせ（Tunnel、Access、Linked App Token、SSE）なので、確かめていないことが少ない。web/ の変更も小さい。1本目の試しで案C の前提が通らなかったら、案A に移る。案B は beta で、端末の流れを通すかが分からないので、今は推さない。
 
@@ -151,16 +158,17 @@
 
 ## 4. 実装の issue の案
 
-順に進める。2から4は1の結果で案が決まってから始める。
+1と2は並行して進められる。2の Rust の口は案A でも案C でも同じである。3と4は、1で案が決まってから始める。
 
 ### 1. 案C の前提を試して決める
 
 - やること: 開発用の Worker で、Void の `.ws.ts` の部屋を作る。Rust か小さなスクリプトからサービストークン付きでつなぎ、ブラウザの要求を中継させる。
-- 完了の条件:
+- 完了の条件は次のとおり。
   - サービストークンを付けた WebSocket の upgrade が、Access を通って部屋に届く。JWT の `common_name` が読める
   - 人のログインのブラウザから同じ部屋へつなぎ、`{ id, cmd, args }` を送ってアプリの返事が id どおりに返る
   - 部屋が休眠した後も、接続ごとの印（アプリかブラウザか）が残る
   - 別のオリジンのページからの upgrade が断られる
+  - アプリ用でないサービストークン（`town-void-deploy` のもの）では部屋に入れない
   - 結果を issue に書き、案C か案A かを決める
 - 通らなかったとき: 案A に移る。2の Rust の口は案A でも同じなので、無駄にならない。
 - 本人に聞くこと: 開発用のホスト名、Access アプリ、サービストークンを Cloudflare に作る。本番の設定への書き込みなので、作る前に本人の了承を取る。
@@ -168,7 +176,7 @@
 ### 2. アプリに外から呼べる口を足す（案A と案C で共通）
 
 - やること: 命令名と引数で受け、許可リストの命令だけを同じ Rust の関数で呼ぶ。`pty::subscribe` の購読を複数にする。
-- 完了の条件:
+- 完了の条件は次のとおり。
   - 許可リストの命令を、試験から名前と引数で呼べる。リストに無い名前は断る
   - 許可リストの名前が全部 `generate_handler!` にあることを、試験で確かめる
   - Mac の窓で端末を開いたまま、2つ目の購読をつけても、両方に出力が届く
@@ -178,10 +186,11 @@
 ### 3. 経路をつなぐ（案C の場合）
 
 - やること: Rust から部屋への接続と再接続、ping。Worker の部屋と、`01.access.ts` のサービストークンの例外。
-- 完了の条件:
+- 完了の条件は次のとおり。
   - アプリを起動すると部屋につながり、ネットワークが切れても戻ればつなぎ直す
   - アプリがつながっていないとき、ブラウザに「アプリにつながっていない（最後は何時何分）」が出る
   - 2つ目のアプリがつなぐと、古い接続が閉じる
+  - アプリ用の `common_name` でないサービストークンと、人のログインでは、アプリとして部屋に入れない
   - cloudflare-do-safety を実行し、結果を PR 本文に書く
   - サービストークンの秘密は、アプリの置き場所（`fc_path(Scope::App, …)`）に権限 600 のファイルで置く。安定版と開発版で分かれ、古い安定版はこのファイルを読まないので、形を気にしなくてよい
 
@@ -190,11 +199,16 @@
 ### 4. 画面をつなぎ替える
 
 - やること: `src/bridge.ts` の `WEB` を、新しい口で命令名と引数を送る形にする。`openTerminal` も新しい口で読む。
-- 完了の条件:
+- 完了の条件は次のとおり。
   - ブラウザ版で、一覧、会話、送信、承認、割り込み、新しい世帯、停止、端末の表示が動く。スマホの幅でも確かめる
   - 承認の欄、モデルと権限モードの切り替えが、アプリと同じ Rust の処理を通る
   - Mac の窓とスマホで同じ端末を開いても、Mac の窓の端末の幅が変わらない
   - README の「ブラウザ版（PWA）」を書き直す
+- 切り替えの順番: `web/` は main へのマージで本番へデプロイされ、画面の `src/` はアプリと共有である。この issue をマージした時点で、本番のブラウザ版は新しい口に替わる。マージの前に、次の3つをそろえる。
+  - 外からの口を持った安定版が上がっている（上げるのは本人か親だけ。CLAUDE.md）
+  - サービストークンの秘密が Mac に置いてある
+  - 開発版のアプリと手元の Worker（`web/` の `bun run dev`）で、一覧から端末までを通して確かめた記録が PR にある
+- 戻すとき: 安定版を外からの口の無い版へ戻すと、ブラウザ版も止まる。戻すなら、この issue の PR も一緒に戻す。
 
 ### 5. ccn の経路を消す
 
