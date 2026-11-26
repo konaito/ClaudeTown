@@ -319,7 +319,8 @@ pub fn verified_pids_of(root: &Path, id: &str) -> Vec<u32> {
     cands.into_iter().filter(|(pid, want)| now.get(pid) == Some(want)).map(|c| c.0).collect()
 }
 
-/// verified_pids_of の先頭。無ければ None
+/// verified_pids_of の先頭。無ければ None。今は試験だけが使う
+#[cfg(test)]
 pub fn verified_pid_of(root: &Path, id: &str) -> Option<u32> {
     verified_pids_of(root, id).into_iter().next()
 }
