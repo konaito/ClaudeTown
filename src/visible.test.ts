@@ -80,16 +80,16 @@ describe("pollBackoff（#5）", () => {
     let changed = false;
     const t0 = Date.now();
     const p = v.backoff(() => { at.push(Date.now() - t0); return changed; }, 30, 120);
-    await advance(250);
-    // 0, 60, 180 に呼ぶ（間隔が 60→120 と延び、max の 120 で止まる。次は 300）
-    expect(at).toEqual([0, 60, 180]);
+    await advance(310);
+    // 0, 60, 180, 300 に呼ぶ（間隔が 60→120 と延び、max の 120 で止まる。max が無ければ 3回目の次は 420）
+    expect(at).toEqual([0, 60, 180, 300]);
     changed = true;
     p.kick();
     // kick ですぐ取り直す
-    expect(at).toEqual([0, 60, 180, 250]);
-    await advance(75);
-    // 変わったので 30 ごとに戻る
-    expect(at).toEqual([0, 60, 180, 250, 280, 310]);
+    expect(at).toEqual([0, 60, 180, 300, 310]);
+    await advance(115);
+    // 変わったので 30 ごとに戻る。kick の前に置いた 420 のタイマーは消えている
+    expect(at).toEqual([0, 60, 180, 300, 310, 340, 370, 400]);
     p.stop();
   });
 
