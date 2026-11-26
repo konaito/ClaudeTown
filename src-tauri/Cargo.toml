@@ -27,17 +27,16 @@ fastrand = "2"
 tauri-plugin-clipboard-manager = "2"
 # 2つ目の起動を止める（#176）。2.5 は tauri 2.12 以上が要る
 tauri-plugin-single-instance = "2.5"
-# お便りの通知（#292）。2.6 から macOS の desktop でも押した知らせ（on_action の tap）を受けられる
-tauri-plugin-notification = "2.8"
 libc = "0.2"
 portable-pty = "0.9.0"
 vt100 = "0.18"
 
 # 開発版の確認用に、アプリの中から NSApp のメニューを読んで押す（menu.rs の dev_ctl、FC_MENU_CTL）。版と機能は muda が使うものに合わせる
+# お便りの通知を NSUserNotificationCenter に出し、押された知らせを delegate で受ける（notify_mac.rs、#330）。NSDictionary と NSUserNotification はそのため
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSMenu", "NSMenuItem", "NSResponder"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSString", "NSUserNotification"] }
 
 [dev-dependencies]
 # メニューのキー（accelerator）が読めるかを試験で確かめる（menu.rs）。tauri は muda の Accelerator を外に出していない。版は tauri が使うものに合わせる

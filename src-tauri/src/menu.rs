@@ -298,6 +298,7 @@ pub(crate) fn menu_state<R: Runtime>(app: AppHandle<R>, state: MenuState) -> Res
 /// 結果は FC_PERF_LOG に {"bench":"menu-ctl", ...} の行で書く。`bun tauri dev` の実行ファイル（tauri::is_dev()）でだけ動く。
 /// - {"n":1,"op":"dump"}   NSApp のメニューを読む（題、キー、押せるか。macOS が足した項目も含む）。押せるかは NSMenu の update で確かめ直した値
 /// - {"n":2,"op":"press","menu":"表示","item":"拡大"}   その項目を NSMenu の performActionForItemAtIndex で押す（メニューを開いて選んだときと同じ action）
+///
 /// AX（System Events）は、走らせるプロセスにアクセシビリティの許可が要る。許可が無いところでは、この口で同じことを確かめる（scripts/menu-ax.ts）
 pub(crate) fn start_dev_ctl<R: Runtime>(app: &AppHandle<R>) {
     let Ok(path) = std::env::var("FC_MENU_CTL") else { return };

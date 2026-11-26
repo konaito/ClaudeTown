@@ -369,7 +369,7 @@ mod tests {
         native::TEST_HOME.with(|h| *h.borrow_mut() = None);
         let t0 = std::time::Instant::now();
         let mut outside_ended = false;
-        while t0.elapsed() < std::time::Duration::from_secs(3) && !(outside_ended && !pty::owns(&id)) {
+        while t0.elapsed() < std::time::Duration::from_secs(3) && (!outside_ended || pty::owns(&id)) {
             outside_ended = outside_ended || outside.try_wait().unwrap().is_some();
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
