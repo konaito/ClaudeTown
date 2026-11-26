@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { ICON, STROKE } from "../icons";
 import { IS_WEB, call as invoke } from "../bridge";
@@ -42,7 +42,11 @@ type Load = { state: "loading" } | { state: "ok"; list: RecentPlace[]; defaultPl
  * 先頭の「新しい世帯」は一覧を待たずに押せる。立てる場所は設定（place、#92）で、無ければ ~/Documents/meta。
  * 一覧からは、その立てる場所を除く（withoutPlace）。見出しは出さない（2026-11-21 本人の決定）
  */
-export function NewHousePane({ place, onCreated, onError }: { place: string | null; onCreated: (r: CreatedSession | null) => void; onError: (m: string) => void }) {
+export function NewHousePane({ place, onCreated, onError, newReq = 0, resumeReq = 0 }: {
+  place: string | null; onCreated: (r: CreatedSession | null) => void; onError: (m: string) => void;
+  /** メニューバー（#300）の「新しい世帯」と「セッション id で開き直す…」の合図。増えたら先頭のボタンと同じに立てる、id の欄にフォーカスする */
+  newReq?: number; resumeReq?: number;
+}) {
   const [load, setLoad] = useState<Load>({ state: "loading" });
   // 立てている場所。"" は先頭のボタン（既定の場所）
   const [busy, setBusy] = useState<string | null>(null);
@@ -79,6 +83,9 @@ export function NewHousePane({ place, onCreated, onError }: { place: string | nu
     finally { setBusy(null); }
   };
   const off = busy !== null;
+  useEffect(() => { if (newReq && !off) void go(place, true); }, [newReq]);
+  const resumeInput = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (resumeReq) resumeInput.current?.focus(); }, [resumeReq]);
   // 置き場所を除いた一覧。除いても件数が減らないよう、1件多く読んでおき、ここで RECENT_PLACES_MAX 件に切る
   const shown = load.state === "ok" ? withoutPlace(load.list, place, load.defaultPlace).slice(0, RECENT_PLACES_MAX) : [];
 
@@ -106,7 +113,7 @@ export function NewHousePane({ place, onCreated, onError }: { place: string | nu
       </div>
       {!IS_WEB && (
         <form className="nh-resume" onSubmit={reopen}>
-          <input className="set-input" value={resumeId} onChange={(e) => setResumeId(e.target.value)} disabled={off}
+          <input ref={resumeInput} className="set-input" value={resumeId} onChange={(e) => setResumeId(e.target.value)} disabled={off}
             placeholder="セッション id で開き直す" aria-label="Claude Town で開き直すセッションの id" spellCheck={false}
             title="終わったセッションの id を入れて Enter。前と同じ場所で claude --resume を起動する" />
           {busy === "resume" && <span className="nh-note">開いている…</span>}

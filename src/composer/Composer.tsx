@@ -1,6 +1,6 @@
 // チャットの入力欄。キーの動きは Claude Code の CLI の入力に合わせる。
 // 何をどう合わせたか、合わせなかったものと理由は docs/research/cli-input.md の表にある。
-import { useContext, useLayoutEffect, useRef, useState } from "react";
+import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { IS_WEB, call as invoke } from "../bridge";
 import getCaretCoordinates from "textarea-caret";
 import { SendHorizontal, Square } from "lucide-react";
@@ -47,7 +47,10 @@ const HELP: [string, string][] = [
   ["Ctrl+C", "作業を止める（作業中）・打ちかけを消す"],
 ];
 
-export function Composer({ agent, text, setText, busy, running, booting = false, support = "no", onSubmit, onError, touch }: {
+export function Composer({ agent, text, setText, busy, running, booting = false, support = "no", onSubmit, onError, touch, helpReq = 0, helpSeen }: {
+  /** メニューバーの「キーボードショートカット」（#300）。helpSeen より大きければキーの一覧を開け閉めし（? と同じ）、helpSeen を進める。
+   *  入力欄が押せないセッションでは Esc も ? も届かないので、閉じるのもメニューから */
+  helpReq?: number; helpSeen?: React.MutableRefObject<number>;
   /** claude の起動を待っている。送った文は Rust が預かり、起動したら送る（入力欄の案内だけ替える） */
   booting?: boolean;
   /** ノードに command の口があるか（#97）。/ のコマンドの振り分けと、補完の印に使う */
@@ -65,6 +68,11 @@ export function Composer({ agent, text, setText, busy, running, booting = false,
   const [caret, setCaret] = useState(text.length);
   const [dismissed, setDismissed] = useState<string | null>(null);
   const [help, setHelp] = useState(false);
+  useEffect(() => {
+    if (!helpSeen || helpReq <= helpSeen.current) return;
+    helpSeen.current = helpReq;
+    setHelp((h) => !h);
+  }, [helpReq]);
   const kills = useRef<string[]>([]);
   const yank = useRef<{ from: number; to: number; i: number } | null>(null);
   const lastEsc = useRef(0);

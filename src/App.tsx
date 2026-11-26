@@ -48,7 +48,8 @@ import {
   MOOD_LABEL, NEEDS_YOU, buildTree, cardNames, moodOf,
 } from "./model";
 import type { CreatedSession } from "./types";
-import { NEW_HOUSE_CAPS } from "./abilities";
+import { NEW_HOUSE_CAPS, hasTerminal } from "./abilities";
+import { useMenu } from "./menu";
 
 /** 右パネルの幅（px）。最小と既定。最大はウィンドウ幅の半分（maxSize="50%"） */
 const SIDE_MIN = 380;
@@ -82,7 +83,7 @@ export default function App() {
   useVisualViewport(mobile);
   useEffect(() => { const t = setTimeout(() => { void loadTerminal(); }, 2000); return () => clearTimeout(t); }, []);
   const { snap, err, reload } = useTown();
-  const { selected, setSelected, fresh, setFresh, termReq, chatReq, setChatReq, composeReq, setComposeReq, focus } = useSelection();
+  const { selected, setSelected, fresh, setFresh, termReq, setTermReq, chatReq, setChatReq, composeReq, setComposeReq, focus } = useSelection();
   const { toasts, toast } = useToasts();
   const { zoom, zoomOut, zoomIn, zoomFit } = useZoom();
 
@@ -167,8 +168,11 @@ export default function App() {
   useEffect(() => { if (sel) perfMark("listed", sel.id); }, [sel?.id]);
   useBench({ ready: !!snap, select: setSelected, focusId: (id) => { const a = tree.byId.get(id); if (a) focus(a); } });
 
+  // メニューバー（#300）から右パネルの「状態」のタブと、入力欄のキーの一覧（? と同じ）を開く合図
+  const [stateReq, setStateReq] = useState(0);
+  const [helpReq, setHelpReq] = useState(0);
   const panelProps = {
-    agent: sel, lineage: sel ? tree.lineage(sel) : [], termReq, chatReq, composeReq, sendHook: panelSend,
+    agent: sel, lineage: sel ? tree.lineage(sel) : [], termReq, chatReq, composeReq, stateReq, helpReq, sendHook: panelSend,
     onSent: (a: Agent) => { kickTown(); toast(`${a.name} に届けた`); }, onSent2: (m: string) => { kickTown(); toast(m); }, onError: (m: string) => toast(m, true),
     needs, onSelect: (a: Agent) => setSelected(a.id), onClose: () => setSelected(null),
   };
@@ -179,9 +183,37 @@ export default function App() {
   // 設定（#92）。「新しい世帯」で親を立てる場所。null は既定（~/Documents/meta）
   const [place, setPlace] = useState<string | null>(loadPlace);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 設定を開いたときに見せる欄。メニューの「アップデートを確認…」は更新の欄まで送る
+  const [settingsFocus, setSettingsFocus] = useState<"update" | null>(null);
+  const openSettings = (focus: "update" | null = null) => { setSettingsFocus(focus); setSettingsOpen(true); };
   // 安定版の更新があるか（#295）。あれば歯車に点を付ける。開発版とブラウザ版では null のまま
   const [update, setUpdate] = useUpdateStatus(60_000);
   const updateDot = showDot(update);
+
+  // メニューバー（#300）。押したら画面の既存の操作を呼ぶ。押せる・押せないは state で Rust に渡す（src/menu.ts、src-tauri/src/menu.rs）
+  const [newReq, setNewReq] = useState(0);
+  const [resumeReq, setResumeReq] = useState(0);
+  const [creditsReq, setCreditsReq] = useState(0);
+  const bump = (set: React.Dispatch<React.SetStateAction<number>>) => set((n) => n + 1);
+  const openHouses = () => { const r = housesRef.current; if (r?.isCollapsed()) r.expand(); };
+  const term = !!sel && hasTerminal(sel);
+  useMenu({
+    update: () => openSettings("update"),
+    settings: () => openSettings(),
+    "new-house": () => bump(setNewReq),
+    resume: () => { openHouses(); bump(setResumeReq); },
+    "open-chat": () => { if (sel) bump(setChatReq); },
+    "open-term": () => { if (term) bump(setTermReq); },
+    sidebar: toggleHouses,
+    "zoom-in": zoomIn,
+    "zoom-out": zoomOut,
+    "zoom-fit": zoomFit,
+    "tab-chat": () => { if (sel) bump(setChatReq); },
+    "tab-state": () => { if (sel) bump(setStateReq); },
+    "tab-term": () => { if (term) bump(setTermReq); },
+    "help-keys": () => { if (sel) bump(setHelpReq); },
+    credits: () => bump(setCreditsReq),
+  }, { selected: !!sel, terminal: term, sidebar: housesOpen, update: update ? update.available : null });
 
   return (
     <SkinCtx.Provider value={skinCtx}>
@@ -200,7 +232,7 @@ export default function App() {
       <SplitGroup className="body" orientation="horizontal" defaultLayout={savedSplit()} onLayoutChanged={(l) => saveSplit(sideRef.current?.isCollapsed() ? keepSide(l, savedSplit()) : l)}>
         <SplitPanel id="houses" panelRef={housesRef} collapsible collapsedSize={0} defaultSize={HOUSES_DEFAULT} minSize={HOUSES_MIN} maxSize="30%"
           onResize={() => setHousesOpen(!housesRef.current?.isCollapsed())}>
-          <NewHousePane place={place} onCreated={newHousehold} onError={(m) => toast(m, true)} />
+          <NewHousePane place={place} onCreated={newHousehold} onError={(m) => toast(m, true)} newReq={newReq} resumeReq={resumeReq} />
         </SplitPanel>
         <Separator className={`split-handle${housesOpen ? "" : " closed"}`} />
         <SplitPanel id="town" minSize={TOWN_MIN}>
@@ -217,7 +249,7 @@ export default function App() {
             </div>
             <div className="top-mid" />
             <div className="top-right">
-              <button className="side-toggle set-gear" onClick={() => setSettingsOpen(true)} aria-label={updateDot ? "設定（更新がある）" : "設定"}
+              <button className="side-toggle set-gear" onClick={() => openSettings()} aria-label={updateDot ? "設定（更新がある）" : "設定"}
                 title={updateDot ? "設定（更新がある）" : "設定"} aria-haspopup="dialog">
                 <Settings size={18} strokeWidth={1.8} />{updateDot && <i className="set-dot" aria-hidden />}
               </button>
@@ -270,7 +302,7 @@ export default function App() {
               <button className="fs" title="全画面" aria-label="全画面" onClick={() => setFullscreen()}><Maximize size={ICON.md} strokeWidth={STROKE} /></button>
             </div>
             <span className="hint">クリックでチャット・右クリックでターミナル</span>
-            <Credits skin={skin} onSkin={(v) => { setSkin(v); saveSkin(v); }} />
+            <Credits skin={skin} onSkin={(v) => { setSkin(v); saveSkin(v); }} openReq={creditsReq} />
           </div>
         </div>
 
@@ -285,7 +317,7 @@ export default function App() {
       </SplitGroup>
       </>)}
 
-      {settingsOpen && <SettingsDialog place={place} defaults={loadDefaults()} onSave={(p, d) => {
+      {settingsOpen && <SettingsDialog place={place} defaults={loadDefaults()} focus={settingsFocus} onSave={(p, d) => {
         // 変えた項目を知らせる
         const msgs: string[] = [];
         if (p !== place) { savePlace(p); setPlace(p); msgs.push(p ? "新しい世帯の場所を変えた" : "新しい世帯の場所を既定に戻した"); }

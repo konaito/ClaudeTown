@@ -4,6 +4,7 @@
 // - open: 自分で作ったセッション1つを、選び直して右クリックと同じ操作で開き直し、❯ が見えるまでを測る
 // - all: new を n 回、続けて最後に作ったセッションで open を n 回
 // - watch: 40秒、1秒ごとに町の人数と赤い帯とトーストを記録する
+// - menu: メニューバー（#300）を外から AX で押したときの画面の動き（タブ、左のペイン、拡大率、設定、素材、キーの一覧、フォーカス）を、変わったときに記録する
 // - resize: 新しい世帯の右パネルの境目をドラッグし、claude が新しい幅で描き直すまでを測る（#19）
 // - cpu: ?sid=<セッション> のターミナルを開いたまま30秒、IPC の回数を数える（#8、#9）
 // - order: ?sid=<セッション> のチャットを開き、子が作業中になったら、入力欄から ?a= と ?b= の2通を続けて送る。?secs=<秒>（既定 90）のあいだ1秒ごとに、
@@ -164,6 +165,56 @@ async function run(h: () => { select: (id: string | null) => void; focusId: (id:
         await log({ typed: true, xterm: `${t.cols}x${t.rows}`, mine: mine0, sent: perfCounters.resizes - r0, rules: rules() });
         t.input("\x7f");
         await sleep(1000);
+      }
+      return;
+    }
+    // menu: メニューバー（#300）を AX で押したときの画面の動きを、?secs=（既定 600）のあいだ0.5秒ごとに見て、変わったときだけ記録する。
+    // 押すのは外から（scripts/menu-ax.ts press）。ここでは何も押さない。?sid= があれば、最初にそのセッションを選ぶ
+    if (mode === "menu") {
+      const sid = params.get("sid");
+      if (sid) for (let i = 0; i < 10 && !document.querySelector(".tabs"); i++) { h().select(sid); await sleep(1000); }
+      const end = Date.now() + Number(params.get("secs") ?? 600) * 1000;
+      let last = "";
+      // 開いたものは外から閉じられない（キーもクリックも送らない）ので、開いて3秒たったら、閉じるのと同じ操作をここでする。
+      // 設定とキーの一覧は Esc、素材は「素材」のボタン。入力欄には ?text= の文を1回だけ入れておく（編集のメニューの確認用）
+      const opened = new Map<string, number>();
+      const closeAfter = (key: string, open: boolean, close: () => void) => {
+        if (!open) { opened.delete(key); return; }
+        const t = opened.get(key) ?? Date.now();
+        opened.set(key, t);
+        if (Date.now() - t > 3000) { opened.delete(key); close(); }
+      };
+      const esc = (el: EventTarget) => el.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      let filled = false;
+      while (Date.now() < end) {
+        const ta = document.querySelector<HTMLTextAreaElement>(".composer textarea");
+        if (ta && !ta.disabled && !filled && params.get("text")) {
+          filled = true;
+          Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(ta, params.get("text"));
+          ta.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        closeAfter("settings", !!document.querySelector(".set-modal"), () => esc(window));
+        closeAfter("credits", !!document.querySelector(".credit-pop"), () => document.querySelector<HTMLButtonElement>(".credit-btn")?.click());
+        closeAfter("help", !!document.querySelector(".cmp-help"), () => { if (ta) esc(ta); });
+        const a = document.activeElement as HTMLElement | null;
+        const modal = document.querySelector<HTMLElement>(".set-modal");
+        const st = {
+          tab: document.querySelector(".tabs .on")?.textContent ?? null,
+          tabs: [...document.querySelectorAll(".tabs button")].map((e) => e.textContent),
+          houses: document.querySelector(".brand .side-toggle")?.getAttribute("aria-expanded"),
+          zoom: document.querySelector(".zval")?.textContent ?? null,
+          settings: !!modal, settingsTop: modal ? Math.round(modal.scrollTop) : null, update: !!document.querySelector(".set-update"),
+          // 更新の欄が設定の画面の見えている範囲に入っているか（「アップデートを確認…」で開いたとき）
+          updateShown: (() => { const u = document.querySelector(".set-update")?.getBoundingClientRect(); const m = modal?.getBoundingClientRect(); return u && m ? u.top >= m.top && u.bottom <= m.bottom + 1 : null; })(),
+          credits: !!document.querySelector(".credit-pop"), help: !!document.querySelector(".cmp-help"),
+          active: a ? `${a.tagName.toLowerCase()}${a.className ? `.${String(a.className).split(" ").join(".")}` : ""}${a.getAttribute("aria-label") ? `[${a.getAttribute("aria-label")}]` : ""}` : null,
+          busy: document.querySelector(".nh-new")?.textContent ?? null,
+          toasts: [...document.querySelectorAll(".toast")].map((e) => e.textContent),
+          text: ta ? ta.value : null, sel: ta ? [ta.selectionStart, ta.selectionEnd] : null,
+        };
+        const j = JSON.stringify(st);
+        if (j !== last) { last = j; await log({ at: new Date().toISOString().slice(11, 23), ...st }); }
+        await sleep(500);
       }
       return;
     }
