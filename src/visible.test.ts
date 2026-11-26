@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import { createVisibility, forceVisibleFlag } from "./visible";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -71,21 +71,31 @@ describe("shownAt（#6）", () => {
 });
 
 describe("pollBackoff（#5）", () => {
+  // 呼んだ回数と時刻をちょうどで見る試験は、偽の時計で進める。本物の時計では、イベントループが塞がるとタイマーがずれて落ちる（#323）。
+  // backoff は await load() の後に次のタイマーを置くので、1ms 進めるたびにマイクロタスクを流す。
+  // 偽の時計のあいだは、実のイベントループに戻らずマイクロタスクだけで流す。戻ると、ほかが置いた実のタイマーが偽の Date.now を読むので、時刻を待つ処理が止まらなくなるおそれがある
+  const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+  // 進める前にも流す。始めの回が置くタイマーを、進める前の時刻に置かせるため
+  const advance = async (ms: number) => { await flush(); for (let i = 0; i < ms; i++) { jest.advanceTimersByTime(1); await flush(); } };
+  afterEach(() => { jest.useRealTimers(); });
+
   test("変わらない回が続くと間隔が延び、変わったら戻る。kick ですぐ取り直す", async () => {
+    jest.useFakeTimers();
     const v = createVisibility(true);
     const at: number[] = [];
     let changed = false;
     const t0 = Date.now();
     const p = v.backoff(() => { at.push(Date.now() - t0); return changed; }, 30, 120);
-    await wait(250);
-    // 0, 60, 180 に呼ぶ（間隔が 60→120 と延びる。次は 300）
-    expect(at.length).toBe(3);
+    await advance(310);
+    // 0, 60, 180, 300 に呼ぶ（間隔が 60→120 と延び、max の 120 で止まる。max が無ければ 3回目の次は 420）
+    expect(at).toEqual([0, 60, 180, 300]);
     changed = true;
     p.kick();
-    expect(at.length).toBe(4);
-    await wait(75);
-    // 変わったので 30 ごとに戻る
-    expect(at.length).toBeGreaterThanOrEqual(5);
+    // kick ですぐ取り直す
+    expect(at).toEqual([0, 60, 180, 300, 310]);
+    await advance(115);
+    // 変わったので 30 ごとに戻る。kick の前に置いた 420 のタイマーは消えている
+    expect(at).toEqual([0, 60, 180, 300, 310, 340, 370, 400]);
     p.stop();
   });
 
