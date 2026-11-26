@@ -79,6 +79,16 @@ v2="$(g rev-parse HEAD)"
 g push -q -u origin main 2>/dev/null
 # 本体の checkout は fetch の前の古い追跡 ref のまま（ボタンが fetch してから上げるかも見る）
 g update-ref refs/remotes/origin/main "$v1"
+# 本体の checkout のローカルの main は origin/main より古く、作業ツリーのスクリプトには未コミットの変更がある（#299）。
+# ボタンが走らせるのは origin/main のスクリプトで、作業ツリーの古いものは走らせない。作業ツリーの方は、走ったら印を書いて 7 で終わる偽物にする
+g reset -q --hard "$v1"
+old_mark="$root/old-script-ran"
+printf '#!/bin/sh\necho old > "%s"\nexit 7\n' "$old_mark" > "$repo/scripts/release-stable.sh"
+printf 'echo old-lib > "%s"\n' "$old_mark" > "$repo/scripts/stable-lib.sh"
+before_status="$(git -C "$repo" status --porcelain)"
+before_head="$(git -C "$repo" rev-parse HEAD)"
+before_branch="$(git -C "$repo" symbolic-ref --short HEAD)"
+[ -n "$before_status" ] && [ "$before_head" = "$v1" ] || { echo "作業ツリーの準備が違う" >&2; exit 1; }
 
 # --- 一時の入れ先に、アプリ役の .app を置く ---
 dest_dir="$root/Applications"
@@ -134,6 +144,13 @@ read -r tag sha < "$state/current.ref"
 grep -q "release $tag $v2" "$state/releases.log" 2>/dev/null && ok "releases.log に記録" || ng "releases.log に記録が無い"
 [ "$(cat "$state/hooks/fc-report.py" 2>/dev/null)" = 'print("v2")' ] && [ "$(cat "$state/hooks.ref" 2>/dev/null)" = "$tag $v2" ] \
   && ok "状態 hook を新しい版から写した" || ng "状態 hook が写っていない"
+
+[ ! -e "$old_mark" ] && ok "作業ツリーの古いスクリプトは走らなかった" || ng "作業ツリーの古いスクリプトが走った: $(cat "$old_mark")"
+[ "$(git -C "$repo" status --porcelain)" = "$before_status" ] && [ "$(git -C "$repo" rev-parse HEAD)" = "$before_head" ] \
+  && [ "$(git -C "$repo" symbolic-ref --short HEAD)" = "$before_branch" ] \
+  && ok "本体の checkout の作業ツリー、HEAD、ブランチは変わっていない" || ng "本体の checkout が変わった"
+took="$(sed -n 's/^origin\/main のスクリプトを取り出した: //p' <<< "$log" | head -n 1)"
+[ -n "$took" ] && [ ! -e "$took" ] && ok "取り出したスクリプトの一時の場所（${took}）は消えた" || ng "取り出したスクリプトの一時の場所が無いか残った: ${took:-（記録なし）}"
 
 if [ "$failed" != 0 ]; then
   echo "--- update-run.log"; cat "$state/update-run.log"
