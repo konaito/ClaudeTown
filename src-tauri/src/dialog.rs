@@ -70,7 +70,7 @@ fn row_of(line: &str) -> Option<(usize, Row)> {
     Some((indent, Row { n, label: label.trim().to_string(), cursor, checked }))
 }
 
-fn is_rule(line: &str) -> bool {
+pub(crate) fn is_rule(line: &str) -> bool {
     let t = line.trim();
     t.chars().count() >= 20 && t.chars().all(|c| c == '─' || c == '╌')
 }
