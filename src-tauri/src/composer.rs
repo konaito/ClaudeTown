@@ -454,8 +454,22 @@ const IMAGE_EXTS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 /// 文と混ざっていると文のまま受ける（2026-11-26、v2.1.332 の本物の claude で見た）。
 /// 画像のパスとみなすのは、文の頭か空白の後ろから次の空白まで（\ の付いた空白は続きとみる）の語で、/ から始まり、
 /// \ を外すと実在するファイルで、拡張子が IMAGE_EXTS のもの。入力欄への貼り付けとドロップ（src/composer/edit.ts の quotePath）が入れる形。
-/// 画像のパスが無ければ、文全体を1つの切れ端で返す（今までと同じ1回の貼り付け）
+/// 画像のパスが無ければ、文全体を1つの切れ端で返す（今までと同じ1回の貼り付け）。
+/// ! と / で始まる文（bash のモードとコマンド）は切り分けない。頭の ! や / を貼った後に入力欄の扱いが変わり、
+/// 単独で貼ったパスが印になるかは確かめていない。今までどおり CLI に打ったのと同じに動かす。頭の語が画像のパスなら / で始まっても切り分ける
 pub fn paste_parts(text: &str) -> Vec<Part<'_>> {
+    let head = text.trim_start();
+    // 頭の語（\ の付いた空白は続き）
+    let mut esc = false;
+    let end = head.char_indices().find(|&(_, c)| {
+        let stop = !esc && c.is_whitespace();
+        esc = !esc && c == '\\';
+        stop
+    });
+    let first = &head[..end.map_or(head.len(), |(i, _)| i)];
+    if head.starts_with('!') || head.starts_with('/') && !is_image_path(first) {
+        return vec![Part::Text(text)];
+    }
     let mut out = vec![];
     let mut from = 0;
     let mut start: Option<usize> = None;
@@ -1021,6 +1035,11 @@ mod tests {
             assert_eq!(paste_parts(&t), vec![Part::Text(&t)], "{t}");
         }
         assert_eq!(paste_parts(""), vec![Part::Text("")]);
+        // ! と / のコマンドは切り分けない。頭の語が画像のパスなら / で始まっても切り分ける
+        for t in [format!("!open {jpg}"), format!("  /review {shot} を見て")] {
+            assert_eq!(paste_parts(&t), vec![Part::Text(&t)], "{t}");
+        }
+        assert_eq!(paste_parts(&format!("{shot} 見て")), vec![Part::Image(&shot), Part::Text(" 見て")]);
         fs::remove_dir_all(&dir).unwrap();
     }
 
