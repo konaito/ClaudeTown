@@ -456,7 +456,7 @@ describe("家族の木の配置", () => {
 
   // 2026-11-26 の本人の画面と同じ形。子3人（左、右、真下）の真下の子に、名前 general-purpose の孫5人。
   // 扇形の置き方では枠が 578×382 だった。詰めて置くと、孫は真下の子の左右と下に並び、幅は子の3人の幅のまま
-  test("19. 子3人の真下の子に孫5人（本人の画面の形）: 枠は 578×382 から 578×346 に小さくなる", () => {
+  test("19. 子3人の真下の子に孫5人（本人の画面の形）: 枠は 578×382 から 578×346 に小さくなり、孫は左右対称に並ぶ", () => {
     const rows: [string, string | null][] = [["p", null], ["k1", "p"], ["k2", "p"], ["k3", "p"]];
     for (let j = 1; j <= 5; j++) rows.push([`g${j}`, "k3"]);
     const r = layoutFamily(family(rows, Object.fromEntries(rows.map(([id]) => [id, id.startsWith("g") ? "general-purpose" : id]))));
@@ -465,6 +465,9 @@ describe("家族の木の配置", () => {
     expect(groupSizeOf(r.metrics)).toEqual({ w: 578, h: 346 });
     expect(r.grid).toBe("bfs");
     expect(ok(r.metrics)).toBe(true);
+    // 孫の x は、真下の子（x = 0）の縦の軸に対して左右対称
+    const xs = r.nodes.filter((n) => n.depth === 2).map((n) => Math.round(n.x));
+    expect([...xs].sort((a, b) => a - b)).toEqual(xs.map((x) => 0 - x || 0).sort((a, b) => a - b));
     expect(["k1", "k2", "k3"].map((id) => [get(r.nodes, id).x, get(r.nodes, id).y])).toEqual(childSlots(3)!.map((q) => [q.x, q.y]));
     report.push({ ケース: 19, 扇形の枠: JSON.stringify(groupSizeOf(fan)), 枠: JSON.stringify(groupSizeOf(r.metrics)), 置き方: r.grid, ...r.metrics });
   });
