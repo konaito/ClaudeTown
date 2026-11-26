@@ -876,6 +876,23 @@ mod tests {
     }
 
     #[test]
+    fn reads_symlinked_user_skills_each_time() {
+        // ~/.claude/skills/<名前> が ~/.agents/skills/<名前> への相対リンクでも読み、足した・消したスキルを次の呼び出しで返す（#315）
+        let root = std::env::temp_dir().join(format!("ct-skill-link-{}-{}", std::process::id(), fastrand::u32(..)));
+        let home = root.join("home");
+        fs::create_dir_all(home.join(".claude/skills")).unwrap();
+        fs::create_dir_all(home.join(".agents/skills/linked")).unwrap();
+        fs::write(home.join(".agents/skills/linked/SKILL.md"), "---\nname: linked\ndescription: Linked skill\n---\n").unwrap();
+        let names = || slash_commands_in(&home, None).into_iter().map(|c| c.name).collect::<Vec<_>>();
+        assert!(!names().contains(&"linked".to_string()));
+        std::os::unix::fs::symlink("../../.agents/skills/linked", home.join(".claude/skills/linked")).unwrap();
+        assert!(names().contains(&"linked".to_string()));
+        fs::remove_file(home.join(".claude/skills/linked")).unwrap();
+        assert!(!names().contains(&"linked".to_string()));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn ranks_files() {
         let f: Vec<String> = ["src/App.tsx", "a.txt", "src/", "docs/app-notes.md", "README.md"].iter().map(|s| s.to_string()).collect();
         assert_eq!(rank_files(&f, "app", 10), vec!["src/App.tsx", "docs/app-notes.md"]);
