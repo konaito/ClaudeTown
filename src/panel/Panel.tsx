@@ -170,14 +170,15 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, sendHook, 
     // 印が出て余白が付くと中身が伸びるので、一番下にいたら送り直す（開いたまま切れたとき、items は変わらない）
   }, [items, pending, id, tab, chatReq, hasNote, live, working, boot.queued.length]);
 
-  // 中身の高さが後から変わったとき（#311）も、一番下にいたら送り直す。上の effect は会話や状態が変わったときしか動かない。
+  // 承認の欄の高さが後から変わったとき（#311）も、一番下にいたら送り直す。上の effect は会話や状態が変わったときしか動かない。
   // 承認の欄は「承認の中身を読んでいる…」の1行で出て、session_detail が返ると質問の欄の高さに伸びるので、伸びた分が入力欄の裏に隠れていた。
-  // 高さが変わってもスクロールのイベントは出ないので、stick は一番下にいたときの値のまま残る
+  // 高さが変わってもスクロールのイベントは出ないので、stick は一番下にいたときの値のまま残る。
+  // 見るのは承認の欄だけにする。道具の行を開くなど、本人が自分で高さを変えたときに下へ送ると、押した行が上へ流れるため
   useEffect(() => {
     const el = scroller.current;
     if (tab !== "talk" || !el) return;
     const ro = new ResizeObserver(() => { if (stick.current) toEnd(el); });
-    const watch = () => { ro.disconnect(); for (const c of el.children) ro.observe(c); };
+    const watch = () => { ro.disconnect(); const c = el.querySelector(":scope > .approval"); if (c) ro.observe(c); };
     watch();
     const mo = new MutationObserver(watch);
     mo.observe(el, { childList: true });
