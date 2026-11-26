@@ -141,7 +141,7 @@ function ToolForm({ p, busy, answer, mate }: { p: PendingReq; busy: "allow" | "d
           <button className="ap-deny" disabled={!!busy} title="拒否する。下の欄に書いた理由を Claude に伝える" onClick={() => answer("deny", { message: reason })}>{busy === "deny" ? "送っている…" : "拒否する"}</button>
         </div>
       )}
-      <input className="ap-reason" placeholder="拒否の理由（任意。Claude に伝わる）" value={reason} disabled={!!busy} onChange={(e) => setReason(e.target.value)} />
+      <input className="ap-reason" placeholder={`拒否の理由（任意。${mate ?? "Claude"} に伝わる）`} value={reason} disabled={!!busy} onChange={(e) => setReason(e.target.value)} />
     </>
   );
 }
