@@ -67,7 +67,7 @@ describe("shownAt（#6）", () => {
 describe("pollBackoff（#5）", () => {
   // 呼んだ回数と時刻をちょうどで見る試験は、偽の時計で進める。本物の時計では、イベントループが塞がるとタイマーがずれて落ちる（#323）。
   // backoff は await load() の後に次のタイマーを置くので、1ms 進めるたびにマイクロタスクを流す。
-  // 偽の時計のあいだは setTimeout や setImmediate で実のイベントループに戻らない。戻すと、偽の Date.now で回る処理が止まらなくなる
+  // 偽の時計のあいだは、実のイベントループに戻らずマイクロタスクだけで流す。戻ると、ほかが置いた実のタイマーが偽の Date.now を読むので、時刻を待つ処理が止まらなくなるおそれがある
   const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
   // 進める前にも流す。始めの回が置くタイマーを、進める前の時刻に置かせるため
   const advance = async (ms: number) => { await flush(); for (let i = 0; i < ms; i++) { jest.advanceTimersByTime(1); await flush(); } };
