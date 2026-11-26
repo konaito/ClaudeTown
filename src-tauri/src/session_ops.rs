@@ -75,6 +75,11 @@ pub(crate) fn restart_session(session_id: String) -> Result<Value, String> {
     if !std::path::Path::new(&cwd).is_dir() {
         return Err(format!("場所が無いか、ディレクトリではない: {cwd}"));
     }
+    // 同じ id を2か所以上のプロセスが名乗っている（#331）と、1つ止めてももう1つが残り、下の待ちで失敗する。止める前に断る
+    let n = native::sessions::live_pids_of(&root, &session_id).len();
+    if n >= 2 {
+        return Err(format!("同じセッションが{n}か所で開いているので、再起動しなかった。ほかの端末で開いている分を閉じてから再起動して"));
+    }
     let (cols, rows) = pty::size_of(&session_id).unwrap_or((120, 40));
     stop_any(&session_id)?;
     let t0 = std::time::Instant::now();
@@ -288,6 +293,44 @@ mod tests {
         let e = restart_session("55555555-5555-4555-8555-555555555555".into()).unwrap_err();
         native::TEST_HOME.with(|h| *h.borrow_mut() = None);
         assert!(e.contains("jsonl"), "{e}");
+    }
+
+    /// 同じ id を2つのプロセスが名乗っている（#331）と、1つ止めてももう1つが残り、立て直しを待ちきれずに失敗する。
+    /// 止めてから失敗すると端末が1つ消えるだけなので、止める前に断る
+    #[test]
+    fn restart_refuses_before_stopping_when_two_processes_share_the_id() {
+        let root = std::env::temp_dir().join(format!("fc-restart-dup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let place = root.join("place");
+        fs::create_dir_all(&place).unwrap();
+        let cwd = place.to_string_lossy().to_string();
+        let id = "66666666-6666-4666-8666-666666666666";
+        let proj = root.join("projects").join(native::sessions::project_dir_name(&cwd));
+        fs::create_dir_all(&proj).unwrap();
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        fs::write(proj.join(format!("{id}.jsonl")), format!("{{\"type\":\"user\",\"cwd\":{}}}\n", serde_json::to_string(&cwd).unwrap())).unwrap();
+        let mut kids: Vec<std::process::Child> = (0..2).map(|_| std::process::Command::new("/bin/sleep").arg("60").spawn().unwrap()).collect();
+        for (i, k) in kids.iter().enumerate() {
+            let pid = k.id();
+            // 止める前の確かめ（起動時刻）が通るように、claude と同じ形の procStart を書く
+            let out = std::process::Command::new("/bin/ps").env("LC_ALL", "C").env("TZ", "UTC").args(["-o", "lstart=", "-p", &pid.to_string()]).output().unwrap();
+            let start = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            fs::write(root.join(format!("sessions/{pid}.json")), json!({ "pid": pid, "sessionId": id, "cwd": cwd, "startedAt": 1_000 + i as u64,
+                "kind": "interactive", "status": "idle", "procStart": start }).to_string()).unwrap();
+        }
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        let r = restart_session(id.into());
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        // SIGHUP を受けた sleep は終わる。断ったなら2つとも生きている
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let alive: Vec<bool> = kids.iter_mut().map(|k| k.try_wait().unwrap().is_none()).collect();
+        for k in kids.iter_mut() {
+            let _ = (k.kill(), k.wait());
+        }
+        let _ = fs::remove_dir_all(&root);
+        let e = r.unwrap_err();
+        assert_eq!(alive, vec![true, true], "止める前に断る: {e}");
+        assert!(e.contains("2か所"), "{e}");
     }
 
     /// 立て直す前の確かめ（#152）。jsonl が無いもの、よそで同じ id が動いているもの、場所が無いものは飛ばす

@@ -86,6 +86,8 @@ pub struct Stats {
     /// jsonl が規則の場所に無く、projects/*/ を探して見つけた数と、見つからなかった数
     pub jsonl_searched: usize,
     pub jsonl_missing: usize,
+    /// 同じ sessionId の記録が2つ以上あり、1行にまとめて落とした行の数（#331、sessions::merge_same_id）
+    pub dup_merged: usize,
     /// sub-agent の数（全部、出した数、畳んだ数、上限で落とした数、meta.json が無かった数）
     pub sub_total: usize,
     pub sub_shown: usize,
@@ -123,11 +125,13 @@ pub fn path_of(id: &str) -> Option<PathBuf> {
 /// 操作の命令で、このアプリが立てていないセッションを断るときの文
 pub const READ_ONLY: &str = "このセッションは Claude Town の外で起動したもので、Claude Code の記録から読んでいるだけなので、ここからは操作できない。起動した端末で操作して";
 
-/// 一覧を作る。生きているセッションと、その下の sub-agent とチームメイト
-pub fn list(root: &Path, now: u64) -> NativeList {
+/// 一覧を作る。生きているセッションと、その下の sub-agent とチームメイト。
+/// 同じ id の記録が2つ以上あれば1行にまとめる（#331）。app_pids は、このアプリが立てた端末の pid（まとめるときに残す行を決める）
+pub fn list(root: &Path, now: u64, app_pids: &std::collections::HashSet<u32>) -> NativeList {
     let t0 = std::time::Instant::now();
     let mut stats = Stats::default();
-    let live = sessions::live(root, &mut stats);
+    // sub-agent とチームメイトはセッションごとに読むので、まとめる前に読むと、それらの行も同じ id で2つになる
+    let live = sessions::merge_same_id(sessions::live(root, &mut stats), app_pids, &mut stats);
     let mut out = NativeList::default();
     // tmux のチームメイトは sessions/<pid>.json を作らない（2回の実測）。もし作る版が来たら、同じ id のセッションの行は
     // 親の分かるチームメイトの行で置き換える

@@ -237,7 +237,9 @@ fn letters_from(path: &std::path::Path, now: u128, tail: &mut Option<LetterTail>
 /// 町の一覧の行。Claude Code の記録から読んだセッション、sub-agent、チームメイトに、このアプリが立てた端末を重ねる。
 /// このアプリが立てたもので、まだ sessions/<pid>.json が無い（起動したばかり）ものは、台帳から仮の行を作る
 fn town_rows() -> Vec<Value> {
-    let n = native::list(&native::claude_home(), native::now_ms());
+    // 同じ id の記録が2つあるとき（#331）は、このアプリが立てた端末の行を残す
+    let app_pids: HashSet<u32> = pty::list().iter().map(|p| p.pid).collect();
+    let n = native::list(&native::claude_home(), native::now_ms(), &app_pids);
     let mut rows: Vec<Value> = n.sessions.into_iter().chain(n.subagents).collect();
     // /clear で id が変わっても同じ pid なら同じ端末。一覧で見えた id を台帳に足してから、どれがこのアプリのものかを決める
     pty::note_ids(&rows.iter().filter(|r| r["kind"] == "terminal").filter_map(|r| Some((r["id"].as_str()?.to_string(), r["pid"].as_u64()? as u32))).collect::<Vec<_>>());
@@ -575,8 +577,8 @@ fn print_paths() {
 /// 開発用の引数 --native-list。~/.claude（FC_CLAUDE_HOME）から一覧を2回作り、件数と時間だけを出す
 fn print_native_list() {
     let root = native::claude_home();
-    let first = native::list(&root, native::now_ms());
-    let second = native::list(&root, native::now_ms());
+    let first = native::list(&root, native::now_ms(), &HashSet::new());
+    let second = native::list(&root, native::now_ms(), &HashSet::new());
     let convs: Vec<Value> = first.sessions.iter().chain(first.subagents.iter()).filter_map(|r| {
         let p = PathBuf::from(r["native"]["jsonl"].as_str()?);
         let t = std::time::Instant::now();
@@ -1012,6 +1014,99 @@ mod tests {
         assert_eq!(d.items.len(), 1);
         assert_eq!(LAST_SOURCES.lock().unwrap().as_ref().unwrap()["app"], 0);
         native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+    }
+
+    #[test]
+    fn town_shows_one_row_for_two_processes_with_the_same_id() {
+        // #331: 同じセッションを2か所で開くと、sessions/ に同じ sessionId の記録が2つできる（#328）。
+        // 画面は id を鍵にしている（React の key、buildTree の byId、状態ファイル、avatars.json）ので、町の一覧では1行にまとめる
+        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _bin = pty::BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t0 = std::time::Instant::now();
+        while !pty::list().is_empty() && t0.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        use native::testtree::*;
+        let root = tmp("dup-id");
+        let a = "abababab-0000-4000-8000-0000000000ab";
+        let cwd = "/tmp/合成/dup";
+        // 生きている2つのプロセスが同じ id を名乗る。古いほうは待機、新しいほうは承認待ち
+        let mut old = std::process::Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        let mut new = std::process::Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        let rec = |pid: u32, started: u64, status: &str, updated: u64| {
+            write(&root.join(format!("sessions/{pid}.json")), &json!({ "pid": pid, "sessionId": a, "cwd": cwd, "startedAt": started,
+                "kind": "interactive", "status": status, "updatedAt": updated }).to_string());
+        };
+        rec(old.id(), 1_000, "idle", 2_000);
+        rec(new.id(), 3_000, "waiting", 4_000);
+        write(&root.join(format!("projects/{}/{a}.jsonl", enc(cwd))), "{\"type\":\"user\",\"message\":{\"content\":\"やって\"}}\n");
+        let sub = root.join(format!("projects/{}/{a}/subagents", enc(cwd)));
+        write(&sub.join("agent-y1.jsonl"), "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"見た\"}]}}\n");
+        write(&sub.join("agent-y1.meta.json"), &json!({ "agentType": "Explore", "description": "探す" }).to_string());
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        let agents = agents_from(town_rows());
+        let merged = LAST_SOURCES.lock().unwrap().as_ref().unwrap()["native"]["dup_merged"].clone();
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        let _ = (old.kill(), new.kill(), old.wait(), new.wait());
+        let ids: Vec<&str> = agents.iter().filter_map(|x| x["id"].as_str()).collect();
+        let y1 = native::subagents::sub_id("y1", a);
+        assert_eq!(ids.iter().filter(|i| **i == a).count(), 1, "セッションの行が1つ: {ids:?}");
+        assert_eq!(ids.iter().filter(|i| **i == y1).count(), 1, "sub-agent の行も1つ: {ids:?}");
+        let me = agents.iter().find(|x| x["id"] == a).unwrap();
+        // どれかが承認待ちなら承認待ち（#329 の通知と同じ）。開始は早いほう、最後の動きは遅いほう
+        assert_eq!(me["state"], "waiting_permission");
+        assert_eq!(me["startedAt"], 1_000);
+        assert_eq!(me["lastActivityAt"], 4_000);
+        // 外の2つでは、新しく開いたほうの行を残す（送信と停止もそちらに当てる）
+        assert_eq!(me["pid"], new.id());
+        assert_eq!(merged, 1, "まとめた数を数える");
+    }
+
+    #[test]
+    fn town_keeps_the_app_terminal_row_when_the_same_id_is_also_open_outside() {
+        // #328 の形: Claude Town の端末で開いているセッションを、外の端末でも `claude -r <id>` で開いた。
+        // 外のほうが新しくても、このアプリの端末の行（pid）を残す。操作（送信、承認、停止）は id で pty に当たるので、行もそれに合わせる
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _bin = pty::BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t0 = std::time::Instant::now();
+        while !pty::list().is_empty() && t0.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        use native::testtree::*;
+        let root = tmp("dup-app");
+        let bin = root.join("claude");
+        std::fs::write(&bin, "#!/bin/sh\nexec cat\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
+        let r = pty::spawn(root.to_str().unwrap(), None, &[], 80, 24, || {});
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+        let r = r.unwrap();
+        let a = r["id"].as_str().unwrap().to_string();
+        let app_pid = r["pid"].as_u64().unwrap() as u32;
+        let mut outside = std::process::Command::new("/bin/sleep").arg("60").spawn().unwrap();
+        let cwd = "/tmp/合成/dup-app";
+        let rec = |pid: u32, started: u64, status: &str| {
+            write(&root.join(format!("sessions/{pid}.json")), &json!({ "pid": pid, "sessionId": a, "cwd": cwd, "startedAt": started,
+                "kind": "interactive", "status": status, "updatedAt": started }).to_string());
+        };
+        rec(app_pid, 1_000, "idle");
+        rec(outside.id(), 3_000, "busy");
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        let agents = agents_from(town_rows());
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        let _ = (outside.kill(), outside.wait());
+        let _ = pty::kill(&a);
+        let t0 = std::time::Instant::now();
+        while pty::owns(&a) && t0.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let rows: Vec<&Value> = agents.iter().filter(|x| x["id"] == a.as_str()).collect();
+        assert_eq!(rows.len(), 1, "{agents:?}");
+        assert_eq!(rows[0]["pid"], app_pid);
+        assert_eq!(rows[0]["source"], "app");
+        assert_eq!(rows[0]["state"], "running", "外のほうが作業中なら作業中");
+        assert_eq!(rows[0]["startedAt"], 1_000);
     }
 
     /// hook（fc-report.py）が pid ごとに残した id の並び（ids/<pid>.json）で、/clear の前の id を引く（#266）。
