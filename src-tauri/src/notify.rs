@@ -19,26 +19,23 @@ use super::*;
 //
 // 出したかどうかはメモリにだけ持つ。~/.family-computing/ には書かない（安定版も読むファイルの形を変えない）。
 //
-// 通知は tauri-plugin-notification（macOS では notify-rust → mac-notification-sys の NSUserNotificationCenter）で出す。
-// - 音は sound に NSUserNotificationDefaultSoundName を渡すと既定の音になる（mac-notification-sys の objc/notify.m）。渡さなければ鳴らない
-// - 押した知らせは on_action に "tap" で来る（2.6.0 から）。show の時点で handler が登録済みのときだけ追跡するので、最初の通知より前に登録する。
-//   通知の extra に子のセッション ID を入れておくと、押した知らせの notification().extra() で読み戻せる（プラグインの desktop.rs の wait と performed）。
+// 通知は notify_mac.rs が NSUserNotificationCenter に直接出す（#330。前は tauri-plugin-notification → notify-rust → mac-notification-sys）。
+// - 音は soundName に NSUserNotificationDefaultSoundName を入れると既定の音になる。入れなければ鳴らない
+// - 通知の userInfo に子のセッション ID を入れておき、押されたら delegate（didActivateNotification）から読み戻す。
 //   押されたら窓を前に出し、画面へ OPEN_EVENT でセッション ID を送って、その子のチャットを開く（2026-11-23、本人が押して窓だけ開いたため）
-// - `bun tauri dev` の実行ファイル（tauri::is_dev()）では、通知は com.apple.Terminal の名義で出る（プラグインの desktop.rs）。
-//   2026-11-23 にこの機械の開発版で出すと、usernoted が要求を断った（「Denying message 3 from connection <LegacyConnection identifier:
-//   com.apple.Terminal>」）。ターミナルの通知を許可すれば出るかは確かめていない。開発版は FC_NOTIFY=1 のときだけ出す（wanted）
-// - アプリが最前面のときは、macOS が通知を出さないはず（mac-notification-sys の delegate に shouldPresentNotification が無い）。確かめていない
+// - 前の経路は、押した知らせを受けるために通知ごとのスレッドと 0.5 秒おきの deliveredNotifications の問い合わせを main の
+//   run loop に足し、残った通知の数だけ main スレッドが重くなった（#330）。delegate は1つだけで、問い合わせはしない
+// - 束の ID が無いプロセスでは通知センターが無く、出さずに記録だけ残す（notify_mac::center）。
+//   前の経路は、`bun tauri dev` の実行ファイルでは com.apple.Terminal の名義で出し、2026-11-23 にこの機械の usernoted に断られた
+//   （「Denying message 3 from connection <LegacyConnection identifier: com.apple.Terminal>」）。開発版は FC_NOTIFY=1 のときだけ出す（wanted）
+// - アプリが最前面のときは、macOS が通知を出さないはず（delegate に shouldPresentNotification を置いていない）。確かめていない
 
 /// 一覧から消えた子の記録を捨てるまでの、続けて見えなかった回数
 const FORGET_AFTER: u32 = 30;
 /// 通知の本文の長さの上限（文字）
 const BODY_MAX: usize = 120;
-/// 既定の通知の音（NSUserNotificationDefaultSoundName）
-const SOUND: &str = "NSUserNotificationDefaultSoundName";
 /// 押した通知の子のチャットを開く合図。画面（src/App.tsx）が受けて、その子を選びチャットを開く。中身はセッション ID
 pub(crate) const OPEN_EVENT: &str = "notify-open";
-/// 通知の extra に入れる、子のセッション ID の鍵
-const EXTRA_ID: &str = "sessionId";
 /// 見張り（watch.rs）が最後に一覧を渡してから、これより長く経ったら止まったとみなし、このスレッドが一覧を作る
 const WATCH_STALE: Duration = Duration::from_secs(12);
 
@@ -198,15 +195,21 @@ fn bring_front(app: &tauri::AppHandle) {
     }
 }
 
+/// 通知を出す。通知センターは main スレッドで触る
 fn show(app: &tauri::AppHandle, n: &Notice, via: &str) {
-    use tauri_plugin_notification::NotificationExt;
-    let mut b = app.notification().builder().title(&n.title).sound(SOUND).extra(EXTRA_ID, &n.id);
-    if !n.body.is_empty() {
-        b = b.body(&n.body);
-    }
-    let r = b.show();
     let kind = match n.wait { Wait::Approval => "approval", Wait::Reply => "reply" };
-    perf_log(json!({ "notify": kind, "id": n.id, "via": via, "ok": r.is_ok(), "err": r.err().map(|e| e.to_string()), "at": now_ms() as u64 }).to_string());
+    let (title, body, id, v) = (n.title.clone(), n.body.clone(), n.id.clone(), via.to_string());
+    let sent = app.run_on_main_thread(move || {
+        let r = crate::notify_mac::deliver(&title, &body, true, &id);
+        log_show(kind, &id, &v, r.map_err(String::from));
+    });
+    if let Err(e) = sent {
+        log_show(kind, &n.id, via, Err(e.to_string()));
+    }
+}
+
+fn log_show(kind: &str, id: &str, via: &str, r: Result<(), String>) {
+    perf_log(json!({ "notify": kind, "id": id, "via": via, "ok": r.is_ok(), "err": r.err(), "at": now_ms() as u64 }).to_string());
 }
 
 /// 通知を出すか。安定版はいつも出す。開発版は FC_NOTIFY=1 のときだけ出す。
@@ -215,20 +218,17 @@ fn wanted(app_id: &str, flag: Option<&str>) -> bool {
     app_id == STABLE_ID || flag == Some("1")
 }
 
-/// 押した通知の子のセッション ID（extra に入れた値）。押したのが通知そのもの（tap）でなければ None
-pub(crate) fn tapped_id(p: &tauri_plugin_notification::ActionPerformed) -> Option<String> {
-    if p.action_id() != "tap" {
-        return None;
-    }
-    p.notification()?.extra().get(EXTRA_ID)?.as_str().filter(|s| !s.is_empty()).map(String::from)
+/// 押した通知で開く子のセッション ID。通知そのものを押したときだけ。古い安定版が出した通知は ID が無い
+pub(crate) fn tapped_id(t: &crate::notify_mac::Tap) -> Option<&str> {
+    (t.kind == "contents").then_some(t.session_id.as_deref()).flatten()
 }
 
-/// 押された通知で窓を前に出し、その子のチャットを開く合図を画面に送る
-fn on_tap(app: &tauri::AppHandle, p: &tauri_plugin_notification::ActionPerformed) {
+/// 押された通知で窓を前に出し、その子のチャットを開く合図を画面に送る。delegate から main スレッドで呼ばれる
+fn on_tap(app: &tauri::AppHandle, t: &crate::notify_mac::Tap) {
     use tauri::Emitter;
     bring_front(app);
-    let id = tapped_id(p);
-    perf_log(json!({ "notifyAction": p.action_id(), "id": id, "at": now_ms() as u64 }).to_string());
+    let id = tapped_id(t);
+    perf_log(json!({ "notifyAction": t.kind, "id": id, "at": now_ms() as u64 }).to_string());
     if let Some(id) = id {
         let _ = app.emit(OPEN_EVENT, id);
     }
@@ -236,13 +236,13 @@ fn on_tap(app: &tauri::AppHandle, p: &tauri_plugin_notification::ActionPerformed
 
 /// アプリの setup で呼ぶ。押した通知で窓を前に出してその子のチャットを開く口を登録し、通知を出す口を入れ、隠れている間の見張りを始める
 pub(crate) fn start(app: &tauri::AppHandle) {
-    use tauri_plugin_notification::NotificationExt;
     if !wanted(&app.config().identifier, std::env::var("FC_NOTIFY").ok().as_deref()) {
         return;
     }
     let _ = STARTED_AT.set(now_ms() as u64);
     let h = app.clone();
-    let _ = app.notification().on_action(move |p| on_tap(&h, p));
+    let installed = crate::notify_mac::install(move |t| on_tap(&h, &t));
+    perf_log(json!({ "notifyInstall": installed, "at": now_ms() as u64 }).to_string());
     if APP.set(app.clone()).is_ok() {
         let _ = std::thread::Builder::new().name("mail-notify".into()).spawn(hidden_loop);
     }
@@ -399,13 +399,34 @@ mod tests {
 
     #[test]
     fn tap_carries_the_session_id() {
-        // プラグインが押した知らせとして渡す形（desktop.rs の performed: actionId と、show のときの通知の中身）
-        let performed = |action: &str, extra: Value| -> tauri_plugin_notification::ActionPerformed {
-            serde_json::from_value(json!({ "actionId": action, "inputValue": null, "notification": { "id": 1, "title": "t", "extra": extra } })).unwrap()
-        };
-        assert_eq!(tapped_id(&performed("tap", json!({ EXTRA_ID: "abc" }))).as_deref(), Some("abc"));
-        assert_eq!(tapped_id(&performed("tap", json!({}))), None);
-        assert_eq!(tapped_id(&performed("snooze", json!({ EXTRA_ID: "abc" }))), None);
+        use crate::notify_mac::{build, tap_of, Tap};
+        // 出す通知の userInfo に入れた ID を、押された知らせから読み戻せる
+        let n = build("題", "本文", true, "abc");
+        assert_eq!(tap_of(&n).session_id.as_deref(), Some("abc"));
+        // 通知そのものを押したときだけ、その子のチャットを開く
+        let tap = |kind, id: Option<&str>| Tap { kind, session_id: id.map(String::from) };
+        assert_eq!(tapped_id(&tap("contents", Some("abc"))), Some("abc"));
+        assert_eq!(tapped_id(&tap("contents", None)), None, "古い安定版が出した通知は窓を前に出すだけ");
+        assert_eq!(tapped_id(&tap("action", Some("abc"))), None);
+    }
+
+    #[test]
+    fn delegate_hands_the_tap_to_the_handler() {
+        // AppKit が押された通知で呼ぶ didActivateNotification から、handler（start では on_tap）に届く
+        let got: std::sync::Arc<Mutex<Vec<crate::notify_mac::Tap>>> = Default::default();
+        let g = got.clone();
+        crate::notify_mac::set_handler_for_test(move |t| g.lock().unwrap().push(t));
+        crate::notify_mac::activate_for_test(&crate::notify_mac::build("題", "", false, "xyz"));
+        let got = got.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].session_id.as_deref(), Some("xyz"));
+    }
+
+    #[test]
+    fn no_center_without_a_bundle() {
+        // 試験の実行ファイルは束の ID が無く、通知センターが無い。panic せず、出さずに Err を返す
+        assert!(crate::notify_mac::center().is_none());
+        assert!(crate::notify_mac::deliver("題", "本文", false, "abc").is_err());
     }
 
     #[test]

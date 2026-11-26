@@ -18,6 +18,7 @@ mod composer;
 mod dialog;
 mod naming;
 mod notify;
+mod notify_mac;
 mod places;
 mod pty;
 mod repo;
@@ -674,7 +675,6 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_notification::init())
         // メニューバー（#300）。Tauri の既定の英語のメニューの代わりに、日本語のメニューを組む（menu.rs）
         .menu(menu::build)
         .on_menu_event(|app, ev| menu::on_event(app, ev.id().as_ref()))
