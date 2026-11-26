@@ -89,10 +89,20 @@ pub(crate) fn step(seen: &mut Seen, agents: &[Value], started_at: u64) -> Vec<No
     let primed = std::mem::replace(&mut seen.primed, true);
     let mut out = vec![];
     let mut present = HashSet::new();
+    // 同じ id の行が複数ある（#328: 同じセッションを2か所で開いている）と、行ごとに記録を上書きして毎回出してしまう。
+    // id ごとに1つにまとめ、どれかの行が待ちなら、その子は待ち（最初に待っていた行を使う）
+    let mut rows: Vec<(&str, &Value, Option<Wait>)> = vec![];
     for a in agents {
         let Some(id) = a["id"].as_str() else { continue };
-        present.insert(id.to_string());
         let wait = wait_of(a);
+        match rows.iter_mut().find(|r| r.0 == id) {
+            Some(r) if r.2.is_none() => (r.1, r.2) = (a, wait),
+            Some(_) => {}
+            None => rows.push((id, a, wait)),
+        }
+    }
+    for (id, a, wait) in rows {
+        present.insert(id.to_string());
         let before = seen.ids.insert(id.to_string(), (wait.is_some(), 0)).map(|(w, _)| w);
         let Some(wait) = wait else { continue };
         if !primed || before == Some(true) {
@@ -316,6 +326,22 @@ mod tests {
         assert_eq!(step(&mut s, &[approval("a")], START).len(), 1);
         assert!(step(&mut s, &[working("a")], START).is_empty());
         assert_eq!(ids(&step(&mut s, &[reply("a", START + 9)], START)), vec![("a", Wait::Reply)], "作業を挟んで入り直したら出す");
+    }
+
+    #[test]
+    fn duplicate_id_rows_fire_once() {
+        // #328: 同じ id の行が2つあり、片方が待ち、片方が作業中。一覧を何回読んでも1回だけ出す
+        let mut s = Seen::default();
+        step(&mut s, &[working("a")], START);
+        let n = step(&mut s, &[reply("a", START + 5), working("a")], START);
+        assert_eq!(ids(&n), vec![("a", Wait::Reply)]);
+        for i in 0..5 {
+            assert!(step(&mut s, &[reply("a", START + 5), working("a")], START).is_empty(), "待ち→作業の順 {i}回目");
+            assert!(step(&mut s, &[working("a"), reply("a", START + 5)], START).is_empty(), "作業→待ちの順 {i}回目");
+        }
+        // 両方作業中になれば抜け、また待てば出す
+        assert!(step(&mut s, &[working("a"), working("a")], START).is_empty());
+        assert_eq!(step(&mut s, &[working("a"), approval("a")], START).len(), 1);
     }
 
     #[test]

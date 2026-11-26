@@ -495,18 +495,26 @@ pub fn hint_of(tool: &str, input: &Value) -> Option<Hint> {
 }
 
 /// 画面の本文（norm 済み）に、hint がどれだけ出ているか。(full の頭か後ろから続けて本文に出ている字数, full が全部出ているか)。
-/// head が出ていなければ None
-fn strength(h: &Hint, body: &str) -> Option<(usize, bool)> {
-    if !body.contains(&h.head) {
+/// head が出ていなければ None。ただし cut（承認の上が省かれて見出しが画面に無い）のときは、頭の代わりに full の後ろから比べる。
+/// 端末の高さを超える command は、承認の中で上が「↑ N more lines」と省かれ、見出しと command の1行目が画面に出ない（#319、2026-11-26、v2.1.332 で見た）
+fn strength(h: &Hint, body: &str, cut: bool) -> Option<(usize, bool)> {
+    // 頭が画面に無いのを、上が省かれたせいとみなすのは、頭から比べる道具（Bash など）だけ
+    let headless = cut && !h.tail && !body.contains(&h.head);
+    if !headless && !body.contains(&h.head) {
         return None;
     }
+    let from_end = h.tail || headless;
     let cs: Vec<char> = h.full.chars().collect();
-    let piece = |k: usize| -> String { if h.tail { cs[cs.len() - k..].iter().collect() } else { cs[..k].iter().collect() } };
+    let piece = |k: usize| -> String { if from_end { cs[cs.len() - k..].iter().collect() } else { cs[..k].iter().collect() } };
     // 頭（後ろ）から k 字が出ていれば、それより短いものも出ているので、二分探索で一番長い k を探す
     let (mut lo, mut hi) = (0, cs.len());
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
         if body.contains(&piece(mid)) { lo = mid } else { hi = mid - 1 }
+    }
+    // 頭の代わりに、後ろから続けて30字（短い command は全部）が画面に出ていることを求める
+    if headless && lo < cs.len().min(30) {
+        return None;
     }
     Some((lo, lo == cs.len()))
 }
@@ -631,12 +639,14 @@ pub fn match_tool(d: &Dialog, hook: &[HookItem], open: &[Tool]) -> Result<(Tool,
                 _ => (None, &lines[..]),
             };
             let b = norm(&area.join("\n"));
+            // 本文の1行目が command の行（行頭の「│」）なら、承認の上が省かれて見出しが画面に無い
+            let cut = body.lines().map(str::trim).find(|l| !l.is_empty()).is_some_and(|l| l.starts_with('│'));
             // cands の n_hook 番目からが transcript の分
             struct Scored<'a> { c: &'a (Tool, bool), st: (usize, bool), full: String, open: bool }
             let scored: Vec<Scored> = cands.iter().enumerate()
                 .filter(|(_, (t, _))| !matches!(t.1.as_str(), "AskUserQuestion" | "ExitPlanMode" | "Agent" | "Task"))
                 .filter(|(_, (t, _))| only.is_none_or(|o| o.contains(&t.1.as_str())))
-                .filter_map(|(i, c)| hint_of(&c.0 .1, &c.0 .2).and_then(|h| strength(&h, &b).map(|st| Scored { c, st, full: h.full, open: i >= n_hook })))
+                .filter_map(|(i, c)| hint_of(&c.0 .1, &c.0 .2).and_then(|h| strength(&h, &b, cut).map(|st| Scored { c, st, full: h.full, open: i >= n_hook })))
                 .collect();
             let best = scored.iter().map(|x| x.st).max();
             let top_all: Vec<&Scored> = scored.iter().filter(|x| Some(x.st) == best).collect();
@@ -1363,6 +1373,32 @@ mod tests {
         assert!(match_tool(&parse(&bash_screen(rm)).unwrap(), &hook, &[]).is_err());
     }
 
+    /// 端末の高さを超える Bash の承認。上が「↑ 32 more lines」と省かれ、見出しと command の1行目が画面に無い
+    /// （2026-11-26、v2.1.332 の本物の claude を pty::spawn の 140x45 で動かして書き出した。real_claude_answers_a_long_command）
+    const BASH_CUT_TOP: &str = include_str!("dialog_fixtures/bash_long_cut_top.txt");
+
+    #[test]
+    fn long_command_with_the_top_cut_matches_by_its_end() {
+        let body: String = (1..=60).map(|i| format!("line {i:02} of the long probe\n")).collect();
+        let long = format!("cat > long.txt <<'EOF'\n{body}EOF\necho mate-probe");
+        let d = parse(BASH_CUT_TOP).expect("承認の画面として読める");
+        // 直す前は「待っている道具と合わない」になった
+        let (t, kind) = match_tool(&d, &[hk("Bash", json!({ "command": long }), None, 5)], &[]).unwrap();
+        assert_eq!((t.0.as_str(), kind), ("hook:5", "tool"));
+        // 画面に全部出ている短い古い記録より、後ろから長く合う記録を取る
+        let old = hk("Bash", json!({ "command": "echo mate-probe" }), None, 9);
+        assert_eq!(match_tool(&d, &[hk("Bash", json!({ "command": long }), None, 5), old.clone()], &[]).unwrap().0.0, "hook:5");
+        // 終わりの違う長い command は合わない
+        let other = long.replace("echo mate-probe", "echo other");
+        assert!(match_tool(&d, &[hk("Bash", json!({ "command": other }), None, 5)], &[]).is_err());
+        // 終わりは同じで、途中の違う長い command は、画面に出ている長さで負ける
+        let mid = long.replace("line 40 of", "line 4O of");
+        assert_eq!(match_tool(&d, &[hk("Bash", json!({ "command": mid }), None, 5), hk("Bash", json!({ "command": long }), None, 6)], &[]).unwrap().0.0, "hook:6");
+        // 見出しが見えている画面では、今まで通り頭で比べる（後ろだけ合う記録は使わない）
+        let tail_only = "cd /elsewhere && echo probe-ok > probe2.txt";
+        assert!(match_tool(&parse(BASH).unwrap(), &[hk("Bash", json!({ "command": tail_only }), None, 5)], &[]).is_err());
+    }
+
     fn hk(tool: &str, input: Value, agent: Option<&str>, at: u64) -> HookItem {
         HookItem { tool_name: tool.into(), tool_input: input, agent_id: agent.map(Into::into), at, agent_name: None }
     }
@@ -1595,6 +1631,53 @@ mod tests {
         eprintln!("deny: {:?}", answer(&now_id(), p["requestId"].as_str().unwrap(), &Act::Deny { reason: None }));
         until(20, "承認の結果", &|| std::fs::read_dir(&proj).unwrap().filter_map(|e| e.ok())
             .any(|e| std::fs::read_to_string(e.path()).is_ok_and(|t| t.contains(&id) && t.contains("User has approved your plan"))));
+        crate::pty::kill(&id).unwrap();
+    }
+
+    /// 端末の高さを超える長い Bash の承認に答える（#319）。準備は real_claude_answers_through_the_pty と同じで、
+    /// FC_E2E_DIR/.claude/settings.json に、command に mate-probe を含む Bash へ ask を返す PreToolUse の hook を書いておく。
+    /// FC_LONG_SCREEN を渡すと、承認の画面をそのファイルに書く
+    #[test]
+    #[ignore]
+    fn real_claude_answers_a_long_command() {
+        let dir = std::env::var("FC_E2E_DIR").expect("FC_E2E_DIR");
+        let _ = std::fs::remove_file(format!("{dir}/long.txt"));
+        let r = crate::pty::spawn(&dir, None, &[], 140, 45, || {}).unwrap();
+        let id = r["id"].as_str().unwrap().to_string();
+        let screen = || crate::pty::screen_text(&id).unwrap_or_default();
+        let until = |sec: u64, what: &str, f: &dyn Fn() -> bool| {
+            let t0 = Instant::now();
+            while !f() {
+                assert!(t0.elapsed() < Duration::from_secs(sec), "{what} が {sec} 秒で来なかった。画面:\n{}", screen());
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        };
+        until(30, "入力欄", &|| screen().contains("? for shortcuts") || screen().contains("mode on"));
+        std::thread::sleep(Duration::from_secs(2));
+        let body: String = (1..=60).map(|i| format!("line {i:02} of the long probe\n")).collect();
+        let cmd = format!("cat > long.txt <<'EOF'\n{body}EOF\necho mate-probe");
+        let t = format!("Run this bash command exactly as written, in one Bash call, without changing it:\n\n{cmd}");
+        crate::pty::write(&id, &format!("\x1b[200~{t}\x1b[201~")).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        crate::pty::write(&id, "\r").unwrap();
+        until(120, "承認の画面", &|| waiting(&id) && parse(&screen()).is_some());
+        std::thread::sleep(Duration::from_secs(1));
+        if let Ok(f) = std::env::var("FC_LONG_SCREEN") {
+            std::fs::write(f, screen()).unwrap();
+        }
+        let t0 = Instant::now();
+        let p = loop {
+            let d = detail(&id);
+            if d["pending"][0]["kind"] == "tool" {
+                break d["pending"][0].clone();
+            }
+            assert!(t0.elapsed() < Duration::from_secs(10), "承認の欄に出ない: detail={d}\n画面:\n{}", screen());
+            std::thread::sleep(Duration::from_millis(300));
+        };
+        assert!(p["input"]["command"].as_str().unwrap().contains("line 60 of the long probe"), "{p}");
+        let yes = p["options"].as_array().unwrap().iter().find(|r| r["label"] == "Yes").unwrap().clone();
+        eprintln!("allow: {:?}", answer(&id, p["requestId"].as_str().unwrap(), &Act::Option { n: yes["n"].as_u64().unwrap() as u32, label: "Yes".into() }));
+        until(60, "Bash の結果", &|| std::fs::read_to_string(format!("{dir}/long.txt")).is_ok_and(|s| s.contains("line 60")));
         crate::pty::kill(&id).unwrap();
     }
 

@@ -1,0 +1,45 @@
+ │ line 28 of the long probe
+ │ line 29 of the long probe
+ │ line 30 of the long probe
+ │ line 31 of the long probe
+ │ line 32 of the long probe
+ │ line 33 of the long probe
+ │ line 34 of the long probe
+ │ line 35 of the long probe
+ │ line 36 of the long probe
+ │ line 37 of the long probe
+ │ line 38 of the long probe
+ │ line 39 of the long probe
+ │ line 40 of the long probe
+ │ line 41 of the long probe
+ │ line 42 of the long probe
+ │ line 43 of the long probe
+ │ line 44 of the long probe
+ │ line 45 of the long probe
+ │ line 46 of the long probe
+ │ line 47 of the long probe
+ │ line 48 of the long probe
+ │ line 49 of the long probe
+ │ line 50 of the long probe
+ │ line 51 of the long probe
+ │ line 52 of the long probe
+ │ line 53 of the long probe
+ │ line 54 of the long probe
+ │ line 55 of the long probe
+ │ line 56 of the long probe
+ │ line 57 of the long probe
+ │ line 58 of the long probe
+ │ line 59 of the long probe
+ │ line 60 of the long probe
+ │ EOF
+ │ echo mate-probe
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ │ Hook PreToolUse:Bash requires confirmation for this command:
+ │ probe: 本人が確認すること [settings]
+ settings.json to update hooks
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+ ↑ 32 more lines 
+ Esc to cancel · Tab to amend

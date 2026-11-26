@@ -27,6 +27,9 @@
 #   CT_BUILD_WORKTREE  ビルド用の一時 worktree（既定 $HOME/.cache/claude-town/stable-worktree）
 #   CT_TARGET_DIR   Rust のビルド結果の置き場（既定 $HOME/.cache/claude-town/stable-target）
 #   CT_NO_OPEN=1    最後に起動しない
+#   CT_REPO         タグを打ち、ビルドするリポジトリ（既定はこのスクリプトのあるリポジトリ）。
+#                   設定の「更新して再起動」は、origin/main のこのスクリプトを一時の場所に取り出して走らせ、
+#                   本体の checkout をここで渡す（#299）。この口を外すと、ボタンからの更新が止まる
 #
 # 署名（#188）:
 #   CT_SIGN_IDENTITY  コード署名に使う証明書の名前（security find-identity -p codesigning に出る名前）。
@@ -55,7 +58,7 @@ STABLE_CONF_PATH="src-tauri/tauri.stable.conf.json"
 ref="${1:-}"
 [ -n "$ref" ] || { echo "使い方: $0 <ref>" >&2; exit 2; }
 
-repo="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+repo="$(git -C "${CT_REPO:-$SCRIPT_DIR}" rev-parse --show-toplevel)"
 sha="$(git -C "$repo" rev-parse --verify --quiet "$ref^{commit}")" || { echo "ref が見つからない: $ref" >&2; exit 1; }
 check_ref_fresh "$repo" "$ref" || exit 1
 git -C "$repo" cat-file -e "$sha:$STABLE_CONF_PATH" 2>/dev/null \
