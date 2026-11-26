@@ -33,7 +33,7 @@ pub const KEY_ID: &str = "sessionId";
 /// 押された通知
 #[derive(Debug, PartialEq, Eq)]
 pub struct Tap {
-    /// 押し方（contents は通知そのものを押した）。記録に残す
+    /// 押し方（tap は通知そのものを押した。前のプラグインの action_id と同じ名前）。記録に残す
     pub kind: &'static str,
     /// 通知に入れた子のセッション ID。古い安定版が出した通知（userInfo が無い）では None
     pub session_id: Option<String>,
@@ -78,7 +78,7 @@ impl TapDelegate {
 /// 押された通知の中身。押し方と、userInfo の子のセッション ID
 pub fn tap_of(n: &NSUserNotification) -> Tap {
     let kind = match n.activationType() {
-        NSUserNotificationActivationType::ContentsClicked => "contents",
+        NSUserNotificationActivationType::ContentsClicked => "tap",
         NSUserNotificationActivationType::ActionButtonClicked => "action",
         NSUserNotificationActivationType::Replied => "replied",
         NSUserNotificationActivationType::AdditionalActionClicked => "additional",

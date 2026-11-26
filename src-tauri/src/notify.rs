@@ -220,7 +220,7 @@ fn wanted(app_id: &str, flag: Option<&str>) -> bool {
 
 /// 押した通知で開く子のセッション ID。通知そのものを押したときだけ。古い安定版が出した通知は ID が無い
 pub(crate) fn tapped_id(t: &crate::notify_mac::Tap) -> Option<&str> {
-    (t.kind == "contents").then_some(t.session_id.as_deref()).flatten()
+    (t.kind == "tap").then_some(t.session_id.as_deref()).flatten()
 }
 
 /// 押された通知で窓を前に出し、その子のチャットを開く合図を画面に送る。delegate から main スレッドで呼ばれる
@@ -405,8 +405,8 @@ mod tests {
         assert_eq!(tap_of(&n).session_id.as_deref(), Some("abc"));
         // 通知そのものを押したときだけ、その子のチャットを開く
         let tap = |kind, id: Option<&str>| Tap { kind, session_id: id.map(String::from) };
-        assert_eq!(tapped_id(&tap("contents", Some("abc"))), Some("abc"));
-        assert_eq!(tapped_id(&tap("contents", None)), None, "古い安定版が出した通知は窓を前に出すだけ");
+        assert_eq!(tapped_id(&tap("tap", Some("abc"))), Some("abc"));
+        assert_eq!(tapped_id(&tap("tap", None)), None, "古い安定版が出した通知は窓を前に出すだけ");
         assert_eq!(tapped_id(&tap("action", Some("abc"))), None);
     }
 
