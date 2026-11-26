@@ -27,6 +27,18 @@ import { canAnswerPermission, hasTerminal } from "../abilities";
 
 const NO_NOTES: PendingItem[] = [];
 
+/**
+ * 会話の欄を一番下へ送る。承認の欄（質問、計画、道具の承認）が欄の高さより大きいときは、承認の欄の先頭を欄の上端に合わせる。
+ * 一番下に合わせると見出しと1問目が上に切れて、何を聞かれているかが見えないため（#311）。
+ * 先頭に合わせるのは、承認の欄の先頭がまだ上へ流れていないときだけにする。下の答えるボタンまで送ったあとに欄の高さが変わっても、先頭へ引き戻さない
+ */
+function toEnd(el: HTMLElement | null) {
+  if (!el) return;
+  const card = el.querySelector<HTMLElement>(":scope > .approval");
+  const top = card ? card.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - parseFloat(getComputedStyle(el).paddingTop) : 0;
+  el.scrollTop = card && card.offsetHeight > el.clientHeight && top >= el.scrollTop - 1 ? top : el.scrollHeight;
+}
+
 export function Panel({ agent, lineage, termReq, chatReq, composeReq, stateReq = 0, helpReq = 0, sendHook, onSent, onSent2, onError, needs, onSelect, mobile, onBack, onClose }: {
   /** スマホ専用の画面（src/mobile）。見出しを戻るつきの1行にし、細かいボタンは出さない */
   mobile?: boolean; onBack?: () => void;
@@ -150,7 +162,7 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, stateReq =
   useEffect(() => {
     const vv = window.visualViewport;
     if (!mobile || !vv) return;
-    const on = () => { const el = scroller.current; if (el && stick.current) el.scrollTop = el.scrollHeight; };
+    const on = () => { if (stick.current) toEnd(scroller.current); };
     vv.addEventListener("resize", on);
     return () => vv.removeEventListener("resize", on);
   }, [mobile]);
@@ -158,12 +170,27 @@ export function Panel({ agent, lineage, termReq, chatReq, composeReq, stateReq =
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el || !stick.current) return;
-    el.scrollTop = el.scrollHeight;
+    toEnd(el);
     // 吹き出しの高さが描画のあとに決まる分（Markdown など）を拾う
-    const raf = requestAnimationFrame(() => { if (stick.current) el.scrollTop = el.scrollHeight; });
+    const raf = requestAnimationFrame(() => { if (stick.current) toEnd(el); });
     return () => cancelAnimationFrame(raf);
     // 印が出て余白が付くと中身が伸びるので、一番下にいたら送り直す（開いたまま切れたとき、items は変わらない）
   }, [items, pending, id, tab, chatReq, hasNote, live, working, boot.queued.length]);
+
+  // 承認の欄の高さが後から変わったとき（#311）も、一番下にいたら送り直す。上の effect は会話や状態が変わったときしか動かない。
+  // 承認の欄は「承認の中身を読んでいる…」の1行で出て、session_detail が返ると質問の欄の高さに伸びるので、伸びた分が入力欄の裏に隠れていた。
+  // 高さが変わってもスクロールのイベントは出ないので、stick は一番下にいたときの値のまま残る。
+  // 見るのは承認の欄だけにする。道具の行を開くなど、本人が自分で高さを変えたときに下へ送ると、押した行が上へ流れるため
+  useEffect(() => {
+    const el = scroller.current;
+    if (tab !== "talk" || !el) return;
+    const ro = new ResizeObserver(() => { if (stick.current) toEnd(el); });
+    const watch = () => { ro.disconnect(); const c = el.querySelector(":scope > .approval"); if (c) ro.observe(c); };
+    watch();
+    const mo = new MutationObserver(watch);
+    mo.observe(el, { childList: true });
+    return () => { ro.disconnect(); mo.disconnect(); };
+  }, [id, tab]);
 
   if (!agent) {
     quickSend.current = null;

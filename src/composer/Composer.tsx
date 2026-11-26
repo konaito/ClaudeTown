@@ -7,7 +7,7 @@ import { SendHorizontal, Square } from "lucide-react";
 import { ICON, STROKE } from "../icons";
 import type { Agent } from "../model";
 import { usePaste, REMOTE_FILES } from "./usePaste";
-import { useCompletion } from "./useCompletion";
+import { skills, useCompletion } from "./useCompletion";
 import { useHistory } from "./useHistory";
 import { useHistorySearch } from "./useHistorySearch";
 import { routeOf } from "./route";
@@ -90,6 +90,8 @@ export function Composer({ agent, text, setText, busy, running, booting = false,
     if (!body.trim() || busy || !agent.canSend) return;
     const ok = await onSubmit(body);
     if (ok) { remember(body); histSt.current = { index: -1, draft: "" }; setHelp(false); setTimeout(loadHistory, 1500); }
+    // /reload-skills はセッションの claude に届けたうえで、こちらの / の候補も読み直す（#315）
+    if (ok && local && agent.cwd && /^\/reload-skills(\s|$)/.test(body.trim())) void skills.refresh(agent.cwd);
   };
 
   const { search, startSearch, searchMatch, runSearch, endSearch, onSearchKey } = useHistorySearch({ searchList, text, ta, replaceAll, submit, loadAll });
@@ -246,6 +248,8 @@ export function Composer({ agent, text, setText, busy, running, booting = false,
     const ctrl = e.ctrlKey && !e.metaKey && !e.altKey;
     const alt = e.altKey && !e.ctrlKey && !e.metaKey;
     const plain = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+    // 押しっぱなしの繰り返しの Enter では送らない（#304）。1回の押下で同じ文が続けて送られるのを防ぐ
+    if (k === "Enter" && e.repeat) { e.preventDefault(); return; }
     const key: Key = { e, k, ctrl, alt, plain, stop: () => e.preventDefault() };
     if (k !== "Escape") lastEsc.current = 0;
     if (!(ctrl && k === "y") && !(alt && e.code === "KeyY")) yank.current = null;

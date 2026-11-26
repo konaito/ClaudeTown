@@ -121,7 +121,7 @@ export function SettingsDialog({ place, defaults, onSave, onClose, onUpdateStatu
         {upd && (
           <section className="set-sec set-update" ref={updBox}>
             <span className="set-label">更新</span>
-            <p className="hint">押すと {upd.branch} を fetch して、scripts/release-stable.sh {upd.branch} を走らせる。ビルドに数分かかり、済むとアプリが終わって新しい版で起動し直す。開いていた端末は、起動し直した後に立て直す。</p>
+            <p className="hint">押すと {upd.branch} を fetch して、{upd.branch} の scripts/release-stable.sh を走らせる。ビルドに数分かかり、済むとアプリが終わって新しい版で起動し直す。開いていた端末は、起動し直した後に立て直す。</p>
             <div className="set-row">
               <div className="set-pair">
                 <span className="set-sub">今の版</span>

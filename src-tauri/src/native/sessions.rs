@@ -41,7 +41,7 @@ impl Session {
             "startedAt": self.started_at,
             "lastActivityAt": self.updated_at,
             "parent": self.parent_raw,
-            "capabilities": super::caps_with_send(self.socket.is_some()),
+            "capabilities": super::outside_caps(self.socket.is_some()),
             "title": self.title,
             "native": { "jsonl": self.jsonl, "kind": self.kind, "socket": self.socket },
         })
@@ -290,6 +290,41 @@ pub fn live_pid_of(root: &Path, id: &str) -> Option<u32> {
     cands.iter().zip(ok).find(|(_, a)| *a).map(|(c, _)| c.0)
 }
 
+/// id を名乗っている claude の pid のうち、記録の起動時刻（procStart）が今のプロセスと一致するもの。止める前の確かめに使う（#309）。
+/// live_pid_of と違い、起動時刻を比べられない記録は選ばない。pid が別のプロセスに使い回されていても見分けられないので、信号を送らない
+pub fn verified_pid_of(root: &Path, id: &str) -> Option<u32> {
+    let cands: Vec<(u32, String)> = fs::read_dir(root.join("sessions")).ok()?.flatten().filter_map(|e| {
+        let v: Value = serde_json::from_str(&fs::read_to_string(e.path()).ok()?).ok()?;
+        (v["sessionId"].as_str() == Some(id)).then_some(())?;
+        Some((v["pid"].as_u64()? as u32, proc_start_of(&v)?))
+    }).collect();
+    let now = ps_lstart(&cands.iter().map(|c| c.0).collect::<Vec<_>>());
+    cands.into_iter().find(|(pid, want)| now.get(pid) == Some(want)).map(|c| c.0)
+}
+
+/// SIGHUP を送ってから、終わっていなければ SIGKILL を送るまで待つ長さ。
+/// Claude Town の外で起動した claude は、SIGHUP から 1.69 秒で終わった（2026-11-26 の実測、#309）
+const HANGUP_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Claude Town の外で起動したセッションを止める（#309）。claude の pid に SIGHUP を送る。このアプリが立てた端末と同じ止め方（pty::kill）。
+/// 受信ソケットに /exit を送っても、ただの文として届くので使わない（composer.rs の socket_refusal）。
+/// HANGUP_WAIT たっても同じプロセスが残っていれば SIGKILL を送る。どちらも送る直前に起動時刻を確かめる。返すのは止めた pid
+pub fn hangup(root: &Path, id: &str) -> Result<u32, String> {
+    let pid = verified_pid_of(root, id).ok_or("止める claude が見つからなかった（もう終わったか、記録の起動時刻が今のプロセスと合わない）")?;
+    if unsafe { libc::kill(pid as i32, libc::SIGHUP) } != 0 {
+        return Err(format!("止められなかった: {}", std::io::Error::last_os_error()));
+    }
+    let (root, id) = (root.to_path_buf(), id.to_string());
+    std::thread::spawn(move || {
+        std::thread::sleep(HANGUP_WAIT);
+        if verified_pid_of(&root, &id) == Some(pid) {
+            eprintln!("[native] SIGHUP で終わらなかったので SIGKILL を送る pid {pid}");
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+    });
+    Ok(pid)
+}
+
 /// id を名乗るプロセスが消えるのを、limit まで待つ。消えた（もともと無い）なら true。
 /// アプリを入れ替えた直後は、前のアプリの claude が SIGHUP を受けてから終わるまでに1秒ほどかかる（2026-11-22 の実測で 1.27 秒）。
 /// その間に立て直しを判定すると「よそで動いている」と見て外してしまうので、起動のときの立て直しはここで待ってから判定する
@@ -398,6 +433,72 @@ pub fn live(root: &Path, stats: &mut Stats) -> Vec<Session> {
 mod tests {
     use super::*;
     use crate::native::testtree::*;
+
+    /// HUP を受けたら dir/hup を書いて終わる代役（#309）。dir/ready が書かれるまで待ってから返す
+    fn hup_stub(dir: &Path) -> std::process::Child {
+        let d = dir.display();
+        let child = std::process::Command::new("/bin/sh").arg("-c")
+            .arg(format!("trap 'echo hup > {d}/hup; exit 0' HUP; echo ready > {d}/ready; while :; do sleep 0.1; done"))
+            .spawn().unwrap();
+        let t0 = std::time::Instant::now();
+        while !dir.join("ready").exists() {
+            assert!(t0.elapsed() < std::time::Duration::from_secs(5), "代役が起動しなかった");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        child
+    }
+
+    /// 代役の pid で sessions/<pid>.json を書く。proc_start が None なら procStart を書かない
+    fn record_stub(root: &Path, pid: u32, id: &str, proc_start: Option<&str>) {
+        let mut v = json!({ "pid": pid, "sessionId": id, "cwd": "/tmp/合成", "startedAt": 1_000u64, "kind": "interactive", "status": "idle" });
+        if let Some(s) = proc_start {
+            v["procStart"] = json!(s);
+        }
+        write(&root.join(format!("sessions/{pid}.json")), &v.to_string());
+    }
+
+    /// 代役が limit までに終わったか
+    fn exits_within(child: &mut std::process::Child, limit: std::time::Duration) -> bool {
+        let t0 = std::time::Instant::now();
+        while t0.elapsed() < limit {
+            if child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn hangup_sends_sighup_to_the_recorded_claude() {
+        // 記録の起動時刻が今のプロセスと合えば、SIGHUP を送って止める（#309）
+        let root = tmp("hangup-ok");
+        let mut child = hup_stub(&root);
+        let pid = child.id();
+        let start = ps_lstart(&[pid]).remove(&pid).expect("ps で起動時刻が取れる");
+        let id = "eeeeeeee-0000-4000-8000-00000000000e";
+        record_stub(&root, pid, id, Some(&start));
+        assert_eq!(hangup(&root, id), Ok(pid));
+        assert!(exits_within(&mut child, std::time::Duration::from_secs(3)), "SIGHUP で終わらなかった");
+        assert!(root.join("hup").exists(), "SIGHUP が届かなかった");
+    }
+
+    #[test]
+    fn hangup_refuses_when_the_start_time_does_not_match() {
+        // pid が別のプロセスに使い回された記録（起動時刻が合わない）と、起動時刻の無い記録には信号を送らない（#309）
+        for (name, start) in [("hangup-reused", Some("Mon Jan 1 00:00:00 2001")), ("hangup-nostart", None)] {
+            let root = tmp(name);
+            let mut child = hup_stub(&root);
+            let pid = child.id();
+            let id = "ffffffff-0000-4000-8000-00000000000f";
+            record_stub(&root, pid, id, start);
+            assert!(hangup(&root, id).is_err(), "{name}: 断らなかった");
+            let ended = exits_within(&mut child, std::time::Duration::from_millis(500));
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(!ended && !root.join("hup").exists(), "{name}: 信号が届いた");
+        }
+    }
 
     #[test]
     fn project_dir_name_replaces_every_non_alnum() {

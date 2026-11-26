@@ -26,7 +26,7 @@
 .fc-bubble {
   position: absolute; left: var(--fc-bx); top: 0; box-sizing: border-box; isolation: isolate;
   width: var(--fc-bub); height: var(--fc-bub); border-radius: 50%;
-  background: #fff; border: 1.5px solid #d4d4d4; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  background: var(--bg); border: 1.5px solid var(--bubble-line); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
   display: flex; align-items: center; justify-content: center;
 }
 .fc-bubble img { display: block; width: var(--fc-emo); height: var(--fc-emo); }
@@ -34,7 +34,7 @@
   content: ""; position: absolute; z-index: -1;
   left: calc(var(--fc-bub) * 0.08); bottom: calc(var(--fc-bub) * -0.06);
   width: calc(var(--fc-bub) * 0.22); height: calc(var(--fc-bub) * 0.22);
-  background: #fff; border-left: 1.5px solid #d4d4d4; border-bottom: 1.5px solid #d4d4d4;
+  background: var(--bg); border-left: 1.5px solid var(--bubble-line); border-bottom: 1.5px solid var(--bubble-line);
   transform: skewY(-25deg) rotate(-10deg);
 }
 

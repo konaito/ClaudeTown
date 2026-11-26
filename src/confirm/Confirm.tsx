@@ -33,14 +33,14 @@ export function Confirm({ title, ok, danger, single, onCancel, onConfirm, childr
   );
 }
 
-/** 閉じる前の確認。人数は killPlan で数える（#183）。sub-agent と in-process のチームメイトは親と一緒に終わる分として数え、外で起動した分は数えない */
+/** 閉じる前の確認。人数は killPlan で数える（#183）。sub-agent と in-process のチームメイトは親と一緒に終わる分として数え、ここから止められない分（tmux のチームメイトなど）は数えない */
 export function KillConfirm({ agent, plan, onCancel, onConfirm }: { agent: Agent; plan: KillPlan; onCancel: () => void; onConfirm: () => void }) {
   const descendants = plan.descendants;
   // 止める子孫の数を引いた残りが、親と一緒に終わる sub-agent とチームメイト
   const riding = descendants - (plan.stop.length - 1);
   return (
     <Confirm title={`${agent.name}${descendants ? ` と子孫 ${descendants} 人` : ""}を閉じる？`} ok="閉じる" danger onCancel={onCancel} onConfirm={onConfirm}>
-      このアプリが立てた claude を止める。{plan.stop.length > 1 ? "子孫は孫から順に止める。" : ""}{riding > 0 ? "sub-agent とチームメイトは親と一緒に終わる。" : ""}Claude Town の外で起動したセッションと、止まらなかった分は画面に残る。⌘ を押しながら閉じるボタン（<Power className="inline-icon" size={ICON.sm} strokeWidth={STROKE} aria-label="閉じる" />）を押すと、確認なしで閉じる。
+      claude を止める。Claude Town の外で起動したものは、起動した端末がシェルに戻る。{plan.stop.length > 1 ? "子孫は孫から順に止める。" : ""}{riding > 0 ? "sub-agent とチームメイトは親と一緒に終わる。" : ""}tmux のチームメイトと、止まらなかった分は画面に残る。⌘ を押しながら閉じるボタン（<Power className="inline-icon" size={ICON.sm} strokeWidth={STROKE} aria-label="閉じる" />）を押すと、確認なしで閉じる。
     </Confirm>
   );
 }

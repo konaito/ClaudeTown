@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CircleQuestionMark, ClipboardList, Hand } from "lucide-react";
+import { Check, CircleQuestionMark, ClipboardList, Hand } from "lucide-react";
 import { ICON, STROKE } from "../icons";
 import { call as invoke } from "../bridge";
 import { pollWhileVisible } from "../visible";
@@ -19,6 +19,10 @@ import { isDenyRow, isReviseRow, planLabel, ptyPicks, toolLabel, type ScreenRow 
 type PendingReq = {
   requestId: string; toolName: string; input: Record<string, unknown>; suggestions?: unknown;
   options?: ScreenRow[]; screenPlan?: string; blocked?: string | null; kind?: string;
+  /** チームメイトの承認がリードの端末に出たときの、依頼元のチームメイトの名前（#317） */
+  agentName?: string | null;
+  /** PreToolUse の hook が ask を返したときの、画面に出た hook の理由 */
+  hookNote?: string | null;
 };
 /** PTY のセッションで Rust に渡す答え（dialog.rs の Act） */
 type Act = { type: "option"; n: number; label: string } | { type: "deny"; reason?: string } | { type: "revise"; note: string } | { type: "ask"; picks: { picked: number[]; other: string }[] };
@@ -73,7 +77,10 @@ export function Approval({ agent, planHint, onDone, onError, onTerm }: {
   // PTY のセッションは Rust が画面から種類を決める（本文の無い ExitPlanMode の「Exit plan mode?」は道具の承認と同じ形）
   const kind = p?.kind === "ask" || p?.kind === "plan" || p?.kind === "tool" ? p.kind
     : p?.toolName === "AskUserQuestion" ? "ask" : p?.toolName === "ExitPlanMode" ? "plan" : "tool";
-  const title = kind === "ask" ? `${agent.name} が質問している` : kind === "plan" ? `${agent.name} が計画の確認を待っている` : `${agent.name} が承認を待っている`;
+  // チームメイトの承認は、リードの端末に出てリードの欄で答える。題には依頼元のチームメイトの名前を出す
+  const mate = p?.agentName || null;
+  const title = kind === "ask" ? `${agent.name} が質問している` : kind === "plan" ? `${agent.name} が計画の確認を待っている`
+    : mate ? `チームメイトの ${mate} が承認を待っている` : `${agent.name} が承認を待っている`;
   return (
     <div className={`approval ap-${kind}`}>
       <div className="ap-title">{(() => { const I = kind === "ask" ? CircleQuestionMark : kind === "plan" ? ClipboardList : Hand; return <I size={ICON.md} strokeWidth={STROKE} aria-hidden />; })()}{title}</div>
@@ -91,7 +98,7 @@ export function Approval({ agent, planHint, onDone, onError, onTerm }: {
       ) : kind === "plan" ? (
         <PlanForm key={p.requestId} plan={String(p.input?.plan || planHint || p.screenPlan || "")} busy={busy} answer={answer} rows={pty ? p.options! : null} />
       ) : (
-        <ToolForm key={p.requestId} p={p} busy={busy} answer={answer} />
+        <ToolForm key={p.requestId} p={p} busy={busy} answer={answer} mate={mate} />
       )}
       {canAnswer && (pending?.length ?? 0) > 1 && <div className="hint">ほかに{pending!.length - 1}件の承認が待っている。1件ずつ答える。</div>}
     </div>
@@ -99,10 +106,11 @@ export function Approval({ agent, planHint, onDone, onError, onTerm }: {
 }
 
 /** 道具の承認。「常に許可」は ccn が渡した提案（suggestions）のうち、返してよいものだけを出す。拒否には理由を付けられる */
-function ToolForm({ p, busy, answer }: { p: PendingReq; busy: "allow" | "deny" | null; answer: Answer }) {
+function ToolForm({ p, busy, answer, mate }: { p: PendingReq; busy: "allow" | "deny" | null; answer: Answer; mate: string | null }) {
   const [reason, setReason] = useState("");
   const always = alwaysOptions(p.suggestions);
-  // PTY: 画面の行をそのままボタンにする（行は道具と設定で変わる）。断るのは No の行で、理由があれば作業を止めずに伝える
+  // PTY: 画面の行をそのままボタンにする（行は道具と設定で変わる）。断るのは No の行で、理由があれば作業を止めずに伝える。
+  // チームメイトの承認は、理由なしで断っても道具の結果が「別のやり方を試す」になり、作業は止まらない（2026-11-26、v2.1.332 の実機）
   const rows = Array.isArray(p.options) ? p.options : null;
   const i = p.input;
   const detail = String(i?.command ?? i?.file_path ?? i?.url ?? JSON.stringify(p.input));
@@ -111,6 +119,7 @@ function ToolForm({ p, busy, answer }: { p: PendingReq; busy: "allow" | "deny" |
       <div>
         <div className="ap-tool">{p.toolName}</div>
         {detail && <ScrollEdgeGradient className="ap-detail"><span>{linkify(detail)}</span></ScrollEdgeGradient>}
+        {p.hookNote && <div className="hint ap-hook">{p.hookNote}</div>}
       </div>
       {rows ? (
         <div className="ap-btns">
@@ -118,7 +127,9 @@ function ToolForm({ p, busy, answer }: { p: PendingReq; busy: "allow" | "deny" |
             <button key={r.n} className={r.label === "Yes" ? "ap-allow" : "ap-always"} disabled={!!busy} title={r.label}
               onClick={() => answer("allow", { act: { type: "option", n: r.n, label: r.label } })}>{busy === "allow" && r.label === "Yes" ? "送っている…" : toolLabel(r.label)}</button>
           ))}
-          <button className="ap-deny" disabled={!!busy || !rows.some((r) => isDenyRow(r.label))} title="拒否する。下の欄に理由を書くと、作業を止めずに Claude に伝える。空なら作業を止める"
+          <button className="ap-deny" disabled={!!busy || !rows.some((r) => isDenyRow(r.label))} title={mate
+              ? `拒否する。下の欄に理由を書くと、${mate} に伝える。空でも ${mate} の作業は止まらず、別のやり方を探す`
+              : "拒否する。下の欄に理由を書くと、作業を止めずに Claude に伝える。空なら作業を止める"}
             onClick={() => answer("deny", { act: { type: "deny", reason } })}>{busy === "deny" ? "送っている…" : "拒否する"}</button>
         </div>
       ) : (
@@ -130,7 +141,7 @@ function ToolForm({ p, busy, answer }: { p: PendingReq; busy: "allow" | "deny" |
           <button className="ap-deny" disabled={!!busy} title="拒否する。下の欄に書いた理由を Claude に伝える" onClick={() => answer("deny", { message: reason })}>{busy === "deny" ? "送っている…" : "拒否する"}</button>
         </div>
       )}
-      <input className="ap-reason" placeholder="拒否の理由（任意。Claude に伝わる）" value={reason} disabled={!!busy} onChange={(e) => setReason(e.target.value)} />
+      <input className="ap-reason" placeholder={`拒否の理由（任意。${mate ?? "Claude"} に伝わる）`} value={reason} disabled={!!busy} onChange={(e) => setReason(e.target.value)} />
     </>
   );
 }
@@ -138,39 +149,62 @@ function ToolForm({ p, busy, answer }: { p: PendingReq; busy: "allow" | "deny" |
 /** AskUserQuestion の質問。選択肢を押して選び、「答える」で全部の質問の答えをまとめて送る。選択肢に無い答えは「その他」に書く */
 function AskForm({ questions, busy, answer, pty }: { questions: Question[]; busy: "allow" | "deny" | null; answer: Answer; pty: boolean }) {
   const [picks, setPicks] = useState<Pick[]>(() => questions.map(emptyPick));
+  // 2問以上のときは1問ずつ出す（#313）。step は今出している質問の番号。答えは全問そろってから、今までと同じ形で一度に送る
+  const [step, setStep] = useState(0);
   const set = (qi: number, f: (p: Pick) => Pick) => setPicks((ps) => ps.map((p, i) => (i === qi ? f(p) : p)));
   const texts = questions.map((q, i) => answerText(q, picks[i] ?? emptyPick()));
   const ready = questions.length > 0 && texts.every((t) => !!t);
   if (!questions.length) return <div className="hint">質問の中身が読めない。ターミナルで答える。</div>;
+  const many = questions.length > 1;
+  const last = step === questions.length - 1;
+  const q = questions[step];
+  const pk = picks[step] ?? emptyPick();
+  const send = () => answer("allow", pty
+    ? { act: { type: "ask", picks: ptyPicks(questions, picks) } }
+    : { answers: Object.fromEntries(questions.map((q, i) => [q.question, texts[i]])) });
   return (
     <>
-      {questions.map((q, qi) => {
-        const pk = picks[qi] ?? emptyPick();
-        return (
-          <div className="ask-q" key={qi}>
-            <div className="ask-head">{q.header && <span className="ask-chip">{q.header}</span>}<span className="ask-text">{q.question}</span>{q.multiSelect && <span className="hint">（いくつでも選べる）</span>}</div>
-            <div className="ask-opts" role={q.multiSelect ? "group" : "radiogroup"}>
-              {(q.options ?? []).map((o) => {
-                const on = pk.picked.includes(o.label);
-                return (
-                  <button key={o.label} className={`ask-opt${on ? " on" : ""}`} role={q.multiSelect ? "checkbox" : "radio"} aria-checked={on} disabled={!!busy}
-                    onClick={() => set(qi, (p) => ({ ...p, picked: q.multiSelect ? (on ? p.picked.filter((x) => x !== o.label) : [...p.picked, o.label]) : [o.label], other: q.multiSelect ? p.other : "" }))}>
-                    <span className="ask-label">{o.label}</span>
-                    {o.description && <span className="ask-desc">{o.description}</span>}
-                  </button>
-                );
-              })}
-            </div>
-            <input className="ask-other" placeholder="その他（選択肢に無い答えを書く）" value={pk.other} disabled={!!busy}
-              onChange={(e) => { const v = e.target.value; set(qi, (p) => ({ picked: q.multiSelect || !v ? p.picked : [], other: v })); }} />
-          </div>
-        );
-      })}
+      {many && (
+        <div className="ask-steps" role="tablist" aria-label="質問">
+          {questions.map((x, i) => (
+            <button key={i} role="tab" aria-selected={i === step} className={`ask-step${i === step ? " on" : ""}${texts[i] ? " done" : ""}`} disabled={!!busy}
+              title={texts[i] ? `答え: ${texts[i]}` : "まだ答えていない"} onClick={() => setStep(i)}>
+              {texts[i] ? <Check size={ICON.sm} strokeWidth={STROKE} aria-hidden /> : <span className="ask-step-n">{i + 1}</span>}
+              <span className="ask-step-label">{x.header || `質問${i + 1}`}</span>
+            </button>
+          ))}
+          <span className="ask-step-count">{step + 1} / {questions.length}</span>
+        </div>
+      )}
+      <div className="ask-q" key={step}>
+        <div className="ask-head">{!many && q.header && <span className="ask-chip">{q.header}</span>}<span className="ask-text">{q.question}</span>{q.multiSelect && <span className="hint">（いくつでも選べる）</span>}</div>
+        <div className="ask-opts" role={q.multiSelect ? "group" : "radiogroup"}>
+          {(q.options ?? []).map((o) => {
+            const on = pk.picked.includes(o.label);
+            return (
+              <button key={o.label} className={`ask-opt${on ? " on" : ""}`} role={q.multiSelect ? "checkbox" : "radio"} aria-checked={on} disabled={!!busy}
+                onClick={() => {
+                  set(step, (p) => ({ ...p, picked: q.multiSelect ? (on ? p.picked.filter((x) => x !== o.label) : [...p.picked, o.label]) : [o.label], other: q.multiSelect ? p.other : "" }));
+                  // 1つだけ選ぶ質問は、選んだら次の質問へ進む（端末の AskUserQuestion と同じ）。最後の質問では進まず、答えるボタンで送る
+                  if (!q.multiSelect && !last) setStep(step + 1);
+                }}>
+                <span className="ask-label">{o.label}</span>
+                {o.description && <span className="ask-desc">{o.description}</span>}
+              </button>
+            );
+          })}
+        </div>
+        <input className="ask-other" placeholder="その他（選択肢に無い答えを書く）" value={pk.other} disabled={!!busy}
+          onChange={(e) => { const v = e.target.value; set(step, (p) => ({ picked: q.multiSelect || !v ? p.picked : [], other: v })); }}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing && texts[step] && !last) setStep(step + 1); }} />
+      </div>
       <div className="ap-btns">
-        <button className="ap-allow" disabled={!ready || !!busy} title={ready ? "選んだ答えを送る" : "全部の質問に答えると送れる"}
-          onClick={() => answer("allow", pty
-            ? { act: { type: "ask", picks: ptyPicks(questions, picks) } }
-            : { answers: Object.fromEntries(questions.map((q, i) => [q.question, texts[i]])) })}>{busy === "allow" ? "送っている…" : "答える"}</button>
+        {many && step > 0 && <button className="ap-always" disabled={!!busy} onClick={() => setStep(step - 1)}>戻る</button>}
+        {!last ? (
+          <button className="ap-allow" disabled={!texts[step] || !!busy} title={texts[step] ? "次の質問へ" : "この質問に答えると進める"} onClick={() => setStep(step + 1)}>次へ</button>
+        ) : (
+          <button className="ap-allow" disabled={!ready || !!busy} title={ready ? "選んだ答えを送る" : "全部の質問に答えると送れる"} onClick={send}>{busy === "allow" ? "送っている…" : "答える"}</button>
+        )}
         <button className="ap-deny" disabled={!!busy} title="質問に答えずに断る（ターミナルの Esc と同じ）" onClick={() => answer("deny", { act: { type: "deny" } })}>{busy === "deny" ? "送っている…" : "答えずに断る"}</button>
       </div>
     </>

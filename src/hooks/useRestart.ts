@@ -5,7 +5,7 @@ import { kickTown } from "../town";
 import { canRestart } from "../abilities";
 
 /**
- * セッションの再起動（カードの「再起動」）。このアプリが立てた端末を止め、同じ id を claude --resume で、
+ * セッションの再起動（カードの「再起動」）。セッションを止め、同じ id を claude --resume で、このアプリの端末に
  * cam usage の best のアカウントで立て直す（Rust の restart_session）。id は変わらないので、選んでいるセッションはそのまま
  */
 export function useRestart(toast: (text: string, bad?: boolean) => void) {

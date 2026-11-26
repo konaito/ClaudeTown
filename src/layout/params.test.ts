@@ -26,8 +26,18 @@ describe("世帯の枠の余白", () => {
     const s = groupSizeOf(m);
     expect(s.w).toBe(Math.ceil(400 + 2 * (G.border + G.pad)));
     expect(s.h).toBe(Math.ceil(2 * G.border + 2 * G.pad + G.head + G.headGap + 200));
-    // 狭い世帯は minW まで広げる
-    expect(groupSizeOf({ width: 100, height: 96 }).w).toBe(G.minW);
+    // 狭い世帯も広げない（最小の幅は持たない、#302）
+    expect(groupSizeOf({ width: 100, height: 96 }).w).toBe(100 + 2 * (G.border + G.pad));
+    expect("minW" in G).toBe(false);
+  });
+  test("枠の左右の余白が同じ。カード1枚（176）の世帯も、枠を中身に合わせて右に余りを残さない（#302）", () => {
+    const i = groupInsetOf();
+    for (const width of [LAYOUT.card.w, 2 * LAYOUT.card.w + 8, 400, 552]) {
+      const s = groupSizeOf({ width, height: LAYOUT.card.h });
+      const left = i.x, right = s.w - i.x - width;
+      expect(right).toBe(left);
+    }
+    expect(groupSizeOf({ width: LAYOUT.card.w, height: LAYOUT.card.h }).w).toBe(LAYOUT.card.w + 2 * (G.border + G.pad));
   });
   test("CSS に渡す変数が LAYOUT.group と同じ値", () => {
     expect(groupCssVars()).toEqual({ "--g-pad": "16px", "--g-head": "24px", "--g-head-gap": "16px", "--g-border": "1px" });
