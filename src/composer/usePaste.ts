@@ -1,4 +1,5 @@
-// 画像とファイルの貼り付けとドロップ（#64、#69）。端末への送信は文しか運べないので、手元のファイルのパスを文として入れる。受け手の Claude はパスを読む
+// 画像とファイルの貼り付けとドロップ（#64、#69）。端末への送信は文しか運べないので、手元のファイルのパスを文として入れる。
+// 画像のパスは、送るときに Rust が1つずつ貼り、CLI が [Image #N] の添付にする（composer.rs の paste_parts、#67）。ほかのファイルは受け手の Claude がパスを読む
 import { useEffect, useRef, useState } from "react";
 import { call as invoke, onFileDrop } from "../bridge";
 import { insertPaths, type Edit, type Sel } from "./edit";
