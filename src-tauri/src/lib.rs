@@ -240,9 +240,10 @@ fn town_rows() -> Vec<Value> {
     // 同じ id の記録が2つあるとき（#331）は、このアプリが立てた端末の行を残す
     let app_pids: HashSet<u32> = pty::list().iter().map(|p| p.pid).collect();
     let n = native::list(&native::claude_home(), native::now_ms(), &app_pids);
+    // /clear で id が変わっても同じ pid なら同じ端末。一覧で見えた id を台帳に足してから、どれがこのアプリのものかを決める。
+    // 同じ id を1行にまとめる前の (id, pid) を渡す（まとめて落とした行の pid も、アプリの端末なら今の id を知る、#331）
+    pty::note_ids(&n.pids);
     let mut rows: Vec<Value> = n.sessions.into_iter().chain(n.subagents).collect();
-    // /clear で id が変わっても同じ pid なら同じ端末。一覧で見えた id を台帳に足してから、どれがこのアプリのものかを決める
-    pty::note_ids(&rows.iter().filter(|r| r["kind"] == "terminal").filter_map(|r| Some((r["id"].as_str()?.to_string(), r["pid"].as_u64()? as u32))).collect::<Vec<_>>());
     let seen: HashSet<String> = rows.iter().filter_map(|r| r["id"].as_str().map(String::from)).collect();
     let mut app = 0;
     for p in pty::list() {
@@ -1107,6 +1108,50 @@ mod tests {
         assert_eq!(rows[0]["source"], "app");
         assert_eq!(rows[0]["state"], "running", "外のほうが作業中なら作業中");
         assert_eq!(rows[0]["startedAt"], 1_000);
+    }
+
+    #[test]
+    fn town_follows_an_app_terminal_that_resumed_into_another_app_terminals_id() {
+        // アプリの端末 A が /resume で、アプリの端末 B の id に入った（2つとも同じ id を名乗る）。
+        // 一覧は1行にまとめても、A の台帳は今の id に移す。移さないと、A の前の id の仮の行が町に残る
+        use std::os::unix::fs::PermissionsExt;
+        let _serial = NATIVE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _bin = pty::BIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t0 = std::time::Instant::now();
+        while !pty::list().is_empty() && t0.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        use native::testtree::*;
+        let root = tmp("dup-two-apps");
+        let bin = root.join("claude");
+        std::fs::write(&bin, "#!/bin/sh\nexec cat\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("FC_CLAUDE_BIN", &bin) };
+        let ra = pty::spawn(root.to_str().unwrap(), None, &[], 80, 24, || {});
+        let rb = pty::spawn(root.to_str().unwrap(), None, &[], 80, 24, || {});
+        unsafe { std::env::remove_var("FC_CLAUDE_BIN") };
+        let (ra, rb) = (ra.unwrap(), rb.unwrap());
+        let (ia, ib) = (ra["id"].as_str().unwrap().to_string(), rb["id"].as_str().unwrap().to_string());
+        let (pa, pb) = (ra["pid"].as_u64().unwrap() as u32, rb["pid"].as_u64().unwrap() as u32);
+        for (pid, started) in [(pa, 1_000u64), (pb, 2_000u64)] {
+            write(&root.join(format!("sessions/{pid}.json")), &json!({ "pid": pid, "sessionId": ib, "cwd": "/tmp/合成/two", "startedAt": started,
+                "kind": "interactive", "status": "idle", "updatedAt": started }).to_string());
+        }
+        native::TEST_HOME.with(|h| *h.borrow_mut() = Some(root.clone()));
+        let agents = agents_from(town_rows());
+        native::TEST_HOME.with(|h| *h.borrow_mut() = None);
+        let cur_a = pty::list().into_iter().find(|p| p.pid == pa).map(|p| p.cur);
+        // 2つとも同じ id を持つので、id で止めると同じ端末に当たりうる。pid に直接送る
+        for pid in [pa, pb] {
+            unsafe { libc::kill(pid as i32, libc::SIGHUP) };
+        }
+        let t0 = std::time::Instant::now();
+        while !pty::list().is_empty() && t0.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let ids: Vec<&str> = agents.iter().filter_map(|x| x["id"].as_str()).collect();
+        assert_eq!(cur_a.as_deref(), Some(ib.as_str()), "A の台帳の今の id");
+        assert_eq!(ids, vec![ib.as_str()], "A の前の id {ia} の仮の行が残っている");
     }
 
     /// hook（fc-report.py）が pid ごとに残した id の並び（ids/<pid>.json）で、/clear の前の id を引く（#266）。

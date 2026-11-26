@@ -72,6 +72,9 @@ pub fn outside_caps(send: bool) -> Value {
 #[derive(Default, Debug)]
 pub struct NativeList {
     pub sessions: Vec<Value>,
+    /// 生きている対話セッションの (id, pid) の全部。同じ id を1行にまとめる前のもの（#331）。
+    /// アプリの端末の台帳（pty::note_ids）は、まとめて落とした行の pid でも今の id を知る必要がある
+    pub pids: Vec<(String, u32)>,
     pub subagents: Vec<Value>,
     pub stats: Stats,
 }
@@ -131,12 +134,15 @@ pub fn list(root: &Path, now: u64, app_pids: &std::collections::HashSet<u32>) ->
     let t0 = std::time::Instant::now();
     let mut stats = Stats::default();
     // sub-agent とチームメイトはセッションごとに読むので、まとめる前に読むと、それらの行も同じ id で2つになる
-    let live = sessions::merge_same_id(sessions::live(root, &mut stats), app_pids, &mut stats);
+    let all = sessions::live(root, &mut stats);
+    let pids: Vec<(String, u32)> = all.iter().map(|s| (s.id.clone(), s.pid)).collect();
+    let live = sessions::merge_same_id(all, app_pids, &mut stats);
     let mut out = NativeList::default();
     // tmux のチームメイトは sessions/<pid>.json を作らない（2回の実測）。もし作る版が来たら、同じ id のセッションの行は
     // 親の分かるチームメイトの行で置き換える
     let mates = teams::tmux_rows(root, &live, now, &mut stats);
     let mate_ids: std::collections::HashSet<&str> = mates.iter().filter_map(|r| r["id"].as_str()).collect();
+    out.pids = pids.into_iter().filter(|(id, _)| !mate_ids.contains(id.as_str())).collect();
     for s in &live {
         out.subagents.extend(subagents::of_session(s, now, &mut stats));
         if !mate_ids.contains(s.id.as_str()) {

@@ -310,13 +310,18 @@ pub fn live_pid_of(root: &Path, id: &str) -> Option<u32> {
     live_pids_of(root, id).into_iter().next()
 }
 
-/// id を名乗っている claude の pid のうち、記録の起動時刻（procStart）が今のプロセスと一致するもの。止める前の確かめに使う（#309）。
-/// live_pid_of と違い、起動時刻を比べられない記録は選ばない。pid が別のプロセスに使い回されていても見分けられないので、信号を送らない。
-/// 2つ以上あれば newer_first の先頭（町の一覧に残した行の pid）
-pub fn verified_pid_of(root: &Path, id: &str) -> Option<u32> {
+/// id を名乗っている claude の pid のうち、記録の起動時刻（procStart）が今のプロセスと一致するもの全部。止める前の確かめに使う（#309）。
+/// live_pids_of と違い、起動時刻を比べられない記録は選ばない。pid が別のプロセスに使い回されていても見分けられないので、信号を送らない。
+/// 並びは newer_first（先頭が町の一覧に残した行の pid）
+pub fn verified_pids_of(root: &Path, id: &str) -> Vec<u32> {
     let cands: Vec<(u32, String)> = records_of(root, id).into_iter().filter_map(|(pid, _, v)| Some((pid, proc_start_of(&v)?))).collect();
     let now = ps_lstart(&cands.iter().map(|c| c.0).collect::<Vec<_>>());
-    cands.into_iter().find(|(pid, want)| now.get(pid) == Some(want)).map(|c| c.0)
+    cands.into_iter().filter(|(pid, want)| now.get(pid) == Some(want)).map(|c| c.0).collect()
+}
+
+/// verified_pids_of の先頭。無ければ None
+pub fn verified_pid_of(root: &Path, id: &str) -> Option<u32> {
+    verified_pids_of(root, id).into_iter().next()
 }
 
 /// SIGHUP を送ってから、終わっていなければ SIGKILL を送るまで待つ長さ。
@@ -325,21 +330,36 @@ const HANGUP_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Claude Town の外で起動したセッションを止める（#309）。claude の pid に SIGHUP を送る。このアプリが立てた端末と同じ止め方（pty::kill）。
 /// 受信ソケットに /exit を送っても、ただの文として届くので使わない（composer.rs の socket_refusal）。
-/// HANGUP_WAIT たっても同じプロセスが残っていれば SIGKILL を送る。どちらも送る直前に起動時刻を確かめる。返すのは止めた pid
-pub fn hangup(root: &Path, id: &str) -> Result<u32, String> {
-    let pid = verified_pid_of(root, id).ok_or("止める claude が見つからなかった（もう終わったか、記録の起動時刻が今のプロセスと合わない）")?;
-    if unsafe { libc::kill(pid as i32, libc::SIGHUP) } != 0 {
-        return Err(format!("止められなかった: {}", std::io::Error::last_os_error()));
+/// 同じ id を2か所以上で開いていれば（#331）、全部に送る。町のカードは id ごとに1枚なので、1つ残すとカードが消えない。
+/// skip の pid には送らない（このアプリの端末で、pty::kill で止めるもの）。
+/// HANGUP_WAIT たっても同じプロセスが残っていれば SIGKILL を送る。どちらも送る直前に起動時刻を確かめる。返すのは止めた pid（1つも無ければ Err）
+pub fn hangup(root: &Path, id: &str, skip: Option<u32>) -> Result<Vec<u32>, String> {
+    let pids: Vec<u32> = verified_pids_of(root, id).into_iter().filter(|p| Some(*p) != skip).collect();
+    if pids.is_empty() {
+        return Err("止める claude が見つからなかった（もう終わったか、記録の起動時刻が今のプロセスと合わない）".into());
     }
-    let (root, id) = (root.to_path_buf(), id.to_string());
+    let mut sent = vec![];
+    let mut failed = vec![];
+    for pid in pids {
+        if unsafe { libc::kill(pid as i32, libc::SIGHUP) } == 0 {
+            sent.push(pid);
+        } else {
+            failed.push(format!("pid {pid}: {}", std::io::Error::last_os_error()));
+        }
+    }
+    if !failed.is_empty() {
+        return Err(format!("止められなかった: {}", failed.join("、")));
+    }
+    let (root, id, watch) = (root.to_path_buf(), id.to_string(), sent.clone());
     std::thread::spawn(move || {
         std::thread::sleep(HANGUP_WAIT);
-        if verified_pid_of(&root, &id) == Some(pid) {
+        let left = verified_pids_of(&root, &id);
+        for pid in watch.into_iter().filter(|p| left.contains(p)) {
             eprintln!("[native] SIGHUP で終わらなかったので SIGKILL を送る pid {pid}");
             unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         }
     });
-    Ok(pid)
+    Ok(sent)
 }
 
 /// id を名乗るプロセスが消えるのを、limit まで待つ。消えた（もともと無い）なら true。
@@ -536,7 +556,7 @@ mod tests {
         let start = ps_lstart(&[pid]).remove(&pid).expect("ps で起動時刻が取れる");
         let id = "eeeeeeee-0000-4000-8000-00000000000e";
         record_stub(&root, pid, id, Some(&start));
-        assert_eq!(hangup(&root, id), Ok(pid));
+        assert_eq!(hangup(&root, id, None), Ok(vec![pid]));
         assert!(exits_within(&mut child, std::time::Duration::from_secs(3)), "SIGHUP で終わらなかった");
         assert!(root.join("hup").exists(), "SIGHUP が届かなかった");
     }
@@ -550,7 +570,7 @@ mod tests {
             let pid = child.id();
             let id = "ffffffff-0000-4000-8000-00000000000f";
             record_stub(&root, pid, id, start);
-            assert!(hangup(&root, id).is_err(), "{name}: 断らなかった");
+            assert!(hangup(&root, id, None).is_err(), "{name}: 断らなかった");
             let ended = exits_within(&mut child, std::time::Duration::from_millis(500));
             let _ = child.kill();
             let _ = child.wait();
