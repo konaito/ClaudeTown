@@ -10,6 +10,7 @@
 # 本物の安定版には触らない。
 # - 実行ファイルを一時の入れ先（CT_DEST_DIR）の Claude Town.app の中に写し、--update-run で動かす（画面は作らない）
 # - 一時のリポジトリ（FC_UPDATE_REPO）に release-stable.sh と stable-lib.sh を写し、一時の bare リポジトリを origin にする
+#   origin/main には本物を push し、作業ツリーのものは走ったら印を書く偽物に替える（ボタンが origin/main のものを走らせるか、#299）
 # - CT_DEST_DIR、CT_STABLE_HOME、CT_BUILD_WORKTREE、CT_TARGET_DIR、FC_APP_HOME を mktemp -d の下に向け、CT_NO_OPEN=1 を付ける
 # - tauri build は偽の bunx に替え、FC_UPDATE_PATH で偽物を PATH の先頭に置く（偽物が先頭か、走らせる前と出力で確かめる）
 set -uo pipefail

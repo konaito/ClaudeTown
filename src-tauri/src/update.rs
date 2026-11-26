@@ -3,7 +3,7 @@
 // - 今の版は、release-stable.sh が書く <置き場>/current.ref（「タグ sha」の1行）から読む
 // - origin/main は、本体の checkout（既定 ~/Documents/family-computing）で数分ごとに git fetch origin して読む。
 //   fetch は裏のスレッドで回し、アプリの起動を待たせない
-// - 「更新して再起動」は、fetch した origin/main の scripts/release-stable.sh と stable-lib.sh を一時の場所に取り出し、
+// - 「更新して再起動」は、fetch した origin/main の scripts/ を一時の場所に取り出し、
 //   release-stable.sh origin/main を、アプリから切り離して走らせる。本体の checkout の作業ツリーのスクリプトは走らせない（#299）。
 //   スクリプトは途中で安定版（このアプリ）を終わらせる。2026-11-23 に、安定版の端末の中から走らせたスクリプトが、
 //   安定版の終わりと一緒に落ち、current.ref、hook の写し、releases.log、起動が抜けた。
@@ -274,8 +274,9 @@ pub(crate) enum Run {
 
 static RUN: Mutex<Option<Run>> = Mutex::new(None);
 
-/// 走らせるシェルの本文。$1 が本体の checkout、$2 が update-run.exit。fetch してから、origin/main の release-stable.sh と
-/// stable-lib.sh を一時の場所に取り出して走らせ、終わりを $2 に書く。
+/// 走らせるシェルの本文。$1 が本体の checkout、$2 が update-run.exit。fetch してから、origin/main の scripts/ を
+/// 一時の場所に取り出して release-stable.sh を走らせ、終わりを $2 に書く。release-stable.sh が読むファイル（stable-lib.sh など）を
+/// 名前で決め打ちしないよう、scripts/ ごと取り出す（このアプリに入っている WRAPPER は、origin/main のスクリプトより古い）。
 /// 本体の checkout の作業ツリーのスクリプトは走らせない。ローカルの main は pull されずに古いことがあり、
 /// 新しいスクリプトの直しが更新に入らなかった（#299）。本体の checkout の作業ツリーとブランチには触らない。
 /// 取り出したスクリプトは git の外にあるので、リポジトリの場所は CT_REPO で渡す
@@ -290,13 +291,12 @@ if ! git -C "$1" fetch origin; then
 elif ! tmp="$(mktemp -d "${TMPDIR:-/tmp}/claude-town-update.XXXXXX")"; then
   echo "スクリプトを取り出す一時の場所を作れない" >&2
 else
-  if git -C "$1" archive origin/main scripts/release-stable.sh scripts/stable-lib.sh | tar -x -C "$tmp" \
-    && [ -x "$tmp/scripts/release-stable.sh" ] && [ -f "$tmp/scripts/stable-lib.sh" ]; then
+  if git -C "$1" archive origin/main scripts | tar -x -C "$tmp" && [ -x "$tmp/scripts/release-stable.sh" ]; then
     echo "origin/main のスクリプトを取り出した: $tmp"
     CT_REPO="$1" "$tmp/scripts/release-stable.sh" origin/main
     code=$?
   else
-    echo "origin/main から release-stable.sh と stable-lib.sh を取り出せない" >&2
+    echo "origin/main から scripts/ を取り出せない" >&2
   fi
   rm -rf "$tmp"
 fi
