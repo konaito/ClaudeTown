@@ -4,7 +4,7 @@ import { call as invoke } from "../bridge";
 import type { Agent } from "../model";
 import { BUILTINS, type Command } from "./commands";
 import { acceptFile, rankCommands, tokenAt } from "./edit";
-import { skillStore } from "./skills";
+import { repick, skillStore } from "./skills";
 import { tagOf } from "./route";
 import type { Support } from "../session/control";
 import type { Search } from "./useHistorySearch";
@@ -55,10 +55,8 @@ export function useCompletion({ agent, local, text, caret, search, dismissed, cc
   // 開いている間に読み直しが届いて候補が増減したら、選んでいたコマンドを新しい並びで引き直す。番号のままだと Enter で別のコマンドを送る
   const shown = useRef<{ items: Command[]; pick: number }>({ items: [], pick: 0 });
   useEffect(() => {
-    const was = shown.current.items[shown.current.pick];
-    if (!was) return;
-    const i = slashItems.findIndex((c) => c.source === was.source && c.name === was.name);
-    setPick(i >= 0 ? i : 0);
+    const i = repick(shown.current.items, shown.current.pick, slashItems);
+    if (i != null) setPick(i);
   }, [commands]);
   useEffect(() => { shown.current = { items: slashItems, pick }; });
   const menuRef = useRef<HTMLDivElement>(null);

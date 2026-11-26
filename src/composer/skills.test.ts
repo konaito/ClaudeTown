@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Command } from "./commands";
-import { skillStore } from "./skills";
+import { repick, skillStore } from "./skills";
 
 const cmd = (name: string): Command => ({ name, description: name, source: "user" });
 const names = (l: Command[]) => l.map((c) => c.name);
@@ -79,5 +79,24 @@ describe("skillStore", () => {
     await Promise.all([s.refresh("/x"), s.refresh("/y")]);
     expect(names(s.get("/x"))).toEqual(["x"]);
     expect(names(s.get("/y"))).toEqual(["y"]);
+  });
+});
+
+describe("repick", () => {
+  const l = (...n: string[]) => n.map(cmd);
+  test("前にスキルが増えてずれたら、選んでいたコマンドの新しい番号を返す", () => {
+    expect(repick(l("a", "b", "c"), 1, l("x", "a", "b", "c"))).toBe(2);
+  });
+  test("選んでいたコマンドが消えたら先頭に戻す", () => {
+    expect(repick(l("a", "b"), 1, l("a"))).toBe(0);
+  });
+  test("並びが変わらなければ同じ番号、選んでいなければ動かさない", () => {
+    expect(repick(l("a", "b"), 1, l("a", "b"))).toBe(1);
+    expect(repick([], 0, l("a"))).toBeNull();
+  });
+  test("名前が同じでも出所が違えば別のコマンドとして扱う", () => {
+    const user = cmd("deploy");
+    const proj: Command = { ...user, source: "project" };
+    expect(repick([user, proj], 1, [user, cmd("z"), proj])).toBe(2);
   });
 });

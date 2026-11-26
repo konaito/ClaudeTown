@@ -33,3 +33,11 @@ export function skillStore(load: (cwd: string) => Promise<Command[]>) {
     },
   };
 }
+
+/** 開いている候補の並びが替わったとき、選んでいたコマンドの新しい番号。見つからなければ先頭、元から選んでいなければ null（動かさない） */
+export function repick(prev: Command[], pick: number, next: Command[]): number | null {
+  const was = prev[pick];
+  if (!was) return null;
+  const i = next.findIndex((c) => c.source === was.source && c.name === was.name);
+  return i >= 0 ? i : 0;
+}
