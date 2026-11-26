@@ -399,15 +399,130 @@ fn deliver(session_id: &str, text: &str) -> Result<Gate, String> {
     })
 }
 
-/// 錠の中で呼ぶ（deliver）。貼った後、Enter の前に状態を読み直す。貼り付けと Enter の間に承認の画面が出ると、Enter でカーソルの行（Yes）が選ばれる
+/// 錠の中で呼ぶ（deliver）。貼った後、Enter の前に状態を読み直す。貼り付けと Enter の間に承認の画面が出ると、Enter でカーソルの行（Yes）が選ばれる。
+/// 画像のパスがあれば、文の順のまま切れ端に分けて貼る（paste_parts、#67）。画像のパスを貼ったら、CLI が入力欄で [Image #N] に替えるのを待ってから次を貼る
 fn paste_enter(session_id: &str, text: &str) -> Result<(), String> {
-    super::pty::write(session_id, &format!("\x1b[200~{}\x1b[201~", paste_body(text)))?;
+    let parts = paste_parts(text);
+    for (k, part) in parts.iter().enumerate() {
+        // 2つ目からは、貼る前にも状態を読み直す。途中で承認の画面が出たら、残りを貼らない（貼った文字が選択の行のキーとして読まれうる）
+        if k > 0
+            && let Some(why) = blocked_now(session_id) {
+                return Err(format!("貼っている途中で{why}ので、残りを貼らず Enter も送らなかった。ターミナルの入力欄に途中までの文が残っているかもしれない"));
+            }
+        match part {
+            Part::Text(s) => {
+                super::pty::write(session_id, &format!("\x1b[200~{}\x1b[201~", paste_body(s)))?;
+                // 次の切れ端の前の読み直しが、貼った文で出た画面に間に合うよう、Enter の前と同じだけ空ける
+                if k + 1 < parts.len() {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+            }
+            Part::Image(p) => {
+                let before = image_marks(&super::pty::screen_text(session_id).unwrap_or_default());
+                super::pty::write(session_id, &format!("\x1b[200~{}\x1b[201~", paste_body(p)))?;
+                // 印が出なければ（読めない画像など）、パスは文のまま残り、受け手が Read で読む。待つのをやめて続ける
+                let t0 = Instant::now();
+                while t0.elapsed() < IMAGE_WAIT && image_marks(&super::pty::screen_text(session_id).unwrap_or_default()) <= before {
+                    std::thread::sleep(Duration::from_millis(30));
+                }
+            }
+        }
+    }
     // 貼り付けと Enter の間を空ける。続けて書くと、貼り付けの最後と Enter が1つの入力として読まれ、改行になることがある
     std::thread::sleep(Duration::from_millis(150));
     if let Some(why) = blocked_now(session_id) {
         return Err(format!("貼った直後に{why}ので、Enter を送らなかった。ターミナルの入力欄に文が残っているかもしれない"));
     }
     super::pty::write(session_id, "\r")
+}
+
+/// 画像のパスを貼ってから、入力欄に [Image #N] が出るまで待つ上限
+const IMAGE_WAIT: Duration = Duration::from_secs(5);
+
+/// 貼り付けの切れ端
+#[derive(Debug, PartialEq)]
+pub enum Part<'a> {
+    Text(&'a str),
+    /// 画像のパス（入力欄に入った形のまま。空白や記号の前に \ が付く）
+    Image(&'a str),
+}
+
+/// CLI が添付にする画像の拡張子（conv.ts の IMAGE_PATH と同じ）
+const IMAGE_EXTS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
+
+/// 送る文を、画像のパスとそれ以外の文に分ける（#67）。CLI は、1回の貼り付けの中身全体が画像のパスのときだけ [Image #N] の添付にし、
+/// 文と混ざっていると文のまま受ける（2026-11-26、v2.1.332 の本物の claude で見た）。
+/// 画像のパスとみなすのは、文の頭か空白の後ろから次の空白まで（\ の付いた空白は続きとみる）の語で、/ から始まり、
+/// \ を外すと実在するファイルで、拡張子が IMAGE_EXTS のもの。入力欄への貼り付けとドロップ（src/composer/edit.ts の quotePath）が入れる形。
+/// 画像のパスが無ければ、文全体を1つの切れ端で返す（今までと同じ1回の貼り付け）。
+/// ! と / で始まる文（bash のモードとコマンド）は切り分けない。頭の ! や / を貼った後に入力欄の扱いが変わり、
+/// 単独で貼ったパスが印になるかは確かめていない。今までどおり CLI に打ったのと同じに動かす。頭の語が画像のパスなら / で始まっても切り分ける
+pub fn paste_parts(text: &str) -> Vec<Part<'_>> {
+    let head = text.trim_start();
+    // 頭の語（\ の付いた空白は続き）
+    let mut esc = false;
+    let end = head.char_indices().find(|&(_, c)| {
+        let stop = !esc && c.is_whitespace();
+        esc = !esc && c == '\\';
+        stop
+    });
+    let first = &head[..end.map_or(head.len(), |(i, _)| i)];
+    if head.starts_with('!') || head.starts_with('/') && !is_image_path(first) {
+        return vec![Part::Text(text)];
+    }
+    let mut out = vec![];
+    let mut from = 0;
+    let mut start: Option<usize> = None;
+    let mut esc = false;
+    // 末尾に空白を1つ足したつもりで回し、最後の語も同じところで見る
+    for (i, c) in text.char_indices().chain(std::iter::once((text.len(), ' '))) {
+        if esc {
+            esc = false;
+        } else if c.is_whitespace() {
+            if let Some(s) = start.take()
+                && is_image_path(&text[s..i]) {
+                    if from < s {
+                        out.push(Part::Text(&text[from..s]));
+                    }
+                    out.push(Part::Image(&text[s..i]));
+                    from = i;
+                }
+        } else {
+            start.get_or_insert(i);
+            esc = c == '\\';
+        }
+    }
+    if from < text.len() || out.is_empty() {
+        out.push(Part::Text(&text[from..]));
+    }
+    out
+}
+
+/// \ の付いた語が、実在する画像のファイルの絶対パスか
+fn is_image_path(word: &str) -> bool {
+    if !word.starts_with('/') {
+        return false;
+    }
+    let mut path = String::new();
+    let mut esc = false;
+    for c in word.chars() {
+        if c == '\\' && !esc {
+            esc = true;
+            continue;
+        }
+        esc = false;
+        path.push(c);
+    }
+    let p = Path::new(&path);
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str())) && p.is_file()
+}
+
+/// 画面の入力欄（罫線の次の ❯ の行から、次の罫線まで）にある [Image #N] の数
+pub fn image_marks(screen: &str) -> usize {
+    use super::dialog::is_rule;
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(top) = (1..lines.len()).rev().find(|&i| lines[i].trim_start().starts_with('❯') && is_rule(lines[i - 1])) else { return 0 };
+    lines[top..].iter().take_while(|l| !is_rule(l)).map(|l| l.matches("[Image #").count()).sum()
 }
 
 /// 今の sessions/<pid>.json と画面で、Enter を書いてはいけないかを見る（enter_blocked）
@@ -900,6 +1015,44 @@ mod tests {
     }
 
     #[test]
+    fn splits_image_paths_out_of_the_text() {
+        let dir = std::env::temp_dir().join(format!("fc-67-{}-{}", std::process::id(), fastrand::u64(..)));
+        fs::create_dir_all(dir.join("a b")).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let d = dir.to_string_lossy().to_string();
+        for f in ["a b/スクショ (1).PNG", "x.jpg", "note.txt"] {
+            fs::write(dir.join(f), b"x").unwrap();
+        }
+        let shot = format!("{d}/a\\ b/スクショ\\ \\(1\\).PNG");
+        let jpg = format!("{d}/x.jpg");
+        // 文の中の位置のまま、前後の空白は文の側に残す
+        let t = format!("見て {shot} と\n{jpg} の違い ");
+        assert_eq!(paste_parts(&t), vec![Part::Text("見て "), Part::Image(&shot), Part::Text(" と\n"), Part::Image(&jpg), Part::Text(" の違い ")]);
+        // 頭と末尾
+        assert_eq!(paste_parts(&format!("{jpg} {shot}")), vec![Part::Image(&jpg), Part::Text(" "), Part::Image(&shot)]);
+        // 画像でない拡張子、無いファイル、相対パス、語の途中は文のまま（1回の貼り付け）
+        for t in [format!("読んで {d}/note.txt"), format!("{d}/none.png"), "x.jpg".to_string(), format!("日本語{jpg}"), format!("{d}/a b/スクショ (1).PNG")] {
+            assert_eq!(paste_parts(&t), vec![Part::Text(&t)], "{t}");
+        }
+        assert_eq!(paste_parts(""), vec![Part::Text("")]);
+        // ! と / のコマンドは切り分けない。頭の語が画像のパスなら / で始まっても切り分ける
+        for t in [format!("!open {jpg}"), format!("  /review {shot} を見て")] {
+            assert_eq!(paste_parts(&t), vec![Part::Text(&t)], "{t}");
+        }
+        assert_eq!(paste_parts(&format!("{shot} 見て")), vec![Part::Image(&shot), Part::Text(" 見て")]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn counts_image_marks_only_in_the_input() {
+        let rule = "─".repeat(40);
+        let screen = format!("❯ [Image #1] 前の文\n  ⎿  [Image #1]\n⏺ 赤\n{rule}\n❯ 左 [Image #2] 中 [Image #3]\n  続き [Image #4]\n{rule}\n  ⏵⏵ [Image #9]");
+        assert_eq!(image_marks(&screen), 3);
+        assert_eq!(image_marks(&format!("{rule}\n❯ \n{rule}")), 0);
+        assert_eq!(image_marks("[Image #1]"), 0);
+    }
+
+    #[test]
     fn paste_body_leaves_no_markers() {
         // 入れ子にすると、内側を外した後に終わりの印ができる（#173）
         assert!(!paste_body("\x1b[20\x1b[201~1~").contains("\x1b[201~"));
@@ -1013,9 +1166,11 @@ mod interleave {
     /// 代役の claude。入力を raw で読み、貼り付けの終わりと Enter を「paste:<画面>:<入力欄の文>」「enter:<画面>:<文>」の形で events に書く。
     /// 画面は input（入力欄）、dialog（道具の承認）、picker（/model のピッカー）のどれか。
     /// __ON_PASTE__ が dialog なら最初の貼り付けの直後に承認の画面を出す（sessions/<pid>.json は idle のまま、画面だけが先に変わる場合）。
-    /// dialog-waiting なら、あわせて sessions/<pid>.json を waiting にする。/model と Enter でピッカーを出し、矢印は無視し、Esc で閉じる
+    /// dialog-waiting なら、あわせて sessions/<pid>.json を waiting にする。/model と Enter でピッカーを出し、矢印は無視し、Esc で閉じる。
+    /// image なら、.png で終わる貼り付けを 0.4 秒後に入力欄の末尾の [Image #N] に替え、入力欄を描き直す。その間に届いた貼り付けは先に入る
+    /// （本物の CLI も画像の取り込みを待たずに次の貼り付けを入れ、印の位置がずれた。2026-11-26、v2.1.332）
     const STAND_IN: &str = r#"#!/usr/bin/env python3
-import json, os, time, tty
+import json, os, select, time, tty
 D = "__DIR__"; ROOT = "__ROOT__"; ON_PASTE = "__ON_PASTE__"
 tty.setraw(0)
 RULE = "─" * 60
@@ -1040,17 +1195,30 @@ def event(e):
 mode = "input"; text = ""; pasting = False; popped = False
 show(INPUT); row("idle")
 buf = b""
+images = []; marks = 0; paste_from = 0
+def draw():
+    show(INPUT.replace("❯ ", "❯ " + text, 1))
 while True:
+    due = min(images) if images else None
+    r, _, _ = select.select([0], [], [], None if due is None else max(0, due - time.time()))
+    for d in [d for d in images if d <= time.time()]:
+        images.remove(d); marks += 1; text += f"[Image #{marks}]"; draw()
+    if not r:
+        continue
     b = os.read(0, 4096)
     if not b:
         break
     buf += b
     while buf:
         if buf.startswith(b"\x1b[200~"):
-            pasting = True; buf = buf[6:]
+            pasting = True; buf = buf[6:]; paste_from = len(text)
         elif buf.startswith(b"\x1b[201~"):
             pasting = False; buf = buf[6:]
+            if ON_PASTE == "image" and mode == "input" and text[paste_from:].endswith(".png"):
+                text = text[:paste_from]; images.append(time.time() + 0.4)
             event(f"paste:{mode}:{text}")
+            if ON_PASTE == "image":
+                draw()
             if mode == "input" and not popped and ON_PASTE.startswith("dialog"):
                 popped = True; mode = "dialog"; show(DIALOG)
                 if ON_PASTE == "dialog-waiting":
@@ -1145,6 +1313,53 @@ while True:
         s
     }
 
+    /// 代役の場所に画像のファイル（中身は問わない）を置き、入力欄に入る形（\ 付きの空白）のパスを返す
+    fn image_in(s: &Stand) -> String {
+        let p = s.dir.join("shot 1.png");
+        fs::write(&p, b"png").unwrap();
+        p.to_string_lossy().replace(' ', "\\ ")
+    }
+
+    /// 画像のパスは1つずつ貼り、[Image #N] が出てから次を貼る。文の中の位置のまま添付になる（#67）
+    #[test]
+    fn image_paths_are_pasted_alone_in_order() {
+        let s = stand_in("image");
+        let p = image_in(&s);
+        let t0 = Instant::now();
+        super::send_direct(s.id.clone(), format!("左 {p} 中 {p} 右")).unwrap();
+        let took = t0.elapsed();
+        until(3, "入力欄への Enter", || s.events().contains("enter:"));
+        let ev = s.events();
+        assert_eq!(ev.lines().last(), Some("enter:input:左 [Image #1] 中 [Image #2] 右"), "{ev}");
+        assert_eq!(ev.lines().filter(|l| l.starts_with("paste:")).count(), 5, "{ev}");
+        assert!(took < Duration::from_secs(3), "印を見て進まず、上限まで待った: {took:?}");
+    }
+
+    /// 対照: 待たずに続けて貼ると、印は後から届いた文より後ろに付く（代役が本物の CLI と同じずれを起こせているか）
+    #[test]
+    fn stand_in_reorders_without_waiting() {
+        let s = stand_in("image");
+        let p = image_in(&s);
+        for part in ["左 ", p.as_str(), " 右"] {
+            crate::pty::write(&s.id, &format!("\x1b[200~{part}\x1b[201~")).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(700));
+        crate::pty::write(&s.id, "\r").unwrap();
+        until(3, "入力欄への Enter", || s.events().contains("enter:"));
+        assert_eq!(s.events().lines().last(), Some("enter:input:左  右[Image #1]"));
+    }
+
+    /// 1つ目の切れ端を貼った後に承認の画面が出たら、残りも Enter も送らない
+    #[test]
+    fn parts_stop_when_an_approval_pops_up_midway() {
+        let s = stand_in("dialog");
+        let p = image_in(&s);
+        let r = super::send_direct(s.id.clone(), format!("左 {p} 右"));
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(r.as_ref().is_err_and(|e| e.contains("残りを貼らず")), "{r:?}");
+        assert_eq!(s.events(), "paste:input:左 \n");
+    }
+
     /// 対照: 何も出ていなければ、貼り付けも Enter も入力欄に届く
     #[test]
     fn enter_reaches_the_input_when_nothing_pops_up() {
@@ -1192,5 +1407,93 @@ while True:
         assert_eq!(ev, "paste:input:/model\nenter:input:/model\npaste:input:hello\nenter:input:hello\n");
         assert!(r.is_ok(), "{r:?}");
         assert!(m.is_err(), "代役のピッカーに Opus の行は無い: {m:?}");
+    }
+}
+
+#[cfg(test)]
+mod real_image {
+    /// 本物の claude で、チャット欄の文（文と画像のパス）を send_direct で送り、会話の jsonl の user の行に image の部分が入るかを見る（#67）。
+    /// 課金がかかるので手で回す。FC_IMAGE は画像のパス（空白を含む場所で試す）。FC_TEXT を渡すと、その文（パスは \ 付きで）を送り、
+    /// FC_WANT 枚の image を待つ（既定 1）。信頼の確認の画面が出たら Yes を選ぶ。CLAUDE_CODE_* を継がないよう env -i で回す。
+    /// env -i HOME=$HOME USER=$USER PATH=$PATH TERM=xterm-256color LANG=ja_JP.UTF-8 FC_CAM_BIN=$HOME/.cam/bin/cam \
+    ///   FC_PTY_TRY_CWD=<捨ての場所> FC_IMAGE=<画像> /usr/bin/script -q /dev/null <試験のバイナリ> real_image_attach --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn real_image_attach() {
+        use std::time::{Duration, Instant};
+        let cwd = std::env::var("FC_PTY_TRY_CWD").expect("FC_PTY_TRY_CWD");
+        let image = std::env::var("FC_IMAGE").expect("FC_IMAGE");
+        // 入力欄に入る形（src/composer/edit.ts の quotePath と同じく、空白と記号の前に \）
+        let quoted: String = image.chars().flat_map(|c| {
+            let esc = c.is_whitespace() || "\\'\"()[]{}<>&;|$`!*?#".contains(c);
+            esc.then_some('\\').into_iter().chain(std::iter::once(c))
+        }).collect();
+        let text = std::env::var("FC_TEXT").unwrap_or_else(|_| format!("この画像の色を1語で答えて {quoted}"));
+        let start = vec!["--model".to_string(), "haiku".to_string()];
+        let r = crate::pty::spawn(&cwd, None, &start, 120, 40, || {}).unwrap();
+        let (id, pid) = (r["id"].as_str().unwrap().to_string(), r["pid"].as_u64().unwrap());
+        println!("spawned id={id} pid={pid}");
+        let t0 = Instant::now();
+        let mut trusted = false;
+        let sent = loop {
+            let t = Instant::now();
+            let r = super::send_direct(id.clone(), text.clone());
+            if r.is_ok() { println!("send_direct にかかった時間: {:?}", t.elapsed()); }
+            match r {
+                Ok(()) => break Ok(()),
+                Err(e) if e == super::NOT_BOOTED && t0.elapsed() < Duration::from_secs(60) => {
+                    let screen = crate::pty::screen_text(&id).unwrap_or_default();
+                    if !trusted && screen.contains("trust") {
+                        let yes = screen.lines().find(|l| l.contains("Yes")).and_then(|l| l.chars().find(|c| c.is_ascii_digit()));
+                        println!("信頼の確認の画面。Yes の番号: {yes:?}");
+                        crate::pty::write(&id, &yes.unwrap_or('1').to_string()).unwrap();
+                        trusted = true;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                Err(e) => break Err(e),
+            }
+        };
+        println!("send_direct: {sent:?} after {:?}", t0.elapsed());
+        let root = crate::native::claude_home();
+        let t1 = Instant::now();
+        let mut user: Option<serde_json::Value> = None;
+        let mut reply = String::new();
+        while t1.elapsed() < Duration::from_secs(90) {
+            if let Some(p) = crate::native::sessions::find_jsonl(&root, &id) {
+                let body = std::fs::read_to_string(&p).unwrap_or_default();
+                for l in body.lines() {
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { continue };
+                    if v["type"] == "user" && user.is_none() && v["isMeta"] != true {
+                        user = Some(v.clone());
+                    }
+                    if v["type"] == "assistant" {
+                        for c in v["message"]["content"].as_array().into_iter().flatten() {
+                            if c["type"] == "text" { reply = c["text"].as_str().unwrap_or("").to_string(); }
+                        }
+                    }
+                }
+                if user.is_some() && !reply.is_empty() { println!("jsonl: {}", p.display()); break; }
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let screen = crate::pty::screen_text(&id).unwrap_or_default();
+        println!("画面:\n{}", screen.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n"));
+        crate::pty::kill(&id).unwrap();
+        let user = user.expect("user の行が jsonl に無い");
+        let content = &user["message"]["content"];
+        let kinds: Vec<String> = match content {
+            serde_json::Value::Array(a) => a.iter().map(|c| c["type"].as_str().unwrap_or("?").to_string()).collect(),
+            _ => vec!["string".into()],
+        };
+        let mut shown = content.clone();
+        for c in shown.as_array_mut().into_iter().flatten() {
+            if c["type"] == "image" { c["source"]["data"] = serde_json::Value::String("<省略>".into()); }
+        }
+        println!("user の content の種類: {kinds:?}");
+        println!("user の content: {shown}");
+        println!("返事: {reply}");
+        let want: usize = std::env::var("FC_WANT").ok().and_then(|w| w.parse().ok()).unwrap_or(1);
+        assert_eq!(kinds.iter().filter(|k| *k == "image").count(), want, "user の行の image の数");
     }
 }
