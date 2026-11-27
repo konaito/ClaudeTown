@@ -30,6 +30,7 @@ tauri-plugin-single-instance = "2.5"
 libc = "0.2"
 portable-pty = "0.9.0"
 vt100 = "0.18"
+tauri-plugin-dialog = "2"
 
 # 開発版の確認用に、アプリの中から NSApp のメニューを読んで押す（menu.rs の dev_ctl、FC_MENU_CTL）。版と機能は muda が使うものに合わせる
 # お便りの通知を NSUserNotificationCenter に出し、押された知らせを delegate で受ける（notify_mac.rs、#330）。NSDictionary と NSUserNotification はそのため

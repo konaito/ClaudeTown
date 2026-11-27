@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Plus } from "lucide-react";
+import { FolderOpen, Plus } from "lucide-react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ICON, STROKE } from "../icons";
 import { IS_WEB, call as invoke } from "../bridge";
 import { lastTermSize } from "../term/size";
@@ -64,12 +65,21 @@ export function NewHousePane({ place, onCreated, onError, newReq = 0, resumeReq 
   // 開いたときと、窓が見えるようになったときに読み直す（Rust は履歴のファイルが変わったときだけ読み直す）
   useEffect(() => { reload(); return onVisibleChange((v) => { if (v) reload(); }); }, [reload]);
 
-  const go = async (cwd: string | null, top = false) => {
-    setBusy(top ? "" : cwd);
+  const go = async (cwd: string | null, top = false, key: string | null = top ? "" : cwd) => {
+    setBusy(key);
     try { onCreated(await createHousehold(cwd)); reload(); }
     // 先頭のボタン（top）は設定の場所で立てるので、失敗の通知に設定の場所を添える。一覧の行は押した場所そのもの
     catch (e) { onCreated(null); onError(placeFailure(top ? place : null, e)); }
     finally { setBusy(null); }
+  };
+  // Finder でフォルダを選び、そこで親を立てる（#336）。選んでいる間も "pick" にして、ほかのボタンを押せなくする
+  const pick = async () => {
+    setBusy("pick");
+    let dir: string | null = null;
+    try { dir = await openDialog({ directory: true, multiple: false, title: "親を立てるフォルダを選ぶ", defaultPath: place ?? undefined }); }
+    catch (e) { onError(`フォルダを選べなかった: ${String(e)}`); }
+    if (dir) await go(dir, false, "picked");
+    else setBusy(null);
   };
   // id で開き直す欄（#152）
   const [resumeId, setResumeId] = useState("");
@@ -95,6 +105,11 @@ export function NewHousePane({ place, onCreated, onError, newReq = 0, resumeReq 
         <button className="pane-btn new-house nh-new" disabled={off} onClick={() => go(place, true)} title={`${place ? placeLabel(place) : DEFAULT_PLACE_LABEL} で親を立てる（場所は右上の設定で変えられる）`}>
           {busy === "" ? "立てている…" : <><Plus size={ICON.md} strokeWidth={STROKE} aria-hidden />新しい世帯</>}
         </button>
+        {!IS_WEB && (
+          <button className="pane-btn new-house nh-new" disabled={off} onClick={pick} title="Finder でフォルダを選び、そこで親を立てる">
+            {busy === "pick" ? "選んでいる…" : busy === "picked" ? "立てている…" : <><FolderOpen size={ICON.md} strokeWidth={STROKE} aria-hidden />フォルダを選ぶ…</>}
+          </button>
+        )}
       </div>
       <div className="nh-sub">最近の場所</div>
       <div className="nh-list">
